@@ -39,8 +39,18 @@
 
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
+        # Include Cargo sources plus runtime assets compiled into the
+        # binary via include_bytes! (the bundled function signatures).
+        src = pkgs.lib.fileset.toSource {
+          root = ./.;
+          fileset = pkgs.lib.fileset.unions [
+            (craneLib.fileset.commonCargoSources ./.)
+            ./schemas
+          ];
+        };
+
         commonArgs = {
-          src = craneLib.cleanCargoSource ./.;
+          inherit src;
           strictDeps = true;
 
           nativeBuildInputs = with pkgs; [
