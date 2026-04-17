@@ -1,0 +1,22 @@
+[package]
+name = "tfls-diag"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tfls-core.workspace = true
+tfls-parser.workspace = true
+tfls-schema.workspace = true
+thiserror.workspace = true
+lsp-types.workspace = true
+ropey.workspace = true
+hcl-edit.workspace = true
+
+[dev-dependencies]
+sonic-rs.workspace = true

@@ -1,0 +1,27 @@
+[package]
+name = "tfls-schema"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tfls-core.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+sonic-rs.workspace = true
+serde.workspace = true
+flate2.workspace = true
+tracing.workspace = true
+sha2 = "0.10"
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "schema_parse"
+harness = false

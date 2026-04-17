@@ -1,0 +1,89 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MPL-2.0"
+repository = "https://github.com/ali/terraform-ls-rs"
+
+[workspace.metadata.crane]
+name = "terraform-ls-rs"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "deny"
+
+[workspace.dependencies]
+# Error handling
+thiserror = "2.0"
+
+# Crypto
+sha2 = "0.10"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+
+# LSP
+tower-lsp = "0.20"
+lsp-types = "0.94"
+
+# HCL parsing
+hcl-edit = "0.9"
+
+# Text buffers
+ropey = "1.6"
+
+# Concurrent data structures
+dashmap = "6"
+
+# File watching
+notify = "7"
+notify-debouncer-full = "0.4"
+
+# JSON (SIMD-accelerated)
+sonic-rs = "0.3"
+
+# Serde
+serde = { version = "1", features = ["derive"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Compression (for bundled schemas)
+flate2 = "1"
+
+# Benchmarking
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+# Internal crates
+tfls-core = { path = "crates/tfls-core" }
+tfls-parser = { path = "crates/tfls-parser" }
+tfls-schema = { path = "crates/tfls-schema" }
+tfls-state = { path = "crates/tfls-state" }
+tfls-lsp = { path = "crates/tfls-lsp" }
+tfls-walker = { path = "crates/tfls-walker" }
+tfls-diag = { path = "crates/tfls-diag" }
+tfls-format = { path = "crates/tfls-format" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 1
+
+[profile.bench]
+lto = "thin"

@@ -1,0 +1,129 @@
+//! Handler-level benchmarks — exercise hot paths at realistic scale.
+
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use std::sync::Arc;
+
+use criterion::{Criterion, criterion_group, criterion_main};
+use tfls_lsp::Backend;
+use tfls_lsp::handlers;
+use tfls_state::{DocumentState, JobQueue, StateStore};
+use tokio::runtime::Runtime;
+use tower_lsp::LspService;
+use tower_lsp::lsp_types::{
+    DocumentSymbolParams, PartialResultParams, TextDocumentIdentifier, Url,
+    WorkDoneProgressParams, WorkspaceSymbolParams,
+};
+
+/// Build a realistic workspace with many symbols across many files.
+fn populate(state: &StateStore, files: usize, per_file_vars: usize) {
+    for f in 0..files {
+        let uri = Url::parse(&format!("file:///f{f}.tf")).expect("url");
+        let mut src = String::new();
+        for v in 0..per_file_vars {
+            src.push_str(&format!("variable \"v_{f}_{v}\" {{}}\n"));
+        }
+        src.push_str(&format!(
+            "resource \"aws_instance\" \"r_{f}\" {{ ami = \"x\" }}\n"
+        ));
+        state.upsert_document(DocumentState::new(uri, &src, 1));
+    }
+}
+
+fn backend(state: Arc<StateStore>, jobs: Arc<JobQueue>) -> Backend {
+    let (service, _) = LspService::new(Backend::new);
+    Backend::with_shared_state(service.inner().client.clone(), state, jobs)
+}
+
+fn bench_workspace_symbol(c: &mut Criterion) {
+    let rt = Runtime::new().expect("runtime");
+    let state = Arc::new(StateStore::new());
+    // 100 files × 100 vars = 10 000 symbols, roughly a large monorepo.
+    populate(&state, 100, 100);
+    let jobs = Arc::new(JobQueue::new());
+    let backend = backend(Arc::clone(&state), Arc::clone(&jobs));
+
+    let mut group = c.benchmark_group("workspace_symbol");
+    group.bench_function("10k_symbols_exact_match", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                let _ = handlers::symbols::workspace_symbol(
+                    &backend,
+                    WorkspaceSymbolParams {
+                        query: "v_50_50".to_string(),
+                        work_done_progress_params: WorkDoneProgressParams::default(),
+                        partial_result_params: PartialResultParams::default(),
+                    },
+                )
+                .await;
+            });
+        });
+    });
+    group.bench_function("10k_symbols_fuzzy", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                let _ = handlers::symbols::workspace_symbol(
+                    &backend,
+                    WorkspaceSymbolParams {
+                        query: "v".to_string(),
+                        work_done_progress_params: WorkDoneProgressParams::default(),
+                        partial_result_params: PartialResultParams::default(),
+                    },
+                )
+                .await;
+            });
+        });
+    });
+    group.finish();
+}
+
+fn bench_document_symbol(c: &mut Criterion) {
+    let rt = Runtime::new().expect("runtime");
+    let state = Arc::new(StateStore::new());
+    populate(&state, 1, 500);
+    let jobs = Arc::new(JobQueue::new());
+    let backend = backend(Arc::clone(&state), Arc::clone(&jobs));
+    let uri = Url::parse("file:///f0.tf").expect("url");
+
+    c.bench_function("document_symbol_500_symbols", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                let _ = handlers::symbols::document_symbol(
+                    &backend,
+                    DocumentSymbolParams {
+                        text_document: TextDocumentIdentifier { uri: uri.clone() },
+                        work_done_progress_params: WorkDoneProgressParams::default(),
+                        partial_result_params: PartialResultParams::default(),
+                    },
+                )
+                .await;
+            });
+        });
+    });
+}
+
+fn bench_enclosing_call(c: &mut Criterion) {
+    use tfls_lsp::handlers::signature_help::enclosing_call;
+
+    // A realistic 200-line body with function calls sprinkled throughout.
+    let mut src = String::new();
+    for _ in 0..200 {
+        src.push_str("locals { x = format(\"%s-%d\", var.name, length([1,2,3])) }\n");
+    }
+    // Cursor at the end of a middle line, inside a nested call.
+    let target = src.len() / 2;
+
+    c.bench_function("signature_help_enclosing_call_200_lines", |b| {
+        b.iter(|| {
+            let _ = enclosing_call(&src, target);
+        });
+    });
+}
+
+criterion_group!(
+    benches,
+    bench_workspace_symbol,
+    bench_document_symbol,
+    bench_enclosing_call
+);
+criterion_main!(benches);

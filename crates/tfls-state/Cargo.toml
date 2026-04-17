@@ -1,0 +1,25 @@
+[package]
+name = "tfls-state"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tfls-core.workspace = true
+tfls-parser.workspace = true
+tfls-schema.workspace = true
+thiserror.workspace = true
+dashmap.workspace = true
+ropey.workspace = true
+lsp-types.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+sonic-rs.workspace = true
+
+[dev-dependencies]
+sonic-rs.workspace = true
