@@ -3,6 +3,7 @@ pub mod code_lens;
 pub mod commands;
 pub mod completion;
 pub mod cursor;
+pub mod hover_attribute;
 pub mod document;
 pub mod document_link;
 pub mod folding;

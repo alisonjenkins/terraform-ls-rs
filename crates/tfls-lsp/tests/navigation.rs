@@ -5,6 +5,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use tfls_lsp::Backend;
+use tfls_schema::ProviderSchemas;
 use tfls_state::DocumentState;
 use tower_lsp::LspService;
 use tower_lsp::lsp_types::{
@@ -160,6 +161,136 @@ async fn hover_works_on_definition_label() {
     };
     assert!(markdown.contains("variable"), "got: {markdown}");
     assert!(markdown.contains("region"), "got: {markdown}");
+}
+
+#[tokio::test]
+async fn hover_on_resource_attribute_returns_schema_description() {
+    // Install a minimal schema so attribute hover has something to look up.
+    let u = uri("file:///attr.tf");
+    let src = "resource \"aws_instance\" \"web\" {\n  ami = \"ami-123\"\n}\n";
+    let backend = backend_with(src, &u);
+    let schema: ProviderSchemas = sonic_rs::from_str(
+        r#"{
+        "format_version": "1.0",
+        "provider_schemas": {
+            "registry.terraform.io/hashicorp/aws": {
+                "provider": { "version": 0, "block": {} },
+                "resource_schemas": {
+                    "aws_instance": {
+                        "version": 1,
+                        "block": {
+                            "attributes": {
+                                "ami": { "type": "string", "required": true, "description": "The AMI ID to use for the instance." }
+                            }
+                        }
+                    }
+                },
+                "data_source_schemas": {}
+            }
+        }
+    }"#,
+    )
+    .expect("parse schema");
+    backend.state.install_schemas(schema);
+
+    // Cursor on `ami` key at line 1 column 3 — within `  ami = "ami-123"`.
+    let hover = tfls_lsp::handlers::navigation::hover(
+        &backend,
+        HoverParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: u },
+                position: Position::new(1, 3),
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        },
+    )
+    .await
+    .expect("ok")
+    .expect("some hover");
+
+    let markdown = match hover.contents {
+        tower_lsp::lsp_types::HoverContents::Markup(m) => m.value,
+        other => panic!("expected markup, got {other:?}"),
+    };
+    assert!(markdown.contains("attribute"), "got: {markdown}");
+    assert!(markdown.contains("ami"), "got: {markdown}");
+    assert!(markdown.contains("required"), "got: {markdown}");
+    assert!(
+        markdown.contains("The AMI ID to use"),
+        "description missing from hover: {markdown}"
+    );
+}
+
+#[tokio::test]
+async fn hover_on_nested_block_attribute_resolves_through_block_types() {
+    // Schema has a nested `root_block_device` block under `aws_instance`.
+    let u = uri("file:///nested.tf");
+    let src = "resource \"aws_instance\" \"web\" {\n  root_block_device {\n    volume_size = 100\n  }\n}\n";
+    let backend = backend_with(src, &u);
+    let schema: ProviderSchemas = sonic_rs::from_str(
+        r#"{
+        "format_version": "1.0",
+        "provider_schemas": {
+            "registry.terraform.io/hashicorp/aws": {
+                "provider": { "version": 0, "block": {} },
+                "resource_schemas": {
+                    "aws_instance": {
+                        "version": 1,
+                        "block": {
+                            "attributes": {},
+                            "block_types": {
+                                "root_block_device": {
+                                    "nesting_mode": "list",
+                                    "block": {
+                                        "attributes": {
+                                            "volume_size": {
+                                                "type": "number",
+                                                "optional": true,
+                                                "description": "Size of the root volume in GiB."
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "data_source_schemas": {}
+            }
+        }
+    }"#,
+    )
+    .expect("parse schema");
+    backend.state.install_schemas(schema);
+
+    // Cursor on `volume_size` at line 2 column 6.
+    let hover = tfls_lsp::handlers::navigation::hover(
+        &backend,
+        HoverParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: u },
+                position: Position::new(2, 6),
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        },
+    )
+    .await
+    .expect("ok")
+    .expect("some hover");
+
+    let markdown = match hover.contents {
+        tower_lsp::lsp_types::HoverContents::Markup(m) => m.value,
+        other => panic!("expected markup, got {other:?}"),
+    };
+    assert!(markdown.contains("volume_size"), "got: {markdown}");
+    assert!(
+        markdown.contains("root_block_device"),
+        "nested path missing from hover: {markdown}"
+    );
+    assert!(
+        markdown.contains("Size of the root volume"),
+        "description missing from hover: {markdown}"
+    );
 }
 
 #[tokio::test]
