@@ -247,6 +247,7 @@ fn resource_scaffold_snippet(type_name: &str, backend: &Backend, kind: &str) -> 
 
     let mut snippet = format!("{type_name}\" \"${{1:name}}\" {{\n");
     let mut tab = 2;
+    let mut had_required = false;
 
     if let Some(schema) = schema {
         let mut required: Vec<(&String, &tfls_schema::AttributeSchema)> = schema
@@ -256,13 +257,22 @@ fn resource_scaffold_snippet(type_name: &str, backend: &Backend, kind: &str) -> 
             .filter(|(_, a)| a.required)
             .collect();
         required.sort_by_key(|(name, _)| name.as_str());
+        had_required = !required.is_empty();
         for (name, _) in &required {
             snippet.push_str(&format!("  {name} = \"${{{tab}}}\"\n"));
             tab += 1;
         }
     }
 
-    snippet.push_str("  $0\n}");
+    // When there are required attrs, end the block right after the last
+    // one — the user tabs through the required values and exits the
+    // snippet cleanly. When there are none, leave an empty body line
+    // with `$0` so the cursor lands inside the block for free-form
+    // editing.
+    if !had_required {
+        snippet.push_str("  $0\n");
+    }
+    snippet.push('}');
     snippet
 }
 

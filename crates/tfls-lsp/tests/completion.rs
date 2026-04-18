@@ -272,6 +272,67 @@ async fn resource_type_completion_on_open_label_keeps_scaffold() {
         item.insert_text_format,
         Some(lsp_types::InsertTextFormat::SNIPPET),
     );
+    // With required attrs, the block closes immediately after the last
+    // attr — no trailing `  $0\n` line that would render as a blank.
+    assert!(
+        text.ends_with("= \"${2}\"\n}"),
+        "scaffold should end right after last required attr, got: {text:?}"
+    );
+    assert!(
+        !text.contains("$0"),
+        "no $0 expected when required attrs are present, got: {text:?}"
+    );
+}
+
+// No required attrs → scaffold keeps `$0` so the cursor lands inside
+// the empty body for free-form editing.
+#[tokio::test]
+async fn resource_type_scaffold_keeps_dollar_zero_when_no_required_attrs() {
+    let u = uri("file:///a.tf");
+    let backend = fresh_backend("resource \"", &u);
+    // Install a schema whose only resource type has no required attrs.
+    let schema: ProviderSchemas = sonic_rs::from_str(
+        r#"{
+            "format_version": "1.0",
+            "provider_schemas": {
+                "registry.terraform.io/hashicorp/aws": {
+                    "provider": { "version": 0, "block": {} },
+                    "resource_schemas": {
+                        "aws_no_required": {
+                            "version": 1,
+                            "block": {
+                                "attributes": {
+                                    "optional_attr": { "type": "string", "optional": true }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }"#,
+    )
+    .expect("parse schema");
+    backend.state.install_schemas(schema);
+
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(0, 10)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let CompletionResponse::Array(items) = resp else {
+        panic!("expected array response");
+    };
+    let item = items
+        .iter()
+        .find(|i| i.label == "aws_no_required")
+        .expect("aws_no_required item missing");
+    let text = item.insert_text.as_deref().expect("insert_text set");
+    assert!(
+        text.contains("  $0\n}"),
+        "empty-body scaffold should still carry `$0`, got: {text:?}"
+    );
 }
 
 #[tokio::test]
