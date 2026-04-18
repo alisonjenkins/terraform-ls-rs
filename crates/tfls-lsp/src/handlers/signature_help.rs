@@ -98,7 +98,7 @@ pub fn enclosing_call(text: &str, offset: usize) -> Option<(String, usize)> {
 
 /// Scan backward from `end` while bytes are valid identifier chars
 /// (`A-Za-z0-9_`). Returns the identifier, or `None` if it's empty.
-fn identifier_ending_at(text: &str, end: usize) -> Option<String> {
+pub(crate) fn identifier_ending_at(text: &str, end: usize) -> Option<String> {
     let bytes = text.as_bytes();
     let mut start = end;
     while start > 0 {
@@ -113,6 +113,42 @@ fn identifier_ending_at(text: &str, end: usize) -> Option<String> {
         None
     } else {
         text.get(start..end).map(str::to_string)
+    }
+}
+
+/// Identifier surrounding `offset` — walks forward AND backward from the
+/// cursor. Returns the identifier text and its absolute byte range, or
+/// `None` if the cursor is not on identifier characters.
+pub(crate) fn identifier_at(text: &str, offset: usize) -> Option<(String, std::ops::Range<usize>)> {
+    let bytes = text.as_bytes();
+    if offset > bytes.len() {
+        return None;
+    }
+
+    let mut start = offset;
+    while start > 0 {
+        let b = bytes[start - 1];
+        if b.is_ascii_alphanumeric() || b == b'_' {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+
+    let mut end = offset;
+    while end < bytes.len() {
+        let b = bytes[end];
+        if b.is_ascii_alphanumeric() || b == b'_' {
+            end += 1;
+        } else {
+            break;
+        }
+    }
+
+    if start == end {
+        None
+    } else {
+        text.get(start..end).map(|s| (s.to_string(), start..end))
     }
 }
 
@@ -195,7 +231,7 @@ fn clamp_active(idx: usize, sig: &FunctionSignature) -> usize {
     }
 }
 
-fn type_label(ty: &sonic_rs::Value) -> String {
+pub(crate) fn type_label(ty: &sonic_rs::Value) -> String {
     use sonic_rs::JsonValueTrait;
     if let Some(s) = ty.as_str() {
         return s.to_string();
