@@ -21,7 +21,11 @@ use tfls_parser::hcl_span_to_lsp_range;
 use tfls_schema::{AttributeSchema, BlockSchema, ProviderSchema};
 use tfls_state::{DocumentState, StateStore};
 
-/// Try to produce a hover for an attribute key under the cursor.
+/// Try to produce a hover for an attribute key under the cursor. Always
+/// returns `Some(...)` when the cursor is on an attribute key inside a
+/// resource / data / provider body — even if the relevant schema isn't
+/// loaded, so the user gets a clear "what to do" message instead of
+/// silently falling through to the enclosing block's label hover.
 pub fn attribute_hover(
     state: &StateStore,
     doc: &DocumentState,
@@ -30,25 +34,12 @@ pub fn attribute_hover(
     let body = doc.parsed.body.as_ref()?;
     let hit = find_attribute_at(body, doc, pos)?;
 
-    let root_schema = match hit.root_kind {
-        RootBlockKind::Resource => {
-            let ps = state.find_resource_schema(&hit.root_type)?;
-            ps.resource_schemas.get(&hit.root_type).cloned()?
-        }
-        RootBlockKind::DataSource => {
-            let ps = state.find_data_source_schema(&hit.root_type)?;
-            ps.data_source_schemas.get(&hit.root_type).cloned()?
-        }
-        RootBlockKind::Provider => {
-            let ps = find_provider_schema(state, &hit.root_type)?;
-            ps.provider.clone()
-        }
+    let markdown = match resolve_attribute_schema(state, &hit) {
+        AttributeLookup::Found(schema) => render_attribute(&hit, &schema),
+        AttributeLookup::SchemasNotLoaded => render_schemas_not_loaded(&hit),
+        AttributeLookup::ProviderMissing => render_provider_missing(&hit),
+        AttributeLookup::AttributeUnknown => render_attribute_unknown(&hit),
     };
-
-    let block_schema = descend_schema(&root_schema.block, &hit.nested_path)?;
-    let attr_schema = block_schema.attributes.get(&hit.attr_name)?;
-
-    let markdown = render_attribute(&hit, attr_schema);
     let range = hcl_span_to_lsp_range(&doc.rope, hit.key_span).ok()?;
 
     Some(Hover {
@@ -58,6 +49,45 @@ pub fn attribute_hover(
         }),
         range: Some(range),
     })
+}
+
+enum AttributeLookup {
+    Found(AttributeSchema),
+    /// No schemas at all — user probably hasn't run `terraform init`.
+    SchemasNotLoaded,
+    /// Schemas are loaded but none of them provide this resource type.
+    ProviderMissing,
+    /// Schema exists for the enclosing block but the attribute isn't in it.
+    AttributeUnknown,
+}
+
+fn resolve_attribute_schema(state: &StateStore, hit: &AttributeHit) -> AttributeLookup {
+    if state.schemas.is_empty() {
+        return AttributeLookup::SchemasNotLoaded;
+    }
+
+    let root_schema = match hit.root_kind {
+        RootBlockKind::Resource => state
+            .find_resource_schema(&hit.root_type)
+            .and_then(|ps| ps.resource_schemas.get(&hit.root_type).cloned()),
+        RootBlockKind::DataSource => state
+            .find_data_source_schema(&hit.root_type)
+            .and_then(|ps| ps.data_source_schemas.get(&hit.root_type).cloned()),
+        RootBlockKind::Provider => {
+            find_provider_schema(state, &hit.root_type).map(|ps| ps.provider.clone())
+        }
+    };
+    let Some(root_schema) = root_schema else {
+        return AttributeLookup::ProviderMissing;
+    };
+
+    let Some(block_schema) = descend_schema(&root_schema.block, &hit.nested_path) else {
+        return AttributeLookup::AttributeUnknown;
+    };
+    match block_schema.attributes.get(&hit.attr_name).cloned() {
+        Some(a) => AttributeLookup::Found(a),
+        None => AttributeLookup::AttributeUnknown,
+    }
 }
 
 fn find_provider_schema(state: &StateStore, name: &str) -> Option<Arc<ProviderSchema>> {
@@ -228,4 +258,48 @@ fn render_attribute(hit: &AttributeHit, schema: &AttributeSchema) -> String {
     }
 
     out
+}
+
+fn attribute_header(hit: &AttributeHit) -> String {
+    let kind = match hit.root_kind {
+        RootBlockKind::Resource => "resource",
+        RootBlockKind::DataSource => "data source",
+        RootBlockKind::Provider => "provider",
+    };
+    let mut out = format!("**attribute** `{attr}` on {kind} `{root}`",
+        attr = hit.attr_name,
+        root = hit.root_type);
+    if !hit.nested_path.is_empty() {
+        out.push_str(&format!(" (block `{}`)", hit.nested_path.join(".")));
+    }
+    out
+}
+
+fn render_schemas_not_loaded(hit: &AttributeHit) -> String {
+    format!(
+        "{header}\n\n_No provider schemas are loaded._ \
+Run `terraform init` (or `tofu init`) in this workspace so tfls can fetch \
+attribute documentation via `terraform providers schema -json`.",
+        header = attribute_header(hit),
+    )
+}
+
+fn render_provider_missing(hit: &AttributeHit) -> String {
+    format!(
+        "{header}\n\n_No schema for `{root}` is loaded._ \
+The relevant provider may not be declared in `required_providers`, or \
+`terraform init` has not been run since it was added.",
+        header = attribute_header(hit),
+        root = hit.root_type,
+    )
+}
+
+fn render_attribute_unknown(hit: &AttributeHit) -> String {
+    format!(
+        "{header}\n\n_Attribute `{attr}` is not in the schema for `{root}`._ \
+Check the spelling or provider version.",
+        header = attribute_header(hit),
+        attr = hit.attr_name,
+        root = hit.root_type,
+    )
 }
