@@ -51,7 +51,7 @@ pub struct BlockSchema {
 }
 
 /// Attribute schema (required/optional/computed + type).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AttributeSchema {
     /// `type` is reserved in Rust so we rename it.
     #[serde(rename = "type", default)]
@@ -70,6 +70,18 @@ pub struct AttributeSchema {
     pub sensitive: bool,
     #[serde(default)]
     pub deprecated: bool,
+
+    // Relational constraints. The CLI JSON emits these for some providers;
+    // the plugin gRPC protocol returns them on every attribute. Defaults
+    // make old schemas still deserialise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts_with: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_with: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exactly_one_of: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub at_least_one_of: Vec<String>,
 }
 
 /// How a nested block relates to its parent.

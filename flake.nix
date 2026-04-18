@@ -46,6 +46,9 @@
           fileset = pkgs.lib.fileset.unions [
             (craneLib.fileset.commonCargoSources ./.)
             ./schemas
+            # Vendored tfplugin protobuf definitions consumed by
+            # tfls-provider-protocol/build.rs via tonic-build.
+            ./crates/tfls-provider-protocol/proto
           ];
         };
 
@@ -55,6 +58,7 @@
 
           nativeBuildInputs = with pkgs; [
             pkg-config
+            protobuf # tonic-build needs protoc for the tfplugin6 protos
           ];
 
           buildInputs = with pkgs; [
@@ -62,6 +66,11 @@
           ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
             pkgs.libiconv
           ];
+
+          # tonic-build reads PROTOC at build time; make it explicit so the
+          # sandboxed nix build uses the pinned protobuf package rather than
+          # whatever (if anything) is on $PATH.
+          PROTOC = "${pkgs.protobuf}/bin/protoc";
         };
 
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;

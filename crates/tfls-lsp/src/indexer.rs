@@ -229,12 +229,45 @@ async fn fetch_and_install_schemas(
     state: &StateStore,
     working_dir: &Path,
 ) -> Result<(), IndexerError> {
+    // Prefer the plugin-protocol path when `.terraform/providers/` exists:
+    // it doesn't require credentials or backend init, and it reuses the
+    // provider binaries terraform/tofu already downloaded.
+    let terraform_dir = working_dir.join(".terraform");
+    let providers_dir = terraform_dir.join("providers");
+    if providers_dir.is_dir() {
+        tracing::info!(
+            dir = %terraform_dir.display(),
+            "fetching provider schemas via plugin protocol",
+        );
+        match tfls_provider_protocol::fetch_schemas_from_plugins(&terraform_dir).await {
+            Ok(schemas) if !schemas.provider_schemas.is_empty() => {
+                let count = schemas.provider_schemas.len();
+                state.install_schemas(schemas);
+                tracing::info!(providers = count, "installed provider schemas (plugin)");
+                return Ok(());
+            }
+            Ok(_) => {
+                tracing::warn!(
+                    dir = %providers_dir.display(),
+                    "plugin protocol returned no schemas; falling back to CLI",
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    dir = %providers_dir.display(),
+                    "plugin protocol failed; falling back to CLI",
+                );
+            }
+        }
+    }
+
     tracing::info!(dir = %working_dir.display(), "fetching provider schemas via CLI");
     let fetcher = SchemaFetcher::new(working_dir.to_path_buf()).with_timeout(SCHEMA_FETCH_TIMEOUT);
     let schemas = fetcher.fetch().await.map_err(IndexerError::SchemaFetch)?;
     let count = schemas.provider_schemas.len();
     state.install_schemas(schemas);
-    tracing::info!(providers = count, "installed provider schemas");
+    tracing::info!(providers = count, "installed provider schemas (CLI)");
     Ok(())
 }
 

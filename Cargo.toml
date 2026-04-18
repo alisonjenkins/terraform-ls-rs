@@ -76,6 +76,7 @@ tfls-lsp = { path = "crates/tfls-lsp" }
 tfls-walker = { path = "crates/tfls-walker" }
 tfls-diag = { path = "crates/tfls-diag" }
 tfls-format = { path = "crates/tfls-format" }
+tfls-provider-protocol = { path = "crates/tfls-provider-protocol" }
 
 [profile.release]
 lto = "thin"

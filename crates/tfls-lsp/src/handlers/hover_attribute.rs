@@ -257,7 +257,23 @@ fn render_attribute(hit: &AttributeHit, schema: &AttributeSchema) -> String {
         }
     }
 
+    // Relational metadata from the provider schema (present on the CLI JSON
+    // path for providers that declare them). Plugin-protocol schemas don't
+    // currently carry these — the fields stay empty and this block is skipped.
+    append_related(&mut out, "Conflicts with", &schema.conflicts_with);
+    append_related(&mut out, "Required with", &schema.required_with);
+    append_related(&mut out, "Exactly one of", &schema.exactly_one_of);
+    append_related(&mut out, "At least one of", &schema.at_least_one_of);
+
     out
+}
+
+fn append_related(out: &mut String, label: &str, names: &[String]) {
+    if names.is_empty() {
+        return;
+    }
+    let list: Vec<String> = names.iter().map(|n| format!("`{n}`")).collect();
+    out.push_str(&format!("\n\n_{label}:_ {}", list.join(", ")));
 }
 
 fn attribute_header(hit: &AttributeHit) -> String {

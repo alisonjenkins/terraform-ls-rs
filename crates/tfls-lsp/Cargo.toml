@@ -17,6 +17,7 @@ tfls-diag.workspace = true
 tfls-schema.workspace = true
 tfls-format.workspace = true
 tfls-walker.workspace = true
+tfls-provider-protocol.workspace = true
 thiserror.workspace = true
 tower-lsp.workspace = true
 lsp-types.workspace = true

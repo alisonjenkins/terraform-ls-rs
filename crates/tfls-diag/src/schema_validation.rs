@@ -122,6 +122,43 @@ fn validate_block(
             });
         }
     }
+
+    // Relational constraints from the schema (CLI JSON emits these for some
+    // providers; plugin-protocol doesn't yet, so many blocks will have empty
+    // lists and this is a no-op).
+    for (name, range) in &present_attrs {
+        let Some(attr) = schema.block.attributes.get(*name) else {
+            continue;
+        };
+
+        for other in &attr.conflicts_with {
+            if present_attrs.iter().any(|(n, _)| *n == other.as_str()) {
+                out.push(Diagnostic {
+                    range: *range,
+                    severity: Some(DiagnosticSeverity::WARNING),
+                    source: Some("terraform-ls-rs".to_string()),
+                    message: format!(
+                        "attribute `{name}` conflicts with `{other}` — set one, not both"
+                    ),
+                    ..Default::default()
+                });
+            }
+        }
+
+        for other in &attr.required_with {
+            if !present_attrs.iter().any(|(n, _)| *n == other.as_str()) {
+                out.push(Diagnostic {
+                    range: *range,
+                    severity: Some(DiagnosticSeverity::WARNING),
+                    source: Some("terraform-ls-rs".to_string()),
+                    message: format!(
+                        "attribute `{name}` requires `{other}` to also be set"
+                    ),
+                    ..Default::default()
+                });
+            }
+        }
+    }
 }
 
 fn first_label(block: &Block) -> Option<&str> {
@@ -223,5 +260,87 @@ mod tests {
           instance_type = "t3.micro"
         }"#);
         assert!(d.is_empty(), "got: {d:?}");
+    }
+
+    fn schemas_with_relations() -> ProviderSchemas {
+        sonic_rs::from_str(
+            r#"{
+                "format_version": "1.0",
+                "provider_schemas": {
+                    "registry.terraform.io/hashicorp/aws": {
+                        "provider": { "version": 0, "block": {} },
+                        "resource_schemas": {
+                            "aws_thing": {
+                                "version": 1,
+                                "block": {
+                                    "attributes": {
+                                        "a": { "type": "string", "optional": true, "conflicts_with": ["b"] },
+                                        "b": { "type": "string", "optional": true, "conflicts_with": ["a"] },
+                                        "c": { "type": "string", "optional": true, "required_with": ["d"] },
+                                        "d": { "type": "string", "optional": true }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("parse")
+    }
+
+    fn diags_with(schemas: &ProviderSchemas, src: &str) -> Vec<Diagnostic> {
+        let rope = Rope::from_str(src);
+        let body = parse_source(src).body.expect("parses");
+        resource_diagnostics(&body, &rope, &uri(), schemas)
+    }
+
+    #[test]
+    fn flags_conflicts_with() {
+        let schemas = schemas_with_relations();
+        let d = diags_with(
+            &schemas,
+            r#"resource "aws_thing" "x" {
+              a = "one"
+              b = "two"
+            }"#,
+        );
+        let conflict = d
+            .iter()
+            .find(|d| d.message.contains("conflicts with"))
+            .expect("conflict diagnostic");
+        assert_eq!(conflict.severity, Some(DiagnosticSeverity::WARNING));
+    }
+
+    #[test]
+    fn flags_missing_required_with() {
+        let schemas = schemas_with_relations();
+        let d = diags_with(
+            &schemas,
+            r#"resource "aws_thing" "x" {
+              c = "one"
+            }"#,
+        );
+        let req = d
+            .iter()
+            .find(|d| d.message.contains("requires `d`"))
+            .expect("required-with diagnostic");
+        assert_eq!(req.severity, Some(DiagnosticSeverity::WARNING));
+    }
+
+    #[test]
+    fn required_with_satisfied_yields_no_diagnostic() {
+        let schemas = schemas_with_relations();
+        let d = diags_with(
+            &schemas,
+            r#"resource "aws_thing" "x" {
+              c = "one"
+              d = "two"
+            }"#,
+        );
+        assert!(
+            d.iter().all(|d| !d.message.contains("requires")),
+            "unexpected required-with warning: {d:?}"
+        );
     }
 }
