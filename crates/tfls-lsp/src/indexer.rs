@@ -81,6 +81,22 @@ pub fn ensure_module_indexed(state: &StateStore, queue: &JobQueue, file_uri: &ls
         return;
     };
     let dir_buf = dir.to_path_buf();
+
+    // Also look for a parent with `.terraform/providers/` and enqueue a
+    // schema fetch there. That's where provider schemas live, and it's
+    // often not the same directory as the opened file (sub-modules
+    // inherit their parent's initialisation).
+    if let Some(init_root) = find_terraform_init_root(&dir_buf) {
+        if state.fetched_schema_dirs.insert(init_root.clone()) {
+            queue.enqueue(
+                Job::FetchSchemas {
+                    working_dir: init_root,
+                },
+                Priority::Normal,
+            );
+        }
+    }
+
     // Marking up-front also dedupes: if two files in the same dir are
     // opened back-to-back the second call is a cheap no-op.
     if !state.scanned_dirs.insert(dir_buf.clone()) {
@@ -180,6 +196,22 @@ async fn handle_job(state: &StateStore, job: Job) -> Result<(), IndexerError> {
         }
         Job::ScanDirectory(dir) => scan_dir_into_state(state, &dir).await,
     }
+}
+
+/// Walk upward from `start` looking for a directory whose
+/// `.terraform/providers/` subtree exists. That directory is the
+/// terraform module root where `tofu init` was run and its schemas
+/// live. Returns `None` if nothing was found before hitting the
+/// filesystem root.
+fn find_terraform_init_root(start: &Path) -> Option<PathBuf> {
+    let mut current: Option<&Path> = Some(start);
+    while let Some(dir) = current {
+        if dir.join(".terraform").join("providers").is_dir() {
+            return Some(dir.to_path_buf());
+        }
+        current = dir.parent();
+    }
+    None
 }
 
 async fn scan_dir_into_state(state: &StateStore, dir: &Path) -> Result<(), IndexerError> {

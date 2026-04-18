@@ -60,6 +60,11 @@ pub struct StateStore {
     /// sibling files' symbols become resolvable (fixes false-positive
     /// undefined-reference diagnostics across unrelated workspace roots).
     pub scanned_dirs: dashmap::DashSet<std::path::PathBuf>,
+
+    /// Terraform init-root directories (containing a `.terraform/providers/`
+    /// subtree) we have already enqueued a schema fetch for. Dedupes the
+    /// cross-module FetchSchemas enqueues triggered from did_open.
+    pub fetched_schema_dirs: dashmap::DashSet<std::path::PathBuf>,
 }
 
 impl StateStore {
