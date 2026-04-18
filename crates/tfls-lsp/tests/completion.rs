@@ -170,6 +170,55 @@ async fn variable_ref_suggests_defined_variables() {
     assert_eq!(ls, vec!["name".to_string(), "region".to_string()]);
 }
 
+// Regression: cursor inside the *second* label of an existing
+// `resource "TYPE" "NAME"` header must not receive resource-type
+// scaffold snippets. Accepting such a snippet splices a whole new
+// resource block into the already-open one and produces malformed
+// code (see commit 9c26c79 "LSP snippet completions").
+#[tokio::test]
+async fn completion_in_resource_name_label_does_not_return_resource_types() {
+    let u = uri("file:///a.tf");
+    let src = "resource \"aws_instance\" \"web";
+    let backend = fresh_backend(src, &u);
+    install_aws_schema(&backend);
+
+    // Cursor at the end of the (unclosed) name label.
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(0, src.len() as u32)),
+    )
+    .await
+    .expect("ok");
+
+    // Accept either no completions or a set with no resource-type items.
+    if let Some(response) = resp {
+        match response {
+            CompletionResponse::Array(items) => {
+                for item in &items {
+                    assert_ne!(
+                        item.detail.as_deref(),
+                        Some("resource type"),
+                        "item {:?} was offered as a resource type inside the name label",
+                        item.label
+                    );
+                    if let Some(text) = &item.insert_text {
+                        assert!(
+                            !text.contains("\" \"${1:name}\" {"),
+                            "item {:?} carries a resource scaffold snippet: {text:?}",
+                            item.label
+                        );
+                    }
+                }
+            }
+            CompletionResponse::List(list) => {
+                for item in &list.items {
+                    assert_ne!(item.detail.as_deref(), Some("resource type"));
+                }
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn completion_without_schema_returns_none_for_resource_type() {
     let u = uri("file:///a.tf");

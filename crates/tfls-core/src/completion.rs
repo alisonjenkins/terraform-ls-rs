@@ -215,24 +215,47 @@ fn block_opener_context(before: &str) -> Option<CompletionContext> {
     // Look for `resource "` or `data "` on the current line only.
     let line_start = before.rfind('\n').map_or(0, |i| i + 1);
     let line = &before[line_start..];
-    if line.trim_start().starts_with("resource ") && ends_inside_first_label(line) {
-        Some(CompletionContext::ResourceType)
-    } else if line.trim_start().starts_with("data ") && ends_inside_first_label(line) {
-        Some(CompletionContext::DataSourceType)
-    } else {
-        None
+    let trimmed = line.trim_start();
+    let is_resource = trimmed.starts_with("resource ");
+    let is_data = trimmed.starts_with("data ");
+    if !is_resource && !is_data {
+        return None;
+    }
+    match label_index_at_cursor(line) {
+        // Cursor is in the *first* label — the type position. This is
+        // the only place resource/data-type completions belong.
+        Some(0) if is_resource => Some(CompletionContext::ResourceType),
+        Some(0) => Some(CompletionContext::DataSourceType),
+        // Cursor is in a later label (the name). Short-circuit to
+        // Unknown so no resource-type scaffold is offered.
+        Some(_) => Some(CompletionContext::Unknown),
+        // Cursor is between labels / outside any label — let later
+        // classifiers try.
+        None => None,
     }
 }
 
-fn ends_inside_first_label(line: &str) -> bool {
-    // A simple heuristic: if there's exactly one `"` after the block
-    // keyword, we're inside the first label.
+/// If the cursor sits inside a quoted label on the current line of a
+/// `resource`/`data` block opener, return the 0-based index of that
+/// label. Returns `None` if the cursor is between or after labels.
+fn label_index_at_cursor(line: &str) -> Option<usize> {
+    // Skip past the block keyword (e.g. `resource`) to where labels live.
     let after_keyword = match line.find(' ') {
         Some(i) => &line[i..],
-        None => return false,
+        None => return None,
     };
-    let quote_count = after_keyword.chars().filter(|&c| c == '"').count();
-    quote_count % 2 == 1
+    let mut in_label = false;
+    let mut label_idx = 0usize;
+    for c in after_keyword.chars() {
+        if c == '"' {
+            if in_label {
+                // Closing quote — this label has ended.
+                label_idx += 1;
+            }
+            in_label = !in_label;
+        }
+    }
+    if in_label { Some(label_idx) } else { None }
 }
 
 fn enclosing_block_context(before: &str) -> Option<CompletionContext> {
@@ -438,5 +461,65 @@ mod tests {
             classify_context("short", 9999),
             CompletionContext::Unknown
         );
+    }
+
+    // Regression: when the cursor is inside the *second* label of a
+    // `resource "TYPE" "NAME"` header (i.e. editing the name), the
+    // classifier must not report `ResourceType`. Reporting `ResourceType`
+    // causes the handler to emit full-scaffold snippets that splice into
+    // the already-open resource block and produce malformed code.
+    #[test]
+    fn resource_type_partial_prefix_is_still_resource_type() {
+        assert_eq!(at_end("resource \"aws_"), CompletionContext::ResourceType);
+    }
+
+    #[test]
+    fn cursor_between_labels_is_not_resource_type() {
+        // Cursor sits after the first label's closing quote but before the
+        // second label has been opened. Quote count is even; classifier
+        // should fall through.
+        let ctx = at_end("resource \"aws_instance\" ");
+        assert_ne!(ctx, CompletionContext::ResourceType);
+    }
+
+    #[test]
+    fn cursor_in_empty_name_label_is_not_resource_type() {
+        // Cursor is right after the opening quote of the *name* label.
+        // Old heuristic wrongly classified this as ResourceType because
+        // the raw quote count is odd.
+        let ctx = at_end("resource \"aws_instance\" \"");
+        assert_ne!(ctx, CompletionContext::ResourceType);
+    }
+
+    #[test]
+    fn cursor_inside_name_label_is_not_resource_type() {
+        // Exact screenshot repro: cursor in the second label while typing
+        // a partial name.
+        let ctx = at_end("resource \"aws_security_group\" \"test");
+        assert_ne!(
+            ctx,
+            CompletionContext::ResourceType,
+            "cursor in resource name label must not trigger ResourceType context"
+        );
+    }
+
+    #[test]
+    fn cursor_inside_data_source_name_label_is_not_data_source_type() {
+        let ctx = at_end("data \"aws_ami\" \"x");
+        assert_ne!(ctx, CompletionContext::DataSourceType);
+    }
+
+    #[test]
+    fn resource_body_still_works_after_complete_header() {
+        // Full header on one line with cursor inside the body — must
+        // resolve to ResourceBody via the brace-walking classifier,
+        // *not* be shadowed by block_opener_context.
+        let src = "resource \"aws_instance\" \"web\" {\n  ";
+        match at_end(src) {
+            CompletionContext::ResourceBody { resource_type } => {
+                assert_eq!(resource_type, "aws_instance");
+            }
+            other => panic!("expected ResourceBody, got {other:?}"),
+        }
     }
 }
