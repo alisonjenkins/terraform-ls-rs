@@ -19,8 +19,8 @@ async fn main() {
         .with_target(true)
         .init();
 
-    // Install default rustls provider (ring) before any TLS work.
-    rustls::crypto::ring::default_provider()
+    // Install default rustls provider (aws_lc_rs) before any TLS work.
+    rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .ok();
 

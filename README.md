@@ -165,15 +165,16 @@ and `#[source]` chain preservation:
 
 ```
 crates/
-  tfls-core/     domain types (Symbol, ProviderAddress, ...)
-  tfls-parser/   hcl-edit wrapper, position mapping, symbol + ref extraction
-  tfls-schema/   provider schema types + async CLI fetcher
-  tfls-state/    StateStore (DashMap), DocumentState (rope + AST), JobQueue
-  tfls-diag/     syntax, undefined-ref, schema-validation diagnostics
-  tfls-format/   formatter
-  tfls-walker/   fs discovery + notify-debouncer-full file watcher
-  tfls-lsp/      Backend (tower-lsp) + handlers + background indexer
-  tfls-cli/      main: tokio, clap, stdio transport
+  tfls-core/               domain types (Symbol, ProviderAddress, ...)
+  tfls-parser/             hcl-edit wrapper, position mapping, symbol + ref extraction
+  tfls-schema/             provider schema types + async CLI fetcher
+  tfls-state/              StateStore (DashMap), DocumentState (rope + AST), JobQueue
+  tfls-diag/               syntax, undefined-ref, schema-validation diagnostics
+  tfls-format/             formatter
+  tfls-walker/             fs discovery + notify-debouncer-full file watcher
+  tfls-provider-protocol/  terraform plugin gRPC protocol (v5+v6), mTLS, registry docs
+  tfls-lsp/                Backend (tower-lsp) + handlers + background indexer
+  tfls-cli/                main: tokio, clap, stdio transport
 ```
 
 On `initialize`, the Backend spawns:
@@ -181,9 +182,10 @@ On `initialize`, the Backend spawns:
 1. a **worker task** draining the priority job queue,
 2. a **file watcher** per workspace folder forwarding FS events as
    Normal-priority jobs, and
-3. a one-shot **schema fetch** via `tofu providers schema -json`
-   (opportunistic — silent if the binary is absent or `tofu init`
-   hasn't been run).
+3. a one-shot **schema fetch** — prefers the plugin gRPC protocol
+   (speaking directly to provider binaries in `.terraform/providers/`,
+   no credentials required), falling back to `tofu providers schema -json`
+   if no cached providers exist.
 
 The queue deduplicates identical jobs and delivers by priority
 (`Immediate > High > Normal > Low`), so a flood of save events for the
@@ -196,13 +198,22 @@ symbol table is retained so completion and navigation keep working.
 
 Every documented feature has integration tests. The binary runs, the
 Nix flake builds, and the server talks real JSON-RPC LSP to test
-clients. Not yet implemented (future work):
+clients.
 
-- Bundled provider schemas compiled into the binary (currently
-  requires `tofu init` in the workspace)
-- Registry HTTP API fallback for schema metadata
+Recent additions:
+- **Plugin protocol schema fetch** — speaks the terraform plugin gRPC
+  protocol directly to provider binaries in `.terraform/providers/`,
+  bypassing `tofu providers schema -json` and its credential requirements
+- **Registry docs enrichment** — fills missing attribute descriptions
+  (e.g. AWS SDKv2 providers) from the Terraform Registry HTTP API,
+  cached to disk for subsequent runs
+- **Module-aware indexing** — walks up from opened files to find the
+  nearest `.terraform/providers/` directory
+
+Not yet implemented (future work):
 - Completion inside string-interpolation templates
-- Workspace-folder awareness for config isolation
+- Provider-defined function completion (hover + signature help work,
+  but no completion context for function names)
 
 ## License
 

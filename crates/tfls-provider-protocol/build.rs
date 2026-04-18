@@ -1,7 +1,5 @@
 // Compile the vendored tfplugin proto files with tonic-build.
-//
-// Only tfplugin6 is compiled for now; tfplugin5 support is a future
-// enhancement and the .proto is vendored alongside so it's ready.
+// Both tfplugin5 and tfplugin6 are compiled and fully supported.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::configure()
