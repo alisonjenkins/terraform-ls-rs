@@ -24,6 +24,10 @@ pub enum Job {
     /// Fetch built-in function signatures via
     /// `<binary> metadata functions -json` and install into the store.
     FetchFunctions { binary: PathBuf },
+    /// Enumerate a single directory's `.tf` files (non-recursive) and
+    /// enqueue parse jobs for each. Used when the editor opens a file in
+    /// a directory that hasn't been indexed yet.
+    ScanDirectory(PathBuf),
 }
 
 /// Priority levels (ordered: Immediate is highest).

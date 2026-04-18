@@ -67,7 +67,7 @@ impl Backend {
     }
 
     async fn spawn_workspace_watcher(&self, root: std::path::PathBuf) {
-        indexer::enqueue_workspace_scan(&self.jobs, &root);
+        indexer::enqueue_workspace_scan(&self.state, &self.jobs, &root);
         indexer::enqueue_schema_fetch(&self.jobs, &root);
         // Functions are workspace-independent — fetch once per session.
         indexer::enqueue_functions_fetch(&self.jobs);

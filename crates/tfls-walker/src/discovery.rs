@@ -62,12 +62,57 @@ pub fn discover_terraform_files(root: &Path) -> Result<Vec<PathBuf>, WalkerError
     Ok(out)
 }
 
-fn is_terraform_file(path: &Path) -> bool {
+/// Non-recursive sibling of [`discover_terraform_files`]. Lists `.tf` and
+/// `.tf.json` files in `dir` without descending into subdirectories. Used
+/// when the editor opens a file and we need to index the enclosing module
+/// (a single directory) without pulling in nested modules.
+pub fn discover_terraform_files_in_dir(dir: &Path) -> Result<Vec<PathBuf>, WalkerError> {
+    let entries = std::fs::read_dir(dir).map_err(|source| WalkerError::DirectoryRead {
+        path: dir.display().to_string(),
+        source,
+    })?;
+
+    let mut out = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|source| WalkerError::DirectoryRead {
+            path: dir.display().to_string(),
+            source,
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|source| WalkerError::DirectoryRead {
+            path: path.display().to_string(),
+            source,
+        })?;
+        if file_type.is_file() && is_terraform_file(&path) {
+            out.push(path);
+        }
+    }
+
+    out.sort();
+    Ok(out)
+}
+
+/// Does this path look like a Terraform/OpenTofu source file we should
+/// index?
+///
+/// Covers:
+/// - `.tf`, `.tf.json` — Terraform config
+/// - `.tofu`, `.tofu.json` — OpenTofu config
+/// - `.tftest.hcl`, `.tofutest.hcl` — Terraform/OpenTofu test files
+///
+/// Bare `.hcl` is intentionally excluded: Packer, Nomad, Consul and other
+/// HashiCorp tools also use it, so a naive match produces false positives.
+pub fn is_terraform_file(path: &Path) -> bool {
     let name = match path.file_name().and_then(|s| s.to_str()) {
         Some(n) => n,
         None => return false,
     };
-    name.ends_with(".tf") || name.ends_with(".tf.json")
+    name.ends_with(".tf")
+        || name.ends_with(".tf.json")
+        || name.ends_with(".tofu")
+        || name.ends_with(".tofu.json")
+        || name.ends_with(".tftest.hcl")
+        || name.ends_with(".tofutest.hcl")
 }
 
 #[cfg(test)]

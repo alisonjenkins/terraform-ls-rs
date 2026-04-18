@@ -104,11 +104,7 @@ fn should_ignore(path: &Path) -> bool {
 }
 
 fn is_terraform_file(path: &Path) -> bool {
-    let name = match path.file_name().and_then(|s| s.to_str()) {
-        Some(n) => n,
-        None => return false,
-    };
-    name.ends_with(".tf") || name.ends_with(".tf.json")
+    crate::discovery::is_terraform_file(path)
 }
 
 #[cfg(test)]

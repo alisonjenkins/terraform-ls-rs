@@ -28,6 +28,11 @@ pub async fn did_open(backend: &Backend, params: DidOpenTextDocumentParams) {
         params.text_document.version,
     );
     backend.state.upsert_document(doc);
+    // Make sure the enclosing module directory has been indexed — the
+    // file may be outside the original workspace root (e.g. opened by
+    // Claude Code while editing an unrelated repo) and its sibling
+    // definitions need to be in the store before diagnostics run.
+    crate::indexer::ensure_module_indexed(&backend.state, &backend.jobs, &uri);
     publish_current_diagnostics(backend, &uri, None).await;
 }
 

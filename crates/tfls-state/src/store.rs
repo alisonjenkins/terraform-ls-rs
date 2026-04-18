@@ -54,6 +54,12 @@ pub struct StateStore {
     pub functions: DashMap<String, Arc<FunctionSignature>>,
     /// Runtime configuration updated via `workspace/didChangeConfiguration`.
     pub config: crate::config::ConfigCell,
+    /// Directories we have already enumerated for `.tf` files. Each Terraform
+    /// module is a single directory, so when a file from a not-yet-seen
+    /// directory is opened in the editor we enqueue a scan of that dir so
+    /// sibling files' symbols become resolvable (fixes false-positive
+    /// undefined-reference diagnostics across unrelated workspace roots).
+    pub scanned_dirs: dashmap::DashSet<std::path::PathBuf>,
 }
 
 impl StateStore {

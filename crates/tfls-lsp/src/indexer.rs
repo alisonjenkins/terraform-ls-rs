@@ -10,7 +10,10 @@ use std::time::Duration;
 
 use tfls_schema::{SchemaError, SchemaFetcher, functions_cache};
 use tfls_state::{DocumentState, Job, JobQueue, Priority, StateStore};
-use tfls_walker::{WalkerError, WorkspaceEvent, discover_terraform_files, watch_workspace};
+use tfls_walker::{
+    WalkerError, WorkspaceEvent, discover_terraform_files, discover_terraform_files_in_dir,
+    watch_workspace,
+};
 use thiserror::Error;
 
 const WATCH_DEBOUNCE_MS: u64 = 150;
@@ -46,16 +49,44 @@ pub fn spawn_worker(
 }
 
 /// Enqueue low-priority parse jobs for every `.tf` file under `root`.
-pub fn enqueue_workspace_scan(queue: &JobQueue, root: &Path) {
+///
+/// As each file is enqueued its parent directory is marked scanned in
+/// [`StateStore::scanned_dirs`], so subsequent `did_open` events for files
+/// in those directories don't trigger a redundant rescan.
+pub fn enqueue_workspace_scan(state: &StateStore, queue: &JobQueue, root: &Path) {
     match discover_terraform_files(root) {
         Ok(files) => {
             tracing::info!(count = files.len(), root = %root.display(), "workspace scan");
             for path in files {
+                if let Some(parent) = path.parent() {
+                    state.scanned_dirs.insert(parent.to_path_buf());
+                }
                 queue.enqueue(Job::ParseFile(path), Priority::Low);
             }
         }
         Err(e) => tracing::warn!(error = %e, root = %root.display(), "workspace scan failed"),
     }
+}
+
+/// Enqueue a scan for the single directory containing `file_uri` if it
+/// hasn't been scanned yet. Idempotent — repeated `did_open` events for
+/// the same directory trigger at most one scan. Used so opening a file
+/// outside the primary workspace folder still indexes its sibling `.tf`
+/// files (needed for cross-file undefined-reference resolution).
+pub fn ensure_module_indexed(state: &StateStore, queue: &JobQueue, file_uri: &lsp_types::Url) {
+    let Ok(path) = file_uri.to_file_path() else {
+        return;
+    };
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    let dir_buf = dir.to_path_buf();
+    // Marking up-front also dedupes: if two files in the same dir are
+    // opened back-to-back the second call is a cheap no-op.
+    if !state.scanned_dirs.insert(dir_buf.clone()) {
+        return;
+    }
+    queue.enqueue(Job::ScanDirectory(dir_buf), Priority::Normal);
 }
 
 /// Enqueue a one-shot schema fetch for `root` at normal priority.
@@ -147,7 +178,26 @@ async fn handle_job(state: &StateStore, job: Job) -> Result<(), IndexerError> {
             tracing::info!(count, "installed function signatures");
             Ok(())
         }
+        Job::ScanDirectory(dir) => scan_dir_into_state(state, &dir).await,
     }
+}
+
+async fn scan_dir_into_state(state: &StateStore, dir: &Path) -> Result<(), IndexerError> {
+    match discover_terraform_files_in_dir(dir) {
+        Ok(files) => {
+            tracing::info!(count = files.len(), dir = %dir.display(), "module scan");
+            // `parse_file_into_state` already skips open documents, so we
+            // don't need to pre-check here — just parse each file inline,
+            // inheriting the current worker task's priority slot. Running
+            // them sequentially keeps the worker from starving higher-
+            // priority jobs while a directory is being walked.
+            for path in files {
+                parse_file_into_state(state, &path).await?;
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, dir = %dir.display(), "module scan failed"),
+    }
+    Ok(())
 }
 
 async fn parse_file_into_state(
