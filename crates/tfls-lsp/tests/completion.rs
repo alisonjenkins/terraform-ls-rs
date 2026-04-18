@@ -138,6 +138,66 @@ async fn resource_body_suggests_attributes_from_schema() {
 }
 
 #[tokio::test]
+async fn resource_body_suggests_meta_arguments() {
+    let u = uri("file:///a.tf");
+    let src = "resource \"aws_instance\" \"web\" {\n\n}\n";
+    let backend = fresh_backend(src, &u);
+    install_aws_schema(&backend);
+
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(1, 0)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    for expected in [
+        "count",
+        "for_each",
+        "provider",
+        "depends_on",
+        "lifecycle",
+        "provisioner",
+        "connection",
+    ] {
+        assert!(
+            ls.contains(&expected.to_string()),
+            "resource body completion missing {expected:?}; got: {ls:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn data_body_suggests_meta_arguments_minus_provisioner_connection() {
+    let u = uri("file:///a.tf");
+    let src = "data \"aws_ami\" \"x\" {\n\n}\n";
+    let backend = fresh_backend(src, &u);
+    install_aws_schema(&backend);
+
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(1, 0)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    for expected in ["count", "for_each", "provider", "depends_on", "lifecycle"] {
+        assert!(
+            ls.contains(&expected.to_string()),
+            "data body completion missing {expected:?}; got: {ls:?}"
+        );
+    }
+    for forbidden in ["provisioner", "connection"] {
+        assert!(
+            !ls.contains(&forbidden.to_string()),
+            "data body should not offer {forbidden:?}; got: {ls:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn variable_ref_suggests_defined_variables() {
     // Simulate realistic flow: start with a valid file whose symbols
     // are indexed, then type `var.` to trigger a momentary parse

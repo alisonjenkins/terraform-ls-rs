@@ -9,7 +9,7 @@ use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionParams, CompletionResponse, Documentation,
     InsertTextFormat, MarkupContent, MarkupKind,
 };
-use tfls_core::{CompletionContext, classify_context};
+use tfls_core::{BlockKind, CompletionContext, META_ATTRS, classify_context, meta_blocks};
 use tfls_parser::lsp_position_to_byte_offset;
 use tower_lsp::jsonrpc;
 
@@ -244,8 +244,56 @@ fn resource_body_items(backend: &Backend, type_name: &str, data: bool) -> Vec<Co
         ..Default::default()
     }));
 
+    let kind = if data { BlockKind::Data } else { BlockKind::Resource };
+    items.extend(meta_argument_items(kind));
+    items.extend(meta_block_items(kind));
+
     items.sort_by(|a, b| a.label.cmp(&b.label));
     items
+}
+
+fn meta_argument_items(_kind: BlockKind) -> Vec<CompletionItem> {
+    META_ATTRS
+        .iter()
+        .map(|name| {
+            // `depends_on` takes a list; others take a scalar or ref.
+            let snippet = if *name == "depends_on" {
+                format!("{name} = [${{1}}]")
+            } else {
+                format!("{name} = ${{1}}")
+            };
+            CompletionItem {
+                label: (*name).to_string(),
+                kind: Some(CompletionItemKind::PROPERTY),
+                detail: Some("meta-argument".to_string()),
+                insert_text: Some(snippet),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                ..Default::default()
+            }
+        })
+        .collect()
+}
+
+fn meta_block_items(kind: BlockKind) -> Vec<CompletionItem> {
+    meta_blocks(kind)
+        .iter()
+        .map(|name| {
+            // `provisioner` takes a type label; others are plain blocks.
+            let snippet = if *name == "provisioner" {
+                "provisioner \"${1:local-exec}\" {\n  $0\n}".to_string()
+            } else {
+                format!("{name} {{\n  $0\n}}")
+            };
+            CompletionItem {
+                label: (*name).to_string(),
+                kind: Some(CompletionItemKind::STRUCT),
+                detail: Some("meta-block".to_string()),
+                insert_text: Some(snippet),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                ..Default::default()
+            }
+        })
+        .collect()
 }
 
 fn attribute_detail(attr: &tfls_schema::AttributeSchema) -> String {
