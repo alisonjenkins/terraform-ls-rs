@@ -72,10 +72,23 @@ pub async fn completion(
     let text = doc.rope.to_string();
     let ctx = classify_context(&text, offset);
 
+    let label_closed = label_closed_after(&text, offset);
     let items = match ctx {
         CompletionContext::TopLevel => top_level_items(),
-        CompletionContext::ResourceType => resource_type_items(backend),
-        CompletionContext::DataSourceType => data_source_type_items(backend),
+        CompletionContext::ResourceType => {
+            if label_closed {
+                resource_type_items_bare(backend)
+            } else {
+                resource_type_items(backend)
+            }
+        }
+        CompletionContext::DataSourceType => {
+            if label_closed {
+                data_source_type_items_bare(backend)
+            } else {
+                data_source_type_items(backend)
+            }
+        }
         CompletionContext::ResourceBody { resource_type } => {
             resource_body_items(backend, &resource_type, /*data=*/ false)
         }
@@ -156,6 +169,58 @@ fn data_source_type_items(backend: &Backend) -> Vec<CompletionItem> {
             }
         })
         .collect()
+}
+
+/// Bare-name variants used when the first label is already closed —
+/// e.g. the cursor sits inside an active `${1:type}` placeholder from
+/// an outer `resource`/`data` snippet. Emitting the full scaffold in
+/// that case duplicates the outer snippet's closing quote + name label
+/// + body and produces malformed code.
+fn resource_type_items_bare(backend: &Backend) -> Vec<CompletionItem> {
+    backend
+        .state
+        .all_resource_types()
+        .into_iter()
+        .map(|name| CompletionItem {
+            label: name.clone(),
+            kind: Some(CompletionItemKind::CLASS),
+            detail: Some("resource type".to_string()),
+            insert_text: Some(name),
+            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+            ..Default::default()
+        })
+        .collect()
+}
+
+fn data_source_type_items_bare(backend: &Backend) -> Vec<CompletionItem> {
+    backend
+        .state
+        .all_data_source_types()
+        .into_iter()
+        .map(|name| CompletionItem {
+            label: name.clone(),
+            kind: Some(CompletionItemKind::CLASS),
+            detail: Some("data source type".to_string()),
+            insert_text: Some(name),
+            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// Whether the cursor sits inside an already-closed quoted label: walk
+/// from the cursor to end of line, skip identifier chars, and check if
+/// the next char is `"`. Used by the handler to choose scaffold vs
+/// bare-name completion items.
+fn label_closed_after(text: &str, offset: usize) -> bool {
+    if offset > text.len() {
+        return false;
+    }
+    let after = &text[offset..];
+    let end = after.find('\n').unwrap_or(after.len());
+    let tail = &after[..end];
+    let rest = tail.trim_start_matches(|c: char| c.is_alphanumeric() || c == '_');
+    rest.starts_with('"')
 }
 
 /// Build a snippet that completes the type name and scaffolds the block

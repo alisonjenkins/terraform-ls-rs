@@ -137,6 +137,112 @@ async fn resource_body_suggests_attributes_from_schema() {
     assert!(ls.contains(&"tags".to_string()));
 }
 
+// Regression: when the cursor is inside an already-closed resource
+// type label (e.g. while editing the `${1:type}` placeholder of the
+// top-level `resource` snippet), emit the type name as plain text
+// only. Emitting the full scaffold duplicates the outer snippet's
+// closing quote + name label + body and produces malformed code.
+#[tokio::test]
+async fn resource_type_completion_in_closed_label_inserts_bare_name() {
+    let u = uri("file:///a.tf");
+    // Mirrors post-snippet state: outer resource scaffold already
+    // placed `"${1:type}" "${2:name}" { … }`, user typed `a`.
+    let src = "resource \"a\" \"name\" {\n  \n}\n";
+    let backend = fresh_backend(src, &u);
+    install_aws_schema(&backend);
+
+    // Cursor sits between `a` and the closing quote of the first label.
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(0, 11)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let CompletionResponse::Array(items) = resp else {
+        panic!("expected array response");
+    };
+    let item = items
+        .iter()
+        .find(|i| i.label == "aws_instance")
+        .expect("aws_instance item missing");
+    assert_eq!(
+        item.insert_text.as_deref(),
+        Some("aws_instance"),
+        "expected bare type name, got: {:?}",
+        item.insert_text
+    );
+    assert_eq!(
+        item.insert_text_format,
+        Some(lsp_types::InsertTextFormat::PLAIN_TEXT),
+        "expected PLAIN_TEXT format"
+    );
+}
+
+#[tokio::test]
+async fn data_source_type_completion_in_closed_label_inserts_bare_name() {
+    let u = uri("file:///a.tf");
+    let src = "data \"a\" \"name\" {\n  \n}\n";
+    let backend = fresh_backend(src, &u);
+    install_aws_schema(&backend);
+
+    // `data ` is 5 chars, `"` at 5, `a` at 6, `"` at 7 — cursor at 7
+    // sits between `a` and the closing quote.
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(0, 7)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let CompletionResponse::Array(items) = resp else {
+        panic!("expected array response");
+    };
+    let item = items
+        .iter()
+        .find(|i| i.label == "aws_ami")
+        .expect("aws_ami item missing");
+    assert_eq!(
+        item.insert_text.as_deref(),
+        Some("aws_ami"),
+        "expected bare type name, got: {:?}",
+        item.insert_text
+    );
+}
+
+// Regression guard: when the label is genuinely open (nothing to the
+// right of the cursor), the full scaffold is still the right shape.
+#[tokio::test]
+async fn resource_type_completion_on_open_label_keeps_scaffold() {
+    let u = uri("file:///a.tf");
+    let backend = fresh_backend("resource \"", &u);
+    install_aws_schema(&backend);
+
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(0, 10)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let CompletionResponse::Array(items) = resp else {
+        panic!("expected array response");
+    };
+    let item = items
+        .iter()
+        .find(|i| i.label == "aws_instance")
+        .expect("aws_instance item missing");
+    let text = item.insert_text.as_deref().expect("insert_text set");
+    assert!(
+        text.starts_with("aws_instance\" \"${1:name}\" {"),
+        "expected scaffold, got: {text:?}"
+    );
+    assert_eq!(
+        item.insert_text_format,
+        Some(lsp_types::InsertTextFormat::SNIPPET),
+    );
+}
+
 #[tokio::test]
 async fn resource_body_suggests_meta_arguments() {
     let u = uri("file:///a.tf");
