@@ -67,32 +67,27 @@ pub async fn semantic_tokens_range(
 fn encode_tokens(doc: &DocumentState) -> Vec<SemanticToken> {
     let mut raw: Vec<RawToken> = Vec::new();
 
-    // Definitions → TYPE for resources/data, VARIABLE for variables/locals/outputs, NAMESPACE for modules.
-    for (name, sym) in &doc.symbols.variables {
-        raw.push(RawToken::from_range(sym.location.range(), VARIABLE, name.len()));
+    // Definitions → TYPE for resources/data, VARIABLE for variables/
+    // locals/outputs, NAMESPACE for modules. Token ranges come from the
+    // symbol's `name_range` — the actual label or attribute key position
+    // in source — not from the whole-block location.
+    for sym in doc.symbols.variables.values() {
+        push_label_token(&mut raw, sym.name_range, VARIABLE);
     }
-    for (name, sym) in &doc.symbols.locals {
-        raw.push(RawToken::from_range(sym.location.range(), VARIABLE, name.len()));
+    for sym in doc.symbols.locals.values() {
+        push_label_token(&mut raw, sym.name_range, VARIABLE);
     }
-    for (name, sym) in &doc.symbols.outputs {
-        raw.push(RawToken::from_range(sym.location.range(), VARIABLE, name.len()));
+    for sym in doc.symbols.outputs.values() {
+        push_label_token(&mut raw, sym.name_range, VARIABLE);
     }
-    for (addr, sym) in &doc.symbols.resources {
-        raw.push(RawToken::from_range(
-            sym.location.range(),
-            TYPE,
-            addr.resource_type.len(),
-        ));
+    for sym in doc.symbols.resources.values() {
+        push_label_token(&mut raw, sym.name_range, TYPE);
     }
-    for (addr, sym) in &doc.symbols.data_sources {
-        raw.push(RawToken::from_range(
-            sym.location.range(),
-            TYPE,
-            addr.resource_type.len(),
-        ));
+    for sym in doc.symbols.data_sources.values() {
+        push_label_token(&mut raw, sym.name_range, TYPE);
     }
-    for (name, sym) in &doc.symbols.modules {
-        raw.push(RawToken::from_range(sym.location.range(), NAMESPACE, name.len()));
+    for sym in doc.symbols.modules.values() {
+        push_label_token(&mut raw, sym.name_range, NAMESPACE);
     }
 
     // References get highlighted by their prefix kind.
@@ -115,6 +110,26 @@ fn encode_tokens(doc: &DocumentState) -> Vec<SemanticToken> {
     // Finally encode relative deltas.
     raw.sort_by(|a, b| a.line.cmp(&b.line).then(a.character.cmp(&b.character)));
     encode_delta(&raw)
+}
+
+/// Push a single-line semantic token derived from a label range.
+/// Ranges that span multiple lines (unexpected for block labels) are
+/// dropped to avoid highlighting past the end of the label line.
+fn push_label_token(raw: &mut Vec<RawToken>, range: lsp_types::Range, type_id: u32) {
+    if range.start.line != range.end.line {
+        return;
+    }
+    let length = range.end.character.saturating_sub(range.start.character);
+    if length == 0 {
+        return;
+    }
+    raw.push(RawToken {
+        line: range.start.line,
+        character: range.start.character,
+        length,
+        type_id,
+        modifiers: 0,
+    });
 }
 
 fn reference_width(r: &tfls_parser::Reference) -> usize {

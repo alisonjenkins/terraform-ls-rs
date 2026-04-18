@@ -7,7 +7,7 @@
 use hcl_edit::Ident;
 use hcl_edit::repr::{Decorated, Span};
 use hcl_edit::structure::{Block, BlockLabel, Body};
-use lsp_types::Url;
+use lsp_types::{Range, Url};
 use ropey::Rope;
 use tfls_core::{ResourceAddress, Symbol, SymbolKind, SymbolLocation, SymbolTable};
 
@@ -48,12 +48,20 @@ pub fn extract_symbols(body: &Body, uri: &Url, rope: &Rope) -> SymbolTable {
             }),
             "locals" => extract_locals(block, uri, rope, &mut table),
             "terraform" => {
+                let Some(name_range) = block
+                    .ident
+                    .span()
+                    .and_then(|s| hcl_span_to_lsp_range(rope, s).ok())
+                else {
+                    continue;
+                };
                 if let Some(sym) = build_symbol(
                     "terraform",
                     SymbolKind::TerraformBlock,
                     block,
                     uri,
                     rope,
+                    name_range,
                     None,
                 ) {
                     table
@@ -69,15 +77,22 @@ pub fn extract_symbols(body: &Body, uri: &Url, rope: &Rope) -> SymbolTable {
     table
 }
 
-fn first_label(block: &Block) -> Option<&str> {
-    block.labels.first().map(label_str)
-}
-
 fn label_str(label: &BlockLabel) -> &str {
     match label {
         BlockLabel::String(s) => s.value().as_str(),
         BlockLabel::Ident(i) => i.as_str(),
     }
+}
+
+fn label_span(label: &BlockLabel) -> Option<std::ops::Range<usize>> {
+    match label {
+        BlockLabel::String(s) => s.span(),
+        BlockLabel::Ident(i) => i.span(),
+    }
+}
+
+fn label_range(label: &BlockLabel, rope: &Rope) -> Option<Range> {
+    hcl_span_to_lsp_range(rope, label_span(label)?).ok()
 }
 
 fn insert_labeled(
@@ -87,11 +102,14 @@ fn insert_labeled(
     kind: SymbolKind,
     mut insert: impl FnMut(Symbol, String),
 ) {
-    let Some(name) = first_label(block) else {
+    let Some(label) = block.labels.first() else {
         return;
     };
-    let name_owned = name.to_string();
-    if let Some(sym) = build_symbol(&name_owned, kind, block, uri, rope, None) {
+    let Some(name_range) = label_range(label, rope) else {
+        return;
+    };
+    let name_owned = label_str(label).to_string();
+    if let Some(sym) = build_symbol(&name_owned, kind, block, uri, rope, name_range, None) {
         insert(sym, name_owned);
     }
 }
@@ -109,8 +127,13 @@ fn insert_two_labeled(
     }
     let type_ = label_str(&labels[0]).to_string();
     let name = label_str(&labels[1]).to_string();
+    // Highlight the *type* label — matches what the semantic-tokens
+    // encoder emits as `TYPE` for resource/data blocks.
+    let Some(name_range) = label_range(&labels[0], rope) else {
+        return;
+    };
     let detail = Some(format!("{type_}.{name}"));
-    if let Some(sym) = build_symbol(&name, kind, block, uri, rope, detail) {
+    if let Some(sym) = build_symbol(&name, kind, block, uri, rope, name_range, detail) {
         insert(sym, type_, name);
     }
 }
@@ -122,14 +145,21 @@ fn extract_locals(block: &Block, uri: &Url, rope: &Rope, table: &mut SymbolTable
             None => continue,
         };
         let name = attr.key.as_str().to_string();
-        let Some(span) = attr.span() else { continue };
-        let Ok(range) = hcl_span_to_lsp_range(rope, span) else {
+        let Some(attr_span) = attr.span() else { continue };
+        let Ok(location_range) = hcl_span_to_lsp_range(rope, attr_span) else {
+            continue;
+        };
+        let Some(key_span) = attr.key.span() else {
+            continue;
+        };
+        let Ok(name_range) = hcl_span_to_lsp_range(rope, key_span) else {
             continue;
         };
         let sym = Symbol {
             name: name.clone(),
             kind: SymbolKind::Local,
-            location: SymbolLocation::new(uri.clone(), range),
+            location: SymbolLocation::new(uri.clone(), location_range),
+            name_range,
             detail: None,
             doc: None,
         };
@@ -143,6 +173,7 @@ fn build_symbol(
     block: &Block,
     uri: &Url,
     rope: &Rope,
+    name_range: Range,
     detail: Option<String>,
 ) -> Option<Symbol> {
     let span = block.span()?;
@@ -151,6 +182,7 @@ fn build_symbol(
         name: name.to_string(),
         kind,
         location: SymbolLocation::new(uri.clone(), range),
+        name_range,
         detail,
         doc: None,
     })
@@ -186,6 +218,99 @@ mod tests {
         let sym = &table.variables["region"];
         assert_eq!(sym.kind, SymbolKind::Variable);
         assert_eq!(sym.name, "region");
+    }
+
+    // --- name_range regressions ---------------------------------------
+    //
+    // Semantic tokens need the narrow range of just the label, not the
+    // whole block — otherwise the highlight gets anchored to the
+    // keyword and produces the visible colour-split bug users see on
+    // resource/data/module names.
+
+    fn column_span(s: &str, needle: &str) -> (u32, u32) {
+        let start = s.find(needle).expect("needle not in source");
+        (start as u32, (start + needle.len()) as u32)
+    }
+
+    #[test]
+    fn name_range_for_variable_covers_just_the_label() {
+        let src = r#"variable "region" { default = "us-east-1" }"#;
+        let table = extract(src);
+        let sym = &table.variables["region"];
+        // Whole-block location still starts at the `v` of `variable`.
+        assert_eq!(sym.location.range().start.character, 0);
+        // name_range points at the `"region"` literal — anywhere inside
+        // the quoted span, so long as it is *not* the block keyword.
+        assert!(sym.name_range.start.character > 0,
+            "expected name_range to start past the keyword, got {}", sym.name_range.start.character);
+        let (lo, hi) = column_span(src, "region");
+        // The range must cover the `region` text (inclusive of or
+        // excluding surrounding quotes — both are legitimate spans).
+        assert!(sym.name_range.start.character <= lo,
+            "name_range starts at {} but `region` begins at {}", sym.name_range.start.character, lo);
+        assert!(sym.name_range.end.character >= hi,
+            "name_range ends at {} but `region` ends at {}", sym.name_range.end.character, hi);
+    }
+
+    #[test]
+    fn name_range_for_resource_covers_the_type_label() {
+        let src = r#"resource "aws_security_group_rule" "test" { }"#;
+        let table = extract(src);
+        let sym = &table.resources[&ResourceAddress::new("aws_security_group_rule", "test")];
+        assert_eq!(sym.location.range().start.character, 0);
+        let (lo, hi) = column_span(src, "aws_security_group_rule");
+        assert!(sym.name_range.start.character <= lo);
+        assert!(sym.name_range.end.character >= hi);
+        // Crucially, the range must not extend into or past the name
+        // label — that was the bug where `"test"` got mis-coloured.
+        let (name_lo, _) = column_span(src, "\"test\"");
+        assert!(sym.name_range.end.character <= name_lo,
+            "name_range leaks past the type label into the name label");
+    }
+
+    #[test]
+    fn name_range_for_data_source_covers_the_type_label() {
+        let src = r#"data "aws_ami" "ubuntu" { owners = ["x"] }"#;
+        let table = extract(src);
+        let sym = &table.data_sources[&ResourceAddress::new("aws_ami", "ubuntu")];
+        let (lo, hi) = column_span(src, "aws_ami");
+        assert!(sym.name_range.start.character <= lo);
+        assert!(sym.name_range.end.character >= hi);
+        let (name_lo, _) = column_span(src, "\"ubuntu\"");
+        assert!(sym.name_range.end.character <= name_lo);
+    }
+
+    #[test]
+    fn name_range_for_module_covers_the_label() {
+        let src = r#"module "network" { source = "./x" }"#;
+        let table = extract(src);
+        let sym = &table.modules["network"];
+        assert!(sym.name_range.start.character > 0);
+        let (lo, hi) = column_span(src, "network");
+        assert!(sym.name_range.start.character <= lo);
+        assert!(sym.name_range.end.character >= hi);
+    }
+
+    #[test]
+    fn name_range_for_local_covers_the_key() {
+        let src = "locals {\n  region = \"us-east-1\"\n}\n";
+        let table = extract(src);
+        let sym = &table.locals["region"];
+        assert_eq!(sym.name_range.start.line, 1);
+        // The `region` key starts at column 2 (two-space indent).
+        assert_eq!(sym.name_range.start.character, 2);
+        assert_eq!(sym.name_range.end.character, 2 + "region".len() as u32);
+    }
+
+    #[test]
+    fn name_range_stays_on_a_single_line() {
+        // Even for a multi-line block body, the name_range must not
+        // leak across lines.
+        let src = "resource \"aws_instance\" \"web\" {\n  ami = \"x\"\n}\n";
+        let table = extract(src);
+        let sym = &table.resources[&ResourceAddress::new("aws_instance", "web")];
+        assert_eq!(sym.name_range.start.line, 0);
+        assert_eq!(sym.name_range.end.line, 0);
     }
 
     #[test]

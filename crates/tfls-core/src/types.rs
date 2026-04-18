@@ -144,11 +144,17 @@ impl SymbolLocation {
 }
 
 /// A symbol in a Terraform module.
+///
+/// `location` is the whole block (used for outline, code lens, rename,
+/// navigation) — `name_range` is the narrower range of just the label
+/// or attribute key, used for semantic-token highlighting so that
+/// colours align with the actual identifier rather than the keyword.
 #[derive(Debug, Clone)]
 pub struct Symbol {
     pub name: String,
     pub kind: SymbolKind,
     pub location: SymbolLocation,
+    pub name_range: lsp_types::Range,
     pub detail: Option<String>,
     pub doc: Option<String>,
 }
