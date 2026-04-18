@@ -98,6 +98,37 @@ async fn top_level_suggests_block_keywords() {
     assert!(ls.contains(&"module".to_string()));
 }
 
+// The `resource` / `data` top-level items intentionally stop at the
+// opening quote of the type label so that the per-type scaffold
+// completion (which inserts required attrs + a `${1:name}` placeholder)
+// can take over cleanly once the user types a character.
+#[tokio::test]
+async fn top_level_resource_data_chain_into_type_scaffold() {
+    let u = uri("file:///a.tf");
+    let backend = fresh_backend("", &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(0, 0)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let CompletionResponse::Array(items) = resp else {
+        panic!("expected array");
+    };
+    for (label, expected) in [("resource", "resource \""), ("data", "data \"")] {
+        let item = items
+            .iter()
+            .find(|i| i.label == label)
+            .unwrap_or_else(|| panic!("missing {label}"));
+        assert_eq!(
+            item.insert_text.as_deref(),
+            Some(expected),
+            "{label} top-level snippet must end at open quote"
+        );
+    }
+}
+
 #[tokio::test]
 async fn resource_type_position_returns_schema_types() {
     let u = uri("file:///a.tf");

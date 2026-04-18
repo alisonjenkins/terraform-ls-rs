@@ -16,17 +16,18 @@ use tower_lsp::jsonrpc;
 use crate::backend::Backend;
 
 /// Top-level block snippets: (label, snippet body, detail).
+///
+/// `resource` and `data` intentionally stop at the opening quote of
+/// the type label. The per-type completion (`resource_type_items` /
+/// `data_source_type_items`) then takes over once the user types a
+/// character and produces the full scaffold — including required
+/// attributes and a `${1:name}` placeholder for the instance name.
+/// Emitting the full scaffold here as well would make the two chain
+/// badly (the per-type scaffold cannot safely run inside a closed
+/// placeholder without duplicating braces).
 const TOP_LEVEL_SNIPPETS: &[(&str, &str, &str)] = &[
-    (
-        "resource",
-        "resource \"${1:type}\" \"${2:name}\" {\n  $0\n}",
-        "Resource block",
-    ),
-    (
-        "data",
-        "data \"${1:type}\" \"${2:name}\" {\n  $0\n}",
-        "Data source block",
-    ),
+    ("resource", "resource \"", "Resource block"),
+    ("data", "data \"", "Data source block"),
     (
         "variable",
         "variable \"${1:name}\" {\n  type = ${2:string}\n  $0\n}",
