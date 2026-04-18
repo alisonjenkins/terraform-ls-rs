@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::crypto::{CryptoProvider, ring};
+use rustls::crypto::{CryptoProvider, aws_lc_rs};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 
@@ -89,21 +89,25 @@ pub fn build_client_config(
     let server_cert_der = CertificateDer::from(cert_bytes);
 
     // rustls 0.23 requires an explicit crypto provider; use ring.
-    let provider = Arc::new(ring::default_provider());
+    let provider = Arc::new(aws_lc_rs::default_provider());
 
-    let cfg = ClientConfig::builder_with_provider(provider)
+    let mut cfg = ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(ProtocolError::Tls)?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(PinnedCertVerifier {
             expected: server_cert_der,
-            provider: ring::default_provider(),
+            provider: aws_lc_rs::default_provider(),
         }))
         .with_client_auth_cert(
             vec![identity.cert_der.clone()],
             identity.key_der.clone_key(),
         )
         .map_err(ProtocolError::Tls)?;
+
+    // go-plugin's TLS server uses ALPN to gate HTTP/2 traffic; if we don't
+    // negotiate "h2" it drops the connection right after the handshake.
+    cfg.alpn_protocols = vec![b"h2".to_vec()];
 
     Ok(Arc::new(cfg))
 }

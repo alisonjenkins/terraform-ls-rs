@@ -42,7 +42,11 @@ async fn fetch_schema_v6(
     bin: &ProviderBinary,
     channel: Channel,
 ) -> Result<tfls_schema::ProviderSchema, ProtocolError> {
-    let mut client = ProviderClientV6::new(channel);
+    // AWS and other large providers return schemas over 100 MB (aws v6 is
+    // ~5-6 MB just for the protobuf response; newer versions push higher).
+    // Raise the decode cap so those don't trip the default 4 MB limit.
+    let mut client = ProviderClientV6::new(channel)
+        .max_decoding_message_size(256 * 1024 * 1024);
     let resp = client
         .get_provider_schema(Request::new(get_provider_schema::Request::default()))
         .await
@@ -79,7 +83,8 @@ async fn fetch_schema_v5(
     bin: &ProviderBinary,
     channel: Channel,
 ) -> Result<tfls_schema::ProviderSchema, ProtocolError> {
-    let mut client = ProviderClientV5::new(channel);
+    let mut client = ProviderClientV5::new(channel)
+        .max_decoding_message_size(256 * 1024 * 1024);
     let resp = client
         .get_schema(Request::new(
             proto_v5::get_provider_schema::Request::default(),
