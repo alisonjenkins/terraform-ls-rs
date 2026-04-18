@@ -24,15 +24,37 @@ pub struct ClientIdentity {
 }
 
 impl ClientIdentity {
-    /// Generate one. The SAN is fixed to `localhost` / `127.0.0.1` since
-    /// provider plugins never actually verify it (mTLS identity is by
-    /// pinned cert, not by hostname).
+    /// Generate an ephemeral client identity suitable for mTLS against a
+    /// terraform-plugin-go provider. go-plugin accepts both ECDSA-P256 and
+    /// ECDSA-P384 certs; we use P256 (default). Sets the `client_auth`
+    /// extended key usage so the provider's TLS stack accepts our cert
+    /// for client authentication.
     pub fn generate() -> Result<Self, ProtocolError> {
-        let key_pair = rcgen::KeyPair::generate()?;
-        let params = rcgen::CertificateParams::new(vec![
+        use rcgen::{BasicConstraints, ExtendedKeyUsagePurpose, IsCa, KeyUsagePurpose};
+
+        // go-plugin's TLS server rejects ECDSA client certs under some
+        // circumstances that we haven't fully diagnosed; RSA 2048 works
+        // reliably (confirmed against all v5/v6 providers in the cache).
+        let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_RSA_SHA256)?;
+        let mut params = rcgen::CertificateParams::new(vec![
             "localhost".to_string(),
             "127.0.0.1".to_string(),
         ])?;
+        // The server uses our cert as both trust anchor AND leaf. Go's
+        // x509 chain verifier insists the anchor has CA:TRUE in its basic
+        // constraints; `SelfSignedOnly` sets that without implying the
+        // cert can sign others.
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyAgreement,
+            KeyUsagePurpose::KeyEncipherment,
+            KeyUsagePurpose::KeyCertSign,
+        ];
+        params.extended_key_usages = vec![
+            ExtendedKeyUsagePurpose::ClientAuth,
+            ExtendedKeyUsagePurpose::ServerAuth,
+        ];
         let cert = params.self_signed(&key_pair)?;
         let cert_pem = cert.pem();
         let cert_der = CertificateDer::from(cert.der().to_vec());

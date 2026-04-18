@@ -27,9 +27,14 @@ use tokio::time::timeout;
 
 use crate::ProtocolError;
 
-/// The handshake line's terraform-plugin magic cookie. Required in env.
+/// Terraform's hashicorp/go-plugin magic cookie. Required in env for the
+/// provider to consider us a legitimate host. The value is not the
+/// generic go-plugin UUID — Terraform uses a specific 64-char hex cookie
+/// compiled into the plugin SDK (see
+/// <https://github.com/hashicorp/terraform-plugin-go/blob/main/tfprotov6/tf6server/server.go>).
 pub const MAGIC_COOKIE_KEY: &str = "TF_PLUGIN_MAGIC_COOKIE";
-pub const MAGIC_COOKIE_VALUE: &str = "d602bf8f-11b0-cec1-08fd-1c0c330b6e5b";
+pub const MAGIC_COOKIE_VALUE: &str =
+    "d602bf8f470bc67ca7faa0386276bbdd4330efaf76d1a219cb4d6991ca9872b2";
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -97,8 +102,10 @@ pub async fn spawn_and_handshake(
     cmd.env(MAGIC_COOKIE_KEY, MAGIC_COOKIE_VALUE);
     cmd.env("TF_PLUGIN_MAGIC_COOKIE_KEY", MAGIC_COOKIE_KEY);
     cmd.env("TF_PLUGIN_MAGIC_COOKIE_VALUE", MAGIC_COOKIE_VALUE);
-    // tells go-plugin which protocol versions we accept
-    cmd.env("PLUGIN_PROTOCOL_VERSIONS", "6");
+    // Tell the provider which tfplugin protocol versions we accept.
+    // Providers that support both v5 and v6 will pick v6; older providers
+    // (and many in-the-wild, including AWS <= 5.x) only speak v5.
+    cmd.env("PLUGIN_PROTOCOL_VERSIONS", "5,6");
     if let Some(pem) = client_cert_pem {
         cmd.env("PLUGIN_CLIENT_CERT", pem);
     }
@@ -112,6 +119,27 @@ pub async fn spawn_and_handshake(
         path: binary.display().to_string(),
         source,
     })?;
+
+    // Forward stderr to our log so provider errors surface when TLS or
+    // RPC calls fail.
+    if let Some(stderr) = child.stderr.take() {
+        let path_for_log = binary.display().to_string();
+        tokio::spawn(async move {
+            let mut reader = tokio::io::BufReader::new(stderr);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => tracing::debug!(
+                        provider = %path_for_log,
+                        "{}",
+                        line.trim_end_matches(['\r', '\n']),
+                    ),
+                }
+            }
+        });
+    }
 
     let stdout = child.stdout.take().ok_or_else(|| ProtocolError::Io {
         path: binary.display().to_string(),
@@ -150,7 +178,7 @@ pub async fn spawn_and_handshake(
         reason,
     })?;
 
-    if info.app_protocol_version != 6 {
+    if !matches!(info.app_protocol_version, 5 | 6) {
         return Err(ProtocolError::UnsupportedProtocol {
             version: info.app_protocol_version,
         });

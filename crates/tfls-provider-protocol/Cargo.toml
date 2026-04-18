@@ -25,7 +25,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
-rcgen = "0.13"
+rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs", "pem"] }
 base64 = "0.22"
 rmpv = "1"
 sonic-rs.workspace = true
@@ -37,3 +37,4 @@ tonic-build = { version = "0.12", default-features = false, features = ["prost"]
 
 [dev-dependencies]
 tokio = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

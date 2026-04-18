@@ -14,11 +14,17 @@ pub mod discovery;
 pub mod handshake;
 pub mod tls;
 pub mod translate;
+pub mod translate_v5;
 pub mod client;
 
 #[allow(dead_code, clippy::all)]
 pub(crate) mod proto {
     tonic::include_proto!("tfplugin6");
+}
+
+#[allow(dead_code, clippy::all)]
+pub(crate) mod proto_v5 {
+    tonic::include_proto!("tfplugin5");
 }
 
 pub use discovery::{ProviderBinary, discover_providers};
