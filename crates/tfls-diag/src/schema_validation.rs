@@ -9,6 +9,7 @@ use hcl_edit::repr::Span;
 use hcl_edit::structure::{Block, BlockLabel, Body};
 use lsp_types::{Diagnostic, DiagnosticSeverity, Url};
 use ropey::Rope;
+use tfls_core::{BlockKind, CONDITION_ATTRS, is_meta_attr, lifecycle_attrs, lifecycle_blocks};
 use tfls_parser::hcl_span_to_lsp_range;
 use tfls_schema::{ProviderSchemas, Schema};
 
@@ -44,14 +45,14 @@ pub fn resource_diagnostics(
         };
         let ident = block.ident.as_str();
 
-        let schema = match (ident, first_label(block)) {
-            ("resource", Some(type_name)) => lookup.resource(type_name),
-            ("data", Some(type_name)) => lookup.data_source(type_name),
-            _ => None,
+        let (kind, schema) = match (ident, first_label(block)) {
+            ("resource", Some(type_name)) => (BlockKind::Resource, lookup.resource(type_name)),
+            ("data", Some(type_name)) => (BlockKind::Data, lookup.data_source(type_name)),
+            _ => continue,
         };
         let Some(schema) = schema else { continue };
 
-        validate_block(block, rope, &schema, &mut out);
+        validate_block(block, rope, &schema, kind, &mut out);
     }
 
     out
@@ -61,6 +62,7 @@ fn validate_block(
     block: &Block,
     rope: &Rope,
     schema: &Schema,
+    kind: BlockKind,
     out: &mut Vec<Diagnostic>,
 ) {
     let Some(header_range) = header_range(block, rope) else {
@@ -93,6 +95,12 @@ fn validate_block(
                 }
             }
             None => {
+                // Terraform meta-arguments (count, for_each, provider,
+                // depends_on) are valid in every resource/data block
+                // even though providers don't declare them.
+                if is_meta_attr(name) {
+                    continue;
+                }
                 // Allow nested blocks that happen to share a name.
                 if schema.block.block_types.contains_key(*name) {
                     continue;
@@ -104,6 +112,25 @@ fn validate_block(
                     message: format!("unknown attribute `{name}`"),
                     ..Default::default()
                 });
+            }
+        }
+    }
+
+    // Validate meta-blocks (lifecycle, provisioner, connection) that
+    // are embedded directly in this resource/data body.
+    for structure in block.body.iter() {
+        let Some(inner) = structure.as_block() else {
+            continue;
+        };
+        let name = inner.ident.as_str();
+        match (kind, name) {
+            (_, "lifecycle") => validate_lifecycle_block(inner, rope, kind, out),
+            (BlockKind::Resource, "provisioner") | (BlockKind::Resource, "connection") => {
+                // Allowed; inner body is too variable to validate here.
+            }
+            _ => {
+                // Provider-defined nested blocks or unknown blocks —
+                // leave untouched for now.
             }
         }
     }
@@ -213,6 +240,73 @@ fn validate_block(
     }
 }
 
+/// Validate attributes and sub-blocks inside a `lifecycle { ... }` block.
+/// The allowed names differ between resource and data blocks.
+fn validate_lifecycle_block(
+    block: &Block,
+    rope: &Rope,
+    kind: BlockKind,
+    out: &mut Vec<Diagnostic>,
+) {
+    let attrs = lifecycle_attrs(kind);
+    let blocks = lifecycle_blocks(kind);
+    for structure in block.body.iter() {
+        if let Some(attr) = structure.as_attribute() {
+            let name = attr.key.as_str();
+            if attrs.contains(&name) {
+                continue;
+            }
+            let span = attr.span().unwrap_or(0..0);
+            let range = hcl_span_to_lsp_range(rope, span).unwrap_or_default();
+            out.push(Diagnostic {
+                range,
+                severity: Some(DiagnosticSeverity::ERROR),
+                source: Some("terraform-ls-rs".to_string()),
+                message: format!("unknown attribute `{name}`"),
+                ..Default::default()
+            });
+        } else if let Some(inner) = structure.as_block() {
+            let name = inner.ident.as_str();
+            if blocks.contains(&name) {
+                validate_condition_block(inner, rope, out);
+            } else {
+                let span = inner.ident.span().unwrap_or(0..0);
+                let range = hcl_span_to_lsp_range(rope, span).unwrap_or_default();
+                out.push(Diagnostic {
+                    range,
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    source: Some("terraform-ls-rs".to_string()),
+                    message: format!("unknown block `{name}`"),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+}
+
+/// Validate `precondition`/`postcondition` block bodies. Both accept
+/// only `condition` and `error_message` attributes.
+fn validate_condition_block(block: &Block, rope: &Rope, out: &mut Vec<Diagnostic>) {
+    for structure in block.body.iter() {
+        let Some(attr) = structure.as_attribute() else {
+            continue;
+        };
+        let name = attr.key.as_str();
+        if CONDITION_ATTRS.contains(&name) {
+            continue;
+        }
+        let span = attr.span().unwrap_or(0..0);
+        let range = hcl_span_to_lsp_range(rope, span).unwrap_or_default();
+        out.push(Diagnostic {
+            range,
+            severity: Some(DiagnosticSeverity::ERROR),
+            source: Some("terraform-ls-rs".to_string()),
+            message: format!("unknown attribute `{name}`"),
+            ..Default::default()
+        });
+    }
+}
+
 fn first_label(block: &Block) -> Option<&str> {
     block.labels.first().map(|l| match l {
         BlockLabel::String(s) => s.value().as_str(),
@@ -250,6 +344,17 @@ mod tests {
                                         "ami":           { "type": "string", "required": true  },
                                         "instance_type": { "type": "string", "optional": true },
                                         "legacy_flag":   { "type": "bool",   "optional": true, "deprecated": true }
+                                    }
+                                }
+                            }
+                        },
+                        "data_source_schemas": {
+                            "aws_ami": {
+                                "version": 0,
+                                "block": {
+                                    "attributes": {
+                                        "id":    { "type": "string", "optional": true },
+                                        "owners": { "type": ["list", "string"], "optional": true }
                                     }
                                 }
                             }
@@ -444,6 +549,161 @@ mod tests {
         assert!(
             d.iter().all(|d| !d.message.contains("at least one of")),
             "unexpected at-least-one-of warning: {d:?}"
+        );
+    }
+
+    // --- Meta-argument regression tests -------------------------------
+    //
+    // Terraform meta-arguments are language-level constructs valid in
+    // every resource/data block regardless of provider schema. The
+    // validator must not flag them as unknown attributes.
+
+    fn has_unknown(d: &[Diagnostic], attr: &str) -> bool {
+        let needle = format!("unknown attribute `{attr}`");
+        d.iter().any(|diag| diag.message.contains(&needle))
+    }
+
+    #[test]
+    fn meta_attr_count_not_flagged_in_resource() {
+        let d = diags(r#"resource "aws_instance" "x" {
+          ami   = "ami-1"
+          count = 2
+        }"#);
+        assert!(!has_unknown(&d, "count"), "got: {d:?}");
+    }
+
+    #[test]
+    fn meta_attr_for_each_not_flagged_in_resource() {
+        let d = diags(r#"resource "aws_instance" "x" {
+          ami      = "ami-1"
+          for_each = toset(["a", "b"])
+        }"#);
+        assert!(!has_unknown(&d, "for_each"), "got: {d:?}");
+    }
+
+    #[test]
+    fn meta_attr_provider_not_flagged_in_resource() {
+        let d = diags(r#"resource "aws_instance" "x" {
+          ami      = "ami-1"
+          provider = aws.east
+        }"#);
+        assert!(!has_unknown(&d, "provider"), "got: {d:?}");
+    }
+
+    #[test]
+    fn meta_attr_depends_on_not_flagged_in_resource() {
+        let d = diags(r#"resource "aws_instance" "x" {
+          ami        = "ami-1"
+          depends_on = []
+        }"#);
+        assert!(!has_unknown(&d, "depends_on"), "got: {d:?}");
+    }
+
+    #[test]
+    fn meta_attrs_not_flagged_in_data_block() {
+        let d = diags(r#"data "aws_ami" "x" {
+          count      = 1
+          for_each   = toset(["a"])
+          provider   = aws.east
+          depends_on = []
+        }"#);
+        assert!(!has_unknown(&d, "count"), "got: {d:?}");
+        assert!(!has_unknown(&d, "for_each"), "got: {d:?}");
+        assert!(!has_unknown(&d, "provider"), "got: {d:?}");
+        assert!(!has_unknown(&d, "depends_on"), "got: {d:?}");
+    }
+
+    #[test]
+    fn truly_unknown_attribute_is_still_flagged() {
+        // Negative regression: the meta-argument fix must not over-match.
+        let d = diags(r#"resource "aws_instance" "x" {
+          ami           = "ami-1"
+          not_in_schema = true
+        }"#);
+        assert!(has_unknown(&d, "not_in_schema"), "got: {d:?}");
+    }
+
+    #[test]
+    fn lifecycle_block_with_known_attrs_is_accepted_in_resource() {
+        let d = diags(r#"resource "aws_instance" "x" {
+          ami = "ami-1"
+          lifecycle {
+            create_before_destroy = true
+            prevent_destroy       = false
+          }
+        }"#);
+        assert!(
+            d.iter().all(|diag| !diag.message.contains("unknown")),
+            "got: {d:?}"
+        );
+    }
+
+    #[test]
+    fn lifecycle_unknown_attr_is_flagged_in_resource() {
+        let d = diags(r#"resource "aws_instance" "x" {
+          ami = "ami-1"
+          lifecycle {
+            typo = true
+          }
+        }"#);
+        assert!(has_unknown(&d, "typo"), "got: {d:?}");
+    }
+
+    #[test]
+    fn lifecycle_data_postcondition_is_accepted() {
+        let d = diags(r#"data "aws_ami" "x" {
+          lifecycle {
+            postcondition {
+              condition     = true
+              error_message = "nope"
+            }
+          }
+        }"#);
+        assert!(
+            d.iter().all(|diag| !diag.message.contains("unknown")),
+            "got: {d:?}"
+        );
+    }
+
+    #[test]
+    fn lifecycle_data_attrs_not_allowed() {
+        // `create_before_destroy` only valid on resources, not data sources.
+        let d = diags(r#"data "aws_ami" "x" {
+          lifecycle {
+            create_before_destroy = true
+          }
+        }"#);
+        assert!(has_unknown(&d, "create_before_destroy"), "got: {d:?}");
+    }
+
+    #[test]
+    fn provisioner_block_body_not_validated() {
+        // provisioner bodies vary per provisioner type; skip inner checks.
+        let d = diags(r#"resource "aws_instance" "x" {
+          ami = "ami-1"
+          provisioner "local-exec" {
+            command = "echo hi"
+            anything_goes = true
+          }
+        }"#);
+        assert!(
+            d.iter().all(|diag| !diag.message.contains("unknown")),
+            "got: {d:?}"
+        );
+    }
+
+    #[test]
+    fn connection_block_body_not_validated() {
+        let d = diags(r#"resource "aws_instance" "x" {
+          ami = "ami-1"
+          connection {
+            type = "ssh"
+            host = "h"
+          }
+        }"#);
+        assert!(
+            d.iter().all(|diag| !diag.message.contains("unknown")),
+            "got: {d:?}"
         );
     }
 
