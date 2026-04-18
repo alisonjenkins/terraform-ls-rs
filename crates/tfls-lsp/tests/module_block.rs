@@ -106,6 +106,71 @@ fn src_with_cursor(marked: &str) -> (String, Position) {
     (cleaned, Position::new(line, col))
 }
 
+/// Regression: when the active dir was already marked "scanned" (via
+/// an earlier workspace scan) and then the user opens a file in it
+/// via `did_open`, the child-module scan *must* still be triggered.
+/// Previously `ensure_module_indexed` short-circuited on the first
+/// `scanned_dirs` hit and skipped child discovery.
+#[tokio::test]
+async fn ensure_module_indexed_triggers_child_scans_even_when_dir_already_scanned() {
+    use std::sync::Arc;
+    use tokio::time::{Duration, sleep};
+
+    let tree = make_tmp_tree("already-scanned");
+    let root_main = tree.join("main.tf");
+    let child_vars = tree.join("mod").join("vars.tf");
+    fs::create_dir_all(child_vars.parent().unwrap()).unwrap();
+    fs::write(
+        &child_vars,
+        "variable \"region\" { type = string }\n",
+    )
+    .unwrap();
+    fs::write(
+        &root_main,
+        "module \"web\" { source = \"./mod\" }\n",
+    )
+    .unwrap();
+
+    // Spin up a real backend + worker so Job::ScanDirectory actually
+    // processes.
+    let (service, _socket) = LspService::new(Backend::new);
+    let inner = service.inner();
+    let _backend = Backend::with_shared_state(
+        inner.client.clone(),
+        inner.state.clone(),
+        inner.jobs.clone(),
+    );
+    let worker = tfls_lsp::indexer::spawn_worker(
+        Arc::clone(&inner.state),
+        Arc::clone(&inner.jobs),
+    );
+
+    // Simulate the workspace-scan pre-population: mark the dir as
+    // scanned without enqueueing a ScanDirectory job.
+    inner
+        .state
+        .scanned_dirs
+        .insert(tree.clone());
+    inner.state.upsert_document(DocumentState::new(
+        Url::from_file_path(&root_main).unwrap(),
+        &fs::read_to_string(&root_main).unwrap(),
+        1,
+    ));
+
+    // Now simulate did_open on main.tf.
+    let main_uri = Url::from_file_path(&root_main).unwrap();
+    tfls_lsp::indexer::ensure_module_indexed(&inner.state, &inner.jobs, &main_uri);
+
+    // Give the worker a moment to process the child scan.
+    sleep(Duration::from_millis(400)).await;
+
+    // The child's `variable "region"` should now be in the store.
+    let child_uri = Url::from_file_path(&child_vars).unwrap();
+    let found = inner.state.documents.contains_key(&child_uri);
+    worker.abort();
+    assert!(found, "child module was not indexed despite ensure_module_indexed");
+}
+
 #[tokio::test]
 async fn module_body_suggests_child_input_variables() {
     let tree = make_tmp_tree("inputs");

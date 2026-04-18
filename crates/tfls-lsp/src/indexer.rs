@@ -97,12 +97,16 @@ pub fn ensure_module_indexed(state: &StateStore, queue: &JobQueue, file_uri: &ls
         }
     }
 
-    // Marking up-front also dedupes: if two files in the same dir are
-    // opened back-to-back the second call is a cheap no-op.
-    if !state.scanned_dirs.insert(dir_buf.clone()) {
-        return;
+    // Enqueue a sibling-dir scan if this dir hasn't been scanned yet.
+    // The workspace scanner pre-populates `scanned_dirs`, so a later
+    // did_open may find the dir already marked — that's fine, the
+    // workspace scan covered the same files. But we still need to
+    // discover the module blocks they declare so child modules get
+    // indexed.
+    if state.scanned_dirs.insert(dir_buf.clone()) {
+        queue.enqueue(Job::ScanDirectory(dir_buf.clone()), Priority::Normal);
     }
-    queue.enqueue(Job::ScanDirectory(dir_buf), Priority::Normal);
+    enqueue_child_module_scans(state, queue, &dir_buf);
 }
 
 /// Enqueue a one-shot schema fetch for `root` at normal priority.
