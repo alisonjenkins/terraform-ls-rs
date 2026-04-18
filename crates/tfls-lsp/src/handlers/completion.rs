@@ -308,18 +308,23 @@ fn attribute_value_items(
     resource_type: &str,
     attr_name: &str,
 ) -> Vec<CompletionItem> {
+    use std::collections::HashSet;
     use super::attr_ref_map;
 
     let mut items = Vec::new();
     let mut sort_index = 0u32;
 
+    let known_types: HashSet<String> = backend.state.all_resource_types().into_iter().collect();
+
     // If we know what resource type this attribute references, suggest
     // matching resources and data sources first.
-    if let Some(target_type) = attr_ref_map::referenced_resource_type(resource_type, attr_name) {
+    if let Some(target_type) =
+        attr_ref_map::referenced_resource_type(resource_type, attr_name, &known_types)
+    {
         let out_attr = attr_ref_map::output_attribute(attr_name);
 
         // Resources of the target type.
-        for name in backend.state.resources_of_type(target_type) {
+        for name in backend.state.resources_of_type(&target_type) {
             let ref_expr = format!("{target_type}.{name}{out_attr}");
             items.push(CompletionItem {
                 label: ref_expr.clone(),
@@ -332,7 +337,7 @@ fn attribute_value_items(
         }
 
         // Data sources of the target type.
-        for name in backend.state.data_sources_of_type(target_type) {
+        for name in backend.state.data_sources_of_type(&target_type) {
             let ref_expr = format!("data.{target_type}.{name}{out_attr}");
             items.push(CompletionItem {
                 label: ref_expr.clone(),
