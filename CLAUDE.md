@@ -62,11 +62,11 @@ Registry docs enrichment fills missing attribute descriptions (e.g. AWS SDKv2 pr
 
 ### Unfinished Features
 
-- [ ] **`exactly_one_of` / `at_least_one_of` diagnostics** — Fields exist on `AttributeSchema` and are surfaced in hover (`hover_attribute.rs:265-266`), but `schema_validation.rs` doesn't generate diagnostics for them. Only `conflicts_with` and `required_with` have checks.
+- [x] **`exactly_one_of` / `at_least_one_of` diagnostics** — Added checks in `schema_validation.rs` with 4 tests.
 
-- [ ] **Wire provider-defined functions into indexer** — `client::fetch_provider_functions()` is implemented but never called from `indexer.rs`. Functions currently only come from the CLI `metadata functions -json` path. Provider-defined functions (e.g. `provider::aws::arn_parse`) won't appear until this is connected.
+- [x] **Wire provider-defined functions into indexer** — `fetch_provider_functions()` now called after plugin protocol schema fetch; `merge_functions()` added to StateStore to avoid clearing built-ins.
 
-- [ ] **Function name completion** — `hover_function.rs` and `signature_help.rs` work for functions, but `completion.rs` has no `FunctionName` context. Users can't get completion suggestions when typing function names.
+- [x] **Function name completion** — Added `FunctionCall` context in `completion.rs` triggered by expression-starting tokens (`=`, `(`, `,`, `${`, operators); `function_name_items()` returns all known functions with signatures and docs.
 
 ### Test Coverage Gaps
 

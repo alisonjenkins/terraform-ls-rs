@@ -62,6 +62,7 @@ pub async fn completion(
         CompletionContext::ModuleRef => {
             symbol_name_items(doc.symbols.modules.keys(), CompletionItemKind::MODULE)
         }
+        CompletionContext::FunctionCall => function_name_items(backend),
         CompletionContext::Unknown => Vec::new(),
     };
 
@@ -184,6 +185,32 @@ fn attribute_detail(attr: &tfls_schema::AttributeSchema) -> String {
     } else {
         parts.join(", ")
     }
+}
+
+fn function_name_items(backend: &Backend) -> Vec<CompletionItem> {
+    let mut items: Vec<CompletionItem> = backend
+        .state
+        .functions
+        .iter()
+        .map(|entry| {
+            let name = entry.key().clone();
+            let sig = entry.value();
+            CompletionItem {
+                label: name.clone(),
+                kind: Some(CompletionItemKind::FUNCTION),
+                detail: Some(sig.label(&name)),
+                documentation: sig.description.as_ref().map(|d| {
+                    Documentation::MarkupContent(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: d.clone(),
+                    })
+                }),
+                ..Default::default()
+            }
+        })
+        .collect();
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    items
 }
 
 fn symbol_name_items<'a, I: IntoIterator<Item = &'a String>>(

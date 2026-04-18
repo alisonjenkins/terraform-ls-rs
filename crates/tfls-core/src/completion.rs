@@ -34,6 +34,10 @@ pub enum CompletionContext {
     /// Cursor is after `module.` — expect a module name.
     ModuleRef,
 
+    /// Cursor is in an expression context where a function call could
+    /// start — offer function names.
+    FunctionCall,
+
     /// Unknown — no specific hints available.
     Unknown,
 }
@@ -47,6 +51,11 @@ pub fn classify_context(source: &str, byte_offset: usize) -> CompletionContext {
 
     // Reference prefixes take priority.
     if let Some(ctx) = reference_prefix_context(before) {
+        return ctx;
+    }
+
+    // Expression position where a function call could start.
+    if let Some(ctx) = expression_context(before) {
         return ctx;
     }
 
@@ -66,6 +75,48 @@ pub fn classify_context(source: &str, byte_offset: usize) -> CompletionContext {
     }
 
     CompletionContext::Unknown
+}
+
+fn expression_context(before: &str) -> Option<CompletionContext> {
+    // Strip any partial identifier the user is typing.
+    let prefix = before.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_' || c == ':');
+    let trimmed = prefix.trim_end();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Must be inside a block (depth > 0) to be in an expression.
+    let mut depth: i32 = 0;
+    for c in trimmed.chars() {
+        match c {
+            '{' => depth += 1,
+            '}' => depth = (depth - 1).max(0),
+            _ => {}
+        }
+    }
+    if depth == 0 {
+        return None;
+    }
+    // Check if the prefix ends with an expression-starting token.
+    if trimmed.ends_with('=')
+        || trimmed.ends_with('(')
+        || trimmed.ends_with(',')
+        || trimmed.ends_with('?')
+        || trimmed.ends_with(':')
+        || trimmed.ends_with('[')
+        || trimmed.ends_with('!')
+        || trimmed.ends_with('+')
+        || trimmed.ends_with('-')
+        || trimmed.ends_with('*')
+        || trimmed.ends_with('/')
+        || trimmed.ends_with('%')
+        || trimmed.ends_with("&&")
+        || trimmed.ends_with("||")
+        || trimmed.ends_with("${")
+    {
+        Some(CompletionContext::FunctionCall)
+    } else {
+        None
+    }
 }
 
 fn reference_prefix_context(before: &str) -> Option<CompletionContext> {
@@ -247,6 +298,36 @@ mod tests {
             at_end("output \"x\" { value = var.reg"),
             CompletionContext::VariableRef
         );
+    }
+
+    #[test]
+    fn function_call_after_equals() {
+        let src = "resource \"x\" \"y\" {\n  value = ";
+        assert_eq!(at_end(src), CompletionContext::FunctionCall);
+    }
+
+    #[test]
+    fn function_call_after_open_paren() {
+        let src = "resource \"x\" \"y\" {\n  value = foo(";
+        assert_eq!(at_end(src), CompletionContext::FunctionCall);
+    }
+
+    #[test]
+    fn function_call_after_comma() {
+        let src = "resource \"x\" \"y\" {\n  value = foo(a, ";
+        assert_eq!(at_end(src), CompletionContext::FunctionCall);
+    }
+
+    #[test]
+    fn function_call_in_interpolation() {
+        let src = "resource \"x\" \"y\" {\n  value = \"${";
+        assert_eq!(at_end(src), CompletionContext::FunctionCall);
+    }
+
+    #[test]
+    fn function_call_partial_name() {
+        let src = "resource \"x\" \"y\" {\n  value = for";
+        assert_eq!(at_end(src), CompletionContext::FunctionCall);
     }
 
     #[test]
