@@ -151,6 +151,58 @@ impl StateStore {
         out
     }
 
+    /// Find all resources of a given type across all indexed documents.
+    pub fn resources_of_type(&self, type_name: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for entry in self.documents.iter() {
+            for addr in entry.symbols.resources.keys() {
+                if addr.resource_type == type_name {
+                    out.push(addr.name.clone());
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Find all data sources of a given type across all indexed documents.
+    pub fn data_sources_of_type(&self, type_name: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for entry in self.documents.iter() {
+            for addr in entry.symbols.data_sources.keys() {
+                if addr.resource_type == type_name {
+                    out.push(addr.name.clone());
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// All variable names across all indexed documents.
+    pub fn all_variable_names(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for entry in self.documents.iter() {
+            out.extend(entry.symbols.variables.keys().cloned());
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// All local names across all indexed documents.
+    pub fn all_local_names(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for entry in self.documents.iter() {
+            out.extend(entry.symbols.locals.keys().cloned());
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// Get a resource's schema struct directly (attributes + block_types).
     pub fn resource_schema(&self, type_name: &str) -> Option<Schema> {
         self.find_resource_schema(type_name)

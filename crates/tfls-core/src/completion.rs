@@ -34,6 +34,15 @@ pub enum CompletionContext {
     /// Cursor is after `module.` — expect a module name.
     ModuleRef,
 
+    /// Cursor is at an attribute value inside a resource/data block,
+    /// and we know which attribute it is. Used for context-aware
+    /// reference suggestions (e.g. `security_group_id =` → suggest
+    /// `aws_security_group` resources).
+    AttributeValue {
+        resource_type: String,
+        attr_name: String,
+    },
+
     /// Cursor is in an expression context where a function call could
     /// start — offer function names.
     FunctionCall,
@@ -79,7 +88,7 @@ pub fn classify_context(source: &str, byte_offset: usize) -> CompletionContext {
 
 fn expression_context(before: &str) -> Option<CompletionContext> {
     // Strip any partial identifier the user is typing.
-    let prefix = before.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_' || c == ':');
+    let prefix = before.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_' || c == ':' || c == '.');
     let trimmed = prefix.trim_end();
     if trimmed.is_empty() {
         return None;
@@ -96,8 +105,8 @@ fn expression_context(before: &str) -> Option<CompletionContext> {
     if depth == 0 {
         return None;
     }
-    // Check if the prefix ends with an expression-starting token.
-    if trimmed.ends_with('=')
+
+    let is_expr_start = trimmed.ends_with('=')
         || trimmed.ends_with('(')
         || trimmed.ends_with(',')
         || trimmed.ends_with('?')
@@ -111,12 +120,81 @@ fn expression_context(before: &str) -> Option<CompletionContext> {
         || trimmed.ends_with('%')
         || trimmed.ends_with("&&")
         || trimmed.ends_with("||")
-        || trimmed.ends_with("${")
-    {
-        Some(CompletionContext::FunctionCall)
-    } else {
-        None
+        || trimmed.ends_with("${");
+
+    if !is_expr_start {
+        return None;
     }
+
+    // If cursor is right after `=`, try to extract the attribute name
+    // and enclosing resource type for context-aware value suggestions.
+    if trimmed.ends_with('=') {
+        if let Some(ctx) = attribute_value_context(trimmed) {
+            return Some(ctx);
+        }
+    }
+
+    Some(CompletionContext::FunctionCall)
+}
+
+/// When cursor is after `attr_name =`, extract the attribute name from
+/// the current line and the enclosing resource/data type from the block
+/// header. Returns `AttributeValue` if both are found.
+fn attribute_value_context(before_eq: &str) -> Option<CompletionContext> {
+    // Get the text before `=` and extract the attribute name.
+    let before = before_eq.strip_suffix('=')?;
+    let before = before.trim_end();
+
+    // The attribute name is the last identifier on the line.
+    let attr_name: String = before
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    if attr_name.is_empty() {
+        return None;
+    }
+
+    // Find the enclosing resource/data block header.
+    let resource_type = classify_block_header_from(before)?.1;
+
+    Some(CompletionContext::AttributeValue {
+        resource_type,
+        attr_name,
+    })
+}
+
+/// Walk backwards through brace-depth to find the enclosing block
+/// header, returning `("resource"|"data", type_name)`.
+fn classify_block_header_from(before: &str) -> Option<(String, String)> {
+    let mut depth: i32 = 0;
+    let bytes = before.as_bytes();
+    let mut i = bytes.len();
+    while i > 0 {
+        i -= 1;
+        match bytes[i] {
+            b'}' => depth += 1,
+            b'{' => {
+                if depth == 0 {
+                    let header = &before[..i];
+                    let line_start = header.rfind('\n').map_or(0, |j| j + 1);
+                    let line = header[line_start..].trim();
+                    let (keyword, rest) = line.split_once(char::is_whitespace)?;
+                    if keyword != "resource" && keyword != "data" {
+                        return None;
+                    }
+                    let type_name = first_quoted_string(rest)?;
+                    return Some((keyword.to_string(), type_name));
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn reference_prefix_context(before: &str) -> Option<CompletionContext> {
@@ -301,9 +379,33 @@ mod tests {
     }
 
     #[test]
-    fn function_call_after_equals() {
-        let src = "resource \"x\" \"y\" {\n  value = ";
-        assert_eq!(at_end(src), CompletionContext::FunctionCall);
+    fn attribute_value_after_equals_in_resource() {
+        let src = "resource \"aws_instance\" \"web\" {\n  subnet_id = ";
+        match at_end(src) {
+            CompletionContext::AttributeValue {
+                resource_type,
+                attr_name,
+            } => {
+                assert_eq!(resource_type, "aws_instance");
+                assert_eq!(attr_name, "subnet_id");
+            }
+            other => panic!("expected AttributeValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attribute_value_with_partial_typing() {
+        let src = "resource \"aws_instance\" \"web\" {\n  subnet_id = aws";
+        match at_end(src) {
+            CompletionContext::AttributeValue {
+                resource_type,
+                attr_name,
+            } => {
+                assert_eq!(resource_type, "aws_instance");
+                assert_eq!(attr_name, "subnet_id");
+            }
+            other => panic!("expected AttributeValue, got {other:?}"),
+        }
     }
 
     #[test]
@@ -325,8 +427,8 @@ mod tests {
     }
 
     #[test]
-    fn function_call_partial_name() {
-        let src = "resource \"x\" \"y\" {\n  value = for";
+    fn function_call_partial_name_in_subexpression() {
+        let src = "resource \"x\" \"y\" {\n  value = foo(for";
         assert_eq!(at_end(src), CompletionContext::FunctionCall);
     }
 

@@ -91,6 +91,10 @@ pub async fn completion(
         CompletionContext::ModuleRef => {
             symbol_name_items(doc.symbols.modules.keys(), CompletionItemKind::MODULE)
         }
+        CompletionContext::AttributeValue {
+            resource_type,
+            attr_name,
+        } => attribute_value_items(backend, &resource_type, &attr_name),
         CompletionContext::FunctionCall => function_name_items(backend),
         CompletionContext::Unknown => Vec::new(),
     };
@@ -293,6 +297,83 @@ fn function_name_items(backend: &Backend) -> Vec<CompletionItem> {
         })
         .collect();
     items.sort_by(|a, b| a.label.cmp(&b.label));
+    items
+}
+
+/// Context-aware value completions: suggest matching resources, data
+/// sources, variables, locals, and functions based on the attribute
+/// being edited.
+fn attribute_value_items(
+    backend: &Backend,
+    resource_type: &str,
+    attr_name: &str,
+) -> Vec<CompletionItem> {
+    use super::attr_ref_map;
+
+    let mut items = Vec::new();
+    let mut sort_index = 0u32;
+
+    // If we know what resource type this attribute references, suggest
+    // matching resources and data sources first.
+    if let Some(target_type) = attr_ref_map::referenced_resource_type(resource_type, attr_name) {
+        let out_attr = attr_ref_map::output_attribute(attr_name);
+
+        // Resources of the target type.
+        for name in backend.state.resources_of_type(target_type) {
+            let ref_expr = format!("{target_type}.{name}{out_attr}");
+            items.push(CompletionItem {
+                label: ref_expr.clone(),
+                kind: Some(CompletionItemKind::REFERENCE),
+                detail: Some(format!("resource {target_type}")),
+                sort_text: Some(format!("{sort_index:04}_{}", ref_expr)),
+                ..Default::default()
+            });
+            sort_index += 1;
+        }
+
+        // Data sources of the target type.
+        for name in backend.state.data_sources_of_type(target_type) {
+            let ref_expr = format!("data.{target_type}.{name}{out_attr}");
+            items.push(CompletionItem {
+                label: ref_expr.clone(),
+                kind: Some(CompletionItemKind::REFERENCE),
+                detail: Some(format!("data source {target_type}")),
+                sort_text: Some(format!("{sort_index:04}_{}", ref_expr)),
+                ..Default::default()
+            });
+            sort_index += 1;
+        }
+    }
+
+    // Always suggest variables and locals — we don't know their types
+    // but the user may have named them appropriately.
+    for name in backend.state.all_variable_names() {
+        let ref_expr = format!("var.{name}");
+        items.push(CompletionItem {
+            label: ref_expr.clone(),
+            kind: Some(CompletionItemKind::VARIABLE),
+            detail: Some("variable".to_string()),
+            sort_text: Some(format!("{sort_index:04}_{}", ref_expr)),
+            ..Default::default()
+        });
+        sort_index += 1;
+    }
+
+    for name in backend.state.all_local_names() {
+        let ref_expr = format!("local.{name}");
+        items.push(CompletionItem {
+            label: ref_expr.clone(),
+            kind: Some(CompletionItemKind::VARIABLE),
+            detail: Some("local".to_string()),
+            sort_text: Some(format!("{sort_index:04}_{}", ref_expr)),
+            ..Default::default()
+        });
+        sort_index += 1;
+    }
+
+    // Also include functions for cases like `coalesce(var.x, "default")`.
+    items.extend(function_name_items(backend));
+
     items
 }
 
