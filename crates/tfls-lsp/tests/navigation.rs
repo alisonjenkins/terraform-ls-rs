@@ -129,6 +129,40 @@ output "x" { value = var.region }
 }
 
 #[tokio::test]
+async fn hover_works_on_definition_label() {
+    // Regression test: prior to the key_at_cursor refactor, hover would return
+    // None when the cursor was on a block label. Now it should behave the same
+    // as when the cursor is on a reference.
+    let u = uri("file:///def.tf");
+    let src = r#"variable "region" {}
+"#;
+    let backend = backend_with(src, &u);
+
+    // Cursor on `region` inside `variable "region"` — column 12 puts us
+    // inside the quoted label.
+    let hover = tfls_lsp::handlers::navigation::hover(
+        &backend,
+        HoverParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: u.clone() },
+                position: Position::new(0, 12),
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        },
+    )
+    .await
+    .expect("ok")
+    .expect("some hover");
+
+    let markdown = match hover.contents {
+        tower_lsp::lsp_types::HoverContents::Markup(m) => m.value,
+        other => panic!("expected markup, got {other:?}"),
+    };
+    assert!(markdown.contains("variable"), "got: {markdown}");
+    assert!(markdown.contains("region"), "got: {markdown}");
+}
+
+#[tokio::test]
 async fn goto_definition_on_nothing_returns_none() {
     let u = uri("file:///empty.tf");
     let backend = backend_with("", &u);

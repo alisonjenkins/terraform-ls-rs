@@ -9,6 +9,7 @@ use tfls_state::{SymbolKey, reference_at_position, reference_key};
 use tower_lsp::jsonrpc;
 
 use crate::backend::Backend;
+use crate::handlers::cursor::{find_symbol_at_cursor, key_at_cursor};
 
 /// `textDocument/declaration` — for HCL this is identical to
 /// `textDocument/definition`. Clients often call both, so we expose
@@ -88,75 +89,23 @@ pub async fn hover(backend: &Backend, params: HoverParams) -> jsonrpc::Result<Op
     let Some(doc) = backend.state.documents.get(&uri) else {
         return Ok(None);
     };
-    let Some(reference) = reference_at_position(&doc, pos) else {
-        return Ok(None);
-    };
-    let key = reference_key(&reference.kind);
-    let detail = describe_key(&key);
 
-    Ok(Some(Hover {
-        contents: HoverContents::Markup(MarkupContent {
-            kind: MarkupKind::Markdown,
-            value: detail,
-        }),
-        range: Some(reference.location.range()),
-    }))
+    // Symbol under cursor — reference OR defining block label.
+    if let Some(target) = find_symbol_at_cursor(&doc, pos) {
+        let detail = describe_key(&target.key);
+        return Ok(Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: detail,
+            }),
+            range: Some(target.location.range()),
+        }));
+    }
+
+    Ok(None)
 }
 
-fn key_at_cursor(doc: &tfls_state::DocumentState, pos: lsp_types::Position) -> Option<SymbolKey> {
-    // If cursor is on a reference, use its key.
-    if let Some(r) = reference_at_position(doc, pos) {
-        return Some(reference_key(&r.kind));
-    }
-    // Otherwise look for a defining symbol whose range contains the cursor.
-    for (name, sym) in &doc.symbols.variables {
-        if contains(&sym.location.range(), pos) {
-            return Some(SymbolKey::new(SymbolKind::Variable, name));
-        }
-    }
-    for (name, sym) in &doc.symbols.locals {
-        if contains(&sym.location.range(), pos) {
-            return Some(SymbolKey::new(SymbolKind::Local, name));
-        }
-    }
-    for (name, sym) in &doc.symbols.outputs {
-        if contains(&sym.location.range(), pos) {
-            return Some(SymbolKey::new(SymbolKind::Output, name));
-        }
-    }
-    for (name, sym) in &doc.symbols.modules {
-        if contains(&sym.location.range(), pos) {
-            return Some(SymbolKey::new(SymbolKind::Module, name));
-        }
-    }
-    for (addr, sym) in &doc.symbols.resources {
-        if contains(&sym.location.range(), pos) {
-            return Some(SymbolKey::resource(
-                SymbolKind::Resource,
-                &addr.resource_type,
-                &addr.name,
-            ));
-        }
-    }
-    for (addr, sym) in &doc.symbols.data_sources {
-        if contains(&sym.location.range(), pos) {
-            return Some(SymbolKey::resource(
-                SymbolKind::DataSource,
-                &addr.resource_type,
-                &addr.name,
-            ));
-        }
-    }
-    None
-}
-
-fn contains(range: &lsp_types::Range, pos: lsp_types::Position) -> bool {
-    let after_start = (pos.line, pos.character) >= (range.start.line, range.start.character);
-    let before_end = (pos.line, pos.character) <= (range.end.line, range.end.character);
-    after_start && before_end
-}
-
-fn describe_key(key: &SymbolKey) -> String {
+pub(crate) fn describe_key(key: &SymbolKey) -> String {
     let kind = match key.kind {
         SymbolKind::Variable => "variable",
         SymbolKind::Local => "local",
@@ -169,4 +118,3 @@ fn describe_key(key: &SymbolKey) -> String {
     };
     format!("**{kind}** `{name}`", name = key.name)
 }
-

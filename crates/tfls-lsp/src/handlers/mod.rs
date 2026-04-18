@@ -2,6 +2,7 @@ pub mod code_action;
 pub mod code_lens;
 pub mod commands;
 pub mod completion;
+pub mod cursor;
 pub mod document;
 pub mod document_link;
 pub mod folding;

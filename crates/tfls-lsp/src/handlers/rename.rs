@@ -6,6 +6,10 @@
 //! edit targets the *narrow* identifier range (the last dotted
 //! segment for references, the block label for definitions) — not the
 //! full span stored in `SymbolLocation`.
+//!
+//! The cursor can be on either a reference (`var.region`) or a
+//! defining block label (`variable "region" {}`); both cases are
+//! supported via [`find_symbol_at_cursor`].
 
 use std::collections::HashMap;
 
@@ -15,11 +19,11 @@ use lsp_types::{
 };
 use ropey::Rope;
 use tfls_core::{SymbolKind, SymbolLocation};
-use tfls_state::{DocumentState, StateStore, SymbolKey, reference_at_position, reference_key};
-use tfls_parser::ReferenceKind;
+use tfls_state::{DocumentState, StateStore, SymbolKey};
 use tower_lsp::jsonrpc;
 
 use crate::backend::Backend;
+use crate::handlers::cursor::{CursorKind, find_symbol_at_cursor};
 
 /// Validate that a rename may happen here; return the range of the
 /// identifier being renamed so the editor can highlight it.
@@ -31,13 +35,17 @@ pub async fn prepare_rename(
     let Some(doc) = backend.state.documents.get(&uri) else {
         return Ok(None);
     };
-    let Some(reference) = reference_at_position(&doc, params.position) else {
+    let Some(target) = find_symbol_at_cursor(&doc, params.position) else {
         return Ok(None);
     };
 
-    let name = reference_name(&reference.kind);
-    let full_range = reference.location.range();
-    let Some(narrow) = narrow_identifier_range(&doc.rope, full_range, &name) else {
+    let name = target.key.name.clone();
+    let full_range = target.location.range();
+    let narrow = match target.kind {
+        CursorKind::Reference => narrow_identifier_range(&doc.rope, full_range, &name),
+        CursorKind::Definition => narrow_quoted_label(&doc.rope, full_range, &name),
+    };
+    let Some(narrow) = narrow else {
         return Ok(None);
     };
 
@@ -60,10 +68,11 @@ pub async fn rename(
         let Some(doc) = backend.state.documents.get(&uri) else {
             return Ok(None);
         };
-        let Some(reference) = reference_at_position(&doc, params.text_document_position.position) else {
+        let Some(target) = find_symbol_at_cursor(&doc, params.text_document_position.position)
+        else {
             return Ok(None);
         };
-        reference_key(&reference.kind)
+        target.key
     };
 
     let mut edits: HashMap<Url, Vec<TextEdit>> = HashMap::new();
@@ -222,15 +231,6 @@ fn rfind_ident(haystack: &str, name: &str) -> Option<usize> {
 
 fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
-}
-
-fn reference_name(kind: &ReferenceKind) -> String {
-    match kind {
-        ReferenceKind::Variable { name }
-        | ReferenceKind::Local { name }
-        | ReferenceKind::Module { name } => name.clone(),
-        ReferenceKind::Resource { name, .. } | ReferenceKind::DataSource { name, .. } => name.clone(),
-    }
 }
 
 // Silence clippy for unused-but-exported helpers.
