@@ -25,10 +25,11 @@ pub struct ClientIdentity {
 
 impl ClientIdentity {
     /// Generate an ephemeral client identity suitable for mTLS against a
-    /// terraform-plugin-go provider. go-plugin accepts both ECDSA-P256 and
-    /// ECDSA-P384 certs; we use P256 (default). Sets the `client_auth`
-    /// extended key usage so the provider's TLS stack accepts our cert
-    /// for client authentication.
+    /// terraform-plugin-go provider. Uses RSA-2048 because providers
+    /// consistently accept it (ECDSA variants hit obscure Go-TLS issues in
+    /// early testing); sets basicConstraints=CA:TRUE so the self-signed
+    /// cert is accepted as its own trust anchor, plus clientAuth in
+    /// extendedKeyUsage for mTLS client authentication.
     pub fn generate() -> Result<Self, ProtocolError> {
         use rcgen::{BasicConstraints, ExtendedKeyUsagePurpose, IsCa, KeyUsagePurpose};
 
@@ -88,7 +89,9 @@ pub fn build_client_config(
         })?;
     let server_cert_der = CertificateDer::from(cert_bytes);
 
-    // rustls 0.23 requires an explicit crypto provider; use ring.
+    // rustls 0.23 requires an explicit crypto provider. We use aws_lc_rs
+    // (not ring) because it supports ECDSA_NISTP521_SHA512, which Go's
+    // terraform-plugin-go picks for server-cert signatures.
     let provider = Arc::new(aws_lc_rs::default_provider());
 
     let mut cfg = ClientConfig::builder_with_provider(provider)
