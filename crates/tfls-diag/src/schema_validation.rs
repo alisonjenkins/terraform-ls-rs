@@ -158,6 +158,58 @@ fn validate_block(
                 });
             }
         }
+
+        for other in &attr.exactly_one_of {
+            if other == *name {
+                continue;
+            }
+            if present_attrs.iter().any(|(n, _)| *n == other.as_str()) {
+                out.push(Diagnostic {
+                    range: *range,
+                    severity: Some(DiagnosticSeverity::WARNING),
+                    source: Some("terraform-ls-rs".to_string()),
+                    message: format!(
+                        "attribute `{name}` and `{other}` are in the same exactly-one-of group — set exactly one"
+                    ),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
+    // at_least_one_of: if no member of the group is present, warn once
+    // per unique group. Dedupe by sorting the group members.
+    let mut seen_groups: Vec<Vec<String>> = Vec::new();
+    for (attr_name, attr) in &schema.block.attributes {
+        if attr.at_least_one_of.is_empty() {
+            continue;
+        }
+        let mut group: Vec<String> = attr.at_least_one_of.clone();
+        if !group.contains(attr_name) {
+            group.push(attr_name.clone());
+        }
+        group.sort();
+        if seen_groups.contains(&group) {
+            continue;
+        }
+        let any_present = group
+            .iter()
+            .any(|member| present_attrs.iter().any(|(n, _)| *n == member.as_str()));
+        if !any_present {
+            let members = group
+                .iter()
+                .map(|m| format!("`{m}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push(Diagnostic {
+                range: header_range,
+                severity: Some(DiagnosticSeverity::WARNING),
+                source: Some("terraform-ls-rs".to_string()),
+                message: format!("at least one of {members} must be set"),
+                ..Default::default()
+            });
+        }
+        seen_groups.push(group);
     }
 }
 
@@ -277,7 +329,11 @@ mod tests {
                                         "a": { "type": "string", "optional": true, "conflicts_with": ["b"] },
                                         "b": { "type": "string", "optional": true, "conflicts_with": ["a"] },
                                         "c": { "type": "string", "optional": true, "required_with": ["d"] },
-                                        "d": { "type": "string", "optional": true }
+                                        "d": { "type": "string", "optional": true },
+                                        "e": { "type": "string", "optional": true, "exactly_one_of": ["e", "f"] },
+                                        "f": { "type": "string", "optional": true, "exactly_one_of": ["e", "f"] },
+                                        "g": { "type": "string", "optional": true, "at_least_one_of": ["g", "h"] },
+                                        "h": { "type": "string", "optional": true, "at_least_one_of": ["g", "h"] }
                                     }
                                 }
                             }
@@ -326,6 +382,69 @@ mod tests {
             .find(|d| d.message.contains("requires `d`"))
             .expect("required-with diagnostic");
         assert_eq!(req.severity, Some(DiagnosticSeverity::WARNING));
+    }
+
+    #[test]
+    fn flags_exactly_one_of_when_both_set() {
+        let schemas = schemas_with_relations();
+        let d = diags_with(
+            &schemas,
+            r#"resource "aws_thing" "x" {
+              e = "one"
+              f = "two"
+            }"#,
+        );
+        let exactly = d
+            .iter()
+            .find(|d| d.message.contains("exactly-one-of"))
+            .expect("exactly-one-of diagnostic");
+        assert_eq!(exactly.severity, Some(DiagnosticSeverity::WARNING));
+    }
+
+    #[test]
+    fn exactly_one_of_with_one_set_is_ok() {
+        let schemas = schemas_with_relations();
+        let d = diags_with(
+            &schemas,
+            r#"resource "aws_thing" "x" {
+              e = "one"
+            }"#,
+        );
+        assert!(
+            d.iter().all(|d| !d.message.contains("exactly-one-of")),
+            "unexpected exactly-one-of warning: {d:?}"
+        );
+    }
+
+    #[test]
+    fn flags_at_least_one_of_when_none_set() {
+        let schemas = schemas_with_relations();
+        let d = diags_with(
+            &schemas,
+            r#"resource "aws_thing" "x" {
+              a = "one"
+            }"#,
+        );
+        let at_least = d
+            .iter()
+            .find(|d| d.message.contains("at least one of"))
+            .expect("at-least-one-of diagnostic");
+        assert_eq!(at_least.severity, Some(DiagnosticSeverity::WARNING));
+    }
+
+    #[test]
+    fn at_least_one_of_satisfied() {
+        let schemas = schemas_with_relations();
+        let d = diags_with(
+            &schemas,
+            r#"resource "aws_thing" "x" {
+              g = "one"
+            }"#,
+        );
+        assert!(
+            d.iter().all(|d| !d.message.contains("at least one of")),
+            "unexpected at-least-one-of warning: {d:?}"
+        );
     }
 
     #[test]
