@@ -58,7 +58,7 @@ Registry docs enrichment fills missing attribute descriptions (e.g. AWS SDKv2 pr
 
 - [x] **Update README.md "Status" section** — Listed done features as "future work". Also updated architecture section to mention plugin protocol and the tfls-provider-protocol crate.
 
-- [ ] **Remove dead code markers in client.rs** (lines 265-275) — `_kind_marker` and `_proto_marker` placeholders with `#[allow(dead_code)]` plus the unused `StringKind` import. Either wire them up or delete them.
+- [x] **Remove dead code markers in client.rs** — `_kind_marker` and `_proto_marker` placeholders with `#[allow(dead_code)]` plus the unused `StringKind` and `proto` imports. Were just dead-code suppressors, not unfinished features.
 
 ### Unfinished Features
 
@@ -75,7 +75,3 @@ Registry docs enrichment fills missing attribute descriptions (e.g. AWS SDKv2 pr
 - [ ] **`tls.rs` tests** — Zero unit tests for certificate generation, base64 decoding variants, or pinned verifier logic.
 
 - [ ] **`translate_v5.rs` tests** — Zero unit tests (mirrors `translate.rs` which has 2 tests).
-
-### Polish
-
-- [ ] **README architecture section** (lines 179-186) — Still describes schema fetch as "via `tofu providers schema -json`". Should mention the plugin protocol as the primary mechanism.

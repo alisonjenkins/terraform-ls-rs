@@ -14,10 +14,10 @@ use tonic::transport::{Channel, Endpoint, Uri};
 use crate::discovery::ProviderBinary;
 use crate::handshake::{Network, PluginInstance, spawn_and_handshake};
 use crate::proto::provider_client::ProviderClient as ProviderClientV6;
-use crate::proto::{StringKind, get_provider_schema};
+use crate::proto::get_provider_schema;
 use crate::proto_v5::provider_client::ProviderClient as ProviderClientV5;
 use crate::tls::{ClientIdentity, build_client_config};
-use crate::{ProtocolError, proto, proto_v5, translate, translate_v5};
+use crate::{ProtocolError, proto_v5, translate, translate_v5};
 
 /// One-shot: launch the binary in `bin`, do the handshake, call the
 /// schema RPC (v5 `GetSchema` or v6 `GetProviderSchema` depending on
@@ -260,16 +260,4 @@ async fn connect_unix(
         })?;
 
     Ok(channel)
-}
-
-/// Silence dead-code warnings until these are wired into richer hover
-/// output.
-#[allow(dead_code)]
-fn _kind_marker(k: StringKind) -> StringKind {
-    k
-}
-
-#[allow(dead_code)]
-fn _proto_marker(p: &proto::Schema) -> &proto::Schema {
-    p
 }
