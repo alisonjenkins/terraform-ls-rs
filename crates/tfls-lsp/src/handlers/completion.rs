@@ -5,21 +5,23 @@
 //! (`InsertTextFormat::SNIPPET`) so the client can offer tabstop
 //! navigation through placeholders.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use hcl_edit::repr::Span;
 use hcl_edit::structure::{Block, Body};
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionParams, CompletionResponse, Documentation,
-    InsertTextFormat, MarkupContent, MarkupKind,
+    InsertTextFormat, MarkupContent, MarkupKind, Url,
 };
 use tfls_core::{
-    BlockKind, CompletionContext, META_ATTRS, classify_context, is_singleton_meta_block,
-    meta_blocks,
+    BlockKind, CompletionContext, META_ATTRS, VariableType, classify_context,
+    is_singleton_meta_block, meta_blocks,
 };
 use tfls_parser::lsp_position_to_byte_offset;
 use tfls_schema::NestingMode;
 use tower_lsp::jsonrpc;
+
+use super::util::parent_dir;
 
 use crate::backend::Backend;
 
@@ -107,13 +109,26 @@ pub async fn completion(
             resource_body_items(backend, &resource_type, /*data=*/ true, &filter)
         }
         CompletionContext::VariableRef => {
-            symbol_name_items(doc.symbols.variables.keys(), CompletionItemKind::VARIABLE)
+            module_symbol_items(backend, &uri, SymbolField::Variables, CompletionItemKind::VARIABLE)
         }
         CompletionContext::LocalRef => {
-            symbol_name_items(doc.symbols.locals.keys(), CompletionItemKind::VARIABLE)
+            module_symbol_items(backend, &uri, SymbolField::Locals, CompletionItemKind::VARIABLE)
         }
         CompletionContext::ModuleRef => {
-            symbol_name_items(doc.symbols.modules.keys(), CompletionItemKind::MODULE)
+            module_symbol_items(backend, &uri, SymbolField::Modules, CompletionItemKind::MODULE)
+        }
+        CompletionContext::VariableAttrRef { path } => variable_attr_items(backend, &uri, &path),
+        CompletionContext::ResourceRef { resource_type } => {
+            resource_name_items(backend, &uri, &resource_type, /*data=*/ false)
+        }
+        CompletionContext::ResourceAttr { resource_type, .. } => {
+            resource_attr_items(backend, &resource_type, /*data=*/ false)
+        }
+        CompletionContext::DataSourceRef { resource_type } => {
+            resource_name_items(backend, &uri, &resource_type, /*data=*/ true)
+        }
+        CompletionContext::DataSourceAttr { resource_type, .. } => {
+            resource_attr_items(backend, &resource_type, /*data=*/ true)
         }
         CompletionContext::AttributeValue {
             resource_type,
@@ -600,3 +615,170 @@ fn symbol_name_items<'a, I: IntoIterator<Item = &'a String>>(
     items.sort_by(|a, b| a.label.cmp(&b.label));
     items
 }
+
+/// Which named-symbol bucket of a module to draw from.
+#[derive(Debug, Clone, Copy)]
+enum SymbolField {
+    Variables,
+    Locals,
+    Modules,
+}
+
+/// Gather a sorted, de-duplicated list of names from every `.tf` file
+/// in the same module (directory) as `uri`.
+fn module_symbol_items(
+    backend: &Backend,
+    uri: &Url,
+    field: SymbolField,
+    kind: CompletionItemKind,
+) -> Vec<CompletionItem> {
+    let dir = parent_dir(uri);
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    for entry in backend.state.documents.iter() {
+        if !doc_in_dir(entry.key(), dir.as_deref()) {
+            continue;
+        }
+        let doc = entry.value();
+        match field {
+            SymbolField::Variables => {
+                for n in doc.symbols.variables.keys() {
+                    names.insert(n.clone());
+                }
+            }
+            SymbolField::Locals => {
+                for n in doc.symbols.locals.keys() {
+                    names.insert(n.clone());
+                }
+            }
+            SymbolField::Modules => {
+                for n in doc.symbols.modules.keys() {
+                    names.insert(n.clone());
+                }
+            }
+        }
+    }
+    symbol_name_items(names.iter(), kind)
+}
+
+/// Names of declared resources (or data sources) of `type_name` across
+/// the current module.
+fn resource_name_items(
+    backend: &Backend,
+    uri: &Url,
+    type_name: &str,
+    data: bool,
+) -> Vec<CompletionItem> {
+    let dir = parent_dir(uri);
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    for entry in backend.state.documents.iter() {
+        if !doc_in_dir(entry.key(), dir.as_deref()) {
+            continue;
+        }
+        let table = &entry.value().symbols;
+        let addrs: Box<dyn Iterator<Item = &tfls_core::ResourceAddress>> = if data {
+            Box::new(table.data_sources.keys())
+        } else {
+            Box::new(table.resources.keys())
+        };
+        for addr in addrs {
+            if addr.resource_type == type_name {
+                names.insert(addr.name.clone());
+            }
+        }
+    }
+    symbol_name_items(names.iter(), CompletionItemKind::FIELD)
+}
+
+/// Attributes available on a resource/data source via the provider
+/// schema (e.g. `aws_iam_role.role1.|` → `arn`, `id`, `name`, …).
+fn resource_attr_items(backend: &Backend, type_name: &str, data: bool) -> Vec<CompletionItem> {
+    let schema = if data {
+        backend.state.data_source_schema(type_name)
+    } else {
+        backend.state.resource_schema(type_name)
+    };
+    let Some(schema) = schema else {
+        return Vec::new();
+    };
+    let mut items: Vec<CompletionItem> = schema
+        .block
+        .attributes
+        .iter()
+        .map(|(name, attr)| CompletionItem {
+            label: name.clone(),
+            kind: Some(CompletionItemKind::FIELD),
+            detail: Some(attribute_detail(attr)),
+            documentation: attr.description.as_ref().map(|d| {
+                Documentation::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: d.clone(),
+                })
+            }),
+            insert_text: Some(name.clone()),
+            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+            ..Default::default()
+        })
+        .collect();
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    items
+}
+
+/// Drill into a variable's `type = object({ … })` declaration along
+/// `path` (where `path[0]` is the variable name and subsequent entries
+/// are nested field names). Returns the keys of the resolved object as
+/// completion items; anything not resolving to an object yields empty.
+fn variable_attr_items(backend: &Backend, uri: &Url, path: &[String]) -> Vec<CompletionItem> {
+    let (var_name, rest) = match path.split_first() {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    let dir = parent_dir(uri);
+    let mut ty: Option<VariableType> = None;
+    for entry in backend.state.documents.iter() {
+        if !doc_in_dir(entry.key(), dir.as_deref()) {
+            continue;
+        }
+        if let Some(t) = entry.value().symbols.variable_types.get(var_name) {
+            ty = Some(t.clone());
+            break;
+        }
+    }
+    let Some(mut current) = ty else {
+        return Vec::new();
+    };
+    for segment in rest {
+        current = match current {
+            VariableType::Object(mut fields) => match fields.remove(segment.as_str()) {
+                Some(next) => next,
+                None => return Vec::new(),
+            },
+            _ => return Vec::new(),
+        };
+    }
+    let VariableType::Object(fields) = current else {
+        return Vec::new();
+    };
+    let mut items: Vec<CompletionItem> = fields
+        .iter()
+        .map(|(name, sub)| CompletionItem {
+            label: name.clone(),
+            kind: Some(CompletionItemKind::FIELD),
+            detail: Some(format!("{sub}")),
+            insert_text: Some(name.clone()),
+            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+            ..Default::default()
+        })
+        .collect();
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    items
+}
+
+fn doc_in_dir(doc_uri: &Url, dir: Option<&std::path::Path>) -> bool {
+    match dir {
+        // Without a resolvable parent dir for the active doc, don't
+        // over-filter — include everything.
+        None => true,
+        Some(d) => parent_dir(doc_uri).as_deref() == Some(d),
+    }
+}
+

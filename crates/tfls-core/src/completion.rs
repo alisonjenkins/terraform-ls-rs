@@ -34,6 +34,25 @@ pub enum CompletionContext {
     /// Cursor is after `module.` — expect a module name.
     ModuleRef,
 
+    /// Cursor is after `var.NAME.` (and possibly more `.field` steps)
+    /// — expect a field on a variable's object type.
+    VariableAttrRef { path: Vec<String> },
+
+    /// Cursor is after `<resource_type>.` — expect a name of a
+    /// declared resource of that type.
+    ResourceRef { resource_type: String },
+
+    /// Cursor is after `<resource_type>.<name>.` — expect an attribute
+    /// of that resource from the provider schema.
+    ResourceAttr { resource_type: String, name: String },
+
+    /// Cursor is after `data.<type>.` — expect a data-source name.
+    DataSourceRef { resource_type: String },
+
+    /// Cursor is after `data.<type>.<name>.` — expect an attribute of
+    /// that data source from the provider schema.
+    DataSourceAttr { resource_type: String, name: String },
+
     /// Cursor is at an attribute value inside a resource/data block,
     /// and we know which attribute it is. Used for context-aware
     /// reference suggestions (e.g. `security_group_id =` → suggest
@@ -198,17 +217,87 @@ fn classify_block_header_from(before: &str) -> Option<(String, String)> {
 }
 
 fn reference_prefix_context(before: &str) -> Option<CompletionContext> {
-    // Find the identifier segment immediately before the cursor.
+    // Drop the partial identifier the user is still typing, so we look
+    // at segments *before* the cursor identifier.
     let trimmed = before.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_');
+    // Fast-path: short single-segment refs (unchanged historical behaviour).
     if trimmed.ends_with("var.") {
-        Some(CompletionContext::VariableRef)
-    } else if trimmed.ends_with("local.") {
-        Some(CompletionContext::LocalRef)
-    } else if trimmed.ends_with("module.") {
-        Some(CompletionContext::ModuleRef)
-    } else {
-        None
+        return Some(CompletionContext::VariableRef);
     }
+    if trimmed.ends_with("local.") {
+        return Some(CompletionContext::LocalRef);
+    }
+    if trimmed.ends_with("module.") {
+        return Some(CompletionContext::ModuleRef);
+    }
+    // Multi-segment traversal (TYPE.NAME., data.TYPE.NAME., var.foo.bar.).
+    let prefix = trimmed.strip_suffix('.')?;
+    let segments = traversal_segments_reverse(prefix);
+    let segs: Vec<&str> = segments.iter().map(|s| s.as_str()).collect();
+    match segs.as_slice() {
+        ["var", rest @ ..] if !rest.is_empty() => Some(CompletionContext::VariableAttrRef {
+            path: rest.iter().map(|s| (*s).to_string()).collect(),
+        }),
+        ["data", t] if !is_builtin_prefix(t) => Some(CompletionContext::DataSourceRef {
+            resource_type: (*t).to_string(),
+        }),
+        ["data", t, n] if !is_builtin_prefix(t) => Some(CompletionContext::DataSourceAttr {
+            resource_type: (*t).to_string(),
+            name: (*n).to_string(),
+        }),
+        [t] if !is_builtin_prefix(t) => Some(CompletionContext::ResourceRef {
+            resource_type: (*t).to_string(),
+        }),
+        [t, n] if !is_builtin_prefix(t) => Some(CompletionContext::ResourceAttr {
+            resource_type: (*t).to_string(),
+            name: (*n).to_string(),
+        }),
+        _ => None,
+    }
+}
+
+fn is_builtin_prefix(s: &str) -> bool {
+    matches!(
+        s,
+        "var" | "local" | "module" | "data" | "self" | "count" | "each" | "terraform" | "path"
+    )
+}
+
+/// Walk backwards through `prefix` collecting `ident.ident.ident…`
+/// segments (separated by `.`) until we hit a non-ident / non-dot
+/// boundary. Returns them in source order.
+fn traversal_segments_reverse(prefix: &str) -> Vec<String> {
+    let mut segments: Vec<String> = Vec::new();
+    let bytes = prefix.as_bytes();
+    let mut end = bytes.len();
+    loop {
+        // Walk backwards over identifier characters.
+        let mut start = end;
+        while start > 0 {
+            let c = bytes[start - 1] as char;
+            if c.is_alphanumeric() || c == '_' {
+                start -= 1;
+            } else {
+                break;
+            }
+        }
+        if start == end {
+            break;
+        }
+        segments.push(prefix[start..end].to_string());
+        if start == 0 {
+            break;
+        }
+        // The only acceptable separator is `.`.
+        let prev = bytes[start - 1] as char;
+        if prev == '.' {
+            end = start - 1;
+        } else {
+            break;
+        }
+    }
+    segments.reverse();
+    segments
 }
 
 fn block_opener_context(before: &str) -> Option<CompletionContext> {
@@ -507,6 +596,76 @@ mod tests {
     fn cursor_inside_data_source_name_label_is_not_data_source_type() {
         let ctx = at_end("data \"aws_ami\" \"x");
         assert_ne!(ctx, CompletionContext::DataSourceType);
+    }
+
+    // --- Reference-prefix classifier regressions ---------------------
+
+    #[test]
+    fn resource_ref_after_type_dot() {
+        let ctx = at_end("output \"x\" { value = aws_iam_role.");
+        assert_eq!(
+            ctx,
+            CompletionContext::ResourceRef {
+                resource_type: "aws_iam_role".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn resource_attr_after_type_name_dot() {
+        let ctx = at_end("output \"x\" { value = aws_iam_role.role1.");
+        assert_eq!(
+            ctx,
+            CompletionContext::ResourceAttr {
+                resource_type: "aws_iam_role".to_string(),
+                name: "role1".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn data_source_ref_after_data_type_dot() {
+        let ctx = at_end("output \"x\" { value = data.aws_ami.");
+        assert_eq!(
+            ctx,
+            CompletionContext::DataSourceRef {
+                resource_type: "aws_ami".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn data_source_attr_after_data_type_name_dot() {
+        let ctx = at_end("output \"x\" { value = data.aws_ami.ubuntu.");
+        assert_eq!(
+            ctx,
+            CompletionContext::DataSourceAttr {
+                resource_type: "aws_ami".to_string(),
+                name: "ubuntu".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn variable_attr_ref_single_field() {
+        let ctx = at_end("output \"x\" { value = var.foo.");
+        assert_eq!(
+            ctx,
+            CompletionContext::VariableAttrRef {
+                path: vec!["foo".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn variable_attr_ref_nested_field() {
+        let ctx = at_end("output \"x\" { value = var.foo.bar.");
+        assert_eq!(
+            ctx,
+            CompletionContext::VariableAttrRef {
+                path: vec!["foo".to_string(), "bar".to_string()]
+            }
+        );
     }
 
     #[test]

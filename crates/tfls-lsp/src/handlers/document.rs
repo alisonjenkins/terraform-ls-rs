@@ -4,8 +4,6 @@
 //! reference indexes in sync) and publishes the union of all
 //! diagnostic families back to the client.
 
-use std::path::PathBuf;
-
 use tfls_core::{SymbolKind, SymbolLocation};
 use tfls_diag::{
     diagnostics_for_parse_errors, resource_diagnostics, undefined_reference_diagnostics,
@@ -107,7 +105,7 @@ pub fn compute_diagnostics(state: &StateStore, uri: &Url) -> Vec<Diagnostic> {
     // parent directory — a Terraform module is one directory, so a reference
     // in `<dir>/a.tf` is satisfied by any definition in `<dir>/*.tf` but not
     // by definitions inside `<dir>/modules/**` or unrelated workspace roots.
-    let module_dir = parent_dir(uri);
+    let module_dir = crate::handlers::util::parent_dir(uri);
     out.extend(undefined_reference_diagnostics(&doc.references, |kind| {
         is_defined_in_module(state, module_dir.as_deref(), kind)
     }));
@@ -148,11 +146,7 @@ fn is_defined_in_module(
 }
 
 fn location_in_dir(loc: &SymbolLocation, dir: &std::path::Path) -> bool {
-    parent_dir(&loc.uri).as_deref() == Some(dir)
-}
-
-fn parent_dir(uri: &Url) -> Option<PathBuf> {
-    uri.to_file_path().ok()?.parent().map(|p| p.to_path_buf())
+    crate::handlers::util::parent_dir(&loc.uri).as_deref() == Some(dir)
 }
 
 /// Adapter so `tfls-diag` can query [`StateStore`]-installed schemas

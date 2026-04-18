@@ -631,3 +631,213 @@ async fn resource_body_filters_schema_single_and_keeps_list_nested_block() {
         "ebs_block_device is schema-list and must still be offered; got: {ls:?}"
     );
 }
+
+// --- Reference-completion regressions -----------------------------
+//
+// `TYPE.`, `TYPE.NAME.`, `data.TYPE.`, `data.TYPE.NAME.`, and
+// `var.NAME.field.` should each return a focused, module-scoped menu.
+
+fn insert_doc(backend: &Backend, u: &Url, src: &str) {
+    backend
+        .state
+        .upsert_document(DocumentState::new(u.clone(), src, 1));
+}
+
+/// Extract `"|"` cursor marker from `src`, returning the clean source
+/// and the LSP position of the cursor. The marker never appears in a
+/// real Terraform file so we can use it to pin cursor positions inside
+/// parseable sources.
+fn src_with_cursor(marked: &str) -> (String, Position) {
+    const MARKER: &str = "|";
+    let idx = marked
+        .find(MARKER)
+        .unwrap_or_else(|| panic!("missing cursor `|` in test source"));
+    let cleaned = format!("{}{}", &marked[..idx], &marked[idx + MARKER.len()..]);
+    let before = &marked[..idx];
+    let line = before.matches('\n').count() as u32;
+    let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let col = (idx - line_start) as u32;
+    (cleaned, Position::new(line, col))
+}
+
+#[tokio::test]
+async fn resource_ref_suggests_only_names_of_matching_type() {
+    let u = uri("file:///mod/a.tf");
+    let (src, pos) = src_with_cursor(
+        "resource \"aws_iam_role\" \"role1\" {}\nresource \"aws_instance\" \"web\" {}\noutput \"x\" { value = aws_iam_role.|xxx }\n",
+    );
+    let backend = fresh_backend(&src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&u, pos))
+        .await
+        .expect("ok")
+        .expect("some completions");
+    let ls = labels(resp);
+    assert_eq!(ls, vec!["role1".to_string()]);
+}
+
+#[tokio::test]
+async fn data_source_ref_suggests_only_names_of_matching_type() {
+    let u = uri("file:///mod/a.tf");
+    let (src, pos) = src_with_cursor(
+        "data \"aws_ami\" \"ubuntu\" { owners = [\"x\"] }\noutput \"x\" { value = data.aws_ami.|xxx }\n",
+    );
+    let backend = fresh_backend(&src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&u, pos))
+        .await
+        .expect("ok")
+        .expect("some completions");
+    let ls = labels(resp);
+    assert_eq!(ls, vec!["ubuntu".to_string()]);
+}
+
+#[tokio::test]
+async fn resource_attr_suggests_schema_attributes() {
+    let u = uri("file:///mod/a.tf");
+    let (src, pos) = src_with_cursor(
+        "resource \"aws_instance\" \"web\" {}\noutput \"x\" { value = aws_instance.web.|xxx }\n",
+    );
+    let backend = fresh_backend(&src, &u);
+    install_aws_schema(&backend);
+    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&u, pos))
+        .await
+        .expect("ok")
+        .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"ami".to_string()), "got: {ls:?}");
+    assert!(ls.contains(&"instance_type".to_string()), "got: {ls:?}");
+    assert!(ls.contains(&"tags".to_string()), "got: {ls:?}");
+}
+
+#[tokio::test]
+async fn data_source_attr_has_focused_response() {
+    let u = uri("file:///mod/a.tf");
+    let (src, pos) = src_with_cursor(
+        "data \"aws_ami\" \"ubuntu\" {}\noutput \"x\" { value = data.aws_ami.ubuntu.|xxx }\n",
+    );
+    let backend = fresh_backend(&src, &u);
+    install_aws_schema(&backend);
+    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&u, pos))
+        .await
+        .expect("ok");
+    // With the current fixture `aws_ami` has an empty block; the menu
+    // is either None or an empty list. Either way, the classifier
+    // reached `DataSourceAttr` (covered by the tfls-core unit test) and
+    // didn't leak unrelated variable/local names.
+    if let Some(CompletionResponse::Array(items)) = resp {
+        for it in &items {
+            assert_ne!(it.label, "ubuntu".to_string(), "data-source name leaked as attr");
+        }
+    }
+}
+
+#[tokio::test]
+async fn var_ref_is_module_scoped_across_files() {
+    let ua = uri("file:///mod/a.tf");
+    let ub = uri("file:///mod/b.tf");
+    let uc = uri("file:///other/c.tf");
+    let (src_a, pos) = src_with_cursor(
+        "variable \"a\" {}\noutput \"x\" { value = var.|xxx }\n",
+    );
+    let backend = fresh_backend(&src_a, &ua);
+    insert_doc(&backend, &ub, "variable \"b\" {}\n");
+    insert_doc(&backend, &uc, "variable \"c\" {}\n");
+    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&ua, pos))
+        .await
+        .expect("ok")
+        .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"a".to_string()), "got: {ls:?}");
+    assert!(ls.contains(&"b".to_string()), "got: {ls:?}");
+    assert!(!ls.contains(&"c".to_string()), "`c` lives in /other; got: {ls:?}");
+}
+
+#[tokio::test]
+async fn local_ref_is_module_scoped_across_files() {
+    let ua = uri("file:///mod/a.tf");
+    let ub = uri("file:///mod/b.tf");
+    let uc = uri("file:///other/c.tf");
+    let (src_a, pos) = src_with_cursor(
+        "locals { a = 1 }\noutput \"x\" { value = local.|xxx }\n",
+    );
+    let backend = fresh_backend(&src_a, &ua);
+    insert_doc(&backend, &ub, "locals { b = 2 }\n");
+    insert_doc(&backend, &uc, "locals { c = 3 }\n");
+    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&ua, pos))
+        .await
+        .expect("ok")
+        .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"a".to_string()), "got: {ls:?}");
+    assert!(ls.contains(&"b".to_string()), "got: {ls:?}");
+    assert!(!ls.contains(&"c".to_string()), "got: {ls:?}");
+}
+
+#[tokio::test]
+async fn resource_ref_is_module_scoped_across_files() {
+    let ua = uri("file:///mod/a.tf");
+    let ub = uri("file:///mod/b.tf");
+    let uc = uri("file:///other/c.tf");
+    let (src_a, pos) = src_with_cursor(
+        "resource \"aws_iam_role\" \"admin\" {}\noutput \"x\" { value = aws_iam_role.|xxx }\n",
+    );
+    let backend = fresh_backend(&src_a, &ua);
+    insert_doc(&backend, &ub, "resource \"aws_iam_role\" \"reader\" {}\n");
+    insert_doc(&backend, &uc, "resource \"aws_iam_role\" \"outsider\" {}\n");
+    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&ua, pos))
+        .await
+        .expect("ok")
+        .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"admin".to_string()), "got: {ls:?}");
+    assert!(ls.contains(&"reader".to_string()), "got: {ls:?}");
+    assert!(
+        !ls.contains(&"outsider".to_string()),
+        "outsider lives in /other; got: {ls:?}"
+    );
+}
+
+#[tokio::test]
+async fn variable_attr_ref_suggests_object_fields() {
+    let u = uri("file:///mod/a.tf");
+    let (src, pos) = src_with_cursor(
+        "variable \"config\" {\n  type = object({ region = string, enabled = bool })\n}\noutput \"x\" { value = var.config.|xxx }\n",
+    );
+    let backend = fresh_backend(&src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&u, pos))
+        .await
+        .expect("ok")
+        .expect("some completions");
+    let ls = labels(resp);
+    assert_eq!(ls, vec!["enabled".to_string(), "region".to_string()]);
+}
+
+#[tokio::test]
+async fn variable_attr_ref_drills_into_nested_object() {
+    let u = uri("file:///mod/a.tf");
+    let (src, pos) = src_with_cursor(
+        "variable \"c\" {\n  type = object({ inner = object({ a = string, b = number }) })\n}\noutput \"x\" { value = var.c.inner.|xxx }\n",
+    );
+    let backend = fresh_backend(&src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&u, pos))
+        .await
+        .expect("ok")
+        .expect("some completions");
+    let ls = labels(resp);
+    assert_eq!(ls, vec!["a".to_string(), "b".to_string()]);
+}
+
+#[tokio::test]
+async fn variable_attr_ref_returns_empty_for_non_object() {
+    let u = uri("file:///mod/a.tf");
+    let (src, pos) = src_with_cursor(
+        "variable \"region\" { type = string }\noutput \"x\" { value = var.region.|xxx }\n",
+    );
+    let backend = fresh_backend(&src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&u, pos))
+        .await
+        .expect("ok");
+    assert!(
+        resp.is_none(),
+        "primitive var shouldn't expose fields; got: {resp:?}"
+    );
+}

@@ -169,6 +169,9 @@ pub struct SymbolTable {
     pub data_sources: HashMap<ResourceAddress, Symbol>,
     pub modules: HashMap<String, Symbol>,
     pub providers: HashMap<String, Symbol>,
+    /// Structural types declared via `variable "name" { type = … }`.
+    /// Parallel to `variables`; entries are keyed by variable name.
+    pub variable_types: HashMap<String, crate::variable_type::VariableType>,
 }
 
 impl SymbolTable {

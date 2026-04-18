@@ -28,9 +28,22 @@ pub fn extract_symbols(body: &Body, uri: &Url, rope: &Rope) -> SymbolTable {
         };
         let ident = block.ident.as_str();
         match ident {
-            "variable" => insert_labeled(block, uri, rope, SymbolKind::Variable, |sym, name| {
-                table.variables.insert(name, sym);
-            }),
+            "variable" => {
+                let type_expr = block.body.iter().find_map(|structure| {
+                    let attr = structure.as_attribute()?;
+                    if attr.key.as_str() == "type" {
+                        Some(tfls_core::parse_type_expr(&attr.value))
+                    } else {
+                        None
+                    }
+                });
+                insert_labeled(block, uri, rope, SymbolKind::Variable, |sym, name| {
+                    if let Some(ty) = type_expr.clone() {
+                        table.variable_types.insert(name.clone(), ty);
+                    }
+                    table.variables.insert(name, sym);
+                });
+            }
             "output" => insert_labeled(block, uri, rope, SymbolKind::Output, |sym, name| {
                 table.outputs.insert(name, sym);
             }),
