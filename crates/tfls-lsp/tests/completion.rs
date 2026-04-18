@@ -44,6 +44,24 @@ fn install_aws_schema(backend: &Backend) {
                                 "ami":           { "type": "string", "required": true,  "description": "AMI ID" },
                                 "instance_type": { "type": "string", "optional": true },
                                 "tags":          { "type": ["map", "string"], "optional": true }
+                            },
+                            "block_types": {
+                                "root_block_device": {
+                                    "nesting_mode": "single",
+                                    "block": {
+                                        "attributes": {
+                                            "volume_size": { "type": "number", "optional": true }
+                                        }
+                                    }
+                                },
+                                "ebs_block_device": {
+                                    "nesting_mode": "list",
+                                    "block": {
+                                        "attributes": {
+                                            "device_name": { "type": "string", "required": true }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -489,4 +507,127 @@ async fn completion_without_schema_returns_none_for_resource_type() {
     .await
     .expect("ok");
     assert!(resp.is_none(), "no schemas installed -> no suggestions");
+}
+
+// --- Body-filter regressions --------------------------------------
+//
+// Inside a `resource`/`data` body, suggestions should not re-offer
+// attributes or singleton blocks that are already set. Repeatable
+// nested blocks (schema `list`/`set`/`map`/`group` + `provisioner`)
+// should still be offered even when one already exists.
+
+#[tokio::test]
+async fn resource_body_filters_already_set_schema_attribute() {
+    let u = uri("file:///a.tf");
+    let src = "resource \"aws_instance\" \"x\" {\n  ami = \"ami-1\"\n  \n}\n";
+    let backend = fresh_backend(src, &u);
+    install_aws_schema(&backend);
+
+    // Cursor on the empty line inside the body (line 2, col 2).
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 2)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(!ls.contains(&"ami".to_string()), "ami already set; got: {ls:?}");
+    assert!(ls.contains(&"instance_type".to_string()), "got: {ls:?}");
+    assert!(ls.contains(&"tags".to_string()), "got: {ls:?}");
+}
+
+#[tokio::test]
+async fn resource_body_filters_already_set_meta_argument() {
+    let u = uri("file:///a.tf");
+    let src = "resource \"aws_instance\" \"x\" {\n  count = 2\n  \n}\n";
+    let backend = fresh_backend(src, &u);
+    install_aws_schema(&backend);
+
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 2)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(!ls.contains(&"count".to_string()), "count already set; got: {ls:?}");
+    for still_offered in ["for_each", "provider", "depends_on"] {
+        assert!(
+            ls.contains(&still_offered.to_string()),
+            "{still_offered} must still be offered; got: {ls:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn resource_body_filters_singleton_meta_block() {
+    let u = uri("file:///a.tf");
+    let src = "resource \"aws_instance\" \"x\" {\n  lifecycle {\n    create_before_destroy = true\n  }\n  \n}\n";
+    let backend = fresh_backend(src, &u);
+    install_aws_schema(&backend);
+
+    // Cursor on the empty body line after the lifecycle block closes.
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(4, 2)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(
+        !ls.contains(&"lifecycle".to_string()),
+        "lifecycle is singleton; got: {ls:?}"
+    );
+    assert!(ls.contains(&"provisioner".to_string()), "got: {ls:?}");
+    assert!(ls.contains(&"connection".to_string()), "got: {ls:?}");
+}
+
+#[tokio::test]
+async fn resource_body_keeps_repeatable_meta_block_after_first() {
+    let u = uri("file:///a.tf");
+    let src = "resource \"aws_instance\" \"x\" {\n  provisioner \"local-exec\" {\n    command = \"echo\"\n  }\n  \n}\n";
+    let backend = fresh_backend(src, &u);
+    install_aws_schema(&backend);
+
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(4, 2)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(
+        ls.contains(&"provisioner".to_string()),
+        "provisioner is repeatable; should still appear; got: {ls:?}"
+    );
+}
+
+#[tokio::test]
+async fn resource_body_filters_schema_single_and_keeps_list_nested_block() {
+    let u = uri("file:///a.tf");
+    let src = "resource \"aws_instance\" \"x\" {\n  root_block_device {\n    volume_size = 20\n  }\n  ebs_block_device {\n    device_name = \"/dev/sda1\"\n  }\n  \n}\n";
+    let backend = fresh_backend(src, &u);
+    install_aws_schema(&backend);
+
+    // Cursor on the empty line after both nested blocks (line 7).
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(7, 2)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(
+        !ls.contains(&"root_block_device".to_string()),
+        "root_block_device is schema-single; got: {ls:?}"
+    );
+    assert!(
+        ls.contains(&"ebs_block_device".to_string()),
+        "ebs_block_device is schema-list and must still be offered; got: {ls:?}"
+    );
 }

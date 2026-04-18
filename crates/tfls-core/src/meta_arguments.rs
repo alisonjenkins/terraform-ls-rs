@@ -55,3 +55,28 @@ pub fn lifecycle_blocks(kind: BlockKind) -> &'static [&'static str] {
 
 /// Attributes allowed inside `precondition`/`postcondition` blocks.
 pub const CONDITION_ATTRS: &[&str] = &["condition", "error_message"];
+
+/// Whether a meta-block name is restricted to one occurrence per block.
+/// `provisioner` is labelled and repeatable; everything else is single.
+pub fn is_singleton_meta_block(kind: BlockKind, name: &str) -> bool {
+    match kind {
+        BlockKind::Resource => matches!(name, "lifecycle" | "connection"),
+        BlockKind::Data => name == "lifecycle",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn singleton_meta_blocks_cover_resource_and_data() {
+        assert!(is_singleton_meta_block(BlockKind::Resource, "lifecycle"));
+        assert!(is_singleton_meta_block(BlockKind::Resource, "connection"));
+        assert!(!is_singleton_meta_block(BlockKind::Resource, "provisioner"));
+        assert!(is_singleton_meta_block(BlockKind::Data, "lifecycle"));
+        assert!(!is_singleton_meta_block(BlockKind::Data, "provisioner"));
+        assert!(!is_singleton_meta_block(BlockKind::Data, "connection"));
+        assert!(!is_singleton_meta_block(BlockKind::Resource, "not_a_meta"));
+    }
+}

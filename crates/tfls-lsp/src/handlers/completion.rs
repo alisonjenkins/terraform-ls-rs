@@ -5,12 +5,20 @@
 //! (`InsertTextFormat::SNIPPET`) so the client can offer tabstop
 //! navigation through placeholders.
 
+use std::collections::HashSet;
+
+use hcl_edit::repr::Span;
+use hcl_edit::structure::{Block, Body};
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionParams, CompletionResponse, Documentation,
     InsertTextFormat, MarkupContent, MarkupKind,
 };
-use tfls_core::{BlockKind, CompletionContext, META_ATTRS, classify_context, meta_blocks};
+use tfls_core::{
+    BlockKind, CompletionContext, META_ATTRS, classify_context, is_singleton_meta_block,
+    meta_blocks,
+};
 use tfls_parser::lsp_position_to_byte_offset;
+use tfls_schema::NestingMode;
 use tower_lsp::jsonrpc;
 
 use crate::backend::Backend;
@@ -91,10 +99,12 @@ pub async fn completion(
             }
         }
         CompletionContext::ResourceBody { resource_type } => {
-            resource_body_items(backend, &resource_type, /*data=*/ false)
+            let filter = compute_body_filter(doc.parsed.body.as_ref(), offset);
+            resource_body_items(backend, &resource_type, /*data=*/ false, &filter)
         }
         CompletionContext::DataSourceBody { resource_type } => {
-            resource_body_items(backend, &resource_type, /*data=*/ true)
+            let filter = compute_body_filter(doc.parsed.body.as_ref(), offset);
+            resource_body_items(backend, &resource_type, /*data=*/ true, &filter)
         }
         CompletionContext::VariableRef => {
             symbol_name_items(doc.symbols.variables.keys(), CompletionItemKind::VARIABLE)
@@ -276,7 +286,12 @@ fn resource_scaffold_snippet(type_name: &str, backend: &Backend, kind: &str) -> 
     snippet
 }
 
-fn resource_body_items(backend: &Backend, type_name: &str, data: bool) -> Vec<CompletionItem> {
+fn resource_body_items(
+    backend: &Backend,
+    type_name: &str,
+    data: bool,
+    filter: &BodyFilter,
+) -> Vec<CompletionItem> {
     let schema = if data {
         backend.state.data_source_schema(type_name)
     } else {
@@ -291,6 +306,7 @@ fn resource_body_items(backend: &Backend, type_name: &str, data: bool) -> Vec<Co
         .block
         .attributes
         .iter()
+        .filter(|(name, _)| !filter.present_attrs.contains(name.as_str()))
         .map(|(name, attr)| CompletionItem {
             label: name.clone(),
             kind: Some(if attr.required {
@@ -311,21 +327,84 @@ fn resource_body_items(backend: &Backend, type_name: &str, data: bool) -> Vec<Co
         })
         .collect();
 
-    items.extend(schema.block.block_types.keys().map(|name| CompletionItem {
-        label: name.clone(),
-        kind: Some(CompletionItemKind::STRUCT),
-        detail: Some("nested block".to_string()),
-        insert_text: Some(format!("{name} {{\n  $0\n}}")),
-        insert_text_format: Some(InsertTextFormat::SNIPPET),
-        ..Default::default()
-    }));
+    items.extend(
+        schema
+            .block
+            .block_types
+            .iter()
+            .filter(|(name, nb)| {
+                // Suggest repeatable nested blocks even when one is
+                // already present; skip only schema-`single` blocks
+                // that have already been placed.
+                nb.nesting_mode != NestingMode::Single
+                    || !filter.present_blocks.contains(name.as_str())
+            })
+            .map(|(name, _)| CompletionItem {
+                label: name.clone(),
+                kind: Some(CompletionItemKind::STRUCT),
+                detail: Some("nested block".to_string()),
+                insert_text: Some(format!("{name} {{\n  $0\n}}")),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                ..Default::default()
+            }),
+    );
 
     let kind = if data { BlockKind::Data } else { BlockKind::Resource };
-    items.extend(meta_argument_items(kind));
-    items.extend(meta_block_items(kind));
+    items.extend(
+        meta_argument_items(kind)
+            .into_iter()
+            .filter(|item| !filter.present_attrs.contains(&item.label)),
+    );
+    items.extend(meta_block_items(kind).into_iter().filter(|item| {
+        !(is_singleton_meta_block(kind, &item.label) && filter.present_blocks.contains(&item.label))
+    }));
 
     items.sort_by(|a, b| a.label.cmp(&b.label));
     items
+}
+
+/// Attributes and nested blocks already present in the enclosing
+/// block at the completion cursor, used to suppress duplicate
+/// suggestions.
+#[derive(Default)]
+struct BodyFilter {
+    present_attrs: HashSet<String>,
+    present_blocks: HashSet<String>,
+}
+
+fn compute_body_filter(body_opt: Option<&Body>, offset: usize) -> BodyFilter {
+    let Some(body) = body_opt else {
+        return BodyFilter::default();
+    };
+    let Some(block) = innermost_block_at(body, offset) else {
+        return BodyFilter::default();
+    };
+    let mut out = BodyFilter::default();
+    for structure in block.body.iter() {
+        if let Some(attr) = structure.as_attribute() {
+            out.present_attrs.insert(attr.key.as_str().to_string());
+        } else if let Some(nested) = structure.as_block() {
+            out.present_blocks.insert(nested.ident.as_str().to_string());
+        }
+    }
+    out
+}
+
+fn innermost_block_at(body: &Body, offset: usize) -> Option<&Block> {
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
+        if !span_contains_offset(block.span(), offset) {
+            continue;
+        }
+        return Some(innermost_block_at(&block.body, offset).unwrap_or(block));
+    }
+    None
+}
+
+fn span_contains_offset(span: Option<std::ops::Range<usize>>, offset: usize) -> bool {
+    matches!(span, Some(r) if offset >= r.start && offset <= r.end)
 }
 
 fn meta_argument_items(_kind: BlockKind) -> Vec<CompletionItem> {
