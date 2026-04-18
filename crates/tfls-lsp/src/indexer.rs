@@ -276,6 +276,32 @@ async fn fetch_and_install_schemas(
                 let count = schemas.provider_schemas.len();
                 state.install_schemas(schemas);
                 tracing::info!(providers = count, "installed provider schemas (plugin)");
+
+                // Also fetch provider-defined functions from v6 providers.
+                if let Ok(binaries) = tfls_provider_protocol::discover_providers(&terraform_dir) {
+                    for bin in &binaries {
+                        match tfls_provider_protocol::client::fetch_provider_functions(bin).await {
+                            Ok(funcs) if !funcs.is_empty() => {
+                                let fcount = funcs.len();
+                                state.merge_functions(funcs);
+                                tracing::info!(
+                                    count = fcount,
+                                    provider = %bin.full_address(),
+                                    "installed provider functions",
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::debug!(
+                                    error = %e,
+                                    provider = %bin.full_address(),
+                                    "provider functions unavailable",
+                                );
+                            }
+                        }
+                    }
+                }
+
                 return Ok(());
             }
             Ok(_) => {

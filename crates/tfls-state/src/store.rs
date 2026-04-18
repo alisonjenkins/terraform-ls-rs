@@ -80,6 +80,17 @@ impl StateStore {
         }
     }
 
+    /// Merge additional function signatures (e.g. provider-defined
+    /// functions) into the existing set without clearing built-ins.
+    pub fn merge_functions(
+        &self,
+        functions: impl IntoIterator<Item = (String, FunctionSignature)>,
+    ) {
+        for (name, sig) in functions {
+            self.functions.insert(name, Arc::new(sig));
+        }
+    }
+
     /// Install the entire [`ProviderSchemas`] document into the store,
     /// indexing each provider by its parsed [`ProviderAddress`].
     ///
