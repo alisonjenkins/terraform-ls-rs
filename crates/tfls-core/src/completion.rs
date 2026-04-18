@@ -25,6 +25,14 @@ pub enum CompletionContext {
     /// Cursor is inside a `data "<type>" "<name>" { ... }` block body.
     DataSourceBody { resource_type: String },
 
+    /// Cursor is inside a `module "<name>" { ... }` block body — expect
+    /// one of the child module's input variable names.
+    ModuleBody { name: String },
+
+    /// Cursor is after `module.<name>.` — expect an output name from
+    /// the referenced child module.
+    ModuleAttr { module_name: String },
+
     /// Cursor is after `var.` — expect a variable name.
     VariableRef,
 
@@ -238,6 +246,9 @@ fn reference_prefix_context(before: &str) -> Option<CompletionContext> {
         ["var", rest @ ..] if !rest.is_empty() => Some(CompletionContext::VariableAttrRef {
             path: rest.iter().map(|s| (*s).to_string()).collect(),
         }),
+        ["module", name] => Some(CompletionContext::ModuleAttr {
+            module_name: (*name).to_string(),
+        }),
         ["data", t] if !is_builtin_prefix(t) => Some(CompletionContext::DataSourceRef {
             resource_type: (*t).to_string(),
         }),
@@ -369,17 +380,22 @@ fn enclosing_block_context(before: &str) -> Option<CompletionContext> {
     None
 }
 
-/// Given the text up to the `{`, figure out if it's a resource/data
-/// block header and what type it declares.
+/// Given the text up to the `{`, figure out if it's a resource/data/
+/// module block header and what type or name it declares.
 fn classify_block_header(header_source: &str) -> Option<CompletionContext> {
     // Take the last line of the header (block openers live on one line).
     let line_start = header_source.rfind('\n').map_or(0, |i| i + 1);
     let line = header_source[line_start..].trim();
     let (keyword, rest) = line.split_once(char::is_whitespace)?;
-    let resource_type = first_quoted_string(rest)?;
+    let first_label = first_quoted_string(rest)?;
     match keyword {
-        "resource" => Some(CompletionContext::ResourceBody { resource_type }),
-        "data" => Some(CompletionContext::DataSourceBody { resource_type }),
+        "resource" => Some(CompletionContext::ResourceBody {
+            resource_type: first_label,
+        }),
+        "data" => Some(CompletionContext::DataSourceBody {
+            resource_type: first_label,
+        }),
+        "module" => Some(CompletionContext::ModuleBody { name: first_label }),
         _ => None,
     }
 }
@@ -655,6 +671,38 @@ mod tests {
                 path: vec!["foo".to_string()]
             }
         );
+    }
+
+    #[test]
+    fn module_body_after_block_opener() {
+        let src = "module \"web\" {\n  ";
+        match at_end(src) {
+            CompletionContext::ModuleBody { name } => assert_eq!(name, "web"),
+            other => panic!("expected ModuleBody, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn module_attr_after_module_dot_name() {
+        assert_eq!(
+            at_end("output \"x\" { value = module.web."),
+            CompletionContext::ModuleAttr {
+                module_name: "web".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn module_attr_drill_beyond_name_is_not_reclassified() {
+        // `module.web.foo.` — segments ["module", "web", "foo"]
+        // falls through (no `[module, name, extra]` arm).
+        let ctx = at_end("output \"x\" { value = module.web.foo.");
+        match ctx {
+            CompletionContext::ModuleAttr { .. } | CompletionContext::ResourceAttr { .. } => {
+                panic!("unexpected classification: {ctx:?}")
+            }
+            _ => {}
+        }
     }
 
     #[test]

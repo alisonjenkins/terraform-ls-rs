@@ -41,7 +41,7 @@ pub fn spawn_worker(
     tokio::spawn(async move {
         loop {
             let job = queue.next().await;
-            if let Err(e) = handle_job(&state, job).await {
+            if let Err(e) = handle_job(&state, &queue, job).await {
                 tracing::warn!(error = %e, "background job failed");
             }
         }
@@ -179,7 +179,11 @@ pub fn spawn_watcher(
     Ok(handle)
 }
 
-async fn handle_job(state: &StateStore, job: Job) -> Result<(), IndexerError> {
+async fn handle_job(
+    state: &StateStore,
+    queue: &JobQueue,
+    job: Job,
+) -> Result<(), IndexerError> {
     match job {
         Job::ParseFile(path) => parse_file_into_state(state, &path).await,
         Job::ReparseDocument(url) => {
@@ -194,7 +198,7 @@ async fn handle_job(state: &StateStore, job: Job) -> Result<(), IndexerError> {
             tracing::info!(count, "installed function signatures");
             Ok(())
         }
-        Job::ScanDirectory(dir) => scan_dir_into_state(state, &dir).await,
+        Job::ScanDirectory(dir) => scan_dir_into_state(state, queue, &dir).await,
     }
 }
 
@@ -214,7 +218,11 @@ fn find_terraform_init_root(start: &Path) -> Option<PathBuf> {
     None
 }
 
-async fn scan_dir_into_state(state: &StateStore, dir: &Path) -> Result<(), IndexerError> {
+async fn scan_dir_into_state(
+    state: &StateStore,
+    queue: &JobQueue,
+    dir: &Path,
+) -> Result<(), IndexerError> {
     match discover_terraform_files_in_dir(dir) {
         Ok(files) => {
             tracing::info!(count = files.len(), dir = %dir.display(), "module scan");
@@ -226,10 +234,38 @@ async fn scan_dir_into_state(state: &StateStore, dir: &Path) -> Result<(), Index
             for path in files {
                 parse_file_into_state(state, &path).await?;
             }
+            enqueue_child_module_scans(state, queue, dir);
         }
         Err(e) => tracing::warn!(error = %e, dir = %dir.display(), "module scan failed"),
     }
     Ok(())
+}
+
+/// After a directory's `.tf` files have been parsed into the store,
+/// walk their `module_sources` and enqueue scans of any referenced
+/// child module directories — whether local (relative paths) or
+/// lockfile-resolved (remote modules cached under `.terraform/modules/`).
+fn enqueue_child_module_scans(state: &StateStore, queue: &JobQueue, dir: &Path) {
+    for entry in state.documents.iter() {
+        let uri = entry.key();
+        let Ok(doc_path) = uri.to_file_path() else {
+            continue;
+        };
+        if doc_path.parent() != Some(dir) {
+            continue;
+        }
+        for (label, source) in &entry.value().symbols.module_sources {
+            let Some(child) = crate::handlers::util::resolve_module_source(dir, label, source)
+            else {
+                continue;
+            };
+            if state.scanned_dirs.contains(&child) {
+                continue;
+            }
+            state.scanned_dirs.insert(child.clone());
+            queue.enqueue(Job::ScanDirectory(child), Priority::Normal);
+        }
+    }
 }
 
 async fn parse_file_into_state(

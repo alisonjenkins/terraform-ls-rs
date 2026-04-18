@@ -10,7 +10,7 @@ use tower_lsp::jsonrpc;
 
 use crate::backend::Backend;
 use crate::handlers::cursor::{find_symbol_at_cursor, key_at_cursor};
-use crate::handlers::{hover_attribute, hover_function};
+use crate::handlers::{hover_attribute, hover_function, hover_module_input};
 
 /// `textDocument/declaration` — for HCL this is identical to
 /// `textDocument/definition`. Clients often call both, so we expose
@@ -95,6 +95,12 @@ pub async fn hover(backend: &Backend, params: HoverParams) -> jsonrpc::Result<Op
     // cursor is on an attribute key inside a resource body, because the
     // resource's symbol range contains the attribute's position too.
     if let Some(hover) = hover_attribute::attribute_hover(&backend.state, &doc, pos) {
+        return Ok(Some(hover));
+    }
+
+    // Module-input hover: a key inside a `module "…" {}` block points
+    // at the referenced child module's variable declaration.
+    if let Some(hover) = hover_module_input::module_input_hover(&backend.state, &doc, pos) {
         return Ok(Some(hover));
     }
 

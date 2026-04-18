@@ -47,9 +47,15 @@ pub fn extract_symbols(body: &Body, uri: &Url, rope: &Rope) -> SymbolTable {
             "output" => insert_labeled(block, uri, rope, SymbolKind::Output, |sym, name| {
                 table.outputs.insert(name, sym);
             }),
-            "module" => insert_labeled(block, uri, rope, SymbolKind::Module, |sym, name| {
-                table.modules.insert(name, sym);
-            }),
+            "module" => {
+                let source = string_attribute(block, "source");
+                insert_labeled(block, uri, rope, SymbolKind::Module, |sym, name| {
+                    if let Some(src) = source.clone() {
+                        table.module_sources.insert(name.clone(), src);
+                    }
+                    table.modules.insert(name, sym);
+                });
+            }
             "provider" => insert_labeled(block, uri, rope, SymbolKind::Provider, |sym, name| {
                 table.providers.insert(name, sym);
             }),
@@ -75,6 +81,7 @@ pub fn extract_symbols(body: &Body, uri: &Url, rope: &Rope) -> SymbolTable {
                     uri,
                     rope,
                     name_range,
+                    None,
                     None,
                 ) {
                     table
@@ -122,9 +129,28 @@ fn insert_labeled(
         return;
     };
     let name_owned = label_str(label).to_string();
-    if let Some(sym) = build_symbol(&name_owned, kind, block, uri, rope, name_range, None) {
+    let doc = string_attribute(block, "description");
+    if let Some(sym) = build_symbol(&name_owned, kind, block, uri, rope, name_range, None, doc) {
         insert(sym, name_owned);
     }
+}
+
+/// Read a plain-string attribute value (e.g. `description = "…"` or
+/// `source = "./foo"`) from a block body. Returns `None` when the
+/// attribute is missing or its value isn't a simple string literal.
+fn string_attribute(block: &Block, key: &str) -> Option<String> {
+    for structure in block.body.iter() {
+        let Some(attr) = structure.as_attribute() else {
+            continue;
+        };
+        if attr.key.as_str() != key {
+            continue;
+        }
+        if let hcl_edit::expr::Expression::String(s) = &attr.value {
+            return Some(s.value().to_string());
+        }
+    }
+    None
 }
 
 fn insert_two_labeled(
@@ -146,7 +172,7 @@ fn insert_two_labeled(
         return;
     };
     let detail = Some(format!("{type_}.{name}"));
-    if let Some(sym) = build_symbol(&name, kind, block, uri, rope, name_range, detail) {
+    if let Some(sym) = build_symbol(&name, kind, block, uri, rope, name_range, detail, None) {
         insert(sym, type_, name);
     }
 }
@@ -188,6 +214,7 @@ fn build_symbol(
     rope: &Rope,
     name_range: Range,
     detail: Option<String>,
+    doc: Option<String>,
 ) -> Option<Symbol> {
     let span = block.span()?;
     let range = hcl_span_to_lsp_range(rope, span).ok()?;
@@ -197,7 +224,7 @@ fn build_symbol(
         location: SymbolLocation::new(uri.clone(), range),
         name_range,
         detail,
-        doc: None,
+        doc,
     })
 }
 
@@ -367,6 +394,35 @@ resource "aws_instance" "api" { ami = "ami-123" }
         let table = extract(r#"module "network" { source = "./modules/network" }"#);
         assert_eq!(table.modules.len(), 1);
         assert_eq!(table.modules["network"].kind, SymbolKind::Module);
+    }
+
+    #[test]
+    fn extracts_module_source() {
+        let table = extract(r#"module "x" { source = "./foo" }"#);
+        assert_eq!(table.module_sources.get("x"), Some(&"./foo".to_string()));
+    }
+
+    #[test]
+    fn skips_module_source_when_non_string() {
+        let table = extract(r#"module "x" { source = var.path }"#);
+        assert!(table.module_sources.get("x").is_none());
+    }
+
+    #[test]
+    fn extracts_variable_description() {
+        let table = extract(r#"variable "region" { description = "AWS region" }"#);
+        assert_eq!(
+            table.variables["region"].doc.as_deref(),
+            Some("AWS region")
+        );
+    }
+
+    #[test]
+    fn extracts_output_description() {
+        let table = extract(
+            "output \"url\" {\n  description = \"Public URL\"\n  value = \"x\"\n}\n",
+        );
+        assert_eq!(table.outputs["url"].doc.as_deref(), Some("Public URL"));
     }
 
     #[test]

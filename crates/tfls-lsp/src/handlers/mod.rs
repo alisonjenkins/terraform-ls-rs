@@ -6,6 +6,7 @@ pub mod completion;
 pub mod cursor;
 pub mod hover_attribute;
 pub mod hover_function;
+pub mod hover_module_input;
 pub mod document;
 pub mod document_link;
 pub mod folding;

@@ -172,6 +172,11 @@ pub struct SymbolTable {
     /// Structural types declared via `variable "name" { type = … }`.
     /// Parallel to `variables`; entries are keyed by variable name.
     pub variable_types: HashMap<String, crate::variable_type::VariableType>,
+    /// The `source = "…"` string literal for each `module "name" { … }`
+    /// block. Missing entries mean the source wasn't a plain string
+    /// (e.g. a reference expression) — those modules are skipped by
+    /// child-dir indexing and module-aware completion/hover.
+    pub module_sources: HashMap<String, String>,
 }
 
 impl SymbolTable {

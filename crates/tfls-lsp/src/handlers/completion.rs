@@ -21,7 +21,7 @@ use tfls_parser::lsp_position_to_byte_offset;
 use tfls_schema::NestingMode;
 use tower_lsp::jsonrpc;
 
-use super::util::parent_dir;
+use super::util::{parent_dir, resolve_module_source};
 
 use crate::backend::Backend;
 
@@ -129,6 +129,13 @@ pub async fn completion(
         }
         CompletionContext::DataSourceAttr { resource_type, .. } => {
             resource_attr_items(backend, &resource_type, /*data=*/ true)
+        }
+        CompletionContext::ModuleBody { name } => {
+            let filter = compute_body_filter(doc.parsed.body.as_ref(), offset);
+            module_input_items(backend, &uri, &name, &filter)
+        }
+        CompletionContext::ModuleAttr { module_name } => {
+            module_output_items(backend, &uri, &module_name)
         }
         CompletionContext::AttributeValue {
             resource_type,
@@ -780,5 +787,103 @@ fn doc_in_dir(doc_uri: &Url, dir: Option<&std::path::Path>) -> bool {
         None => true,
         Some(d) => parent_dir(doc_uri).as_deref() == Some(d),
     }
+}
+
+/// Resolve the child module directory referenced by `module_name`
+/// in the active document's `module_sources`. Returns `None` if the
+/// module isn't declared, the source is missing, or the source can't
+/// be resolved (no matching local path, no lockfile entry).
+fn resolve_child_module_dir(
+    backend: &Backend,
+    uri: &Url,
+    module_name: &str,
+) -> Option<std::path::PathBuf> {
+    let parent = parent_dir(uri)?;
+    let doc = backend.state.documents.get(uri)?;
+    let source = doc.symbols.module_sources.get(module_name)?.clone();
+    resolve_module_source(&parent, module_name, &source)
+}
+
+/// Input-variable completions inside `module "NAME" { | }`.
+fn module_input_items(
+    backend: &Backend,
+    uri: &Url,
+    module_name: &str,
+    filter: &BodyFilter,
+) -> Vec<CompletionItem> {
+    let Some(child_dir) = resolve_child_module_dir(backend, uri, module_name) else {
+        return Vec::new();
+    };
+    let mut items: Vec<CompletionItem> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for entry in backend.state.documents.iter() {
+        if !doc_in_dir(entry.key(), Some(child_dir.as_path())) {
+            continue;
+        }
+        let table = &entry.value().symbols;
+        for (name, sym) in &table.variables {
+            if filter.present_attrs.contains(name) || !seen.insert(name.clone()) {
+                continue;
+            }
+            let type_detail = table.variable_types.get(name).map(|t| format!("{t}"));
+            let documentation = sym.doc.clone().map(|d| {
+                Documentation::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: d,
+                })
+            });
+            items.push(CompletionItem {
+                label: name.clone(),
+                kind: Some(CompletionItemKind::PROPERTY),
+                detail: type_detail,
+                documentation,
+                insert_text: Some(format!("{name} = ${{1}}")),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                ..Default::default()
+            });
+        }
+    }
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    items
+}
+
+/// Output completions for `module.NAME.|`.
+fn module_output_items(
+    backend: &Backend,
+    uri: &Url,
+    module_name: &str,
+) -> Vec<CompletionItem> {
+    let Some(child_dir) = resolve_child_module_dir(backend, uri, module_name) else {
+        return Vec::new();
+    };
+    let mut items: Vec<CompletionItem> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for entry in backend.state.documents.iter() {
+        if !doc_in_dir(entry.key(), Some(child_dir.as_path())) {
+            continue;
+        }
+        for (name, sym) in &entry.value().symbols.outputs {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let documentation = sym.doc.clone().map(|d| {
+                Documentation::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: d,
+                })
+            });
+            items.push(CompletionItem {
+                label: name.clone(),
+                kind: Some(CompletionItemKind::FIELD),
+                detail: Some("module output".to_string()),
+                documentation,
+                insert_text: Some(name.clone()),
+                insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+                ..Default::default()
+            });
+        }
+    }
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    items
 }
 
