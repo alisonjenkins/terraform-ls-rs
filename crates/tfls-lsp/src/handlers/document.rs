@@ -4,11 +4,15 @@
 //! reference indexes in sync) and publishes the union of all
 //! diagnostic families back to the client.
 
+use std::path::PathBuf;
+
+use tfls_core::{SymbolKind, SymbolLocation};
 use tfls_diag::{
     diagnostics_for_parse_errors, resource_diagnostics, undefined_reference_diagnostics,
 };
+use tfls_parser::ReferenceKind;
 use tfls_schema::Schema;
-use tfls_state::{DocumentState, StateStore};
+use tfls_state::{DocumentState, StateStore, SymbolKey};
 use tower_lsp::lsp_types::{
     Diagnostic, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, DidSaveTextDocumentParams, MessageType, Url,
@@ -93,10 +97,15 @@ pub fn compute_diagnostics(state: &StateStore, uri: &Url) -> Vec<Diagnostic> {
     };
 
     let mut out = diagnostics_for_parse_errors(&doc.parsed.errors);
-    out.extend(undefined_reference_diagnostics(
-        &doc.references,
-        &doc.symbols,
-    ));
+
+    // Undefined-reference resolution scoped to the referencing document's
+    // parent directory — a Terraform module is one directory, so a reference
+    // in `<dir>/a.tf` is satisfied by any definition in `<dir>/*.tf` but not
+    // by definitions inside `<dir>/modules/**` or unrelated workspace roots.
+    let module_dir = parent_dir(uri);
+    out.extend(undefined_reference_diagnostics(&doc.references, |kind| {
+        is_defined_in_module(state, module_dir.as_deref(), kind)
+    }));
 
     if let Some(body) = doc.parsed.body.as_ref() {
         let lookup = StateStoreSchemaLookup { state };
@@ -104,6 +113,41 @@ pub fn compute_diagnostics(state: &StateStore, uri: &Url) -> Vec<Diagnostic> {
     }
 
     out
+}
+
+/// True if a definition for `kind` exists somewhere in the workspace index
+/// with the same parent directory as the referencing document. Falls back to
+/// a lenient `true` for URIs we can't resolve to a filesystem path, so
+/// nonsense `file://` inputs don't spam diagnostics.
+fn is_defined_in_module(
+    state: &StateStore,
+    module_dir: Option<&std::path::Path>,
+    kind: &ReferenceKind,
+) -> bool {
+    let key = match kind {
+        ReferenceKind::Variable { name } => SymbolKey::new(SymbolKind::Variable, name),
+        ReferenceKind::Local { name } => SymbolKey::new(SymbolKind::Local, name),
+        ReferenceKind::Module { name } => SymbolKey::new(SymbolKind::Module, name),
+        // resource / data-source refs are skipped upstream by the diag engine.
+        _ => return true,
+    };
+    let Some(locs) = state.definitions_by_name.get(&key) else {
+        return false;
+    };
+    let Some(module_dir) = module_dir else {
+        // Without a parseable parent dir we can't compare; treat as defined
+        // to avoid false positives on exotic URIs.
+        return !locs.is_empty();
+    };
+    locs.iter().any(|loc| location_in_dir(loc, module_dir))
+}
+
+fn location_in_dir(loc: &SymbolLocation, dir: &std::path::Path) -> bool {
+    parent_dir(&loc.uri).as_deref() == Some(dir)
+}
+
+fn parent_dir(uri: &Url) -> Option<PathBuf> {
+    uri.to_file_path().ok()?.parent().map(|p| p.to_path_buf())
 }
 
 /// Adapter so `tfls-diag` can query [`StateStore`]-installed schemas
