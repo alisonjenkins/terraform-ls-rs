@@ -148,3 +148,153 @@ fn parameter_from_proto(
         is_nullable: src.allow_null_value,
     })
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    /// MessagePack for `"string"` — reused across attribute tests.
+    const CTY_STRING: &[u8] = &[0xa6, b's', b't', b'r', b'i', b'n', b'g'];
+
+    #[test]
+    fn schema_from_empty_proto() {
+        let src = proto::Schema {
+            version: 0,
+            block: None,
+        };
+        let schema = schema_from_proto(&src).unwrap();
+        assert_eq!(schema.version, 0);
+        assert!(schema.block.attributes.is_empty());
+    }
+
+    #[test]
+    fn schema_preserves_version() {
+        let src = proto::Schema {
+            version: 42,
+            block: Some(proto::schema::Block::default()),
+        };
+        let schema = schema_from_proto(&src).unwrap();
+        assert_eq!(schema.version, 42);
+    }
+
+    #[test]
+    fn attribute_flags_round_trip() {
+        let attr = proto::schema::Attribute {
+            name: "test".into(),
+            r#type: CTY_STRING.to_vec(),
+            description: "a desc".into(),
+            required: true,
+            optional: false,
+            computed: true,
+            sensitive: true,
+            deprecated: true,
+            ..Default::default()
+        };
+        let result = attribute_from_proto(&attr).unwrap();
+        assert!(result.required);
+        assert!(!result.optional);
+        assert!(result.computed);
+        assert!(result.sensitive);
+        assert!(result.deprecated);
+        assert_eq!(result.description.as_deref(), Some("a desc"));
+    }
+
+    #[test]
+    fn attribute_empty_description_becomes_none() {
+        let attr = proto::schema::Attribute {
+            name: "x".into(),
+            r#type: CTY_STRING.to_vec(),
+            description: String::new(),
+            ..Default::default()
+        };
+        let result = attribute_from_proto(&attr).unwrap();
+        assert!(result.description.is_none());
+    }
+
+    #[test]
+    fn v5_attribute_has_empty_constraints() {
+        let attr = proto::schema::Attribute {
+            name: "x".into(),
+            r#type: CTY_STRING.to_vec(),
+            ..Default::default()
+        };
+        let result = attribute_from_proto(&attr).unwrap();
+        assert!(result.conflicts_with.is_empty());
+        assert!(result.required_with.is_empty());
+        assert!(result.exactly_one_of.is_empty());
+        assert!(result.at_least_one_of.is_empty());
+    }
+
+    #[test]
+    fn nesting_mode_all_variants() {
+        use proto::schema::nested_block::NestingMode as P;
+        assert_eq!(nesting_mode_from_proto(P::Single), NestingMode::Single);
+        assert_eq!(nesting_mode_from_proto(P::List), NestingMode::List);
+        assert_eq!(nesting_mode_from_proto(P::Set), NestingMode::Set);
+        assert_eq!(nesting_mode_from_proto(P::Map), NestingMode::Map);
+        assert_eq!(nesting_mode_from_proto(P::Group), NestingMode::Group);
+        assert_eq!(nesting_mode_from_proto(P::Invalid), NestingMode::Single);
+    }
+
+    #[test]
+    fn string_kind_plain_and_markdown() {
+        assert_eq!(
+            string_kind_name(proto::StringKind::Plain).as_deref(),
+            Some("plain")
+        );
+        assert_eq!(
+            string_kind_name(proto::StringKind::Markdown).as_deref(),
+            Some("markdown")
+        );
+    }
+
+    #[test]
+    fn function_with_params_and_return() {
+        let func = proto::Function {
+            parameters: vec![proto::function::Parameter {
+                name: "arg1".into(),
+                r#type: CTY_STRING.to_vec(),
+                description: "first arg".into(),
+                ..Default::default()
+            }],
+            variadic_parameter: Some(proto::function::Parameter {
+                name: "rest".into(),
+                r#type: CTY_STRING.to_vec(),
+                ..Default::default()
+            }),
+            r#return: Some(proto::function::Return {
+                r#type: CTY_STRING.to_vec(),
+            }),
+            summary: "a func".into(),
+            ..Default::default()
+        };
+        let sig = function_from_proto(&func).unwrap();
+        assert_eq!(sig.parameters.len(), 1);
+        assert_eq!(sig.parameters[0].name, "arg1");
+        assert!(sig.variadic_parameter.is_some());
+        assert_eq!(sig.description.as_deref(), Some("a func"));
+    }
+
+    #[test]
+    fn function_description_prefers_description_over_summary() {
+        let func = proto::Function {
+            description: "full desc".into(),
+            summary: "short".into(),
+            r#return: Some(proto::function::Return {
+                r#type: CTY_STRING.to_vec(),
+            }),
+            ..Default::default()
+        };
+        let sig = function_from_proto(&func).unwrap();
+        assert_eq!(sig.description.as_deref(), Some("full desc"));
+    }
+
+    #[test]
+    fn function_defaults_return_type_to_dynamic() {
+        let func = proto::Function::default();
+        let sig = function_from_proto(&func).unwrap();
+        use sonic_rs::JsonValueTrait;
+        assert_eq!(sig.return_type.as_str(), Some("dynamic"));
+    }
+}

@@ -74,6 +74,16 @@ impl PluginInstance {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Test-only constructor without a child process.
+    #[cfg(test)]
+    pub fn test_instance(info: HandshakeInfo, path: PathBuf) -> Self {
+        Self {
+            info,
+            path,
+            child: None,
+        }
+    }
 }
 
 impl Drop for PluginInstance {

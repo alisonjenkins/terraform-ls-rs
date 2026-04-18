@@ -261,3 +261,74 @@ async fn connect_unix(
 
     Ok(channel)
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::handshake::{HandshakeInfo, Network, PluginInstance, Protocol};
+    use crate::tls::ClientIdentity;
+
+    use super::connect_channel;
+
+    fn install_crypto() {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .ok();
+    }
+
+    fn make_instance(server_cert_b64: Option<String>) -> PluginInstance {
+        PluginInstance::test_instance(
+            HandshakeInfo {
+                core_protocol_version: 1,
+                app_protocol_version: 6,
+                network: Network::Unix,
+                address: "/tmp/nonexistent.sock".into(),
+                protocol: Protocol::Grpc,
+                server_cert_b64,
+            },
+            PathBuf::from("/tmp/fake-provider"),
+        )
+    }
+
+    #[tokio::test]
+    async fn connect_channel_errors_on_missing_cert() {
+        install_crypto();
+        let identity = ClientIdentity::generate().unwrap();
+        let instance = make_instance(None);
+
+        let result = connect_channel(&instance, &identity).await;
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("AutoMTLS required"),
+            "expected missing-cert error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_channel_errors_on_invalid_b64_cert() {
+        install_crypto();
+        let identity = ClientIdentity::generate().unwrap();
+        let instance = make_instance(Some("!!!not-base64!!!".into()));
+
+        let result = connect_channel(&instance, &identity).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn connect_channel_errors_on_unreachable_socket() {
+        install_crypto();
+        let identity = ClientIdentity::generate().unwrap();
+        let b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD_NO_PAD,
+            identity.cert_der.as_ref(),
+        );
+        let instance = make_instance(Some(b64));
+
+        // Fails because /tmp/nonexistent.sock doesn't exist.
+        let result = connect_channel(&instance, &identity).await;
+        assert!(result.is_err());
+    }
+}

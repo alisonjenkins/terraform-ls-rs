@@ -70,8 +70,8 @@ Registry docs enrichment fills missing attribute descriptions (e.g. AWS SDKv2 pr
 
 ### Test Coverage Gaps
 
-- [ ] **`client.rs` tests** — Zero unit tests for the core RPC logic (v5/v6 branching, function extraction, 256MB decode cap).
+- [x] **`client.rs` tests** — 3 tests for connect_channel error paths (missing cert, invalid base64, unreachable socket).
 
-- [ ] **`tls.rs` tests** — Zero unit tests for certificate generation, base64 decoding variants, or pinned verifier logic.
+- [x] **`tls.rs` tests** — 11 tests covering cert generation (PEM format, DER non-empty, uniqueness), all 4 base64 decoding variants, invalid base64 rejection, pinned verifier accept/reject, and ALPN h2 config.
 
-- [ ] **`translate_v5.rs` tests** — Zero unit tests (mirrors `translate.rs` which has 2 tests).
+- [x] **`translate_v5.rs` tests** — 11 tests covering schema translation, attribute flags, empty constraints, nesting mode variants, string kind mapping, and function signature parsing.

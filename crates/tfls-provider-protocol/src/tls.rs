@@ -174,3 +174,129 @@ impl ServerCertVerifier for PinnedCertVerifier {
             .supported_schemes()
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    fn install_crypto() {
+        aws_lc_rs::default_provider().install_default().ok();
+    }
+
+    #[test]
+    fn generate_produces_valid_pem() {
+        install_crypto();
+        let id = ClientIdentity::generate().unwrap();
+        assert!(id.cert_pem.contains("-----BEGIN CERTIFICATE-----"));
+        assert!(id.cert_pem.contains("-----END CERTIFICATE-----"));
+    }
+
+    #[test]
+    fn generate_produces_non_empty_der() {
+        install_crypto();
+        let id = ClientIdentity::generate().unwrap();
+        assert!(!id.cert_der.as_ref().is_empty());
+        assert!(!id.key_der.secret_der().is_empty());
+    }
+
+    #[test]
+    fn generate_produces_unique_certs() {
+        install_crypto();
+        let a = ClientIdentity::generate().unwrap();
+        let b = ClientIdentity::generate().unwrap();
+        assert_ne!(a.cert_der.as_ref(), b.cert_der.as_ref());
+    }
+
+    #[test]
+    fn build_config_accepts_standard_no_pad_b64() {
+        install_crypto();
+        let id = ClientIdentity::generate().unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD_NO_PAD
+            .encode(id.cert_der.as_ref());
+        let cfg = build_client_config(&id, &b64).unwrap();
+        assert_eq!(cfg.alpn_protocols, vec![b"h2".to_vec()]);
+    }
+
+    #[test]
+    fn build_config_accepts_standard_b64() {
+        install_crypto();
+        let id = ClientIdentity::generate().unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD
+            .encode(id.cert_der.as_ref());
+        build_client_config(&id, &b64).unwrap();
+    }
+
+    #[test]
+    fn build_config_accepts_url_safe_no_pad_b64() {
+        install_crypto();
+        let id = ClientIdentity::generate().unwrap();
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(id.cert_der.as_ref());
+        build_client_config(&id, &b64).unwrap();
+    }
+
+    #[test]
+    fn build_config_accepts_url_safe_b64() {
+        install_crypto();
+        let id = ClientIdentity::generate().unwrap();
+        let b64 = base64::engine::general_purpose::URL_SAFE
+            .encode(id.cert_der.as_ref());
+        build_client_config(&id, &b64).unwrap();
+    }
+
+    #[test]
+    fn build_config_rejects_invalid_b64() {
+        install_crypto();
+        let id = ClientIdentity::generate().unwrap();
+        let result = build_client_config(&id, "!!!not-base64!!!");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn pinned_verifier_accepts_matching_cert() {
+        install_crypto();
+        let id = ClientIdentity::generate().unwrap();
+        let verifier = PinnedCertVerifier {
+            expected: id.cert_der.clone(),
+            provider: aws_lc_rs::default_provider(),
+        };
+        let result = verifier.verify_server_cert(
+            &id.cert_der,
+            &[],
+            &ServerName::try_from("localhost").unwrap(),
+            &[],
+            UnixTime::now(),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn pinned_verifier_rejects_different_cert() {
+        install_crypto();
+        let a = ClientIdentity::generate().unwrap();
+        let b = ClientIdentity::generate().unwrap();
+        let verifier = PinnedCertVerifier {
+            expected: a.cert_der.clone(),
+            provider: aws_lc_rs::default_provider(),
+        };
+        let result = verifier.verify_server_cert(
+            &b.cert_der,
+            &[],
+            &ServerName::try_from("localhost").unwrap(),
+            &[],
+            UnixTime::now(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_sets_h2_alpn() {
+        install_crypto();
+        let id = ClientIdentity::generate().unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD_NO_PAD
+            .encode(id.cert_der.as_ref());
+        let cfg = build_client_config(&id, &b64).unwrap();
+        assert_eq!(cfg.alpn_protocols, vec![b"h2".to_vec()]);
+    }
+}
