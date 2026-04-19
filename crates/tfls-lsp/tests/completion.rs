@@ -7,9 +7,9 @@ use tfls_schema::ProviderSchemas;
 use tfls_state::DocumentState;
 use tower_lsp::LspService;
 use tower_lsp::lsp_types::{
-    CompletionContext, CompletionParams, CompletionResponse, CompletionTriggerKind,
-    PartialResultParams, Position, TextDocumentIdentifier, TextDocumentPositionParams, Url,
-    WorkDoneProgressParams,
+    CompletionContext, CompletionParams, CompletionResponse, CompletionTextEdit,
+    CompletionTriggerKind, PartialResultParams, Position, TextDocumentIdentifier,
+    TextDocumentPositionParams, Url, WorkDoneProgressParams,
 };
 
 fn uri(path: &str) -> Url {
@@ -927,6 +927,57 @@ output "x" { value = var.regions["eu-west-1"]["subnet_cidrs"][|xxx] }
         .expect("some completions");
     let ls = labels(resp);
     assert_eq!(ls, vec!["eu-west-1a".to_string(), "eu-west-1b".to_string()]);
+}
+
+#[tokio::test]
+async fn index_key_item_emits_text_edit_with_closing_bracket() {
+    let u = uri("file:///mod/a.tf");
+    // Uses a parseable source; cursor sits right after `[`, with an
+    // existing `]` on the same line (the `xxx]` placeholder).
+    let (src, pos) = src_with_cursor(
+        "resource \"aws_vpc\" \"eu\" { for_each = toset([\"vpc\"]) }\noutput \"x\" { value = aws_vpc.eu[|xxx] }\n",
+    );
+    let backend = fresh_backend(&src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&u, pos))
+        .await
+        .expect("ok")
+        .expect("some completions");
+    let CompletionResponse::Array(items) = resp else {
+        panic!("expected array");
+    };
+    let item = items.iter().find(|i| i.label == "vpc").expect("vpc");
+    let Some(CompletionTextEdit::Edit(edit)) = &item.text_edit else {
+        panic!("expected text edit, got {:?}", item.text_edit);
+    };
+    assert_eq!(edit.new_text, "\"vpc\"]", "always emits closing bracket");
+    // Range covers the trailing `xxx]` placeholder, so the existing
+    // `]` is replaced rather than duplicated.
+    assert!(
+        edit.range.end.character > edit.range.start.character,
+        "range must extend over existing partial + close to avoid duplication"
+    );
+}
+
+#[tokio::test]
+async fn index_key_item_replaces_partial_quoted_key() {
+    let u = uri("file:///mod/a.tf");
+    // Partial key already typed: `aws_vpc.eu["vp|"]`.
+    let (src, pos) = src_with_cursor(
+        "resource \"aws_vpc\" \"eu\" { for_each = toset([\"vpc\"]) }\noutput \"x\" { value = aws_vpc.eu[\"vp|\"] }\n",
+    );
+    let backend = fresh_backend(&src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&u, pos))
+        .await
+        .expect("ok")
+        .expect("some completions");
+    let CompletionResponse::Array(items) = resp else {
+        panic!("expected array");
+    };
+    let item = items.iter().find(|i| i.label == "vpc").expect("vpc");
+    let Some(CompletionTextEdit::Edit(edit)) = &item.text_edit else {
+        panic!("expected text edit");
+    };
+    assert_eq!(edit.new_text, "\"vpc\"]");
 }
 
 #[tokio::test]

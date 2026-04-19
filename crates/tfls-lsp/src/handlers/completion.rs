@@ -10,8 +10,8 @@ use std::collections::{BTreeSet, HashSet};
 use hcl_edit::repr::Span;
 use hcl_edit::structure::{Block, Body};
 use lsp_types::{
-    CompletionItem, CompletionItemKind, CompletionParams, CompletionResponse, Documentation,
-    InsertTextFormat, MarkupContent, MarkupKind, Url,
+    CompletionItem, CompletionItemKind, CompletionParams, CompletionResponse, CompletionTextEdit,
+    Documentation, InsertTextFormat, MarkupContent, MarkupKind, Position, Range, TextEdit, Url,
 };
 use tfls_core::{
     BlockKind, CompletionContext, IndexRootRef, META_ATTRS, PathStep, ResourceAddress,
@@ -131,7 +131,8 @@ pub async fn completion(
             resource_attr_items(backend, &resource_type, /*data=*/ true)
         }
         CompletionContext::IndexKeyRef { root, path } => {
-            index_key_items(backend, &uri, &root, &path)
+            let line = doc.rope.line(pos.line as usize).to_string();
+            index_key_items(backend, &uri, &root, &path, &line, pos)
         }
         CompletionContext::ModuleBody { name } => {
             let filter = compute_body_filter(doc.parsed.body.as_ref(), offset);
@@ -971,6 +972,8 @@ fn index_key_items(
     uri: &Url,
     root: &IndexRootRef,
     path: &[PathStep],
+    line: &str,
+    pos: Position,
 ) -> Vec<CompletionItem> {
     let Some(root_shape) = shape_for_root(backend, uri, root) else {
         return Vec::new();
@@ -981,18 +984,111 @@ fn index_key_items(
     let VariableType::Object(fields) = current else {
         return Vec::new();
     };
+
+    let replace_range = compute_index_replace_range(line, pos);
+
     let mut items: Vec<CompletionItem> = fields
         .iter()
         .map(|(name, sub)| CompletionItem {
             label: name.clone(),
             kind: Some(CompletionItemKind::VALUE),
             detail: Some(format!("{sub}")),
-            insert_text: Some(format!("\"{name}\"")),
+            text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+                range: replace_range,
+                // Always include the closing `]`; the replace range
+                // consumes any existing trailing `]` so we never end
+                // up with duplicates.
+                new_text: format!("\"{name}\"]"),
+            })),
             insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
             ..Default::default()
         })
         .collect();
     items.sort_by(|a, b| a.label.cmp(&b.label));
     items
+}
+
+/// Compute the text-edit replace range for a bracket-index completion.
+///
+/// Starts just after the most recent `[` on the cursor's line and
+/// extends forward over any partial key the user already typed
+/// (identifier chars, hyphens, or quotes) plus a trailing `]` if one
+/// is on the same line. The emitted text always includes its own `]`,
+/// so an existing `]` is replaced rather than duplicated.
+fn compute_index_replace_range(line: &str, pos: Position) -> Range {
+    let col = pos.character as usize;
+    let before = line.get(..col).unwrap_or("");
+    let bracket_col = before.rfind('[').map(|b| b + 1).unwrap_or(col);
+
+    let after = &line[col..];
+    let mut consumed = 0usize;
+    let mut done = false;
+    for c in after.chars() {
+        if done {
+            break;
+        }
+        match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '_' | '-' | '"' => {
+                consumed += c.len_utf8();
+            }
+            ']' => {
+                consumed += 1;
+                done = true;
+            }
+            _ => break,
+        }
+    }
+
+    Range {
+        start: Position::new(pos.line, bracket_col as u32),
+        end: Position::new(pos.line, (col + consumed) as u32),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod compute_index_replace_range_tests {
+    use super::*;
+
+    fn range(line: &str, col: u32) -> (u32, u32) {
+        let r = compute_index_replace_range(line, Position::new(0, col));
+        (r.start.character, r.end.character)
+    }
+
+    #[test]
+    fn cursor_right_after_bracket_no_close() {
+        // `aws_vpc.eu[|` (column 11, `[` at column 10).
+        let (s, e) = range("aws_vpc.eu[", 11);
+        assert_eq!((s, e), (11, 11));
+    }
+
+    #[test]
+    fn cursor_inside_brackets_with_close_present() {
+        // `aws_vpc.eu[|xxx]` — consume `xxx]`.
+        let (s, e) = range("aws_vpc.eu[xxx]", 11);
+        assert_eq!((s, e), (11, 15));
+    }
+
+    #[test]
+    fn cursor_after_open_quote() {
+        // `aws_vpc.eu["|partial"]`
+        let (s, e) = range("aws_vpc.eu[\"partial\"]", 12);
+        // start is at `"` (after `[`), end consumes everything through `]`.
+        assert_eq!((s, e), (11, 21));
+    }
+
+    #[test]
+    fn cursor_between_quotes_empty_key() {
+        // `aws_vpc.eu["|"]` — consume `"` + `]`.
+        let (s, e) = range("aws_vpc.eu[\"\"]", 12);
+        assert_eq!((s, e), (11, 14));
+    }
+
+    #[test]
+    fn cursor_after_empty_brackets() {
+        // `aws_vpc.eu[|]` — consume just `]`.
+        let (s, e) = range("aws_vpc.eu[]", 11);
+        assert_eq!((s, e), (11, 12));
+    }
 }
 
