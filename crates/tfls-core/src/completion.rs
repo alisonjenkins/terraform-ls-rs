@@ -61,6 +61,14 @@ pub enum CompletionContext {
     /// that data source from the provider schema.
     DataSourceAttr { resource_type: String, name: String },
 
+    /// Cursor is inside a bracket indexer like `<ref>["key1"][|"]` —
+    /// expect map keys (or tuple indices) drawn from the static shape
+    /// of the root reference, navigated through the collected path.
+    IndexKeyRef {
+        root: IndexRootRef,
+        path: Vec<PathStep>,
+    },
+
     /// Cursor is at an attribute value inside a resource/data block,
     /// and we know which attribute it is. Used for context-aware
     /// reference suggestions (e.g. `security_group_id =` → suggest
@@ -78,12 +86,35 @@ pub enum CompletionContext {
     Unknown,
 }
 
+/// Which kind of reference a bracket indexer is rooted at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexRootRef {
+    Resource { resource_type: String, name: String },
+    DataSource { resource_type: String, name: String },
+    Module { module_name: String },
+    Variable { name: String },
+    Local { name: String },
+}
+
+/// One path step inside a traversal — either a `["literal"]` bracket
+/// lookup or a `.ident` dot lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathStep {
+    Bracket(String),
+    Attr(String),
+}
+
 /// Classify the context at a given byte offset in the source.
 pub fn classify_context(source: &str, byte_offset: usize) -> CompletionContext {
     if byte_offset > source.len() {
         return CompletionContext::Unknown;
     }
     let before = &source[..byte_offset];
+
+    // Bracket-index path wins first — `var.x["key"][` etc.
+    if let Some(ctx) = bracket_index_context(before) {
+        return ctx;
+    }
 
     // Reference prefixes take priority.
     if let Some(ctx) = reference_prefix_context(before) {
@@ -274,6 +305,113 @@ fn is_builtin_prefix(s: &str) -> bool {
     )
 }
 
+/// Classify a cursor sitting inside a bracket indexer. Collects a
+/// path from chained `["key"]` bracket lookups and optional `.ident`
+/// dot steps, then walks the remaining prefix back to the root ref.
+fn bracket_index_context(before: &str) -> Option<CompletionContext> {
+    // 1) Strip the partial trailing key inside the *current* (unterminated) bracket.
+    //    Accept alphanumeric, underscore, hyphen, and quotes (open or close).
+    let stripped = before.trim_end_matches(|c: char| {
+        c.is_alphanumeric() || c == '_' || c == '-' || c == '"'
+    });
+    // 2) The stripped text must end with `[` to indicate we're inside brackets.
+    let mut cursor = stripped.strip_suffix('[')?;
+
+    // 3) Collect completed `["literal"]` trailers (plus interspersed `.ident`).
+    let mut path: Vec<PathStep> = Vec::new();
+    loop {
+        // Trim any trailing `.ident` — treat as an Attr step.
+        if let Some(rest) = peel_attr_step(cursor) {
+            let (stripped, ident) = rest;
+            cursor = stripped;
+            path.push(PathStep::Attr(ident));
+            continue;
+        }
+        // Trim a full `["literal"]` bracket trailer.
+        if let Some(rest) = peel_bracket_step(cursor) {
+            let (stripped, key) = rest;
+            cursor = stripped;
+            path.push(PathStep::Bracket(key));
+            continue;
+        }
+        break;
+    }
+    path.reverse();
+
+    // 4) What's left must end with the root ref segments (no trailing dot).
+    let segments = traversal_segments_reverse(cursor);
+    let segs: Vec<&str> = segments.iter().map(|s| s.as_str()).collect();
+    let root = match segs.as_slice() {
+        ["var", name] => IndexRootRef::Variable {
+            name: (*name).to_string(),
+        },
+        ["local", name] => IndexRootRef::Local {
+            name: (*name).to_string(),
+        },
+        ["module", name] => IndexRootRef::Module {
+            module_name: (*name).to_string(),
+        },
+        ["data", t, n] if !is_builtin_prefix(t) => IndexRootRef::DataSource {
+            resource_type: (*t).to_string(),
+            name: (*n).to_string(),
+        },
+        [t, n] if !is_builtin_prefix(t) => IndexRootRef::Resource {
+            resource_type: (*t).to_string(),
+            name: (*n).to_string(),
+        },
+        _ => return None,
+    };
+    Some(CompletionContext::IndexKeyRef { root, path })
+}
+
+/// Peel a trailing `.ident` off `s`. Returns the stripped prefix and
+/// the ident, or `None` if the text doesn't end in that pattern.
+fn peel_attr_step(s: &str) -> Option<(&str, String)> {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut end = bytes.len();
+    while end > 0 {
+        let c = bytes[end - 1] as char;
+        if c.is_alphanumeric() || c == '_' || c == '-' {
+            end -= 1;
+        } else {
+            break;
+        }
+    }
+    if end == bytes.len() {
+        return None;
+    }
+    // Must be preceded by `.` and not part of a root-ref traversal we
+    // haven't reached yet — i.e. we only peel when the preceding dot's
+    // predecessor is `]` (end of a bracket step).
+    if end == 0 {
+        return None;
+    }
+    if bytes[end - 1] as char != '.' {
+        return None;
+    }
+    if end < 2 {
+        return None;
+    }
+    if bytes[end - 2] as char != ']' {
+        return None;
+    }
+    let ident = s[end..].to_string();
+    Some((&s[..end - 1], ident))
+}
+
+/// Peel a trailing `["literal"]` off `s`. Returns the stripped prefix
+/// and the literal, or `None`.
+fn peel_bracket_step(s: &str) -> Option<(&str, String)> {
+    let s = s.strip_suffix(']')?;
+    let s = s.strip_suffix('"')?;
+    let start = s.rfind("[\"")?;
+    let key = &s[start + 2..];
+    Some((&s[..start], key.to_string()))
+}
+
 /// Walk backwards through `prefix` collecting `ident.ident.ident…`
 /// segments (separated by `.`) until we hit a non-ident / non-dot
 /// boundary. Returns them in source order.
@@ -282,11 +420,13 @@ fn traversal_segments_reverse(prefix: &str) -> Vec<String> {
     let bytes = prefix.as_bytes();
     let mut end = bytes.len();
     loop {
-        // Walk backwards over identifier characters.
+        // Walk backwards over identifier characters — HCL accepts
+        // hyphens in idents after the first character, so names like
+        // `eu-west-1` parse as one segment.
         let mut start = end;
         while start > 0 {
             let c = bytes[start - 1] as char;
-            if c.is_alphanumeric() || c == '_' {
+            if c.is_alphanumeric() || c == '_' || c == '-' {
                 start -= 1;
             } else {
                 break;
@@ -671,6 +811,138 @@ mod tests {
                 path: vec!["foo".to_string()]
             }
         );
+    }
+
+    // --- Bracket-index classifier regressions ------------------------
+
+    #[test]
+    fn resource_index_key_after_bare_bracket() {
+        let src = "output \"x\" { value = aws_vpc.eu-west-1[";
+        match at_end(src) {
+            CompletionContext::IndexKeyRef {
+                root:
+                    IndexRootRef::Resource {
+                        resource_type,
+                        name,
+                    },
+                path,
+            } => {
+                assert_eq!(resource_type, "aws_vpc");
+                assert_eq!(name, "eu-west-1");
+                assert!(path.is_empty());
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn variable_index_key_after_var_dot_name_bracket() {
+        let ctx = at_end("output \"x\" { value = var.regions[");
+        match ctx {
+            CompletionContext::IndexKeyRef {
+                root: IndexRootRef::Variable { name },
+                path,
+            } => {
+                assert_eq!(name, "regions");
+                assert!(path.is_empty());
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn local_index_key_after_local_dot_name_bracket() {
+        let ctx = at_end("output \"x\" { value = local.cfg[");
+        match ctx {
+            CompletionContext::IndexKeyRef {
+                root: IndexRootRef::Local { name },
+                path,
+            } => {
+                assert_eq!(name, "cfg");
+                assert!(path.is_empty());
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn module_index_key_after_module_dot_name_bracket() {
+        let ctx = at_end("output \"x\" { value = module.web[");
+        match ctx {
+            CompletionContext::IndexKeyRef {
+                root: IndexRootRef::Module { module_name },
+                ..
+            } => assert_eq!(module_name, "web"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn data_source_index_key_after_data_triple_bracket() {
+        let ctx = at_end("output \"x\" { value = data.aws_ami.lookup[");
+        match ctx {
+            CompletionContext::IndexKeyRef {
+                root:
+                    IndexRootRef::DataSource {
+                        resource_type,
+                        name,
+                    },
+                ..
+            } => {
+                assert_eq!(resource_type, "aws_ami");
+                assert_eq!(name, "lookup");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn index_key_with_open_quote_collects_no_partial() {
+        let ctx = at_end("output \"x\" { value = var.regions[\"");
+        match ctx {
+            CompletionContext::IndexKeyRef {
+                root: IndexRootRef::Variable { name },
+                path,
+            } => {
+                assert_eq!(name, "regions");
+                assert!(path.is_empty());
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deep_bracket_path_collected() {
+        let ctx = at_end(
+            "output \"x\" { value = var.regions[\"eu-west-1\"][\"subnet_cidrs\"][",
+        );
+        match ctx {
+            CompletionContext::IndexKeyRef {
+                root: IndexRootRef::Variable { name },
+                path,
+            } => {
+                assert_eq!(name, "regions");
+                assert_eq!(
+                    path,
+                    vec![
+                        PathStep::Bracket("eu-west-1".to_string()),
+                        PathStep::Bracket("subnet_cidrs".to_string()),
+                    ]
+                );
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bracket_context_does_not_steal_from_plain_dot() {
+        // `var.regions.` should still route through VariableAttrRef, not
+        // the bracket classifier.
+        let ctx = at_end("output \"x\" { value = var.regions.");
+        assert!(matches!(
+            ctx,
+            CompletionContext::VariableAttrRef { .. }
+        ));
     }
 
     #[test]

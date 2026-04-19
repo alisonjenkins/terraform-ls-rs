@@ -826,6 +826,122 @@ async fn variable_attr_ref_drills_into_nested_object() {
     assert_eq!(ls, vec!["a".to_string(), "b".to_string()]);
 }
 
+// --- Bracket-index / map-key drill-in regressions ---------------
+
+#[tokio::test]
+async fn resource_index_key_suggests_for_each_keys() {
+    let u = uri("file:///mod/a.tf");
+    let (src, pos) = src_with_cursor(
+        "resource \"aws_vpc\" \"eu\" { for_each = toset([\"vpc\", \"dev\"]) }\noutput \"x\" { value = aws_vpc.eu[|xxx] }\n",
+    );
+    let backend = fresh_backend(&src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&u, pos))
+        .await
+        .expect("ok")
+        .expect("some completions");
+    let ls = labels(resp);
+    assert_eq!(ls, vec!["dev".to_string(), "vpc".to_string()]);
+}
+
+#[tokio::test]
+async fn variable_index_key_suggests_default_map_keys() {
+    let u = uri("file:///mod/a.tf");
+    let (src, pos) = src_with_cursor(
+        "variable \"regions\" { default = { \"eu-west-1\" = {}, \"us-east-1\" = {} } }\noutput \"x\" { value = var.regions[|xxx] }\n",
+    );
+    let backend = fresh_backend(&src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&u, pos))
+        .await
+        .expect("ok")
+        .expect("some completions");
+    let ls = labels(resp);
+    assert_eq!(ls, vec!["eu-west-1".to_string(), "us-east-1".to_string()]);
+}
+
+#[tokio::test]
+async fn variable_index_key_suggests_object_type_fields_union_with_default() {
+    let u = uri("file:///mod/a.tf");
+    let (src, pos) = src_with_cursor(
+        "variable \"cfg\" { type = object({ a = string, b = number }) }\noutput \"x\" { value = var.cfg[|xxx] }\n",
+    );
+    let backend = fresh_backend(&src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&u, pos))
+        .await
+        .expect("ok")
+        .expect("some completions");
+    let ls = labels(resp);
+    assert_eq!(ls, vec!["a".to_string(), "b".to_string()]);
+}
+
+#[tokio::test]
+async fn local_index_key_suggests_map_keys() {
+    let u = uri("file:///mod/a.tf");
+    let (src, pos) = src_with_cursor(
+        "locals { cfg = { foo = 1, bar = 2 } }\noutput \"x\" { value = local.cfg[|xxx] }\n",
+    );
+    let backend = fresh_backend(&src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&u, pos))
+        .await
+        .expect("ok")
+        .expect("some completions");
+    let ls = labels(resp);
+    assert_eq!(ls, vec!["bar".to_string(), "foo".to_string()]);
+}
+
+#[tokio::test]
+async fn module_index_key_suggests_for_each_keys() {
+    let u = uri("file:///mod/a.tf");
+    let (src, pos) = src_with_cursor(
+        "module \"web\" {\n  source = \"./mod\"\n  for_each = toset([\"a\", \"b\"])\n}\noutput \"x\" { value = module.web[|xxx] }\n",
+    );
+    let backend = fresh_backend(&src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&u, pos))
+        .await
+        .expect("ok")
+        .expect("some completions");
+    let ls = labels(resp);
+    assert_eq!(ls, vec!["a".to_string(), "b".to_string()]);
+}
+
+#[tokio::test]
+async fn deep_drill_in_via_brackets() {
+    let u = uri("file:///mod/a.tf");
+    let (src, pos) = src_with_cursor(
+        r#"variable "regions" {
+  default = {
+    "eu-west-1" = {
+      "subnet_cidrs" = {
+        "eu-west-1a" = "10.0.1.0/24"
+        "eu-west-1b" = "10.0.2.0/24"
+      }
+    }
+  }
+}
+output "x" { value = var.regions["eu-west-1"]["subnet_cidrs"][|xxx] }
+"#,
+    );
+    let backend = fresh_backend(&src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&u, pos))
+        .await
+        .expect("ok")
+        .expect("some completions");
+    let ls = labels(resp);
+    assert_eq!(ls, vec!["eu-west-1a".to_string(), "eu-west-1b".to_string()]);
+}
+
+#[tokio::test]
+async fn index_key_empty_when_for_each_dynamic() {
+    let u = uri("file:///mod/a.tf");
+    let (src, pos) = src_with_cursor(
+        "resource \"aws_vpc\" \"eu\" { for_each = var.m }\noutput \"x\" { value = aws_vpc.eu[|xxx] }\n",
+    );
+    let backend = fresh_backend(&src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&u, pos))
+        .await
+        .expect("ok");
+    assert!(resp.is_none(), "dynamic for_each shouldn't offer keys; got {resp:?}");
+}
+
 #[tokio::test]
 async fn variable_attr_ref_returns_empty_for_non_object() {
     let u = uri("file:///mod/a.tf");

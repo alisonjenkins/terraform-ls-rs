@@ -117,7 +117,7 @@ pub fn parse_type_expr(expr: &Expression) -> VariableType {
     }
 }
 
-fn object_key_as_ident(key: &hcl_edit::expr::ObjectKey) -> Option<String> {
+pub(crate) fn object_key_as_ident(key: &hcl_edit::expr::ObjectKey) -> Option<String> {
     match key {
         hcl_edit::expr::ObjectKey::Ident(ident) => Some(ident.as_str().to_string()),
         hcl_edit::expr::ObjectKey::Expression(Expression::Variable(v)) => {
@@ -127,6 +127,89 @@ fn object_key_as_ident(key: &hcl_edit::expr::ObjectKey) -> Option<String> {
             Some(s.value().to_string())
         }
         _ => None,
+    }
+}
+
+/// Parse a *value-position* expression (literal, `toset(…)`, ternary,
+/// object literal, array literal, etc.) into a [`VariableType`] capturing
+/// what we can statically deduce about its shape — in particular, what
+/// keys appear at each level so bracket/dot completion can enumerate
+/// them. Unknown expressions degrade to [`VariableType::Any`].
+pub fn parse_value_shape(expr: &Expression) -> VariableType {
+    match expr {
+        Expression::Object(obj) => {
+            let mut fields = BTreeMap::new();
+            for (key, value) in obj.iter() {
+                let Some(name) = object_key_as_ident(key) else {
+                    continue;
+                };
+                fields.insert(name, parse_value_shape(value.expr()));
+            }
+            VariableType::Object(fields)
+        }
+        Expression::Array(arr) => {
+            let items: Vec<VariableType> = arr.iter().map(parse_value_shape).collect();
+            VariableType::Tuple(items)
+        }
+        Expression::String(_) => VariableType::Primitive(Primitive::String),
+        Expression::Number(_) => VariableType::Primitive(Primitive::Number),
+        Expression::Bool(_) => VariableType::Primitive(Primitive::Bool),
+        Expression::FuncCall(call) => {
+            if !call.name.namespace.is_empty() {
+                return VariableType::Any;
+            }
+            match call.name.name.as_str() {
+                "toset" | "tolist" => {
+                    if let Some(first) = call.args.iter().next() {
+                        if let Expression::Array(arr) = first {
+                            let mut keys: BTreeMap<String, VariableType> = BTreeMap::new();
+                            for item in arr.iter() {
+                                if let Expression::String(s) = item {
+                                    keys.insert(s.value().to_string(), VariableType::Any);
+                                }
+                            }
+                            if !keys.is_empty() {
+                                return VariableType::Object(keys);
+                            }
+                        }
+                    }
+                    VariableType::Any
+                }
+                "tomap" => call
+                    .args
+                    .iter()
+                    .next()
+                    .map(parse_value_shape)
+                    .unwrap_or(VariableType::Any),
+                _ => VariableType::Any,
+            }
+        }
+        Expression::Conditional(c) => merge_shapes(
+            parse_value_shape(&c.true_expr),
+            parse_value_shape(&c.false_expr),
+        ),
+        Expression::Parenthesis(inner) => parse_value_shape(inner.inner()),
+        _ => VariableType::Any,
+    }
+}
+
+/// Combine two inferred shapes: the more informative wins; two
+/// [`VariableType::Object`] shapes union their keys and recursively
+/// merge overlapping values.
+pub fn merge_shapes(a: VariableType, b: VariableType) -> VariableType {
+    match (a, b) {
+        (VariableType::Any, other) | (other, VariableType::Any) => other,
+        (VariableType::Object(mut a_fields), VariableType::Object(b_fields)) => {
+            for (k, v) in b_fields {
+                let merged = match a_fields.remove(&k) {
+                    Some(existing) => merge_shapes(existing, v),
+                    None => v,
+                };
+                a_fields.insert(k, merged);
+            }
+            VariableType::Object(a_fields)
+        }
+        (a, _) => a,
     }
 }
 
@@ -146,6 +229,19 @@ mod tests {
             }
         }
         panic!("no `type = …` attribute in source: {src:?}")
+    }
+
+    fn shape_from_src(src: &str) -> VariableType {
+        let body: Body = src.parse().expect("parses");
+        for structure in body.iter() {
+            let Some(attr): Option<&Attribute> = structure.as_attribute() else {
+                continue;
+            };
+            if attr.key.as_str() == "value" {
+                return parse_value_shape(&attr.value);
+            }
+        }
+        panic!("no `value = …` attribute in source: {src:?}")
     }
 
     #[test]
@@ -244,6 +340,107 @@ mod tests {
     fn parse_unknown_falls_back_to_any() {
         assert_eq!(type_from_src("type = 42"), VariableType::Any);
         assert_eq!(type_from_src("type = foo.bar"), VariableType::Any);
+    }
+
+    // --- parse_value_shape regressions ------------------------------
+
+    #[test]
+    fn value_shape_object_literal() {
+        let ty = shape_from_src(r#"value = { "a" = 1, "b" = 2 }"#);
+        match ty {
+            VariableType::Object(fields) => {
+                assert_eq!(
+                    fields.get("a"),
+                    Some(&VariableType::Primitive(Primitive::Number))
+                );
+                assert_eq!(
+                    fields.get("b"),
+                    Some(&VariableType::Primitive(Primitive::Number))
+                );
+            }
+            other => panic!("expected object, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn value_shape_toset_becomes_object_keys_any_values() {
+        let ty = shape_from_src("value = toset([\"vpc\", \"dev\"])");
+        match ty {
+            VariableType::Object(fields) => {
+                assert!(fields.contains_key("vpc"));
+                assert!(fields.contains_key("dev"));
+            }
+            other => panic!("expected object, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn value_shape_tomap_passthrough() {
+        let ty = shape_from_src(r#"value = tomap({ "a" = 1 })"#);
+        match ty {
+            VariableType::Object(fields) => assert!(fields.contains_key("a")),
+            other => panic!("expected object, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn value_shape_conditional_unions_keys() {
+        let ty = shape_from_src("value = true ? toset([\"a\"]) : toset([\"b\"])");
+        match ty {
+            VariableType::Object(fields) => {
+                assert!(fields.contains_key("a"));
+                assert!(fields.contains_key("b"));
+            }
+            other => panic!("expected object, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn value_shape_nested_object_preserves_tree() {
+        let ty = shape_from_src(
+            r#"value = { "outer" = { "inner" = { "leaf" = true } } }"#,
+        );
+        match ty {
+            VariableType::Object(top) => match top.get("outer") {
+                Some(VariableType::Object(mid)) => match mid.get("inner") {
+                    Some(VariableType::Object(leaf)) => {
+                        assert!(leaf.contains_key("leaf"));
+                    }
+                    other => panic!("expected inner object, got {other:?}"),
+                },
+                other => panic!("expected outer object, got {other:?}"),
+            },
+            other => panic!("expected top object, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn value_shape_unknown_yields_any() {
+        let ty = shape_from_src("value = var.x");
+        assert_eq!(ty, VariableType::Any);
+    }
+
+    #[test]
+    fn merge_shapes_unions_object_fields() {
+        let a = VariableType::Object(BTreeMap::from([
+            ("a".to_string(), VariableType::Any),
+        ]));
+        let b = VariableType::Object(BTreeMap::from([
+            ("b".to_string(), VariableType::Primitive(Primitive::String)),
+        ]));
+        match merge_shapes(a, b) {
+            VariableType::Object(fields) => {
+                assert!(fields.contains_key("a"));
+                assert!(fields.contains_key("b"));
+            }
+            other => panic!("expected object, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_shapes_any_is_identity() {
+        let a = VariableType::Primitive(Primitive::Bool);
+        assert_eq!(merge_shapes(VariableType::Any, a.clone()), a);
     }
 
     #[test]

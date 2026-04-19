@@ -9,7 +9,7 @@ pub mod meta_arguments;
 pub mod types;
 pub mod variable_type;
 
-pub use completion::{CompletionContext, classify_context};
+pub use completion::{CompletionContext, IndexRootRef, PathStep, classify_context};
 pub use error::CoreError;
 pub use meta_arguments::{
     BlockKind, CONDITION_ATTRS, META_ATTRS, is_meta_attr, is_singleton_meta_block,
@@ -18,4 +18,4 @@ pub use meta_arguments::{
 pub use types::{
     ModuleId, ProviderAddress, ResourceAddress, Symbol, SymbolKind, SymbolLocation, SymbolTable,
 };
-pub use variable_type::{Primitive, VariableType, parse_type_expr};
+pub use variable_type::{Primitive, VariableType, merge_shapes, parse_type_expr, parse_value_shape};

@@ -14,8 +14,8 @@ use lsp_types::{
     InsertTextFormat, MarkupContent, MarkupKind, Url,
 };
 use tfls_core::{
-    BlockKind, CompletionContext, META_ATTRS, VariableType, classify_context,
-    is_singleton_meta_block, meta_blocks,
+    BlockKind, CompletionContext, IndexRootRef, META_ATTRS, PathStep, ResourceAddress,
+    VariableType, classify_context, is_singleton_meta_block, merge_shapes, meta_blocks,
 };
 use tfls_parser::lsp_position_to_byte_offset;
 use tfls_schema::NestingMode;
@@ -129,6 +129,9 @@ pub async fn completion(
         }
         CompletionContext::DataSourceAttr { resource_type, .. } => {
             resource_attr_items(backend, &resource_type, /*data=*/ true)
+        }
+        CompletionContext::IndexKeyRef { root, path } => {
+            index_key_items(backend, &uri, &root, &path)
         }
         CompletionContext::ModuleBody { name } => {
             let filter = compute_body_filter(doc.parsed.body.as_ref(), offset);
@@ -682,7 +685,7 @@ fn resource_name_items(
             continue;
         }
         let table = &entry.value().symbols;
-        let addrs: Box<dyn Iterator<Item = &tfls_core::ResourceAddress>> = if data {
+        let addrs: Box<dyn Iterator<Item = &ResourceAddress>> = if data {
             Box::new(table.data_sources.keys())
         } else {
             Box::new(table.resources.keys())
@@ -883,6 +886,112 @@ fn module_output_items(
             });
         }
     }
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    items
+}
+
+/// Resolve the statically-known shape of the reference rooted at
+/// `root`, merged across peer documents in the active module.
+fn shape_for_root(
+    backend: &Backend,
+    uri: &Url,
+    root: &IndexRootRef,
+) -> Option<VariableType> {
+    let dir = parent_dir(uri);
+    let mut acc: Option<VariableType> = None;
+    for entry in backend.state.documents.iter() {
+        if !doc_in_dir(entry.key(), dir.as_deref()) {
+            continue;
+        }
+        let table = &entry.value().symbols;
+        let next: Option<VariableType> = match root {
+            IndexRootRef::Variable { name } => {
+                let ty = table.variable_types.get(name).cloned();
+                let default = table.variable_defaults.get(name).cloned();
+                match (ty, default) {
+                    (Some(a), Some(b)) => Some(merge_shapes(a, b)),
+                    (Some(a), None) => Some(a),
+                    (None, Some(b)) => Some(b),
+                    (None, None) => None,
+                }
+            }
+            IndexRootRef::Local { name } => table.local_shapes.get(name).cloned(),
+            IndexRootRef::Resource {
+                resource_type,
+                name,
+            } => table
+                .for_each_shapes
+                .get(&ResourceAddress::new(resource_type.clone(), name.clone()))
+                .cloned(),
+            IndexRootRef::DataSource {
+                resource_type,
+                name,
+            } => table
+                .data_source_for_each_shapes
+                .get(&ResourceAddress::new(resource_type.clone(), name.clone()))
+                .cloned(),
+            IndexRootRef::Module { module_name } => {
+                table.module_for_each_shapes.get(module_name).cloned()
+            }
+        };
+        if let Some(found) = next {
+            acc = Some(match acc {
+                Some(prev) => merge_shapes(prev, found),
+                None => found,
+            });
+        }
+    }
+    acc
+}
+
+/// Walk `shape` along `path`, returning the sub-shape at the end.
+fn walk_shape(shape: &VariableType, path: &[PathStep]) -> Option<VariableType> {
+    let mut current = shape.clone();
+    for step in path {
+        current = match (current, step) {
+            (VariableType::Object(fields), PathStep::Bracket(k))
+            | (VariableType::Object(fields), PathStep::Attr(k)) => {
+                fields.get(k).cloned()?
+            }
+            (VariableType::Map(value), PathStep::Bracket(_)) => *value,
+            (VariableType::Tuple(items), PathStep::Bracket(k)) => {
+                let idx: usize = k.parse().ok()?;
+                items.get(idx).cloned()?
+            }
+            (VariableType::List(value), PathStep::Bracket(_))
+            | (VariableType::Set(value), PathStep::Bracket(_)) => *value,
+            _ => return None,
+        };
+    }
+    Some(current)
+}
+
+fn index_key_items(
+    backend: &Backend,
+    uri: &Url,
+    root: &IndexRootRef,
+    path: &[PathStep],
+) -> Vec<CompletionItem> {
+    let Some(root_shape) = shape_for_root(backend, uri, root) else {
+        return Vec::new();
+    };
+    let Some(current) = walk_shape(&root_shape, path) else {
+        return Vec::new();
+    };
+    let VariableType::Object(fields) = current else {
+        return Vec::new();
+    };
+    let mut items: Vec<CompletionItem> = fields
+        .iter()
+        .map(|(name, sub)| CompletionItem {
+            label: name.clone(),
+            kind: Some(CompletionItemKind::VALUE),
+            detail: Some(format!("{sub}")),
+            insert_text: Some(format!("\"{name}\"")),
+            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+            ..Default::default()
+        })
+        .collect();
     items.sort_by(|a, b| a.label.cmp(&b.label));
     items
 }

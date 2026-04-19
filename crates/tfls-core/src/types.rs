@@ -177,6 +177,21 @@ pub struct SymbolTable {
     /// (e.g. a reference expression) — those modules are skipped by
     /// child-dir indexing and module-aware completion/hover.
     pub module_sources: HashMap<String, String>,
+    /// Statically-inferred shape of each variable's `default = …`
+    /// literal. Stored alongside (and unioned with) `variable_types`
+    /// so bracket/dot drill-in can enumerate keys from either source.
+    pub variable_defaults: HashMap<String, crate::variable_type::VariableType>,
+    /// Statically-inferred shape of each local's value expression.
+    pub local_shapes: HashMap<String, crate::variable_type::VariableType>,
+    /// Shape derived from a resource's `for_each` expression —
+    /// typically an [`Object`] whose keys are the for_each keys.
+    ///
+    /// [`Object`]: crate::variable_type::VariableType::Object
+    pub for_each_shapes: HashMap<ResourceAddress, crate::variable_type::VariableType>,
+    /// Same as [`SymbolTable::for_each_shapes`] for `data` blocks.
+    pub data_source_for_each_shapes: HashMap<ResourceAddress, crate::variable_type::VariableType>,
+    /// Same as [`SymbolTable::for_each_shapes`] for `module` blocks.
+    pub module_for_each_shapes: HashMap<String, crate::variable_type::VariableType>,
 }
 
 impl SymbolTable {

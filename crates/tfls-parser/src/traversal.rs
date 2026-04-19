@@ -29,17 +29,17 @@ pub fn extract_symbols(body: &Body, uri: &Url, rope: &Rope) -> SymbolTable {
         let ident = block.ident.as_str();
         match ident {
             "variable" => {
-                let type_expr = block.body.iter().find_map(|structure| {
-                    let attr = structure.as_attribute()?;
-                    if attr.key.as_str() == "type" {
-                        Some(tfls_core::parse_type_expr(&attr.value))
-                    } else {
-                        None
-                    }
-                });
+                let type_expr = find_attr_expr(block, "type")
+                    .map(tfls_core::parse_type_expr);
+                let default_shape = find_attr_expr(block, "default")
+                    .map(tfls_core::parse_value_shape)
+                    .filter(|s| !matches!(s, tfls_core::VariableType::Any));
                 insert_labeled(block, uri, rope, SymbolKind::Variable, |sym, name| {
                     if let Some(ty) = type_expr.clone() {
                         table.variable_types.insert(name.clone(), ty);
+                    }
+                    if let Some(shape) = default_shape.clone() {
+                        table.variable_defaults.insert(name.clone(), shape);
                     }
                     table.variables.insert(name, sym);
                 });
@@ -49,9 +49,15 @@ pub fn extract_symbols(body: &Body, uri: &Url, rope: &Rope) -> SymbolTable {
             }),
             "module" => {
                 let source = string_attribute(block, "source");
+                let for_each_shape = find_attr_expr(block, "for_each")
+                    .map(tfls_core::parse_value_shape)
+                    .filter(|s| !matches!(s, tfls_core::VariableType::Any));
                 insert_labeled(block, uri, rope, SymbolKind::Module, |sym, name| {
                     if let Some(src) = source.clone() {
                         table.module_sources.insert(name.clone(), src);
+                    }
+                    if let Some(shape) = for_each_shape.clone() {
+                        table.module_for_each_shapes.insert(name.clone(), shape);
                     }
                     table.modules.insert(name, sym);
                 });
@@ -59,12 +65,32 @@ pub fn extract_symbols(body: &Body, uri: &Url, rope: &Rope) -> SymbolTable {
             "provider" => insert_labeled(block, uri, rope, SymbolKind::Provider, |sym, name| {
                 table.providers.insert(name, sym);
             }),
-            "resource" => insert_two_labeled(block, uri, rope, SymbolKind::Resource, |sym, t, n| {
-                table.resources.insert(ResourceAddress::new(t, n), sym);
-            }),
-            "data" => insert_two_labeled(block, uri, rope, SymbolKind::DataSource, |sym, t, n| {
-                table.data_sources.insert(ResourceAddress::new(t, n), sym);
-            }),
+            "resource" => {
+                let for_each_shape = find_attr_expr(block, "for_each")
+                    .map(tfls_core::parse_value_shape)
+                    .filter(|s| !matches!(s, tfls_core::VariableType::Any));
+                insert_two_labeled(block, uri, rope, SymbolKind::Resource, |sym, t, n| {
+                    let addr = ResourceAddress::new(t, n);
+                    if let Some(shape) = for_each_shape.clone() {
+                        table.for_each_shapes.insert(addr.clone(), shape);
+                    }
+                    table.resources.insert(addr, sym);
+                });
+            }
+            "data" => {
+                let for_each_shape = find_attr_expr(block, "for_each")
+                    .map(tfls_core::parse_value_shape)
+                    .filter(|s| !matches!(s, tfls_core::VariableType::Any));
+                insert_two_labeled(block, uri, rope, SymbolKind::DataSource, |sym, t, n| {
+                    let addr = ResourceAddress::new(t, n);
+                    if let Some(shape) = for_each_shape.clone() {
+                        table
+                            .data_source_for_each_shapes
+                            .insert(addr.clone(), shape);
+                    }
+                    table.data_sources.insert(addr, sym);
+                });
+            }
             "locals" => extract_locals(block, uri, rope, &mut table),
             "terraform" => {
                 let Some(name_range) = block
@@ -202,8 +228,27 @@ fn extract_locals(block: &Block, uri: &Url, rope: &Rope, table: &mut SymbolTable
             detail: None,
             doc: None,
         };
+        let shape = tfls_core::parse_value_shape(&attr.value);
+        if !matches!(shape, tfls_core::VariableType::Any) {
+            table.local_shapes.insert(name.clone(), shape);
+        }
         table.locals.insert(name, sym);
     }
+}
+
+/// Find the value expression of a top-level attribute on `block` whose
+/// key matches `key`. Returns `None` when the block body has no such
+/// attribute (or the structure at that position is a nested block).
+fn find_attr_expr<'a>(block: &'a Block, key: &str) -> Option<&'a hcl_edit::expr::Expression> {
+    for structure in block.body.iter() {
+        let Some(attr) = structure.as_attribute() else {
+            continue;
+        };
+        if attr.key.as_str() == key {
+            return Some(&attr.value);
+        }
+    }
+    None
 }
 
 fn build_symbol(
@@ -415,6 +460,95 @@ resource "aws_instance" "api" { ami = "ami-123" }
             table.variables["region"].doc.as_deref(),
             Some("AWS region")
         );
+    }
+
+    #[test]
+    fn captures_for_each_shape_for_resource() {
+        let table = extract(
+            "resource \"aws_vpc\" \"eu\" {\n  for_each = toset([\"vpc\"])\n}\n",
+        );
+        let addr = tfls_core::ResourceAddress::new("aws_vpc", "eu");
+        match table.for_each_shapes.get(&addr) {
+            Some(tfls_core::VariableType::Object(fields)) => {
+                assert!(fields.contains_key("vpc"));
+            }
+            other => panic!("expected Object shape, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn captures_for_each_shape_for_data_source() {
+        let table = extract(
+            "data \"aws_ami\" \"lookup\" {\n  for_each = toset([\"a\", \"b\"])\n}\n",
+        );
+        let addr = tfls_core::ResourceAddress::new("aws_ami", "lookup");
+        match table.data_source_for_each_shapes.get(&addr) {
+            Some(tfls_core::VariableType::Object(fields)) => {
+                assert!(fields.contains_key("a"));
+                assert!(fields.contains_key("b"));
+            }
+            other => panic!("expected Object shape, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn captures_for_each_shape_for_module() {
+        let table = extract(
+            "module \"web\" {\n  source = \"./mod\"\n  for_each = { a = 1, b = 2 }\n}\n",
+        );
+        match table.module_for_each_shapes.get("web") {
+            Some(tfls_core::VariableType::Object(fields)) => {
+                assert!(fields.contains_key("a"));
+                assert!(fields.contains_key("b"));
+            }
+            other => panic!("expected Object shape, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn captures_variable_default_shape_nested() {
+        let table = extract(
+            r#"variable "regions" {
+  default = {
+    "eu-west-1" = {
+      "cidr_block" = "10.0.0.0/16"
+      "enabled"    = true
+      "subnet_cidrs" = {
+        "eu-west-1a" = "10.0.1.0/24"
+      }
+    }
+  }
+}
+"#,
+        );
+        match table.variable_defaults.get("regions") {
+            Some(tfls_core::VariableType::Object(top)) => match top.get("eu-west-1") {
+                Some(tfls_core::VariableType::Object(mid)) => {
+                    assert!(mid.contains_key("cidr_block"));
+                    assert!(mid.contains_key("enabled"));
+                    match mid.get("subnet_cidrs") {
+                        Some(tfls_core::VariableType::Object(leaf)) => {
+                            assert!(leaf.contains_key("eu-west-1a"));
+                        }
+                        other => panic!("expected object at subnet_cidrs, got {other:?}"),
+                    }
+                }
+                other => panic!("expected object at eu-west-1, got {other:?}"),
+            },
+            other => panic!("expected top-level object, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn captures_local_shape_for_map_literal() {
+        let table = extract("locals {\n  cfg = { a = 1, b = 2 }\n}\n");
+        match table.local_shapes.get("cfg") {
+            Some(tfls_core::VariableType::Object(fields)) => {
+                assert!(fields.contains_key("a"));
+                assert!(fields.contains_key("b"));
+            }
+            other => panic!("expected Object shape, got {other:?}"),
+        }
     }
 
     #[test]
