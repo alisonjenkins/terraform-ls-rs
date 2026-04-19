@@ -21,6 +21,19 @@ pub struct BuiltinAttr {
     pub detail: &'static str,
 }
 
+/// A required attribute to pre-fill inside a nested block's body
+/// when the user picks it from completion. Rendered as a snippet
+/// tabstop so the user can tab through the required fields instead
+/// of landing in an empty block and having to look up the docs.
+#[derive(Debug, Clone, Copy)]
+pub struct RequiredAttr {
+    pub name: &'static str,
+    /// When `true` the placeholder is a quoted-string literal (e.g.
+    /// `error_message = "…"`); when `false` it's a bare expression
+    /// (numbers, references, bools).
+    pub quoted: bool,
+}
+
 /// One nested block type declared inside a built-in block.
 #[derive(Debug, Clone, Copy)]
 pub struct BuiltinBlock {
@@ -31,6 +44,12 @@ pub struct BuiltinBlock {
     /// to the user in the completion snippet. `None` means a plain
     /// unlabeled block (e.g. `required_providers { … }`).
     pub label_placeholder: Option<&'static str>,
+    /// Attributes that are *always* required for the block to be
+    /// valid — they're rendered into the snippet body as tabstops
+    /// when the user picks the block from completion. Empty slice
+    /// means the block has no strictly-required attrs and the
+    /// snippet just opens an empty body.
+    pub required_attrs: &'static [RequiredAttr],
 }
 
 /// Schema for one built-in block — attributes + nested blocks.
@@ -60,21 +79,25 @@ pub const TERRAFORM_BLOCK: BuiltinSchema = BuiltinSchema {
             name: "required_providers",
             detail: "Pin provider sources + versions for this module",
             label_placeholder: None,
+            required_attrs: &[],
         },
         BuiltinBlock {
             name: "backend",
             detail: "Remote state backend (e.g. `backend \"s3\" { ... }`)",
             label_placeholder: Some("s3"),
+            required_attrs: &[],
         },
         BuiltinBlock {
             name: "cloud",
             detail: "HCP Terraform / OpenTofu Cloud configuration",
             label_placeholder: None,
+            required_attrs: &[],
         },
         BuiltinBlock {
             name: "provider_meta",
             detail: "Metadata the provider reads per-module",
             label_placeholder: Some("google"),
+            required_attrs: &[],
         },
     ],
 };
@@ -118,6 +141,10 @@ pub const VARIABLE_BLOCK: BuiltinSchema = BuiltinSchema {
         name: "validation",
         detail: "Custom condition + error_message the value must satisfy",
         label_placeholder: None,
+        required_attrs: &[
+            RequiredAttr { name: "condition", quoted: false },
+            RequiredAttr { name: "error_message", quoted: true },
+        ],
     }],
 };
 
@@ -155,6 +182,10 @@ pub const OUTPUT_BLOCK: BuiltinSchema = BuiltinSchema {
         name: "precondition",
         detail: "Expression that must be true before the output is evaluated",
         label_placeholder: None,
+        required_attrs: &[
+            RequiredAttr { name: "condition", quoted: false },
+            RequiredAttr { name: "error_message", quoted: true },
+        ],
     }],
 };
 
@@ -318,11 +349,13 @@ const S3_BACKEND: BuiltinSchema = BuiltinSchema {
             name: "assume_role",
             detail: "Nested configuration for sts:AssumeRole",
             label_placeholder: None,
+            required_attrs: &[RequiredAttr { name: "role_arn", quoted: true }],
         },
         BuiltinBlock {
             name: "endpoints",
             detail: "Per-service endpoint overrides (s3, dynamodb, iam, sts)",
             label_placeholder: None,
+            required_attrs: &[],
         },
     ],
 };
@@ -407,6 +440,10 @@ const REMOTE_BACKEND: BuiltinSchema = BuiltinSchema {
         name: "workspaces",
         detail: "Workspaces to bind to (name or prefix)",
         label_placeholder: None,
+        // `name` and `prefix` are mutually exclusive; one of them is
+        // required. Default to `name` since it's the modern usage
+        // pattern — users who want `prefix` can delete the line.
+        required_attrs: &[RequiredAttr { name: "name", quoted: true }],
     }],
 };
 
@@ -427,6 +464,10 @@ const KUBERNETES_BACKEND: BuiltinSchema = BuiltinSchema {
         name: "exec",
         detail: "Exec-based credential plugin configuration",
         label_placeholder: None,
+        required_attrs: &[
+            RequiredAttr { name: "api_version", quoted: true },
+            RequiredAttr { name: "command", quoted: true },
+        ],
     }],
 };
 

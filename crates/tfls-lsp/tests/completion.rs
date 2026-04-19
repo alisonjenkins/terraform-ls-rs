@@ -1492,6 +1492,168 @@ async fn variable_block_body_suggests_standard_attrs() {
     assert!(ls.contains(&"validation".to_string()));
 }
 
+// --- Nested-block snippet body pre-population -----------------------------
+//
+// When the user picks a nested block that has strictly-required
+// inner attributes, the snippet should pre-fill those with numbered
+// tabstops so they can tab through instead of landing in an empty
+// block. Empty body (no required attrs) and labeled blocks with
+// required attrs are also covered.
+
+#[tokio::test]
+async fn variable_validation_block_prefills_condition_and_error_message() {
+    let u = uri("file:///v.tf");
+    let src = "variable \"x\" {\n  \n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(1, 2)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let insert = find_item(resp, "validation")
+        .insert_text
+        .expect("validation has insert_text");
+    assert!(
+        insert.contains("condition = ${1}"),
+        "validation must prefill `condition`; got {insert:?}"
+    );
+    assert!(
+        insert.contains("error_message = \"${2}\""),
+        "validation must prefill quoted `error_message`; got {insert:?}"
+    );
+    assert!(
+        insert.ends_with("\n  $0\n}"),
+        "validation must end with trailing $0 tabstop; got {insert:?}"
+    );
+}
+
+#[tokio::test]
+async fn output_precondition_block_prefills_required_pair() {
+    let u = uri("file:///o.tf");
+    let src = "output \"x\" {\n  \n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(1, 2)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let insert = find_item(resp, "precondition")
+        .insert_text
+        .expect("precondition has insert_text");
+    assert!(
+        insert.contains("condition = ${1}") && insert.contains("error_message = \"${2}\""),
+        "precondition must prefill condition + error_message; got {insert:?}"
+    );
+}
+
+#[tokio::test]
+async fn s3_backend_assume_role_block_prefills_role_arn() {
+    let u = uri("file:///tf.tf");
+    let src = "terraform {\n  backend \"s3\" {\n    \n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 4)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let insert = find_item(resp, "assume_role")
+        .insert_text
+        .expect("assume_role has insert_text");
+    assert!(
+        insert.contains("role_arn = \"${1}\""),
+        "assume_role must prefill role_arn; got {insert:?}"
+    );
+}
+
+#[tokio::test]
+async fn remote_backend_workspaces_block_prefills_name() {
+    let u = uri("file:///tf.tf");
+    let src = "terraform {\n  backend \"remote\" {\n    \n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 4)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let insert = find_item(resp, "workspaces")
+        .insert_text
+        .expect("workspaces has insert_text");
+    assert!(
+        insert.contains("name = \"${1}\""),
+        "workspaces must prefill name; got {insert:?}"
+    );
+}
+
+#[tokio::test]
+async fn kubernetes_backend_exec_block_prefills_api_version_and_command() {
+    let u = uri("file:///tf.tf");
+    let src = "terraform {\n  backend \"kubernetes\" {\n    \n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 4)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let insert = find_item(resp, "exec")
+        .insert_text
+        .expect("exec has insert_text");
+    assert!(
+        insert.contains("api_version = \"${1}\"") && insert.contains("command = \"${2}\""),
+        "exec must prefill api_version + command; got {insert:?}"
+    );
+}
+
+// Regression: blocks without required_attrs must still render as
+// empty-body snippets (single trailing $0), not emit stray tabstops.
+#[tokio::test]
+async fn terraform_block_required_providers_renders_as_empty_body() {
+    let u = uri("file:///tf.tf");
+    let src = "terraform {\n  \n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(1, 2)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let insert = find_item(resp, "required_providers")
+        .insert_text
+        .expect("required_providers has insert_text");
+    assert_eq!(insert, "required_providers {\n  $0\n}");
+}
+
+// Labeled blocks without required_attrs keep their label tabstop at
+// $1 and their body $0 — no regression in the `backend "s3"` style
+// snippet emitted at top level of `terraform { }`.
+#[tokio::test]
+async fn terraform_block_backend_keeps_label_tabstop() {
+    let u = uri("file:///tf.tf");
+    let src = "terraform {\n  \n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(1, 2)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let insert = find_item(resp, "backend")
+        .insert_text
+        .expect("backend has insert_text");
+    assert_eq!(insert, "backend \"${1:s3}\" {\n  $0\n}");
+}
+
 // After a completed `type = …` line the cursor should fall back to
 // body-attribute completion, not keep firing the type-expression
 // detector. Regression: previously the classifier latched onto the

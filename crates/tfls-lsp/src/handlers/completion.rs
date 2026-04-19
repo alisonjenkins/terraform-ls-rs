@@ -493,30 +493,48 @@ fn builtin_body_items(
         if filter.present_blocks.contains(b.name) {
             continue;
         }
-        // Blocks that take a type label (e.g. `backend "s3" { … }`,
-        // `provider_meta "google" { … }`) expand to a snippet with a
-        // first-tabstop placeholder for the label so the user fills
-        // it in immediately. Unlabelled blocks expand straight to the
-        // body.
-        let insert_text = match b.label_placeholder {
-            Some(placeholder) => format!(
-                "{name} \"${{1:{placeholder}}}\" {{\n  $0\n}}",
-                name = b.name,
-                placeholder = placeholder,
-            ),
-            None => format!("{name} {{\n  $0\n}}", name = b.name),
-        };
         items.push(CompletionItem {
             label: b.name.to_string(),
             kind: Some(CompletionItemKind::STRUCT),
             detail: Some(b.detail.to_string()),
-            insert_text: Some(insert_text),
+            insert_text: Some(render_block_snippet(b)),
             insert_text_format: Some(InsertTextFormat::SNIPPET),
             ..Default::default()
         });
     }
     items.sort_by(|a, b| a.label.cmp(&b.label));
     items
+}
+
+/// Build the snippet body for a nested built-in block. Handles:
+/// - labeled vs unlabeled headers (`backend "s3" { … }` vs
+///   `required_providers { … }`)
+/// - pre-filled required attributes with numbered tabstops so the
+///   user can tab through them instead of landing in an empty block
+/// - final `$0` tabstop at the end of the body for free-form edits
+fn render_block_snippet(b: &tfls_core::builtin_blocks::BuiltinBlock) -> String {
+    let (header, mut next_tab) = match b.label_placeholder {
+        Some(placeholder) => (
+            format!(
+                "{name} \"${{1:{placeholder}}}\" {{",
+                name = b.name,
+                placeholder = placeholder,
+            ),
+            2,
+        ),
+        None => (format!("{name} {{", name = b.name), 1),
+    };
+    let mut body = String::new();
+    for ra in b.required_attrs {
+        if ra.quoted {
+            body.push_str(&format!("\n  {name} = \"${{{next_tab}}}\"", name = ra.name));
+        } else {
+            body.push_str(&format!("\n  {name} = ${{{next_tab}}}", name = ra.name));
+        }
+        next_tab += 1;
+    }
+    body.push_str("\n  $0\n}");
+    format!("{header}{body}")
 }
 
 /// Completions for the body of a `provider "x" { ... }` block. Uses
