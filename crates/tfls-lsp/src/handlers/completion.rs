@@ -200,6 +200,13 @@ pub async fn completion(
         CompletionContext::ModuleVersionValue { source, cursor_partial } => {
             module_version_value_items(source.as_deref(), &cursor_partial).await
         }
+        CompletionContext::BuiltinNestedBody { path } => {
+            let filter = compute_body_filter(doc.parsed.body.as_ref(), offset);
+            match tfls_core::resolve_nested_schema(&path) {
+                Some(schema) => builtin_body_items(schema, &filter),
+                None => Vec::new(),
+            }
+        }
         CompletionContext::Unknown => Vec::new(),
     };
 

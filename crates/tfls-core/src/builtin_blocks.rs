@@ -50,6 +50,25 @@ pub struct BuiltinBlock {
     /// means the block has no strictly-required attrs and the
     /// snippet just opens an empty body.
     pub required_attrs: &'static [RequiredAttr],
+    /// Schema of the block's own body — attrs and further nested
+    /// blocks. `None` means the schema is resolved dynamically (the
+    /// only current case is `backend`, where the label determines
+    /// which backend schema applies — see [`backend_schema`]).
+    ///
+    /// Stored as an indirect-fn so `BuiltinBlock` stays `Copy` and
+    /// can be used inside `const` initializers without tripping over
+    /// recursive-type size calculations. Call
+    /// [`BuiltinBlock::body_schema`] to resolve it.
+    pub schema_fn: Option<fn() -> BuiltinSchema>,
+}
+
+impl BuiltinBlock {
+    /// Resolve this block's body schema, if any. `None` means the
+    /// schema needs dynamic resolution (e.g. by label, as `backend`
+    /// does via [`backend_schema`]).
+    pub fn body_schema(&self) -> Option<BuiltinSchema> {
+        self.schema_fn.map(|f| f())
+    }
 }
 
 /// Schema for one built-in block — attributes + nested blocks.
@@ -80,24 +99,35 @@ pub const TERRAFORM_BLOCK: BuiltinSchema = BuiltinSchema {
             detail: "Pin provider sources + versions for this module",
             label_placeholder: None,
             required_attrs: &[],
+            // `required_providers { NAME = { ... } }` is a map-of-objects,
+            // not a normal block body — the completion path for it has a
+            // dedicated context (`RequiredProvidersBody`) that doesn't
+            // route through the generic `builtin_body_items` dispatch.
+            schema_fn: None,
         },
         BuiltinBlock {
             name: "backend",
             detail: "Remote state backend (e.g. `backend \"s3\" { ... }`)",
             label_placeholder: Some("s3"),
             required_attrs: &[],
+            // Backend body schema depends on the label (s3, gcs, …).
+            // Resolved via `backend_schema(label)` in the dispatcher.
+            schema_fn: None,
         },
         BuiltinBlock {
             name: "cloud",
             detail: "HCP Terraform / OpenTofu Cloud configuration",
             label_placeholder: None,
             required_attrs: &[],
+            schema_fn: Some(cloud_schema),
         },
         BuiltinBlock {
             name: "provider_meta",
             detail: "Metadata the provider reads per-module",
             label_placeholder: Some("google"),
             required_attrs: &[],
+            // Provider-defined; no static schema.
+            schema_fn: None,
         },
     ],
 };
@@ -145,6 +175,7 @@ pub const VARIABLE_BLOCK: BuiltinSchema = BuiltinSchema {
             RequiredAttr { name: "condition", quoted: false },
             RequiredAttr { name: "error_message", quoted: true },
         ],
+        schema_fn: Some(validation_schema),
     }],
 };
 
@@ -186,6 +217,7 @@ pub const OUTPUT_BLOCK: BuiltinSchema = BuiltinSchema {
             RequiredAttr { name: "condition", quoted: false },
             RequiredAttr { name: "error_message", quoted: true },
         ],
+        schema_fn: Some(precondition_schema),
     }],
 };
 
@@ -350,12 +382,14 @@ const S3_BACKEND: BuiltinSchema = BuiltinSchema {
             detail: "Nested configuration for sts:AssumeRole",
             label_placeholder: None,
             required_attrs: &[RequiredAttr { name: "role_arn", quoted: true }],
+            schema_fn: Some(assume_role_schema),
         },
         BuiltinBlock {
             name: "endpoints",
             detail: "Per-service endpoint overrides (s3, dynamodb, iam, sts)",
             label_placeholder: None,
             required_attrs: &[],
+            schema_fn: Some(s3_endpoints_schema),
         },
     ],
 };
@@ -444,6 +478,7 @@ const REMOTE_BACKEND: BuiltinSchema = BuiltinSchema {
         // required. Default to `name` since it's the modern usage
         // pattern — users who want `prefix` can delete the line.
         required_attrs: &[RequiredAttr { name: "name", quoted: true }],
+        schema_fn: Some(workspaces_schema),
     }],
 };
 
@@ -468,6 +503,7 @@ const KUBERNETES_BACKEND: BuiltinSchema = BuiltinSchema {
             RequiredAttr { name: "api_version", quoted: true },
             RequiredAttr { name: "command", quoted: true },
         ],
+        schema_fn: Some(exec_schema),
     }],
 };
 
@@ -480,4 +516,171 @@ const PG_BACKEND: BuiltinSchema = BuiltinSchema {
         BuiltinAttr { name: "skip_index_creation", required: false, detail: "Assume the supporting index already exists" },
     ],
     blocks: &[],
+};
+
+// --- Nested-block schemas used by the built-in hierarchy ------------------
+//
+// These are the bodies of blocks that appear *inside* the top-level
+// schemas above. They let the completion classifier resolve the
+// right attribute list when the cursor sits inside a `validation {}`,
+// `precondition {}`, `lifecycle {}`, `workspaces {}`, etc.
+
+pub const VALIDATION_BLOCK: BuiltinSchema = BuiltinSchema {
+    attrs: &[
+        BuiltinAttr { name: "condition", required: true, detail: "Boolean expression — true means the value is valid" },
+        BuiltinAttr { name: "error_message", required: true, detail: "Message shown when the condition fails" },
+        BuiltinAttr { name: "error_message_expression", required: false, detail: "Expression producing the error message (alternative to error_message)" },
+    ],
+    blocks: &[],
+};
+fn validation_schema() -> BuiltinSchema { VALIDATION_BLOCK }
+
+pub const PRECONDITION_BLOCK: BuiltinSchema = VALIDATION_BLOCK;
+fn precondition_schema() -> BuiltinSchema { PRECONDITION_BLOCK }
+
+pub const POSTCONDITION_BLOCK: BuiltinSchema = VALIDATION_BLOCK;
+fn postcondition_schema() -> BuiltinSchema { POSTCONDITION_BLOCK }
+
+pub const WORKSPACES_BLOCK: BuiltinSchema = BuiltinSchema {
+    attrs: &[
+        BuiltinAttr { name: "name", required: false, detail: "Single workspace name — mutually exclusive with `prefix` and `tags`" },
+        BuiltinAttr { name: "prefix", required: false, detail: "Workspace name prefix — mutually exclusive with `name` (remote backend only)" },
+        BuiltinAttr { name: "tags", required: false, detail: "Set of tags the workspaces must have (cloud block only)" },
+    ],
+    blocks: &[],
+};
+fn workspaces_schema() -> BuiltinSchema { WORKSPACES_BLOCK }
+
+pub const CLOUD_BLOCK: BuiltinSchema = BuiltinSchema {
+    attrs: &[
+        BuiltinAttr { name: "organization", required: true, detail: "HCP Terraform / TFE organization name" },
+        BuiltinAttr { name: "hostname", required: false, detail: "Custom hostname (defaults to app.terraform.io)" },
+        BuiltinAttr { name: "token", required: false, detail: "API token (prefer TF_TOKEN_* env vars)" },
+    ],
+    blocks: &[BuiltinBlock {
+        name: "workspaces",
+        detail: "Workspaces to bind to (name, prefix, or tags)",
+        label_placeholder: None,
+        required_attrs: &[],
+        schema_fn: Some(workspaces_schema),
+    }],
+};
+fn cloud_schema() -> BuiltinSchema { CLOUD_BLOCK }
+
+pub const ASSUME_ROLE_BLOCK: BuiltinSchema = BuiltinSchema {
+    attrs: &[
+        BuiltinAttr { name: "role_arn", required: true, detail: "ARN of the role to assume" },
+        BuiltinAttr { name: "session_name", required: false, detail: "Session name" },
+        BuiltinAttr { name: "external_id", required: false, detail: "External ID required by the assumed role" },
+        BuiltinAttr { name: "policy", required: false, detail: "Session policy JSON" },
+        BuiltinAttr { name: "policy_arns", required: false, detail: "List of managed session policy ARNs" },
+        BuiltinAttr { name: "tags", required: false, detail: "Map of session tags" },
+        BuiltinAttr { name: "transitive_tag_keys", required: false, detail: "Session tags that persist across role chains" },
+        BuiltinAttr { name: "duration", required: false, detail: "Session duration (e.g. `\"1h\"`)" },
+        BuiltinAttr { name: "source_identity", required: false, detail: "Source identity string" },
+    ],
+    blocks: &[],
+};
+fn assume_role_schema() -> BuiltinSchema { ASSUME_ROLE_BLOCK }
+
+pub const S3_ENDPOINTS_BLOCK: BuiltinSchema = BuiltinSchema {
+    attrs: &[
+        BuiltinAttr { name: "s3", required: false, detail: "S3 endpoint URL" },
+        BuiltinAttr { name: "dynamodb", required: false, detail: "DynamoDB endpoint URL" },
+        BuiltinAttr { name: "iam", required: false, detail: "IAM endpoint URL" },
+        BuiltinAttr { name: "sts", required: false, detail: "STS endpoint URL" },
+        BuiltinAttr { name: "sso", required: false, detail: "SSO endpoint URL" },
+    ],
+    blocks: &[],
+};
+fn s3_endpoints_schema() -> BuiltinSchema { S3_ENDPOINTS_BLOCK }
+
+pub const EXEC_BLOCK: BuiltinSchema = BuiltinSchema {
+    attrs: &[
+        BuiltinAttr { name: "api_version", required: true, detail: "client-go ExecCredential API version (e.g. `client.authentication.k8s.io/v1`)" },
+        BuiltinAttr { name: "command", required: true, detail: "Executable to invoke" },
+        BuiltinAttr { name: "args", required: false, detail: "Command-line arguments" },
+        BuiltinAttr { name: "env", required: false, detail: "Environment variables (map of strings)" },
+    ],
+    blocks: &[],
+};
+fn exec_schema() -> BuiltinSchema { EXEC_BLOCK }
+
+/// `lifecycle { ... }` inside a `resource` block. Data blocks have a
+/// narrower variant below — only `postcondition` is permitted there.
+pub const LIFECYCLE_RESOURCE_BLOCK: BuiltinSchema = BuiltinSchema {
+    attrs: &[
+        BuiltinAttr { name: "create_before_destroy", required: false, detail: "Create the replacement before destroying the existing resource" },
+        BuiltinAttr { name: "prevent_destroy", required: false, detail: "Reject any plan that would destroy this resource" },
+        BuiltinAttr { name: "ignore_changes", required: false, detail: "List of attributes (or `all`) to ignore when detecting drift" },
+        BuiltinAttr { name: "replace_triggered_by", required: false, detail: "References whose change forces replacement" },
+    ],
+    blocks: &[
+        BuiltinBlock {
+            name: "precondition",
+            detail: "Condition that must hold before the resource is planned",
+            label_placeholder: None,
+            required_attrs: &[
+                RequiredAttr { name: "condition", quoted: false },
+                RequiredAttr { name: "error_message", quoted: true },
+            ],
+            schema_fn: Some(precondition_schema),
+        },
+        BuiltinBlock {
+            name: "postcondition",
+            detail: "Condition that must hold after the resource is applied",
+            label_placeholder: None,
+            required_attrs: &[
+                RequiredAttr { name: "condition", quoted: false },
+                RequiredAttr { name: "error_message", quoted: true },
+            ],
+            schema_fn: Some(postcondition_schema),
+        },
+    ],
+};
+fn lifecycle_resource_schema() -> BuiltinSchema { LIFECYCLE_RESOURCE_BLOCK }
+
+/// `lifecycle { ... }` inside a `data` block. Only `postcondition`
+/// is permitted; `create_before_destroy`/`prevent_destroy`/
+/// `ignore_changes`/`replace_triggered_by` don't apply.
+pub const LIFECYCLE_DATA_BLOCK: BuiltinSchema = BuiltinSchema {
+    attrs: &[],
+    blocks: &[BuiltinBlock {
+        name: "postcondition",
+        detail: "Condition that must hold after the data source is read",
+        label_placeholder: None,
+        required_attrs: &[
+            RequiredAttr { name: "condition", quoted: false },
+            RequiredAttr { name: "error_message", quoted: true },
+        ],
+        schema_fn: Some(postcondition_schema),
+    }],
+};
+fn lifecycle_data_schema() -> BuiltinSchema { LIFECYCLE_DATA_BLOCK }
+
+/// Synthetic schema used when the resolver needs to descend into a
+/// `resource "X" "Y" { lifecycle { … } }` path. Only the `lifecycle`
+/// child is modelled here — resource bodies themselves route through
+/// provider schemas, not this file.
+pub const RESOURCE_ROOT_SCHEMA: BuiltinSchema = BuiltinSchema {
+    attrs: &[],
+    blocks: &[BuiltinBlock {
+        name: "lifecycle",
+        detail: "Lifecycle rules (create_before_destroy, prevent_destroy, ignore_changes, …)",
+        label_placeholder: None,
+        required_attrs: &[],
+        schema_fn: Some(lifecycle_resource_schema),
+    }],
+};
+
+/// Same idea for `data` blocks.
+pub const DATA_ROOT_SCHEMA: BuiltinSchema = BuiltinSchema {
+    attrs: &[],
+    blocks: &[BuiltinBlock {
+        name: "lifecycle",
+        detail: "Lifecycle rules (data sources: postcondition only)",
+        label_placeholder: None,
+        required_attrs: &[],
+        schema_fn: Some(lifecycle_data_schema),
+    }],
 };

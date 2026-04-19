@@ -161,8 +161,29 @@ pub enum CompletionContext {
     /// start — offer function names.
     FunctionCall,
 
+    /// Cursor is inside a **nested** built-in block — something like
+    /// `validation` inside `variable`, `precondition` inside `output`,
+    /// `workspaces` inside `backend "remote"`, `lifecycle` inside a
+    /// `resource`, or any deeper nesting within those. The `path`
+    /// captures every block header walked from the outermost
+    /// top-level block down to the block the cursor sits in
+    /// (outermost first). Labels are preserved so the resolver can
+    /// pick the right schema for labeled blocks like `backend "s3"`
+    /// vs `backend "remote"`.
+    BuiltinNestedBody { path: Vec<BlockStep> },
+
     /// Unknown — no specific hints available.
     Unknown,
+}
+
+/// One level in a nested-block path. `keyword` is the block ident
+/// (`variable`, `validation`, `lifecycle`, …); `label` is the first
+/// quoted label when present (`"test"` for `variable "test" {`, `"s3"`
+/// for `backend "s3" {`), `None` otherwise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockStep {
+    pub keyword: String,
+    pub label: Option<String>,
 }
 
 /// Which kind of reference a bracket indexer is rooted at.
@@ -896,12 +917,28 @@ fn label_index_at_cursor(line: &str) -> Option<usize> {
 fn enclosing_block_context(before: &str) -> Option<CompletionContext> {
     // Walk braces from right-to-left to find the nearest unclosed `{`.
     // When we pass an unclosed `{` that's a *nested* block opener (e.g.
-    // `root_block_device {`), it doesn't classify as a top-level block
-    // header but it's also not an object literal — keep walking
-    // outward so completion still finds the enclosing resource / data
-    // block. Object-literal openers (`labels = {`) do terminate the
-    // walk: we'd never want to surface block-body completions inside
-    // an expression position.
+    // `validation {`, `root_block_device {`), we accumulate it into
+    // `path_reversed` and keep walking outward. When we finally hit a
+    // recognised top-level block (`variable`, `terraform`, `resource`,
+    // …) we either:
+    //   - return that top-level context directly if no nested blocks
+    //     were traversed, or
+    //   - return `BuiltinNestedBody { path }` with the full outer-
+    //     first path so the dispatcher can resolve the right schema.
+    //
+    // Exceptions that short-circuit the walk:
+    //   - Object literal `= {`   → expression, not block. Treated as
+    //     required-providers entry where applicable, `None` otherwise.
+    //   - Non-identifier opener → something we don't understand;
+    //     bail and return `None`.
+    //
+    // Resource/data/provider bodies are driven by provider schemas
+    // (not by this file's `BuiltinSchema`). If the traversed path
+    // crosses one of those top-level blocks but DOESN'T pass through
+    // a built-in nested block (currently only `lifecycle`), fall
+    // back to the existing top-level context so the provider-schema
+    // dispatch still runs.
+    let mut path_reversed: Vec<BlockStep> = Vec::new();
     let mut depth: i32 = 0;
     let bytes = before.as_bytes();
     let mut i = bytes.len();
@@ -912,13 +949,47 @@ fn enclosing_block_context(before: &str) -> Option<CompletionContext> {
             b'{' => {
                 if depth == 0 {
                     let header = &before[..i];
-                    if let Some(ctx) = classify_block_header(header) {
-                        return Some(ctx);
+                    if let Some(top_ctx) = classify_block_header(header) {
+                        if path_reversed.is_empty() {
+                            return Some(top_ctx);
+                        }
+                        // Resource/data/provider bodies carry their
+                        // own dispatch — only route through the
+                        // built-in resolver when the nested path
+                        // starts with `lifecycle`, which is the one
+                        // built-in-schema nested block we model
+                        // inside those.
+                        let is_provider_schema_root = matches!(
+                            top_ctx,
+                            CompletionContext::ResourceBody { .. }
+                                | CompletionContext::DataSourceBody { .. }
+                                | CompletionContext::ProviderBlockBody { .. }
+                        );
+                        if is_provider_schema_root {
+                            let outermost_nested = path_reversed
+                                .last()
+                                .map(|s| s.keyword.as_str())
+                                .unwrap_or("");
+                            if outermost_nested != "lifecycle" {
+                                return Some(top_ctx);
+                            }
+                        }
+                        let Some(root_step) = parse_block_opener(header) else {
+                            return Some(top_ctx);
+                        };
+                        let mut path = Vec::with_capacity(path_reversed.len() + 1);
+                        path.push(root_step);
+                        while let Some(s) = path_reversed.pop() {
+                            path.push(s);
+                        }
+                        return Some(CompletionContext::BuiltinNestedBody { path });
                     }
                     // Object literal `WORD = { ... }`. The only case
                     // that lights up completion is a
                     // `required_providers` entry; anything else stays
-                    // Unknown.
+                    // Unknown. Object literals terminate path
+                    // collection — we wouldn't want completion from
+                    // inside an expression.
                     if is_object_literal_opener(header) {
                         return match enclosing_block_context(header) {
                             Some(CompletionContext::RequiredProvidersBody) => {
@@ -930,8 +1001,10 @@ fn enclosing_block_context(before: &str) -> Option<CompletionContext> {
                     if !is_nested_block_opener(header) {
                         return None;
                     }
-                    // It's a nested HCL block — keep walking, the caller
-                    // needs the outer resource/data/module context.
+                    if let Some(step) = parse_block_opener(header) {
+                        path_reversed.push(step);
+                    }
+                    // Keep walking outward.
                 } else {
                     depth -= 1;
                 }
@@ -940,6 +1013,66 @@ fn enclosing_block_context(before: &str) -> Option<CompletionContext> {
         }
     }
     None
+}
+
+/// Parse the last-line block header into a [`BlockStep`].
+/// Returns `None` if the header doesn't look like an identifier-style
+/// block opener.
+fn parse_block_opener(header: &str) -> Option<BlockStep> {
+    let line_start = header.rfind('\n').map_or(0, |i| i + 1);
+    let line = header[line_start..].trim();
+    // Strip the optional trailing `{` so a line like `terraform {`
+    // parses as the keyword `terraform`.
+    let line = line.trim_end_matches('{').trim_end();
+    let first_token = line.split_whitespace().next()?;
+    if first_token.is_empty()
+        || !first_token
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    {
+        return None;
+    }
+    let rest = &line[first_token.len()..];
+    let label = first_quoted_string(rest);
+    Some(BlockStep {
+        keyword: first_token.to_string(),
+        label,
+    })
+}
+
+/// Resolve a nested-block path to the concrete [`BuiltinSchema`] whose
+/// body the cursor is currently inside. The path's first element is
+/// the outermost top-level block (`terraform`, `variable`, …) and
+/// each subsequent element is a nested block descending inward.
+///
+/// Labeled blocks (`backend "s3"`) use their label to pick the right
+/// schema; unlabeled blocks and other labeled blocks without a
+/// label-driven schema route through [`BuiltinBlock::body_schema`].
+pub fn resolve_nested_schema(
+    path: &[BlockStep],
+) -> Option<crate::builtin_blocks::BuiltinSchema> {
+    use crate::builtin_blocks;
+    let mut iter = path.iter();
+    let root = iter.next()?;
+    let mut schema = match root.keyword.as_str() {
+        "terraform" => builtin_blocks::TERRAFORM_BLOCK,
+        "variable" => builtin_blocks::VARIABLE_BLOCK,
+        "output" => builtin_blocks::OUTPUT_BLOCK,
+        "module" => builtin_blocks::MODULE_BLOCK,
+        "resource" => builtin_blocks::RESOURCE_ROOT_SCHEMA,
+        "data" => builtin_blocks::DATA_ROOT_SCHEMA,
+        _ => return None,
+    };
+    for step in iter {
+        let block = schema.blocks.iter().find(|b| b.name == step.keyword)?;
+        schema = if block.name == "backend" {
+            let label = step.label.as_deref()?;
+            builtin_blocks::backend_schema(label)?
+        } else {
+            block.body_schema()?
+        };
+    }
+    Some(schema)
 }
 
 /// Does the text immediately before a `{` look like an attribute
@@ -1021,7 +1154,14 @@ fn classify_block_header(header_source: &str) -> Option<CompletionContext> {
         ("variable", Some(name)) => Some(CompletionContext::VariableBlockBody { name }),
         ("output", Some(name)) => Some(CompletionContext::OutputBlockBody { name }),
         ("provider", Some(name)) => Some(CompletionContext::ProviderBlockBody { name }),
-        ("backend", Some(name)) => Some(CompletionContext::BackendBlockBody { name }),
+        // `backend` is intentionally NOT matched here. It's nested
+        // inside `terraform { }` and the path-based resolver handles
+        // it uniformly — the walker collects `backend "s3"` as a
+        // nested step and `resolve_nested_schema` dispatches via
+        // `backend_schema(label)`. Letting the walker continue past
+        // `backend` also means things nested *inside* a backend
+        // (like `assume_role`, `workspaces`, `exec`) resolve
+        // correctly for free.
         _ => None,
     }
 }

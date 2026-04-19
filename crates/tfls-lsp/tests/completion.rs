@@ -1492,6 +1492,269 @@ async fn variable_block_body_suggests_standard_attrs() {
     assert!(ls.contains(&"validation".to_string()));
 }
 
+// --- Nested-block body routing (BuiltinNestedBody) ------------------------
+//
+// When the cursor is *inside* a nested block like `validation`,
+// `precondition`, `lifecycle.postcondition`, or backend sub-blocks
+// (`assume_role`, `endpoints`, `workspaces`, `exec`, `cloud.workspaces`),
+// the completion dispatcher resolves the nested schema via the
+// block-path classifier and offers that schema's attrs — *not* the
+// enclosing block's attrs.
+
+#[tokio::test]
+async fn validation_body_suggests_condition_and_error_message() {
+    let u = uri("file:///v.tf");
+    let src = "variable \"x\" {\n  validation {\n    \n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 4)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(
+        ls.contains(&"condition".to_string()),
+        "validation body must offer `condition`; got {ls:?}"
+    );
+    assert!(
+        ls.contains(&"error_message".to_string()),
+        "validation body must offer `error_message`; got {ls:?}"
+    );
+    // Must NOT leak the outer `variable` block's attrs.
+    assert!(
+        !ls.contains(&"type".to_string()) && !ls.contains(&"nullable".to_string()),
+        "validation body must not show variable attrs; got {ls:?}"
+    );
+}
+
+#[tokio::test]
+async fn precondition_body_in_output_suggests_condition_and_error_message() {
+    let u = uri("file:///o.tf");
+    let src = "output \"x\" {\n  precondition {\n    \n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 4)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"condition".to_string()), "got {ls:?}");
+    assert!(ls.contains(&"error_message".to_string()), "got {ls:?}");
+    assert!(!ls.contains(&"value".to_string()), "got {ls:?}");
+}
+
+#[tokio::test]
+async fn lifecycle_body_in_resource_suggests_lifecycle_attrs() {
+    let u = uri("file:///r.tf");
+    let src = "resource \"aws_instance\" \"x\" {\n  lifecycle {\n    \n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 4)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"create_before_destroy".to_string()), "got {ls:?}");
+    assert!(ls.contains(&"prevent_destroy".to_string()), "got {ls:?}");
+    assert!(ls.contains(&"ignore_changes".to_string()), "got {ls:?}");
+    assert!(ls.contains(&"replace_triggered_by".to_string()), "got {ls:?}");
+    assert!(ls.contains(&"precondition".to_string()), "got {ls:?}");
+    assert!(ls.contains(&"postcondition".to_string()), "got {ls:?}");
+}
+
+#[tokio::test]
+async fn lifecycle_body_in_data_block_only_allows_postcondition() {
+    let u = uri("file:///d.tf");
+    let src = "data \"aws_ami\" \"x\" {\n  lifecycle {\n    \n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 4)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"postcondition".to_string()), "got {ls:?}");
+    // Resource-only attrs must not appear here.
+    assert!(!ls.contains(&"create_before_destroy".to_string()), "got {ls:?}");
+    assert!(!ls.contains(&"prevent_destroy".to_string()), "got {ls:?}");
+    assert!(!ls.contains(&"precondition".to_string()), "got {ls:?}");
+}
+
+#[tokio::test]
+async fn postcondition_in_lifecycle_offers_condition_and_error_message() {
+    let u = uri("file:///r.tf");
+    let src = "resource \"aws_instance\" \"x\" {\n  lifecycle {\n    postcondition {\n      \n    }\n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(3, 6)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"condition".to_string()), "got {ls:?}");
+    assert!(ls.contains(&"error_message".to_string()), "got {ls:?}");
+}
+
+#[tokio::test]
+async fn assume_role_body_in_s3_backend_suggests_role_arn() {
+    let u = uri("file:///tf.tf");
+    let src = "terraform {\n  backend \"s3\" {\n    assume_role {\n      \n    }\n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(3, 6)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"role_arn".to_string()), "got {ls:?}");
+    assert!(ls.contains(&"session_name".to_string()), "got {ls:?}");
+    // Must NOT leak S3 backend body attrs.
+    assert!(!ls.contains(&"bucket".to_string()), "got {ls:?}");
+}
+
+#[tokio::test]
+async fn endpoints_body_in_s3_backend_suggests_service_overrides() {
+    let u = uri("file:///tf.tf");
+    let src = "terraform {\n  backend \"s3\" {\n    endpoints {\n      \n    }\n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(3, 6)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"s3".to_string()), "got {ls:?}");
+    assert!(ls.contains(&"dynamodb".to_string()), "got {ls:?}");
+    assert!(!ls.contains(&"bucket".to_string()), "got {ls:?}");
+}
+
+#[tokio::test]
+async fn workspaces_body_in_remote_backend_suggests_name_and_prefix() {
+    let u = uri("file:///tf.tf");
+    let src = "terraform {\n  backend \"remote\" {\n    workspaces {\n      \n    }\n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(3, 6)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"name".to_string()), "got {ls:?}");
+    assert!(ls.contains(&"prefix".to_string()), "got {ls:?}");
+    // Remote backend's own attrs must not leak through.
+    assert!(!ls.contains(&"organization".to_string()), "got {ls:?}");
+}
+
+#[tokio::test]
+async fn cloud_body_suggests_org_and_workspaces() {
+    let u = uri("file:///tf.tf");
+    let src = "terraform {\n  cloud {\n    \n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 4)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"organization".to_string()), "got {ls:?}");
+    assert!(ls.contains(&"hostname".to_string()), "got {ls:?}");
+    assert!(ls.contains(&"workspaces".to_string()), "got {ls:?}");
+    // Must not leak terraform-block attrs.
+    assert!(!ls.contains(&"required_version".to_string()), "got {ls:?}");
+}
+
+#[tokio::test]
+async fn workspaces_body_in_cloud_suggests_name_prefix_tags() {
+    let u = uri("file:///tf.tf");
+    let src = "terraform {\n  cloud {\n    workspaces {\n      \n    }\n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(3, 6)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"name".to_string()), "got {ls:?}");
+    assert!(ls.contains(&"tags".to_string()), "got {ls:?}");
+    // Must not show cloud's own attrs.
+    assert!(!ls.contains(&"organization".to_string()), "got {ls:?}");
+}
+
+#[tokio::test]
+async fn exec_body_in_kubernetes_backend_suggests_api_version_and_command() {
+    let u = uri("file:///tf.tf");
+    let src = "terraform {\n  backend \"kubernetes\" {\n    exec {\n      \n    }\n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(3, 6)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"api_version".to_string()), "got {ls:?}");
+    assert!(ls.contains(&"command".to_string()), "got {ls:?}");
+    assert!(ls.contains(&"args".to_string()), "got {ls:?}");
+    assert!(ls.contains(&"env".to_string()), "got {ls:?}");
+    // Must not leak kubernetes backend attrs.
+    assert!(!ls.contains(&"namespace".to_string()), "got {ls:?}");
+}
+
+// Regression: the existing resource/data dispatch still fires for
+// provider-schema-driven nested blocks (not lifecycle). The
+// BuiltinNestedBody router must only intercept when the nested path
+// passes through `lifecycle`.
+#[tokio::test]
+async fn resource_nested_block_uses_provider_schema_not_builtin_router() {
+    // `root_block_device` is a provider-defined nested block inside
+    // `aws_instance`; we shouldn't hijack it with the built-in
+    // resolver. Expect NO completions because no provider schema is
+    // installed, but importantly the context should not resolve to
+    // BuiltinNestedBody (which would also yield nothing but for
+    // different reasons). Verified behaviorally by absence of
+    // crashes and absence of lifecycle attrs.
+    let u = uri("file:///r.tf");
+    let src = "resource \"aws_instance\" \"x\" {\n  root_block_device {\n    \n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 4)),
+    )
+    .await
+    .expect("ok");
+    if let Some(CompletionResponse::Array(items)) = resp {
+        let ls: Vec<_> = items.iter().map(|i| i.label.clone()).collect();
+        // `create_before_destroy` only appears inside `lifecycle`; if
+        // we hijacked the nested-block dispatch for arbitrary nested
+        // blocks, it would show up here.
+        assert!(
+            !ls.contains(&"create_before_destroy".to_string()),
+            "provider-schema path must not route through lifecycle; got {ls:?}"
+        );
+    }
+}
+
 // --- Nested-block snippet body pre-population -----------------------------
 //
 // When the user picks a nested block that has strictly-required

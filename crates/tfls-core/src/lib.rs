@@ -11,7 +11,9 @@ pub mod types;
 pub mod variable_type;
 pub mod version_constraint;
 
-pub use completion::{CompletionContext, IndexRootRef, PathStep, classify_context};
+pub use completion::{
+    BlockStep, CompletionContext, IndexRootRef, PathStep, classify_context, resolve_nested_schema,
+};
 pub use error::CoreError;
 pub use meta_arguments::{
     BlockKind, CONDITION_ATTRS, META_ATTRS, is_meta_attr, is_singleton_meta_block,
