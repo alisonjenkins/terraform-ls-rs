@@ -19,6 +19,9 @@ pub struct Config {
     pub cli_enabled: bool,
     /// CLI binary name to resolve from PATH (default: "tofu").
     pub cli_binary: String,
+    /// Number of days past which an exact-pinned version is flagged
+    /// stale by the inlay-hint formatter. Default 180 (~6 months).
+    pub stale_version_days: u32,
 }
 
 impl Default for Config {
@@ -28,6 +31,7 @@ impl Default for Config {
             watch_debounce: Duration::from_millis(150),
             cli_enabled: true,
             cli_binary: "tofu".to_string(),
+            stale_version_days: 180,
         }
     }
 }
@@ -79,6 +83,10 @@ impl ConfigCell {
         }
         if let Some(v) = obj.get("watchDebounceMs").and_then(|v| v.as_u64()) {
             guard.watch_debounce = Duration::from_millis(v);
+        }
+        if let Some(v) = obj.get("staleVersionDays").and_then(|v| v.as_u64()) {
+            // Clamp to u32 range. 0 means "never flag as stale".
+            guard.stale_version_days = v.try_into().unwrap_or(u32::MAX);
         }
     }
 }

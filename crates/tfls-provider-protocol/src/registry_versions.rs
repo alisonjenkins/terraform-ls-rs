@@ -44,10 +44,15 @@ impl Registry {
 /// One version as reported by the registries, tagged with which
 /// registry/registries it was found in so the UI can surface
 /// provenance (most versions show up on both).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionInfo {
     pub version: String,
     pub registries: Vec<Registry>,
+    /// ISO-8601 publication timestamp if we could obtain one (some
+    /// endpoints return version strings only). Used for age-based
+    /// inlay hints; `None` disables the age signal for this version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_at: Option<String>,
 }
 
 impl VersionInfo {
@@ -95,11 +100,207 @@ pub async fn fetch_versions(
 ) -> Result<Vec<VersionInfo>, ProtocolError> {
     let tf = fetch_registry_versions(client, TERRAFORM_HOST, "terraform", namespace, name);
     let tofu = fetch_registry_versions(client, OPENTOFU_HOST, "opentofu", namespace, name);
-    let (tf_res, tofu_res) = tokio::join!(tf, tofu);
+    // Date enrichment runs in parallel with the primary fetches. It
+    // hits the Terraform-registry v2 API (the only one that gives us
+    // `published-at` in bulk). If it fails, we simply skip age-based
+    // inlay hints for this provider — nothing else breaks.
+    let dates = fetch_provider_dates(client, namespace, name);
+    let (tf_res, tofu_res, dates_res) = tokio::join!(tf, tofu, dates);
 
     let tf_vec: Vec<String> = tf_res.unwrap_or_default();
     let tofu_vec: Vec<String> = tofu_res.unwrap_or_default();
-    Ok(merge_with_provenance(tf_vec, tofu_vec))
+    let mut merged = merge_with_provenance(tf_vec, tofu_vec);
+    if let Ok(dates_map) = dates_res {
+        attach_dates(&mut merged, &dates_map);
+    }
+    Ok(merged)
+}
+
+/// Resolve the Terraform-registry internal provider ID, then fetch
+/// every version's `published-at`. Cached under
+/// `registry-versions/dates/{ns}/{name}.json` separately from the
+/// v1 version list so the two can evolve independently.
+async fn fetch_provider_dates(
+    client: &reqwest::Client,
+    namespace: &str,
+    name: &str,
+) -> Result<std::collections::HashMap<String, String>, ProtocolError> {
+    let cache_path = provider_dates_cache_path(namespace, name);
+    if let Some(fresh) = read_fresh_dates_cache(&cache_path).await {
+        return Ok(fresh);
+    }
+    match try_fetch_provider_dates(client, namespace, name).await {
+        Ok(dates) => {
+            write_dates_cache(&cache_path, &dates).await;
+            Ok(dates)
+        }
+        Err(e) => {
+            if let Some(stale) = read_any_dates_cache(&cache_path).await {
+                tracing::debug!(error = %e, %namespace, %name,
+                    "provider dates fetch failed; serving stale cache");
+                Ok(stale)
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+async fn try_fetch_provider_dates(
+    client: &reqwest::Client,
+    namespace: &str,
+    name: &str,
+) -> Result<std::collections::HashMap<String, String>, ProtocolError> {
+    // Step 1 — look up the internal numeric provider ID.
+    let lookup_url = format!(
+        "{TERRAFORM_HOST}/v2/providers?filter%5Bnamespace%5D={namespace}&filter%5Bname%5D={name}&page%5Bsize%5D=1"
+    );
+    #[derive(Deserialize)]
+    struct LookupResp {
+        data: Vec<LookupEntry>,
+    }
+    #[derive(Deserialize)]
+    struct LookupEntry {
+        id: String,
+    }
+    let resp = client
+        .get(&lookup_url)
+        .send()
+        .await
+        .map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(ProtocolError::RegistryHttp(format!(
+            "GET {lookup_url} → HTTP {}",
+            resp.status()
+        )));
+    }
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
+    let lookup: LookupResp =
+        serde_json::from_str(&body).map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
+    let Some(id) = lookup.data.first().map(|e| e.id.clone()) else {
+        return Ok(std::collections::HashMap::new());
+    };
+
+    // Step 2 — paginate /v2/providers/{id}/provider-versions until we
+    // run out. Providers with many releases (e.g. hashicorp/aws) get
+    // ~20 pages of 100; small ones get one page.
+    #[derive(Deserialize)]
+    struct VersionsResp {
+        data: Vec<VersionEntry>,
+        #[serde(default)]
+        meta: Option<MetaBlock>,
+    }
+    #[derive(Deserialize)]
+    struct VersionEntry {
+        attributes: VersionAttrs,
+    }
+    #[derive(Deserialize)]
+    struct VersionAttrs {
+        version: String,
+        #[serde(rename = "published-at", default)]
+        published_at: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct MetaBlock {
+        #[serde(default)]
+        pagination: Option<PaginationBlock>,
+    }
+    #[derive(Deserialize)]
+    struct PaginationBlock {
+        #[serde(rename = "total-pages", default)]
+        total_pages: u32,
+    }
+    let mut out: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for page in 1..=25u32 {
+        let url = format!(
+            "{TERRAFORM_HOST}/v2/providers/{id}/provider-versions?page%5Bsize%5D=100&page%5Bnumber%5D={page}"
+        );
+        let resp = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(ProtocolError::RegistryHttp(format!(
+                "GET {url} → HTTP {}",
+                resp.status()
+            )));
+        }
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
+        let parsed: VersionsResp = serde_json::from_str(&body)
+            .map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
+        let page_len = parsed.data.len();
+        for entry in parsed.data {
+            if let Some(date) = entry.attributes.published_at {
+                out.insert(entry.attributes.version, date);
+            }
+        }
+        if page_len < 100 {
+            break;
+        }
+        if let Some(meta) = parsed.meta {
+            if let Some(pg) = meta.pagination {
+                if page >= pg.total_pages {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn provider_dates_cache_path(namespace: &str, name: &str) -> PathBuf {
+    cache_root()
+        .join("dates")
+        .join(sanitise(namespace))
+        .join(sanitise(name))
+        .join("dates.json")
+}
+
+async fn read_fresh_dates_cache(path: &Path) -> Option<std::collections::HashMap<String, String>> {
+    let meta = tokio::fs::metadata(path).await.ok()?;
+    let modified = meta.modified().ok()?;
+    let age = SystemTime::now()
+        .duration_since(modified)
+        .unwrap_or(Duration::MAX);
+    if age > CACHE_TTL {
+        return None;
+    }
+    read_dates_cache(path).await
+}
+
+async fn read_any_dates_cache(path: &Path) -> Option<std::collections::HashMap<String, String>> {
+    read_dates_cache(path).await
+}
+
+async fn read_dates_cache(path: &Path) -> Option<std::collections::HashMap<String, String>> {
+    let body = tokio::fs::read_to_string(path).await.ok()?;
+    serde_json::from_str::<std::collections::HashMap<String, String>>(&body).ok()
+}
+
+async fn write_dates_cache(path: &Path, dates: &std::collections::HashMap<String, String>) {
+    if let Some(parent) = path.parent() {
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            tracing::debug!(error = %e, dir = %parent.display(), "dates cache dir create failed");
+            return;
+        }
+    }
+    let body = match serde_json::to_string(dates) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!(error = %e, "dates cache serialise failed");
+            return;
+        }
+    };
+    if let Err(e) = tokio::fs::write(path, body).await {
+        tracing::debug!(error = %e, path = %path.display(), "dates cache write failed");
+    }
 }
 
 /// Merge two version lists into one tagged with provenance, then
@@ -122,6 +323,7 @@ pub fn merge_with_provenance(tf: Vec<String>, tofu: Vec<String>) -> Vec<VersionI
             out.push(VersionInfo {
                 version: v,
                 registries: regs,
+                published_at: None,
             });
         }
     }
@@ -130,11 +332,26 @@ pub fn merge_with_provenance(tf: Vec<String>, tofu: Vec<String>) -> Vec<VersionI
             out.push(VersionInfo {
                 version: v,
                 registries: vec![Registry::OpenTofu],
+                published_at: None,
             });
         }
     }
     out.sort_by(|a, b| semver_key(&b.version).cmp(&semver_key(&a.version)));
     out
+}
+
+/// Stitch publication dates (keyed by version string) onto an already-
+/// merged `VersionInfo` list. Missing keys are left as `None`. Used
+/// by callers that enrich v1 version strings with v2 `published_at`
+/// data after the primary fetch completes.
+pub fn attach_dates(versions: &mut [VersionInfo], dates: &std::collections::HashMap<String, String>) {
+    for v in versions.iter_mut() {
+        if v.published_at.is_none() {
+            if let Some(d) = dates.get(&v.version) {
+                v.published_at = Some(d.clone());
+            }
+        }
+    }
 }
 
 /// A comparable key for a semver-ish version string. Tuple shape lets

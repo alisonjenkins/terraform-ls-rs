@@ -28,6 +28,18 @@ struct GitHubRelease {
     draft: bool,
     #[serde(default)]
     prerelease: bool,
+    #[serde(default)]
+    published_at: Option<String>,
+}
+
+/// Cache-on-disk shape: `[{version, published_at?}, …]`. Keeps
+/// release timestamps so the inlay-hint path can surface "N months
+/// old" without refetching GitHub.
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
+struct CachedRelease {
+    version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    published_at: Option<String>,
 }
 
 /// Fetch merged CLI versions from both Terraform and OpenTofu
@@ -41,7 +53,20 @@ pub async fn fetch_tool_versions(
     let (tf_res, tofu_res) = tokio::join!(tf, tofu);
     let tf_vec = tf_res.unwrap_or_default();
     let tofu_vec = tofu_res.unwrap_or_default();
-    Ok(merge_with_provenance(tf_vec, tofu_vec))
+
+    // Extract (version, date) pairs separately so merge can use the
+    // existing string-only helper, then re-attach dates.
+    let mut dates: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for r in tf_vec.iter().chain(tofu_vec.iter()) {
+        if let Some(d) = &r.published_at {
+            dates.entry(r.version.clone()).or_insert_with(|| d.clone());
+        }
+    }
+    let tf_versions: Vec<String> = tf_vec.into_iter().map(|r| r.version).collect();
+    let tofu_versions: Vec<String> = tofu_vec.into_iter().map(|r| r.version).collect();
+    let mut merged = merge_with_provenance(tf_versions, tofu_versions);
+    crate::registry_versions::attach_dates(&mut merged, &dates);
+    Ok(merged)
 }
 
 /// HTTP client appropriate for the GitHub REST API: user-agent set
@@ -59,15 +84,15 @@ async fn fetch_github_releases(
     owner: &str,
     repo: &str,
     cache_slug: &str,
-) -> Result<Vec<String>, ProtocolError> {
+) -> Result<Vec<CachedRelease>, ProtocolError> {
     let cache_path = tool_cache_path(cache_slug);
     if let Some(fresh) = read_fresh_cache(&cache_path).await {
         return Ok(fresh);
     }
     match try_github_fetch(client, owner, repo).await {
-        Ok(versions) => {
-            write_cache(&cache_path, &versions).await;
-            Ok(versions)
+        Ok(releases) => {
+            write_cache(&cache_path, &releases).await;
+            Ok(releases)
         }
         Err(e) => {
             if let Some(stale) = read_any_cache(&cache_path).await {
@@ -88,7 +113,7 @@ async fn try_github_fetch(
     client: &reqwest::Client,
     owner: &str,
     repo: &str,
-) -> Result<Vec<String>, ProtocolError> {
+) -> Result<Vec<CachedRelease>, ProtocolError> {
     // 100 is GitHub's max page size; Terraform and OpenTofu combined
     // have well under 100 stable releases so one page suffices.
     let url = format!("https://api.github.com/repos/{owner}/{repo}/releases?per_page=100");
@@ -115,7 +140,10 @@ async fn try_github_fetch(
     Ok(releases
         .into_iter()
         .filter(|r| !r.draft && !r.prerelease)
-        .map(|r| r.tag_name.strip_prefix('v').unwrap_or(&r.tag_name).to_string())
+        .map(|r| CachedRelease {
+            version: r.tag_name.strip_prefix('v').unwrap_or(&r.tag_name).to_string(),
+            published_at: r.published_at,
+        })
         .collect())
 }
 
@@ -149,7 +177,7 @@ fn tool_cache_path(slug: &str) -> PathBuf {
     cache_root().join(format!("{}.json", sanitise(slug)))
 }
 
-async fn read_fresh_cache(path: &Path) -> Option<Vec<String>> {
+async fn read_fresh_cache(path: &Path) -> Option<Vec<CachedRelease>> {
     let meta = tokio::fs::metadata(path).await.ok()?;
     let modified = meta.modified().ok()?;
     let age = SystemTime::now()
@@ -161,23 +189,39 @@ async fn read_fresh_cache(path: &Path) -> Option<Vec<String>> {
     read_cache_contents(path).await
 }
 
-async fn read_any_cache(path: &Path) -> Option<Vec<String>> {
+async fn read_any_cache(path: &Path) -> Option<Vec<CachedRelease>> {
     read_cache_contents(path).await
 }
 
-async fn read_cache_contents(path: &Path) -> Option<Vec<String>> {
+async fn read_cache_contents(path: &Path) -> Option<Vec<CachedRelease>> {
     let body = tokio::fs::read_to_string(path).await.ok()?;
-    serde_json::from_str::<Vec<String>>(&body).ok()
+    // Accept both the new {version,published_at} shape and the old
+    // bare-string shape so upgrades don't nuke existing caches.
+    if let Ok(rich) = serde_json::from_str::<Vec<CachedRelease>>(&body) {
+        return Some(rich);
+    }
+    if let Ok(plain) = serde_json::from_str::<Vec<String>>(&body) {
+        return Some(
+            plain
+                .into_iter()
+                .map(|v| CachedRelease {
+                    version: v,
+                    published_at: None,
+                })
+                .collect(),
+        );
+    }
+    None
 }
 
-async fn write_cache(path: &Path, versions: &[String]) {
+async fn write_cache(path: &Path, releases: &[CachedRelease]) {
     if let Some(parent) = path.parent() {
         if let Err(e) = tokio::fs::create_dir_all(parent).await {
             tracing::debug!(error = %e, dir = %parent.display(), "cache dir create failed");
             return;
         }
     }
-    let body = match serde_json::to_string(versions) {
+    let body = match serde_json::to_string(releases) {
         Ok(s) => s,
         Err(e) => {
             tracing::debug!(error = %e, "cache serialise failed");
