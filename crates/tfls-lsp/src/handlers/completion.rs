@@ -196,6 +196,7 @@ pub async fn completion(
         CompletionContext::RequiredVersionValue { cursor_partial } => {
             required_version_value_items(&cursor_partial).await
         }
+        CompletionContext::VariableTypeValue => variable_type_value_items(),
         CompletionContext::ModuleVersionValue { source, cursor_partial } => {
             module_version_value_items(source.as_deref(), &cursor_partial).await
         }
@@ -363,6 +364,75 @@ pub fn resource_scaffold_snippet(type_name: &str, backend: &Backend, kind: &str)
     }
     snippet.push('}');
     snippet
+}
+
+/// Terraform type-expression completion: primitives as plain values
+/// and collection constructors as snippets with a tabstop on the
+/// inner type so the user can nest immediately. The detector
+/// populates `VariableTypeValue` both for `type = |` and for
+/// positions recursively inside constructors (`list(|)`,
+/// `object({ name = | })`, …), so the same item list is the right
+/// answer in every position.
+fn variable_type_value_items() -> Vec<CompletionItem> {
+    const PRIMITIVES: &[(&str, &str)] = &[
+        ("string", "A Unicode string value"),
+        ("number", "A numeric value (integer or float)"),
+        ("bool", "A boolean: `true` or `false`"),
+        ("any", "Accept any type. Typically used for pass-through variables"),
+        ("null", "The null value"),
+    ];
+    const CONSTRUCTORS: &[(&str, &str, &str)] = &[
+        (
+            "list",
+            "list(${1:string})",
+            "Ordered sequence of values of the same type",
+        ),
+        (
+            "set",
+            "set(${1:string})",
+            "Unordered collection of unique values",
+        ),
+        (
+            "map",
+            "map(${1:string})",
+            "Key-value mapping. Keys are strings, values share the given type",
+        ),
+        (
+            "tuple",
+            "tuple([${1:string}])",
+            "Ordered sequence where each position has its own type",
+        ),
+        (
+            "object",
+            "object({\n  ${1:name} = ${2:string}\n})",
+            "Record where each named attribute has its own type",
+        ),
+    ];
+    let mut items: Vec<CompletionItem> = Vec::new();
+    for (prim, doc) in PRIMITIVES {
+        items.push(CompletionItem {
+            label: prim.to_string(),
+            kind: Some(CompletionItemKind::TYPE_PARAMETER),
+            detail: Some((*doc).to_string()),
+            insert_text: Some(prim.to_string()),
+            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+            // `00_` prefix keeps primitives on top of constructors.
+            sort_text: Some(format!("00_{prim}")),
+            ..Default::default()
+        });
+    }
+    for (label, snippet, doc) in CONSTRUCTORS {
+        items.push(CompletionItem {
+            label: label.to_string(),
+            kind: Some(CompletionItemKind::CONSTRUCTOR),
+            detail: Some((*doc).to_string()),
+            insert_text: Some((*snippet).to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            sort_text: Some(format!("01_{label}")),
+            ..Default::default()
+        });
+    }
+    items
 }
 
 /// Render completion items for a `BuiltinSchema` — used by

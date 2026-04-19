@@ -90,6 +90,14 @@ pub enum CompletionContext {
         cursor_partial: String,
     },
 
+    /// Cursor is in a type-expression position: the right-hand side
+    /// of `variable "x" { type = | }`, or recursively inside a
+    /// constructor like `list(|)`, `map(string, |)`, or
+    /// `object({ name = | })`. Suggestions are Terraform type
+    /// primitives (`string`, `number`, `bool`, `any`, `null`) plus
+    /// the collection constructors as snippets.
+    VariableTypeValue,
+
     /// Cursor is inside the string value of `version = "|"` directly
     /// inside a `module "…" { … }` block. `source` is the sibling
     /// attribute's value if one is already set — a registry-module
@@ -197,6 +205,14 @@ pub fn classify_context(source: &str, byte_offset: usize) -> CompletionContext {
 
     // Reference prefixes take priority.
     if let Some(ctx) = reference_prefix_context(before) {
+        return ctx;
+    }
+
+    // Type-expression position inside a variable block (`variable "x"
+    // { type = | }` or inside a constructor thereof). Checked before
+    // expression_context so it wins over the generic function-call
+    // fallback.
+    if let Some(ctx) = type_expression_context(before) {
         return ctx;
     }
 
@@ -359,6 +375,119 @@ fn scan_body_for_source_attr(body: &str) -> Option<String> {
             return Some(inner[..end].to_string());
         }
         return None;
+    }
+    None
+}
+
+/// Returns `VariableTypeValue` if the cursor sits somewhere a type
+/// expression is expected — the right-hand side of `type =` inside a
+/// `variable "x" { … }` block, or any position nested inside a
+/// constructor that was started from there (`list(|)`, `tuple([|])`,
+/// `object({ name = | })`, etc.).
+///
+/// The algorithm:
+/// 1. Confirm the enclosing block is `variable`.
+/// 2. Find that block's opening `{` going backwards.
+/// 3. Walk forward from there, tracking paren / brace / bracket depth
+///    relative to the block body. The last `=` we see at depth 0 is
+///    the attribute assignment that governs the cursor's position.
+/// 4. If the preceding identifier is `type`, we're in a type
+///    expression — whether that's directly after `type =` or nested
+///    inside any constructor started from there.
+fn type_expression_context(before: &str) -> Option<CompletionContext> {
+    // `find_variable_block_open` already filters to variable blocks
+    // and walks past intermediate object / function-call openers that
+    // `enclosing_block_context` would bail out on, so use it directly.
+    let block_open = find_variable_block_open(before)?;
+    let body = &before[block_open + 1..];
+    let bytes = body.as_bytes();
+    let mut paren: i32 = 0;
+    let mut brace: i32 = 0;
+    let mut bracket: i32 = 0;
+    let mut in_string = false;
+    let mut last_eq_at_depth_zero: Option<usize> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_string {
+            if b == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            if b == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'(' => paren += 1,
+            b')' => paren -= 1,
+            b'{' => brace += 1,
+            b'}' => brace -= 1,
+            b'[' => bracket += 1,
+            b']' => bracket -= 1,
+            b'=' => {
+                if paren == 0 && brace == 0 && bracket == 0 {
+                    last_eq_at_depth_zero = Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let eq_pos = last_eq_at_depth_zero?;
+    let head = &body[..eq_pos];
+    let trimmed = head.trim_end();
+    let attr_name: String = trimmed
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    if attr_name == "type" {
+        Some(CompletionContext::VariableTypeValue)
+    } else {
+        None
+    }
+}
+
+/// Find the byte offset of the `{` that opens the enclosing
+/// `variable "…" { … }` block. Walks back through any object-literal
+/// openers, function-call bodies, or nested block openers the cursor
+/// is inside — only a recognised block header terminates the search.
+fn find_variable_block_open(before: &str) -> Option<usize> {
+    let mut depth: i32 = 0;
+    let bytes = before.as_bytes();
+    let mut i = bytes.len();
+    while i > 0 {
+        i -= 1;
+        match bytes[i] {
+            b'}' => depth += 1,
+            b'{' => {
+                if depth == 0 {
+                    let header = &before[..i];
+                    if let Some(ctx) = classify_block_header(header) {
+                        if matches!(ctx, CompletionContext::VariableBlockBody { .. }) {
+                            return Some(i);
+                        }
+                        // Some other recognised block — stop.
+                        return None;
+                    }
+                    // Unknown `{` at depth 0 — object literal,
+                    // function-call argument, or nested block. Keep
+                    // walking outward; `depth` stays at 0 because
+                    // we're crossing an *enclosing* opener, not a
+                    // closed sibling.
+                } else {
+                    depth -= 1;
+                }
+            }
+            _ => {}
+        }
     }
     None
 }

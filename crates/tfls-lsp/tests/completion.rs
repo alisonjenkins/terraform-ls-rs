@@ -1384,6 +1384,94 @@ async fn terraform_block_body_suggests_required_version_and_blocks() {
 }
 
 #[tokio::test]
+async fn variable_type_value_top_level_offers_primitives_and_constructors() {
+    let u = uri("file:///v.tf");
+    // Cursor right after `type = `.
+    let src = "variable \"x\" {\n  type = \n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(1, 9)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    for t in ["string", "number", "bool", "any", "null"] {
+        assert!(
+            ls.contains(&t.to_string()),
+            "primitive {t} missing; got {ls:?}"
+        );
+    }
+    for c in ["list", "set", "map", "tuple", "object"] {
+        assert!(
+            ls.contains(&c.to_string()),
+            "constructor {c} missing; got {ls:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn variable_type_value_inside_list_constructor_also_offers_types() {
+    let u = uri("file:///v.tf");
+    // Cursor inside `list(|)`.
+    let src = "variable \"x\" {\n  type = list()\n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(1, 14)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"string".to_string()), "got {ls:?}");
+    assert!(ls.contains(&"map".to_string()));
+}
+
+#[tokio::test]
+async fn variable_type_value_inside_object_constructor() {
+    let u = uri("file:///v.tf");
+    // Cursor at `object({ name = | })`.
+    let src = "variable \"x\" {\n  type = object({ name =  })\n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(1, 25)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"string".to_string()), "got {ls:?}");
+    assert!(ls.contains(&"object".to_string()));
+}
+
+#[tokio::test]
+async fn variable_type_value_does_not_fire_for_default() {
+    // `default = ` is NOT a type expression — we should not suggest
+    // `string`/`number` as values.
+    let u = uri("file:///v.tf");
+    let src = "variable \"x\" {\n  default = \n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(1, 12)),
+    )
+    .await
+    .expect("ok");
+    // We may or may not have other suggestions here; the assertion
+    // is only that primitive type words aren't polluting the list.
+    if let Some(CompletionResponse::Array(items)) = resp {
+        let ls: Vec<_> = items.iter().map(|i| i.label.clone()).collect();
+        assert!(
+            !ls.contains(&"string".to_string()),
+            "type primitives must not appear for default; got {ls:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn variable_block_body_suggests_standard_attrs() {
     let u = uri("file:///v.tf");
     let src = "variable \"my_var\" {\n  \n}\n";
