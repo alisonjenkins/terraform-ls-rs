@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::ProtocolError;
 
@@ -26,7 +26,7 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 const CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Which public registry a version was advertised by.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Registry {
     Terraform,
     OpenTofu,

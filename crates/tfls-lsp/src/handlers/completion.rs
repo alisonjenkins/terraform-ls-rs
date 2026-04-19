@@ -187,7 +187,9 @@ pub async fn completion(
             let filter = compute_body_filter(doc.parsed.body.as_ref(), offset);
             required_provider_entry_attr_items(&filter)
         }
-        CompletionContext::RequiredProviderSourceValue => required_provider_source_value_items(),
+        CompletionContext::RequiredProviderSourceValue => {
+            required_provider_source_value_items().await
+        }
         CompletionContext::RequiredProviderVersionValue { source } => {
             required_provider_version_value_items(source.as_deref()).await
         }
@@ -487,47 +489,105 @@ fn required_providers_entry_items(filter: &BodyFilter) -> Vec<CompletionItem> {
     items
 }
 
-/// Items for `source = "|"` inside a `required_providers` entry —
-/// surfaces the curated list of popular provider source paths from
-/// `builtin_blocks`, each in three flavours:
-///   * bare `namespace/name` — uses the default registry (the one
-///     your CLI was installed from: terraform.io for Terraform,
-///     opentofu.org for tofu).
-///   * `registry.terraform.io/namespace/name` — explicit Terraform.
-///   * `registry.opentofu.org/namespace/name` — explicit OpenTofu.
+/// Items for `source = "|"` inside a `required_providers` entry.
 ///
-/// Enumerating the full public registries (5000+ providers) isn't
-/// useful as a free-completion list; if the user needs something
-/// rarer they just type it directly.
-fn required_provider_source_value_items() -> Vec<CompletionItem> {
+/// Three sources of items, in priority order via `sortText`:
+///   1. Curated entries (hand-maintained in `builtin_blocks`), each
+///      shown in three flavours: bare, `registry.terraform.io/`-
+///      prefixed, and `registry.opentofu.org/`-prefixed — so users
+///      can pin a specific registry when needed.
+///   2. Live Terraform registry catalog (official + partner tiers,
+///      ~250 providers), cached 7 days. Fetched via the shared
+///      `registry_catalog` module.
+///   3. A curated entry always wins ordering / de-dupe against a
+///      catalog entry for the same source, so popular ones stay at
+///      the top.
+///
+/// Community tier is deliberately excluded — thousands of rarely-
+/// used providers would dominate the list with noise.
+async fn required_provider_source_value_items() -> Vec<CompletionItem> {
     let mut items: Vec<CompletionItem> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // (1) Curated entries — `00_` sort prefix keeps them on top.
     for (_, source, hint) in builtin_blocks::REQUIRED_PROVIDERS_COMMON_ENTRIES {
-        items.push(CompletionItem {
-            label: (*source).to_string(),
-            kind: Some(CompletionItemKind::VALUE),
-            detail: Some(format!("default registry — {hint}")),
-            insert_text: Some((*source).to_string()),
-            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
-            ..Default::default()
-        });
-        items.push(CompletionItem {
-            label: format!("registry.terraform.io/{source}"),
-            kind: Some(CompletionItemKind::VALUE),
-            detail: Some(format!("Terraform registry — {hint}")),
-            insert_text: Some(format!("registry.terraform.io/{source}")),
-            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
-            ..Default::default()
-        });
-        items.push(CompletionItem {
-            label: format!("registry.opentofu.org/{source}"),
-            kind: Some(CompletionItemKind::VALUE),
-            detail: Some(format!("OpenTofu registry — {hint}")),
-            insert_text: Some(format!("registry.opentofu.org/{source}")),
-            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
-            ..Default::default()
-        });
+        let bare = (*source).to_string();
+        let tf_prefixed = format!("registry.terraform.io/{source}");
+        let tofu_prefixed = format!("registry.opentofu.org/{source}");
+        if seen.insert(bare.clone()) {
+            items.push(CompletionItem {
+                label: bare.clone(),
+                sort_text: Some(format!("00_{bare}")),
+                kind: Some(CompletionItemKind::VALUE),
+                detail: Some(format!("default registry — {hint}")),
+                insert_text: Some(bare),
+                insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+                ..Default::default()
+            });
+        }
+        if seen.insert(tf_prefixed.clone()) {
+            items.push(CompletionItem {
+                label: tf_prefixed.clone(),
+                sort_text: Some(format!("00_{tf_prefixed}")),
+                kind: Some(CompletionItemKind::VALUE),
+                detail: Some(format!("Terraform registry — {hint}")),
+                insert_text: Some(tf_prefixed),
+                insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+                ..Default::default()
+            });
+        }
+        if seen.insert(tofu_prefixed.clone()) {
+            items.push(CompletionItem {
+                label: tofu_prefixed.clone(),
+                sort_text: Some(format!("00_{tofu_prefixed}")),
+                kind: Some(CompletionItemKind::VALUE),
+                detail: Some(format!("OpenTofu registry — {hint}")),
+                insert_text: Some(tofu_prefixed),
+                insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+                ..Default::default()
+            });
+        }
     }
-    items.sort_by(|a, b| a.label.cmp(&b.label));
+
+    // (2) Live catalog — official + partner tier providers. Failures
+    // are absorbed; we still show the curated list on top so source
+    // completion is never empty.
+    if let Ok(client) = tfls_provider_protocol::registry_catalog::build_http_client() {
+        match tfls_provider_protocol::registry_catalog::fetch_catalog(&client).await {
+            Ok(catalog) => {
+                for entry in catalog {
+                    let source = entry.source();
+                    if !seen.insert(source.clone()) {
+                        continue; // already emitted by the curated list
+                    }
+                    let tier_label = entry
+                        .tier
+                        .as_deref()
+                        .map(|t| format!("{} tier", t))
+                        .unwrap_or_else(|| "public".to_string());
+                    let detail = match entry.description.as_deref() {
+                        Some(d) if !d.trim().is_empty() => {
+                            format!("{} — {}", tier_label, d.trim())
+                        }
+                        _ => tier_label,
+                    };
+                    items.push(CompletionItem {
+                        label: source.clone(),
+                        sort_text: Some(format!("01_{source}")),
+                        kind: Some(CompletionItemKind::VALUE),
+                        detail: Some(detail),
+                        insert_text: Some(source),
+                        insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+                        ..Default::default()
+                    });
+                }
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "catalog fetch failed; only curated sources will show");
+            }
+        }
+    }
+
     items
 }
 

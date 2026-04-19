@@ -13,6 +13,7 @@ use std::path::Path;
 pub mod client;
 pub mod discovery;
 pub mod handshake;
+pub mod registry_catalog;
 pub mod registry_docs;
 pub mod registry_versions;
 pub mod tls;
