@@ -65,6 +65,17 @@ pub enum CompletionContext {
     /// `source` and `version` attribute names.
     RequiredProvidersEntryBody,
 
+    /// Cursor is inside the string value of `source = "|"` under a
+    /// `required_providers` entry. Expect a provider source path
+    /// (e.g. `hashicorp/aws`).
+    RequiredProviderSourceValue,
+
+    /// Cursor is inside the string value of `version = "|"` under a
+    /// `required_providers` entry. `source` is the sibling attr's
+    /// value if one is already set — the dispatcher uses it to fetch
+    /// per-provider versions from the registries.
+    RequiredProviderVersionValue { source: Option<String> },
+
     /// Cursor is after `module.<name>.` — expect an output name from
     /// the referenced child module.
     ModuleAttr { module_name: String },
@@ -147,6 +158,14 @@ pub fn classify_context(source: &str, byte_offset: usize) -> CompletionContext {
     }
     let before = &source[..byte_offset];
 
+    // Cursor inside an unterminated string literal that's the value of
+    // a recognised attribute (e.g. `source = "|"`, `version = "|"`).
+    // Checked before expression_context so we route to the specialised
+    // variants instead of the generic function-call fallback.
+    if let Some(ctx) = string_value_context(before) {
+        return ctx;
+    }
+
     // Bracket-index path wins first — `var.x["key"][` etc.
     if let Some(ctx) = bracket_index_context(before) {
         return ctx;
@@ -178,6 +197,129 @@ pub fn classify_context(source: &str, byte_offset: usize) -> CompletionContext {
     }
 
     CompletionContext::Unknown
+}
+
+/// Detects: cursor sits inside an unterminated string literal whose
+/// role in the surrounding block lets us specialise the suggestions.
+/// Currently used for `required_providers` entry attributes
+/// (`source`, `version`) — the Phase-2 value completions.
+fn string_value_context(before: &str) -> Option<CompletionContext> {
+    let (string_open, in_string) = unterminated_string_open(before)?;
+    if !in_string {
+        return None;
+    }
+    // Walk back from just before the opening quote to extract the
+    // attribute name we're assigning to (`attr = "|"`).
+    let header = before[..string_open].trim_end();
+    let header = header.strip_suffix('=')?;
+    let header = header.trim_end();
+    let attr_name: String = header
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    if attr_name.is_empty() {
+        return None;
+    }
+    // Figure out the enclosing block context to scope the match.
+    let enclosing = enclosing_block_context(&before[..string_open])?;
+    match (attr_name.as_str(), enclosing) {
+        ("source", CompletionContext::RequiredProvidersEntryBody) => {
+            Some(CompletionContext::RequiredProviderSourceValue)
+        }
+        ("version", CompletionContext::RequiredProvidersEntryBody) => {
+            // Best-effort sibling lookup: scan the open object-literal
+            // body for a `source = "…"` sibling to scope versions to.
+            let source = extract_sibling_source(before, string_open);
+            Some(CompletionContext::RequiredProviderVersionValue { source })
+        }
+        _ => None,
+    }
+}
+
+/// Returns `(byte_offset_of_open_quote, is_unterminated)` if there's
+/// exactly one active string literal at the cursor.
+fn unterminated_string_open(before: &str) -> Option<(usize, bool)> {
+    let bytes = before.as_bytes();
+    let mut in_string = false;
+    let mut start: Option<usize> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\\' && in_string && i + 1 < bytes.len() {
+            // Skip the escaped character.
+            i += 2;
+            continue;
+        }
+        if b == b'"' {
+            if in_string {
+                in_string = false;
+                start = None;
+            } else {
+                in_string = true;
+                start = Some(i);
+            }
+        }
+        i += 1;
+    }
+    Some((start?, in_string))
+}
+
+/// Scan backwards from the cursor's string open quote for a sibling
+/// `source = "…"` assignment inside the same object-literal body.
+/// Returns the string contents if found.
+fn extract_sibling_source(before: &str, string_open: usize) -> Option<String> {
+    // Walk back to the nearest `{` at depth 0 (the entry's object
+    // literal opener). Scan attributes between that `{` and the
+    // cursor's string_open for a `source = "…"`.
+    let bytes = before.as_bytes();
+    let mut depth: i32 = 0;
+    let mut i = string_open;
+    while i > 0 {
+        i -= 1;
+        match bytes[i] {
+            b'}' => depth += 1,
+            b'{' => {
+                if depth == 0 {
+                    let body = &before[i + 1..string_open];
+                    return scan_body_for_source_attr(body);
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn scan_body_for_source_attr(body: &str) -> Option<String> {
+    // Simple linear scan: look for `source` followed by `=` and a
+    // quoted string. Whitespace-insensitive.
+    let mut rest = body;
+    while let Some(idx) = rest.find("source") {
+        let tail = &rest[idx + "source".len()..];
+        let trimmed = tail.trim_start();
+        if !trimmed.starts_with('=') {
+            rest = &rest[idx + 1..];
+            continue;
+        }
+        let after_eq = trimmed[1..].trim_start();
+        let bytes = after_eq.as_bytes();
+        if bytes.first() != Some(&b'"') {
+            rest = &rest[idx + 1..];
+            continue;
+        }
+        // Find the closing quote.
+        let inner = &after_eq[1..];
+        if let Some(end) = inner.find('"') {
+            return Some(inner[..end].to_string());
+        }
+        return None;
+    }
+    None
 }
 
 fn expression_context(before: &str) -> Option<CompletionContext> {

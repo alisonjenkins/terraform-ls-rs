@@ -14,6 +14,7 @@ pub mod client;
 pub mod discovery;
 pub mod handshake;
 pub mod registry_docs;
+pub mod registry_versions;
 pub mod tls;
 pub mod translate;
 pub mod translate_v5;

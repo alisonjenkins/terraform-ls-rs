@@ -187,6 +187,10 @@ pub async fn completion(
             let filter = compute_body_filter(doc.parsed.body.as_ref(), offset);
             required_provider_entry_attr_items(&filter)
         }
+        CompletionContext::RequiredProviderSourceValue => required_provider_source_value_items(),
+        CompletionContext::RequiredProviderVersionValue { source } => {
+            required_provider_version_value_items(source.as_deref()).await
+        }
         CompletionContext::Unknown => Vec::new(),
     };
 
@@ -480,6 +484,132 @@ fn required_providers_entry_items(filter: &BodyFilter) -> Vec<CompletionItem> {
     }
     items.sort_by(|a, b| a.label.cmp(&b.label));
     items
+}
+
+/// Items for `source = "|"` inside a `required_providers` entry —
+/// surfaces the curated list of popular provider source paths from
+/// `builtin_blocks`. Enumerating the full public registries (5000+
+/// providers) isn't useful as a free-completion list; if the user
+/// needs something rarer they just type it directly.
+fn required_provider_source_value_items() -> Vec<CompletionItem> {
+    let mut items: Vec<CompletionItem> = builtin_blocks::REQUIRED_PROVIDERS_COMMON_ENTRIES
+        .iter()
+        .map(|(_, source, hint)| CompletionItem {
+            label: source.to_string(),
+            kind: Some(CompletionItemKind::VALUE),
+            detail: Some(hint.to_string()),
+            insert_text: Some(source.to_string()),
+            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+            ..Default::default()
+        })
+        .collect();
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    items
+}
+
+/// Items for `version = "|"` inside a `required_providers` entry.
+/// When we can determine the sibling `source` value, queries the
+/// Terraform + OpenTofu registries for real versions (cached 24h to
+/// disk) and presents them alongside constraint templates. When we
+/// can't identify the source, falls back to just the templates.
+async fn required_provider_version_value_items(source: Option<&str>) -> Vec<CompletionItem> {
+    let mut items: Vec<CompletionItem> = Vec::new();
+
+    if let Some(source) = source.and_then(|s| parse_source(s)) {
+        if let Ok(client) = tfls_provider_protocol::registry_versions::build_http_client() {
+            match tfls_provider_protocol::registry_versions::fetch_versions(
+                &client,
+                &source.0,
+                &source.1,
+            )
+            .await
+            {
+                Ok(versions) => {
+                    // Exact-version items.
+                    for v in &versions {
+                        items.push(CompletionItem {
+                            label: v.clone(),
+                            kind: Some(CompletionItemKind::VALUE),
+                            detail: Some(format!("exact version from registry ({}/{})",
+                                source.0, source.1)),
+                            insert_text: Some(v.clone()),
+                            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+                            ..Default::default()
+                        });
+                    }
+                    // Pessimistic-constraint items for each distinct
+                    // major.minor pair so users can pick the common
+                    // `~> X.Y` form without typing it.
+                    let mut seen_mm: std::collections::BTreeSet<String> =
+                        std::collections::BTreeSet::new();
+                    for v in &versions {
+                        if let Some(mm) = major_minor(v) {
+                            seen_mm.insert(mm);
+                        }
+                    }
+                    for mm in seen_mm.into_iter().rev().take(5) {
+                        let label = format!("~> {mm}");
+                        items.push(CompletionItem {
+                            label: label.clone(),
+                            kind: Some(CompletionItemKind::SNIPPET),
+                            detail: Some("pessimistic (compatible) constraint".to_string()),
+                            insert_text: Some(label),
+                            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+                            ..Default::default()
+                        });
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "registry version fetch failed");
+                }
+            }
+        }
+    }
+
+    // Static constraint-form templates always available.
+    for tmpl in &["~> ", ">= ", "= ", "!= ", "> ", "< "] {
+        items.push(CompletionItem {
+            label: tmpl.trim_end().to_string(),
+            kind: Some(CompletionItemKind::OPERATOR),
+            detail: Some("version constraint operator".to_string()),
+            insert_text: Some(format!("{tmpl}${{1:1.0}}")),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        });
+    }
+
+    // De-dup labels (exact version already present might shadow a
+    // template) keeping first occurrence.
+    let mut seen = std::collections::HashSet::new();
+    items.retain(|i| seen.insert(i.label.clone()));
+    items
+}
+
+/// Split `"namespace/name"` into its two components. Returns `None`
+/// for anything that doesn't match the registry shape.
+fn parse_source(s: &str) -> Option<(String, String)> {
+    let s = s.trim_matches('"').trim();
+    let mut parts = s.splitn(3, '/');
+    let a = parts.next()?;
+    let b = parts.next()?;
+    // Registries also accept `host/ns/name`; in that form the first
+    // component is the host, last two are what we want.
+    if let Some(c) = parts.next() {
+        return Some((b.to_string(), c.to_string()));
+    }
+    Some((a.to_string(), b.to_string()))
+}
+
+/// Extract `"X.Y"` from `"X.Y.Z"` (or `"X.Y.Z-pre"` etc.).
+fn major_minor(version: &str) -> Option<String> {
+    let core = version.split('-').next().unwrap_or(version);
+    let mut it = core.splitn(3, '.');
+    let major = it.next()?;
+    let minor = it.next()?;
+    if major.is_empty() || minor.is_empty() {
+        return None;
+    }
+    Some(format!("{major}.{minor}"))
 }
 
 /// Items for the object-literal body of a `required_providers` entry,

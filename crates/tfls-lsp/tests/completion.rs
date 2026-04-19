@@ -1473,6 +1473,57 @@ async fn required_providers_entry_body_suggests_source_and_version() {
 }
 
 #[tokio::test]
+async fn required_provider_source_value_offers_curated_sources() {
+    // Cursor inside `source = "|"` should surface the curated list of
+    // common provider source paths (e.g. `hashicorp/aws`) as plain
+    // string values.
+    let u = uri("file:///src.tf");
+    let src = "terraform {\n  required_providers {\n    aws = {\n      source = \"\"\n    }\n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    // Cursor between the two `"` on the source line (after `source = "`).
+    // Line 3 = `      source = ""` — position 16 sits between the
+    // two quotes (character 15 is the open `"`, 16 is the close `"`).
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(3, 16)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"hashicorp/aws".to_string()), "got {ls:?}");
+    assert!(ls.contains(&"hashicorp/azurerm".to_string()));
+    assert!(ls.contains(&"hashicorp/google".to_string()));
+    assert!(ls.contains(&"integrations/github".to_string()));
+    // Should NOT offer scaffold snippet-style labels (those belong to
+    // the RequiredProvidersBody context, not the string-value one).
+    assert!(!ls.contains(&"aws".to_string()));
+}
+
+#[tokio::test]
+async fn required_provider_version_value_offers_constraint_templates() {
+    // Without a sibling `source`, we can't hit the registry — but the
+    // static constraint operators should still show.
+    let u = uri("file:///ver.tf");
+    let src = "terraform {\n  required_providers {\n    aws = {\n      version = \"\"\n    }\n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    // Line 3 = `      version = ""` — position 17 is between the
+    // two quotes (indices: 6-12 `version`, 13 space, 14 `=`, 15
+    // space, 16 open `"`, 17 close `"`).
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(3, 17)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"~>".to_string()), "pessimistic constraint missing; got {ls:?}");
+    assert!(ls.contains(&">=".to_string()));
+    assert!(ls.contains(&"=".to_string()));
+}
+
+#[tokio::test]
 async fn provider_block_body_uses_provider_schema_plus_alias() {
     // `provider "aws" { }` should offer both the provider's own schema
     // attrs (here `region`) and the universal `alias` meta-arg.
