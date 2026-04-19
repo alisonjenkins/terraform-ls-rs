@@ -102,8 +102,13 @@ pub async fn fetch_versions(
     Ok(merge_with_provenance(tf_vec, tofu_vec))
 }
 
-/// Merge two ordered version lists into one tagged with provenance.
-/// Pure function so it's trivially unit-testable without network.
+/// Merge two version lists into one tagged with provenance, then
+/// sort newest-first by semver. Sort is descending on
+/// `(major, minor, patch, stability, pre-release identifier)` so
+/// — stable `1.0.0` outranks `1.0.0-rc1` (matching the semver spec);
+/// — non-parseable tag names fall to the bottom deterministically.
+///
+/// Pure function, no network — trivially unit-testable.
 pub fn merge_with_provenance(tf: Vec<String>, tofu: Vec<String>) -> Vec<VersionInfo> {
     let tofu_set: std::collections::HashSet<String> = tofu.iter().cloned().collect();
     let mut out: Vec<VersionInfo> = Vec::new();
@@ -128,7 +133,41 @@ pub fn merge_with_provenance(tf: Vec<String>, tofu: Vec<String>) -> Vec<VersionI
             });
         }
     }
+    out.sort_by(|a, b| semver_key(&b.version).cmp(&semver_key(&a.version)));
     out
+}
+
+/// A comparable key for a semver-ish version string. Tuple shape lets
+/// Rust's derived `Ord` do the right thing:
+/// * parseable `major.minor.patch` sorts numerically;
+/// * stable releases outrank pre-releases of the same core version
+///   (`stability = 1` vs `0`);
+/// * pre-release identifiers compare lexicographically (good enough
+///   for the `alpha < beta < rc` / `alpha.1 < alpha.2` cases);
+/// * unparseable tag names (`main`, `nightly-2026-04-19`) fall to
+///   the very bottom via `major = i64::MIN`.
+fn semver_key(v: &str) -> (i64, i64, i64, i32, String) {
+    let (core, pre) = match v.split_once('-') {
+        Some((c, p)) => (c, Some(p)),
+        None => (v, None),
+    };
+    // Strip semver build metadata (`+sha.abcd`) — it doesn't affect
+    // ordering per semver §11.
+    let core = core.split('+').next().unwrap_or(core);
+    let mut parts = core.splitn(3, '.');
+    let major: Option<i64> = parts.next().and_then(|s| s.parse().ok());
+    let minor: Option<i64> = parts.next().and_then(|s| s.parse().ok());
+    let patch: Option<i64> = parts.next().and_then(|s| s.parse().ok());
+    match major {
+        Some(ma) => {
+            let mi = minor.unwrap_or(0);
+            let pa = patch.unwrap_or(0);
+            let stability = if pre.is_some() { 0 } else { 1 };
+            let pre_id = pre.unwrap_or("").to_string();
+            (ma, mi, pa, stability, pre_id)
+        }
+        None => (i64::MIN, 0, 0, 0, v.to_string()),
+    }
 }
 
 async fn fetch_registry_versions(
@@ -339,6 +378,47 @@ mod tests {
         let merged = merge_with_provenance(tf, tofu);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].registries, vec![Registry::OpenTofu]);
+    }
+
+    #[test]
+    fn merge_sorts_semver_descending_regardless_of_input_order() {
+        // Inputs are intentionally scrambled so the sort — not the
+        // input order — has to produce newest-first.
+        let tf = vec![
+            "1.2.3".to_string(),
+            "10.0.0".to_string(),
+            "2.0.0".to_string(),
+            "1.2.10".to_string(),
+        ];
+        let tofu: Vec<String> = Vec::new();
+        let merged = merge_with_provenance(tf, tofu);
+        let labels: Vec<_> = merged.iter().map(|v| v.version.as_str()).collect();
+        assert_eq!(labels, vec!["10.0.0", "2.0.0", "1.2.10", "1.2.3"]);
+    }
+
+    #[test]
+    fn merge_places_stable_before_prerelease_at_same_core() {
+        let tf = vec![
+            "1.0.0-rc2".to_string(),
+            "1.0.0".to_string(),
+            "1.0.0-alpha".to_string(),
+        ];
+        let merged = merge_with_provenance(tf, Vec::new());
+        let labels: Vec<_> = merged.iter().map(|v| v.version.as_str()).collect();
+        // Stable wins over both pre-releases; rc2 > alpha lexically.
+        assert_eq!(labels, vec!["1.0.0", "1.0.0-rc2", "1.0.0-alpha"]);
+    }
+
+    #[test]
+    fn merge_puts_unparseable_at_the_end() {
+        let tf = vec![
+            "nightly".to_string(),
+            "1.2.3".to_string(),
+            "2.0.0".to_string(),
+        ];
+        let merged = merge_with_provenance(tf, Vec::new());
+        let labels: Vec<_> = merged.iter().map(|v| v.version.as_str()).collect();
+        assert_eq!(labels, vec!["2.0.0", "1.2.3", "nightly"]);
     }
 
     /// An outage with a pre-existing cache — even if the cache is
