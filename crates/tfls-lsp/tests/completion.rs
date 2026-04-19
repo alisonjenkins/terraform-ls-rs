@@ -1786,9 +1786,17 @@ async fn variable_validation_block_prefills_condition_and_error_message() {
         insert.contains("error_message = \"${2}\""),
         "validation must prefill quoted `error_message`; got {insert:?}"
     );
+    // When the snippet already pre-fills required attributes, there
+    // should NOT be an extra blank line before the closing brace —
+    // that was the old behavior and it left a stray whitespace line
+    // after tab-through.
     assert!(
-        insert.ends_with("\n  $0\n}"),
-        "validation must end with trailing $0 tabstop; got {insert:?}"
+        insert.ends_with("${2}\"\n}"),
+        "validation must close directly after last required attr; got {insert:?}"
+    );
+    assert!(
+        !insert.contains("\n  $0\n}"),
+        "validation must not have a trailing $0 line causing a blank before the brace; got {insert:?}"
     );
 }
 

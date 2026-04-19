@@ -540,7 +540,17 @@ fn render_block_snippet(b: &tfls_core::builtin_blocks::BuiltinBlock) -> String {
         }
         next_tab += 1;
     }
-    body.push_str("\n  $0\n}");
+    // Only emit a trailing `$0` line for empty-body snippets. With
+    // required attrs filled in, an extra `\n  $0\n` would leave a
+    // blank whitespace line before `}` after tab-through. Without
+    // `$0`, the cursor naturally lands at the end of the snippet
+    // (past `}`) once the user tabs off the last required attr —
+    // the more common next step anyway.
+    if b.required_attrs.is_empty() {
+        body.push_str("\n  $0\n}");
+    } else {
+        body.push_str("\n}");
+    }
     format!("{header}{body}")
 }
 
