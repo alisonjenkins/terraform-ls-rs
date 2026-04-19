@@ -100,17 +100,30 @@ pub async fn fetch_versions(
 ) -> Result<Vec<VersionInfo>, ProtocolError> {
     let tf = fetch_registry_versions(client, TERRAFORM_HOST, "terraform", namespace, name);
     let tofu = fetch_registry_versions(client, OPENTOFU_HOST, "opentofu", namespace, name);
-    // Date enrichment runs in parallel with the primary fetches. It
-    // hits the Terraform-registry v2 API (the only one that gives us
-    // `published-at` in bulk). If it fails, we simply skip age-based
-    // inlay hints for this provider — nothing else breaks.
-    let dates = fetch_provider_dates(client, namespace, name);
-    let (tf_res, tofu_res, dates_res) = tokio::join!(tf, tofu, dates);
+    // Date enrichment: two independent sources. Terraform Registry's
+    // v2 API gives `published-at` in bulk (fast, complete for official
+    // and partner providers). For providers that only exist on
+    // OpenTofu's registry — or just to fill holes — we also pull dates
+    // from the underlying GitHub releases of whichever repo OpenTofu's
+    // registry points its download URL at. Failures on either side
+    // just reduce the set of versions that get an age signal; they
+    // never break completion or the primary version list.
+    let tf_dates = fetch_provider_dates(client, namespace, name);
+    let tofu_dates = fetch_opentofu_dates(client, namespace, name);
+    let (tf_res, tofu_res, tf_dates_res, tofu_dates_res) =
+        tokio::join!(tf, tofu, tf_dates, tofu_dates);
 
     let tf_vec: Vec<String> = tf_res.unwrap_or_default();
     let tofu_vec: Vec<String> = tofu_res.unwrap_or_default();
     let mut merged = merge_with_provenance(tf_vec, tofu_vec);
-    if let Ok(dates_map) = dates_res {
+    // Apply Terraform-registry dates first (most authoritative for
+    // official providers), then OpenTofu-GitHub dates to fill holes
+    // — `attach_dates` only sets a date on a VersionInfo that doesn't
+    // already have one, so the order preserves Terraform's authority.
+    if let Ok(dates_map) = tf_dates_res {
+        attach_dates(&mut merged, &dates_map);
+    }
+    if let Ok(dates_map) = tofu_dates_res {
         attach_dates(&mut merged, &dates_map);
     }
     Ok(merged)
@@ -253,6 +266,179 @@ async fn try_fetch_provider_dates(
         }
     }
     Ok(out)
+}
+
+/// OpenTofu's registry doesn't emit `published_at`, so we take a
+/// two-step hop: resolve the provider's GitHub source repo via its
+/// registry download URL (one probe request), then fetch that repo's
+/// GitHub releases and map tag → date. Cached independently from the
+/// Terraform-registry date cache.
+async fn fetch_opentofu_dates(
+    client: &reqwest::Client,
+    namespace: &str,
+    name: &str,
+) -> Result<std::collections::HashMap<String, String>, ProtocolError> {
+    let cache_path = opentofu_dates_cache_path(namespace, name);
+    if let Some(fresh) = read_fresh_dates_cache(&cache_path).await {
+        return Ok(fresh);
+    }
+    match try_fetch_opentofu_dates(client, namespace, name).await {
+        Ok(dates) => {
+            write_dates_cache(&cache_path, &dates).await;
+            Ok(dates)
+        }
+        Err(e) => {
+            if let Some(stale) = read_any_dates_cache(&cache_path).await {
+                tracing::debug!(error = %e, %namespace, %name,
+                    "opentofu dates fetch failed; serving stale cache");
+                Ok(stale)
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+async fn try_fetch_opentofu_dates(
+    client: &reqwest::Client,
+    namespace: &str,
+    name: &str,
+) -> Result<std::collections::HashMap<String, String>, ProtocolError> {
+    // Step 1: list available versions to get any one we can probe.
+    #[derive(Deserialize)]
+    struct ListResp {
+        #[serde(default)]
+        versions: Vec<ListVersion>,
+    }
+    #[derive(Deserialize)]
+    struct ListVersion {
+        version: String,
+    }
+    let list_url = format!("{OPENTOFU_HOST}/v1/providers/{namespace}/{name}/versions");
+    let resp = client
+        .get(&list_url)
+        .send()
+        .await
+        .map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(ProtocolError::RegistryHttp(format!(
+            "GET {list_url} → HTTP {}",
+            resp.status()
+        )));
+    }
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
+    let parsed: ListResp =
+        serde_json::from_str(&body).map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
+    let Some(probe_version) = parsed.versions.into_iter().next().map(|v| v.version) else {
+        return Ok(std::collections::HashMap::new());
+    };
+
+    // Step 2: fetch one download URL, pluck the GitHub repo off it.
+    #[derive(Deserialize)]
+    struct DownloadResp {
+        #[serde(default)]
+        download_url: Option<String>,
+    }
+    let dl_url = format!(
+        "{OPENTOFU_HOST}/v1/providers/{namespace}/{name}/{probe_version}/download/linux/amd64"
+    );
+    let resp = client
+        .get(&dl_url)
+        .send()
+        .await
+        .map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(ProtocolError::RegistryHttp(format!(
+            "GET {dl_url} → HTTP {}",
+            resp.status()
+        )));
+    }
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
+    let parsed: DownloadResp =
+        serde_json::from_str(&body).map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
+    let Some(download_url) = parsed.download_url else {
+        return Ok(std::collections::HashMap::new());
+    };
+    let Some((owner, repo)) = parse_github_repo(&download_url) else {
+        return Ok(std::collections::HashMap::new());
+    };
+
+    // Step 3: fetch the GitHub release list for that repo. Mirror
+    // `tool_versions::try_github_fetch` but inline so this module
+    // doesn't depend on tool_versions (currently it's the other way
+    // round — tool_versions uses merge_with_provenance here).
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/releases?per_page=100");
+    let resp = client
+        .get(&url)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", "terraform-ls-rs/0.1 (+opentofu-dates)")
+        .send()
+        .await
+        .map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(ProtocolError::RegistryHttp(format!(
+            "GET {url} → HTTP {}",
+            resp.status()
+        )));
+    }
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
+    #[derive(Deserialize)]
+    struct Release {
+        tag_name: String,
+        #[serde(default)]
+        published_at: Option<String>,
+        #[serde(default)]
+        draft: bool,
+        #[serde(default)]
+        prerelease: bool,
+    }
+    let releases: Vec<Release> =
+        serde_json::from_str(&body).map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
+    let mut out = std::collections::HashMap::new();
+    for r in releases {
+        if r.draft || r.prerelease {
+            continue;
+        }
+        let Some(date) = r.published_at else { continue };
+        let v = r
+            .tag_name
+            .strip_prefix('v')
+            .unwrap_or(&r.tag_name)
+            .to_string();
+        out.insert(v, date);
+    }
+    Ok(out)
+}
+
+/// Extract `(owner, repo)` from a GitHub release-download URL like
+/// `https://github.com/opentofu/terraform-provider-aws/releases/download/v6.41.0/...`.
+fn parse_github_repo(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix("https://github.com/")?;
+    let mut parts = rest.splitn(3, '/');
+    let owner = parts.next()?.to_string();
+    let repo = parts.next()?.to_string();
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some((owner, repo))
+}
+
+fn opentofu_dates_cache_path(namespace: &str, name: &str) -> PathBuf {
+    cache_root()
+        .join("dates-opentofu")
+        .join(sanitise(namespace))
+        .join(sanitise(name))
+        .join("dates.json")
 }
 
 fn provider_dates_cache_path(namespace: &str, name: &str) -> PathBuf {
@@ -743,6 +929,20 @@ mod tests {
         let labels: Vec<_> = merged.iter().map(|v| v.version.as_str()).collect();
         // Stable wins over both pre-releases; rc2 > alpha lexically.
         assert_eq!(labels, vec!["1.0.0", "1.0.0-rc2", "1.0.0-alpha"]);
+    }
+
+    #[test]
+    fn parse_github_repo_extracts_owner_and_repo() {
+        let url = "https://github.com/opentofu/terraform-provider-aws/releases/download/v6.41.0/terraform-provider-aws_6.41.0_linux_amd64.zip";
+        let (owner, repo) = super::parse_github_repo(url).expect("parses");
+        assert_eq!(owner, "opentofu");
+        assert_eq!(repo, "terraform-provider-aws");
+    }
+
+    #[test]
+    fn parse_github_repo_rejects_non_github_urls() {
+        assert!(super::parse_github_repo("https://example.com/foo/bar/baz.zip").is_none());
+        assert!(super::parse_github_repo("github.com/foo/bar").is_none());
     }
 
     #[test]

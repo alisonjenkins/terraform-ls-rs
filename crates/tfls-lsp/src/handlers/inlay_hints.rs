@@ -391,18 +391,38 @@ fn read_tool_cache() -> Option<Vec<(String, Option<String>)>> {
 }
 
 fn read_provider_cache(namespace: &str, name: &str) -> Option<Vec<(String, Option<String>)>> {
-    let dates_path = cache_path(&[
+    // Two date caches: Terraform registry v2 (`dates/`) and OpenTofu
+    // via GitHub fallback (`dates-opentofu/`). Terraform wins for any
+    // version present in both; OpenTofu fills holes.
+    let mut dates: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if let Some(path) = cache_path(&[
         "registry-versions",
         "dates",
         &sanitise(namespace),
         &sanitise(name),
         "dates.json",
-    ])?;
-    let dates: std::collections::HashMap<String, String> =
-        match std::fs::read_to_string(&dates_path) {
-            Ok(body) => serde_json::from_str(&body).unwrap_or_default(),
-            Err(_) => std::collections::HashMap::new(),
-        };
+    ]) {
+        if let Ok(body) = std::fs::read_to_string(&path) {
+            if let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, String>>(&body) {
+                dates.extend(map);
+            }
+        }
+    }
+    if let Some(path) = cache_path(&[
+        "registry-versions",
+        "dates-opentofu",
+        &sanitise(namespace),
+        &sanitise(name),
+        "dates.json",
+    ]) {
+        if let Ok(body) = std::fs::read_to_string(&path) {
+            if let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, String>>(&body) {
+                for (v, d) in map {
+                    dates.entry(v).or_insert(d);
+                }
+            }
+        }
+    }
     let mut out: Vec<(String, Option<String>)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for reg in &["terraform", "opentofu"] {
