@@ -21,5 +21,6 @@ pub use types::{
     ModuleId, ProviderAddress, ResourceAddress, Symbol, SymbolKind, SymbolLocation, SymbolTable,
 };
 pub use variable_type::{
-    Primitive, VariableType, merge_shapes, parse_type_expr, parse_value_shape, satisfies,
+    Primitive, VariableType, explain_mismatch, merge_shapes, parse_type_expr, parse_value_shape,
+    satisfies,
 };

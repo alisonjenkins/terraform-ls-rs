@@ -110,6 +110,13 @@ pub fn parse_type_expr(expr: &Expression) -> VariableType {
                     }
                     VariableType::Object(fields)
                 }
+                // `optional(T)` / `optional(T, default)` — mark the
+                // field as allowed-to-be-missing by collapsing to Any.
+                // This sacrifices the inner type info (present-value
+                // type-checking no longer applies for this field) in
+                // exchange for avoiding false "missing field" positives
+                // on variables that use the optional wrapper.
+                ("optional", [_]) | ("optional", [_, _]) => VariableType::Any,
                 _ => VariableType::Any,
             }
         }
@@ -207,10 +214,11 @@ pub fn parse_value_shape(expr: &Expression) -> VariableType {
 ///   parse as `Tuple`; `list(T)` / `set(T)` accept a `Tuple` if every
 ///   element satisfies `T`.
 /// - `map(T)` accepts an object literal if every value satisfies `T`.
-/// - Object vs object: overlapping fields must be compatible.
-///   Missing declared fields and extra actual fields don't fail here
-///   — authors routinely omit optional fields mid-edit, and the
-///   `optional(…)` wrapper isn't modelled in [`VariableType`] yet.
+/// - Object vs object: the declared schema is authoritative. Extra
+///   fields in the actual value fail. Declared fields typed as
+///   anything other than `Any` must be present — `optional(…)`
+///   fields parse as `Any` (see [`parse_type_expr`]) and are thus
+///   allowed to be absent without a false positive.
 pub fn satisfies(declared: &VariableType, actual: &VariableType) -> bool {
     use VariableType::*;
     match (declared, actual) {
@@ -232,10 +240,83 @@ pub fn satisfies(declared: &VariableType, actual: &VariableType) -> bool {
                     .zip(act_items.iter())
                     .all(|(d, a)| satisfies(d, a))
         }
-        (Object(decl), Object(act)) => decl
-            .iter()
-            .all(|(k, d_ty)| act.get(k).map_or(true, |a_ty| satisfies(d_ty, a_ty))),
+        (Object(decl), Object(act)) => {
+            // Extra fields in the actual value that the declared
+            // schema doesn't know about — fail.
+            if act.keys().any(|k| !decl.contains_key(k)) {
+                return false;
+            }
+            // Declared fields must either be present with a matching
+            // type, or — if declared as `Any` (our stand-in for
+            // `optional(T)` or a type expression we couldn't parse) —
+            // permitted to be absent.
+            decl.iter().all(|(k, d_ty)| match act.get(k) {
+                Some(a_ty) => satisfies(d_ty, a_ty),
+                None => matches!(d_ty, Any),
+            })
+        }
         _ => false,
+    }
+}
+
+/// Produce a human-readable explanation of why `actual` doesn't
+/// satisfy `declared`. Returns an empty string if they match.
+/// Rendered into the diagnostic message so the user sees *which*
+/// field is wrong, not just "mismatch".
+pub fn explain_mismatch(declared: &VariableType, actual: &VariableType) -> String {
+    use VariableType::*;
+    if satisfies(declared, actual) {
+        return String::new();
+    }
+    match (declared, actual) {
+        (Object(decl), Object(act)) => {
+            let extras: Vec<_> = act
+                .keys()
+                .filter(|k| !decl.contains_key(k.as_str()))
+                .cloned()
+                .collect();
+            let missing: Vec<_> = decl
+                .iter()
+                .filter(|(k, d_ty)| !act.contains_key(k.as_str()) && !matches!(d_ty, Any))
+                .map(|(k, _)| k.clone())
+                .collect();
+            let wrong: Vec<_> = decl
+                .iter()
+                .filter_map(|(k, d_ty)| {
+                    act.get(k).and_then(|a_ty| {
+                        (!satisfies(d_ty, a_ty)).then(|| {
+                            format!("`{k}` expected `{d_ty}`, got `{a_ty}`")
+                        })
+                    })
+                })
+                .collect();
+            let mut parts = Vec::new();
+            if !extras.is_empty() {
+                parts.push(format!(
+                    "unknown field{s}: {fields}",
+                    s = if extras.len() == 1 { "" } else { "s" },
+                    fields = extras
+                        .iter()
+                        .map(|k| format!("`{k}`"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ));
+            }
+            if !missing.is_empty() {
+                parts.push(format!(
+                    "missing field{s}: {fields}",
+                    s = if missing.len() == 1 { "" } else { "s" },
+                    fields = missing
+                        .iter()
+                        .map(|k| format!("`{k}`"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ));
+            }
+            parts.extend(wrong);
+            parts.join("; ")
+        }
+        _ => format!("expected `{declared}`, got `{actual}`"),
     }
 }
 
@@ -551,7 +632,7 @@ mod tests {
     }
 
     #[test]
-    fn satisfies_object_overlapping_fields_must_match() {
+    fn satisfies_object_all_fields_present_with_matching_types() {
         assert!(satisfies(
             &decl("object({ a = string, b = number })"),
             &shape(r#"{ a = "x", b = 1 }"#)
@@ -563,14 +644,30 @@ mod tests {
     }
 
     #[test]
-    fn satisfies_object_missing_declared_field_is_allowed() {
-        // Missing required fields are allowed here; the shape inference
-        // can't distinguish optional from required. Authors routinely
-        // omit fields while editing, so false positives would be worse
-        // than false negatives.
-        assert!(satisfies(
+    fn satisfies_object_missing_declared_field_flagged() {
+        // A strictly-typed field (non-optional, known type) missing
+        // from the actual value is a real schema violation.
+        assert!(!satisfies(
             &decl("object({ a = string, b = number })"),
             &shape(r#"{ a = "x" }"#)
+        ));
+    }
+
+    #[test]
+    fn satisfies_object_missing_optional_field_allowed() {
+        // optional(T) collapses to Any in parse_type_expr, which
+        // permits absence — the common case for missing fields.
+        assert!(satisfies(
+            &decl("object({ a = string, b = optional(number) })"),
+            &shape(r#"{ a = "x" }"#)
+        ));
+    }
+
+    #[test]
+    fn satisfies_object_extra_field_flagged() {
+        assert!(!satisfies(
+            &decl("object({ name = string })"),
+            &shape(r#"{ a = "b" }"#)
         ));
     }
 

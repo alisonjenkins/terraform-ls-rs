@@ -11,7 +11,7 @@ use hcl_edit::repr::Span;
 use hcl_edit::structure::Body;
 use lsp_types::{Diagnostic, DiagnosticSeverity};
 use ropey::Rope;
-use tfls_core::{parse_type_expr, parse_value_shape, satisfies};
+use tfls_core::{explain_mismatch, parse_type_expr, parse_value_shape, satisfies};
 use tfls_parser::hcl_span_to_lsp_range;
 
 pub fn variable_default_type_diagnostics(body: &Body, rope: &Rope) -> Vec<Diagnostic> {
@@ -55,13 +55,19 @@ pub fn variable_default_type_diagnostics(body: &Body, rope: &Rope) -> Vec<Diagno
 
         let span = default_span.unwrap_or(0..0);
         let range = hcl_span_to_lsp_range(rope, span).unwrap_or_default();
+        let detail = explain_mismatch(&declared, &actual);
+        let message = if detail.is_empty() {
+            format!(
+                "default value of type `{actual}` does not match declared type `{declared}`"
+            )
+        } else {
+            format!("default does not match declared type `{declared}`: {detail}")
+        };
         out.push(Diagnostic {
             range,
             severity: Some(DiagnosticSeverity::ERROR),
             source: Some("terraform-ls-rs".to_string()),
-            message: format!(
-                "default value of type `{actual}` does not match declared type `{declared}`"
-            ),
+            message,
             ..Default::default()
         });
     }
@@ -173,12 +179,47 @@ mod tests {
     }
 
     #[test]
-    fn accepts_object_with_subset_of_declared_fields() {
+    fn accepts_object_with_optional_missing_fields() {
+        let d = diags(r#"variable "x" {
+          type    = object({ a = string, b = optional(number) })
+          default = { a = "y" }
+        }"#);
+        assert!(d.is_empty(), "got: {d:?}");
+    }
+
+    #[test]
+    fn flags_object_missing_required_field() {
         let d = diags(r#"variable "x" {
           type    = object({ a = string, b = number })
           default = { a = "y" }
         }"#);
-        assert!(d.is_empty(), "got: {d:?}");
+        assert_eq!(d.len(), 1, "got: {d:?}");
+        assert!(
+            d[0].message.contains("missing field") && d[0].message.contains("`b`"),
+            "expected missing-field message; got: {}",
+            d[0].message
+        );
+    }
+
+    #[test]
+    fn flags_object_extra_field() {
+        // The exact case from the user report: declared schema names
+        // `name`, default supplies an unrelated `a`.
+        let d = diags(r#"variable "test" {
+          default = { a = "b" }
+          type    = object({ name = string })
+        }"#);
+        assert_eq!(d.len(), 1, "got: {d:?}");
+        assert!(
+            d[0].message.contains("unknown field") && d[0].message.contains("`a`"),
+            "expected unknown-field message; got: {}",
+            d[0].message
+        );
+        assert!(
+            d[0].message.contains("missing field") && d[0].message.contains("`name`"),
+            "expected missing-field message; got: {}",
+            d[0].message
+        );
     }
 
     #[test]
@@ -188,5 +229,10 @@ mod tests {
           default = { a = 1 }
         }"#);
         assert_eq!(d.len(), 1, "got: {d:?}");
+        assert!(
+            d[0].message.contains("`a`") && d[0].message.contains("expected"),
+            "expected field-type message; got: {}",
+            d[0].message
+        );
     }
 }
