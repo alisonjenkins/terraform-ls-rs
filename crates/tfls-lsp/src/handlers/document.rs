@@ -136,8 +136,6 @@ pub fn compute_diagnostics(state: &StateStore, uri: &Url) -> Vec<Diagnostic> {
         // is amortised across the work the document handler already
         // does.
         out.extend(tfls_diag::typed_variables_diagnostics(body, &doc.rope));
-        out.extend(tfls_diag::required_version_presence_diagnostics(body, &doc.rope));
-        out.extend(tfls_diag::required_providers_version_diagnostics(body, &doc.rope));
         out.extend(tfls_diag::module_version_presence_diagnostics(body, &doc.rope));
         out.extend(tfls_diag::module_pinned_source_diagnostics(body, &doc.rope));
         out.extend(tfls_diag::module_shallow_clone_diagnostics(body, &doc.rope));
@@ -154,7 +152,17 @@ pub fn compute_diagnostics(state: &StateStore, uri: &Url) -> Vec<Diagnostic> {
         let graph = ModuleGraphAdapter {
             state,
             module_dir: module_dir.as_deref(),
+            current_uri: uri,
         };
+        // Module-wide aggregates: these two rules walk every
+        // document in the module for their presence checks, so they
+        // need the graph adapter.
+        out.extend(tfls_diag::required_version_presence_diagnostics(
+            body, &doc.rope, &graph,
+        ));
+        out.extend(tfls_diag::required_providers_version_diagnostics(
+            body, &doc.rope, &graph,
+        ));
         out.extend(tfls_diag::unused_declarations_diagnostics(
             body, &doc.rope, &graph,
         ));
@@ -387,6 +395,7 @@ impl tfls_diag::schema_validation::SchemaLookup for StateStoreSchemaLookup<'_> {
 struct ModuleGraphAdapter<'a> {
     state: &'a StateStore,
     module_dir: Option<&'a std::path::Path>,
+    current_uri: &'a Url,
 }
 
 impl ModuleGraphAdapter<'_> {
@@ -451,6 +460,118 @@ impl tfls_diag::ModuleGraphLookup for ModuleGraphAdapter<'_> {
                     .filter(|s| s.ends_with(".tf") || s.ends_with(".tf.json"))
             })
             .collect()
+    }
+
+    fn is_primary_terraform_doc(&self) -> bool {
+        // Primary = lexicographically-first URI in the same module
+        // that contains at least one top-level `terraform {}` block.
+        let mut candidates: Vec<String> = Vec::new();
+        for doc in self.state.documents.iter() {
+            let Some(body) = doc.parsed.body.as_ref() else {
+                continue;
+            };
+            if let Some(dir) = self.module_dir {
+                let doc_dir = crate::handlers::util::parent_dir(doc.key());
+                if doc_dir.as_deref() != Some(dir) {
+                    continue;
+                }
+            }
+            let has_tf_block = body
+                .iter()
+                .any(|s| s.as_block().is_some_and(|b| b.ident.as_str() == "terraform"));
+            if has_tf_block {
+                candidates.push(doc.key().as_str().to_string());
+            }
+        }
+        candidates.sort();
+        candidates
+            .first()
+            .map(|s| s.as_str() == self.current_uri.as_str())
+            .unwrap_or(false)
+    }
+
+    fn module_has_required_version(&self) -> bool {
+        for doc in self.state.documents.iter() {
+            let Some(body) = doc.parsed.body.as_ref() else {
+                continue;
+            };
+            if let Some(dir) = self.module_dir {
+                let doc_dir = crate::handlers::util::parent_dir(doc.key());
+                if doc_dir.as_deref() != Some(dir) {
+                    continue;
+                }
+            }
+            for structure in body.iter() {
+                let Some(block) = structure.as_block() else {
+                    continue;
+                };
+                if block.ident.as_str() != "terraform" {
+                    continue;
+                }
+                if block.body.iter().any(|s| {
+                    s.as_attribute()
+                        .is_some_and(|a| a.key.as_str() == "required_version")
+                }) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn providers_with_version_set(&self) -> std::collections::HashSet<String> {
+        use hcl_edit::expr::{Expression, ObjectKey};
+        let mut out = std::collections::HashSet::new();
+        for doc in self.state.documents.iter() {
+            let Some(body) = doc.parsed.body.as_ref() else {
+                continue;
+            };
+            if let Some(dir) = self.module_dir {
+                let doc_dir = crate::handlers::util::parent_dir(doc.key());
+                if doc_dir.as_deref() != Some(dir) {
+                    continue;
+                }
+            }
+            for structure in body.iter() {
+                let Some(tf_block) = structure.as_block() else {
+                    continue;
+                };
+                if tf_block.ident.as_str() != "terraform" {
+                    continue;
+                }
+                for inner in tf_block.body.iter() {
+                    let Some(rp_block) = inner.as_block() else {
+                        continue;
+                    };
+                    if rp_block.ident.as_str() != "required_providers" {
+                        continue;
+                    }
+                    for entry in rp_block.body.iter() {
+                        let Some(attr) = entry.as_attribute() else {
+                            continue;
+                        };
+                        let name = attr.key.as_str();
+                        let Expression::Object(obj) = &attr.value else {
+                            continue;
+                        };
+                        let has_version = obj.iter().any(|(k, _v)| match k {
+                            ObjectKey::Ident(id) => id.as_str() == "version",
+                            ObjectKey::Expression(Expression::Variable(v)) => {
+                                v.value().as_str() == "version"
+                            }
+                            ObjectKey::Expression(Expression::String(s)) => {
+                                s.value().as_str() == "version"
+                            }
+                            _ => false,
+                        });
+                        if has_version {
+                            out.insert(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 
     fn is_root_module(&self) -> bool {

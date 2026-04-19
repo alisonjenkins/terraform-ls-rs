@@ -173,6 +173,15 @@ mod tests {
         fn is_root_module(&self) -> bool {
             self.is_root
         }
+        fn module_has_required_version(&self) -> bool {
+            true
+        }
+        fn is_primary_terraform_doc(&self) -> bool {
+            true
+        }
+        fn providers_with_version_set(&self) -> HashSet<String> {
+            HashSet::new()
+        }
     }
 
     fn diags(src: &str, lookup: FakeLookup) -> Vec<Diagnostic> {

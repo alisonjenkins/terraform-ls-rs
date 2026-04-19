@@ -31,4 +31,29 @@ pub trait ModuleGraphLookup {
     /// since a reusable module's variables are intentionally
     /// "unused" from the module's own point of view.
     fn is_root_module(&self) -> bool;
+
+    /// True if any `terraform {}` block anywhere in the module
+    /// declares `required_version`. Terraform merges all
+    /// `terraform {}` blocks at plan time, so one declaration
+    /// satisfies the whole module. Without this check the rule
+    /// would fire per-file and produce N warnings for a module with
+    /// N `terraform {}` blocks scattered across files.
+    fn module_has_required_version(&self) -> bool;
+
+    /// True if the currently-linted document is the "primary"
+    /// `terraform {}`-block document for the module — the one the
+    /// `required_version` warning should attach to when none is
+    /// declared. Convention: the lexicographically-first URI in the
+    /// module that contains a `terraform {}` block. Without this,
+    /// the warning fires once per `terraform {}` block file and
+    /// floods the problems panel.
+    fn is_primary_terraform_doc(&self) -> bool;
+
+    /// Set of provider local names that have a `version` key set in
+    /// at least one `required_providers` block anywhere in the
+    /// module. Used so `required_providers_version` only warns when
+    /// the provider is unversioned across every declaration — not
+    /// when a single file's entry happens to omit it while a
+    /// sibling file sets it.
+    fn providers_with_version_set(&self) -> std::collections::HashSet<String>;
 }
