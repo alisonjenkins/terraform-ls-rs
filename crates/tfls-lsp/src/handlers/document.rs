@@ -32,6 +32,10 @@ pub async fn did_open(backend: &Backend, params: DidOpenTextDocumentParams) {
     // definitions need to be in the store before diagnostics run.
     crate::indexer::ensure_module_indexed(&backend.state, &backend.jobs, &uri);
     publish_current_diagnostics(backend, &uri, None).await;
+    // Kick off background version-cache prefetch so inlay-hint
+    // freshness annotations (and the semantic no-match diagnostic)
+    // light up without the user having to trigger completion first.
+    crate::handlers::version_prefetch::spawn(backend, uri, None);
 }
 
 pub async fn did_change(backend: &Backend, params: DidChangeTextDocumentParams) {
@@ -73,6 +77,10 @@ pub async fn did_save(backend: &Backend, params: DidSaveTextDocumentParams) {
     let uri = params.text_document.uri;
     backend.state.reparse_document(&uri);
     publish_current_diagnostics(backend, &uri, None).await;
+    // Re-prefetch in case the user added a new provider / module /
+    // updated the Terraform required_version. Fresh caches are a no-op
+    // inside the fetch functions so this is cheap when unchanged.
+    crate::handlers::version_prefetch::spawn(backend, uri, None);
 }
 
 pub async fn did_close(backend: &Backend, params: DidCloseTextDocumentParams) {
