@@ -1491,9 +1491,13 @@ async fn required_provider_source_value_offers_curated_sources() {
     .expect("ok")
     .expect("some completions");
     let ls = labels(resp);
+    // Default (registry-less) form for each curated source.
     assert!(ls.contains(&"hashicorp/aws".to_string()), "got {ls:?}");
     assert!(ls.contains(&"hashicorp/azurerm".to_string()));
-    assert!(ls.contains(&"hashicorp/google".to_string()));
+    // Explicit hostname-prefixed variants so users can pin a
+    // specific registry instead of depending on CLI default.
+    assert!(ls.contains(&"registry.terraform.io/hashicorp/aws".to_string()));
+    assert!(ls.contains(&"registry.opentofu.org/hashicorp/aws".to_string()));
     assert!(ls.contains(&"integrations/github".to_string()));
     // Should NOT offer scaffold snippet-style labels (those belong to
     // the RequiredProvidersBody context, not the string-value one).

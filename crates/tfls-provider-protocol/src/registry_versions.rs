@@ -25,6 +25,47 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 /// hitting the network.
 const CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// Which public registry a version was advertised by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Registry {
+    Terraform,
+    OpenTofu,
+}
+
+impl Registry {
+    pub fn label(self) -> &'static str {
+        match self {
+            Registry::Terraform => "terraform",
+            Registry::OpenTofu => "opentofu",
+        }
+    }
+}
+
+/// One version as reported by the registries, tagged with which
+/// registry/registries it was found in so the UI can surface
+/// provenance (most versions show up on both).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionInfo {
+    pub version: String,
+    pub registries: Vec<Registry>,
+}
+
+impl VersionInfo {
+    /// Short phrase for completion-item detail fields.
+    /// "terraform + opentofu", "terraform only", "opentofu only",
+    /// or "(registry unknown)" as a degenerate fallback.
+    pub fn provenance_label(&self) -> String {
+        let tf = self.registries.contains(&Registry::Terraform);
+        let tofu = self.registries.contains(&Registry::OpenTofu);
+        match (tf, tofu) {
+            (true, true) => "terraform + opentofu".to_string(),
+            (true, false) => "terraform only".to_string(),
+            (false, true) => "opentofu only".to_string(),
+            (false, false) => "(registry unknown)".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct VersionsResponse {
     #[serde(default)]
@@ -37,34 +78,57 @@ struct VersionEntry {
 }
 
 /// Fetch available versions for `<namespace>/<name>` from both the
-/// Terraform and OpenTofu registries, merge, dedupe, and return
-/// newest-first by semver-lexical ordering (caller may re-sort).
+/// Terraform and OpenTofu registries, merge, dedupe, and tag each
+/// result with the registry/registries that advertised it. Ordering
+/// preserves the Terraform registry's response order (newest-first
+/// for both registries in practice) with any OpenTofu-only versions
+/// appended at the end.
 ///
 /// Swallows per-registry errors — if either registry is unreachable
 /// but the other succeeds, we still return useful data. If *both*
 /// fail and no cache is usable, returns `Ok(Vec::new())` so callers
-/// can degrade gracefully.
+/// can degrade to static constraint templates.
 pub async fn fetch_versions(
     client: &reqwest::Client,
     namespace: &str,
     name: &str,
-) -> Result<Vec<String>, ProtocolError> {
+) -> Result<Vec<VersionInfo>, ProtocolError> {
     let tf = fetch_registry_versions(client, TERRAFORM_HOST, "terraform", namespace, name);
     let tofu = fetch_registry_versions(client, OPENTOFU_HOST, "opentofu", namespace, name);
     let (tf_res, tofu_res) = tokio::join!(tf, tofu);
 
-    let mut merged: Vec<String> = Vec::new();
-    if let Ok(vs) = tf_res {
-        merged.extend(vs);
+    let tf_vec: Vec<String> = tf_res.unwrap_or_default();
+    let tofu_vec: Vec<String> = tofu_res.unwrap_or_default();
+    Ok(merge_with_provenance(tf_vec, tofu_vec))
+}
+
+/// Merge two ordered version lists into one tagged with provenance.
+/// Pure function so it's trivially unit-testable without network.
+pub fn merge_with_provenance(tf: Vec<String>, tofu: Vec<String>) -> Vec<VersionInfo> {
+    let tofu_set: std::collections::HashSet<String> = tofu.iter().cloned().collect();
+    let mut out: Vec<VersionInfo> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for v in tf {
+        if seen.insert(v.clone()) {
+            let mut regs = vec![Registry::Terraform];
+            if tofu_set.contains(&v) {
+                regs.push(Registry::OpenTofu);
+            }
+            out.push(VersionInfo {
+                version: v,
+                registries: regs,
+            });
+        }
     }
-    if let Ok(vs) = tofu_res {
-        merged.extend(vs);
+    for v in tofu {
+        if seen.insert(v.clone()) {
+            out.push(VersionInfo {
+                version: v,
+                registries: vec![Registry::OpenTofu],
+            });
+        }
     }
-    // Dedupe preserving first-seen order (terraform reg comes first,
-    // so its ordering wins for common versions).
-    let mut seen = std::collections::HashSet::new();
-    merged.retain(|v| seen.insert(v.clone()));
-    Ok(merged)
+    out
 }
 
 async fn fetch_registry_versions(
@@ -239,6 +303,42 @@ mod tests {
         let p1 = versions_cache_path("terraform", "hashicorp", "aws");
         let p2 = versions_cache_path("opentofu", "hashicorp", "aws");
         assert_ne!(p1, p2, "same provider must cache under different registries");
+    }
+
+    #[test]
+    fn merge_tags_shared_versions_with_both_registries() {
+        let tf = vec!["5.99.0".to_string(), "5.98.0".to_string(), "5.97.0".to_string()];
+        let tofu = vec!["5.99.0".to_string(), "5.97.0".to_string()];
+        let merged = merge_with_provenance(tf, tofu);
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged[0].version, "5.99.0");
+        assert_eq!(merged[0].registries, vec![Registry::Terraform, Registry::OpenTofu]);
+        assert_eq!(merged[0].provenance_label(), "terraform + opentofu");
+        assert_eq!(merged[1].version, "5.98.0");
+        assert_eq!(merged[1].registries, vec![Registry::Terraform]);
+        assert_eq!(merged[1].provenance_label(), "terraform only");
+        assert_eq!(merged[2].version, "5.97.0");
+        assert_eq!(merged[2].registries, vec![Registry::Terraform, Registry::OpenTofu]);
+    }
+
+    #[test]
+    fn merge_appends_opentofu_only_versions() {
+        let tf = vec!["5.99.0".to_string()];
+        let tofu = vec!["5.99.0".to_string(), "5.99.0-opentofu-fork".to_string()];
+        let merged = merge_with_provenance(tf, tofu);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[1].version, "5.99.0-opentofu-fork");
+        assert_eq!(merged[1].registries, vec![Registry::OpenTofu]);
+        assert_eq!(merged[1].provenance_label(), "opentofu only");
+    }
+
+    #[test]
+    fn merge_handles_one_registry_empty() {
+        let tf: Vec<String> = Vec::new();
+        let tofu = vec!["1.2.3".to_string()];
+        let merged = merge_with_provenance(tf, tofu);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].registries, vec![Registry::OpenTofu]);
     }
 
     /// An outage with a pre-existing cache — even if the cache is

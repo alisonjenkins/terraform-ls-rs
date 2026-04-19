@@ -488,21 +488,44 @@ fn required_providers_entry_items(filter: &BodyFilter) -> Vec<CompletionItem> {
 
 /// Items for `source = "|"` inside a `required_providers` entry —
 /// surfaces the curated list of popular provider source paths from
-/// `builtin_blocks`. Enumerating the full public registries (5000+
-/// providers) isn't useful as a free-completion list; if the user
-/// needs something rarer they just type it directly.
+/// `builtin_blocks`, each in three flavours:
+///   * bare `namespace/name` — uses the default registry (the one
+///     your CLI was installed from: terraform.io for Terraform,
+///     opentofu.org for tofu).
+///   * `registry.terraform.io/namespace/name` — explicit Terraform.
+///   * `registry.opentofu.org/namespace/name` — explicit OpenTofu.
+///
+/// Enumerating the full public registries (5000+ providers) isn't
+/// useful as a free-completion list; if the user needs something
+/// rarer they just type it directly.
 fn required_provider_source_value_items() -> Vec<CompletionItem> {
-    let mut items: Vec<CompletionItem> = builtin_blocks::REQUIRED_PROVIDERS_COMMON_ENTRIES
-        .iter()
-        .map(|(_, source, hint)| CompletionItem {
-            label: source.to_string(),
+    let mut items: Vec<CompletionItem> = Vec::new();
+    for (_, source, hint) in builtin_blocks::REQUIRED_PROVIDERS_COMMON_ENTRIES {
+        items.push(CompletionItem {
+            label: (*source).to_string(),
             kind: Some(CompletionItemKind::VALUE),
-            detail: Some(hint.to_string()),
-            insert_text: Some(source.to_string()),
+            detail: Some(format!("default registry — {hint}")),
+            insert_text: Some((*source).to_string()),
             insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
             ..Default::default()
-        })
-        .collect();
+        });
+        items.push(CompletionItem {
+            label: format!("registry.terraform.io/{source}"),
+            kind: Some(CompletionItemKind::VALUE),
+            detail: Some(format!("Terraform registry — {hint}")),
+            insert_text: Some(format!("registry.terraform.io/{source}")),
+            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+            ..Default::default()
+        });
+        items.push(CompletionItem {
+            label: format!("registry.opentofu.org/{source}"),
+            kind: Some(CompletionItemKind::VALUE),
+            detail: Some(format!("OpenTofu registry — {hint}")),
+            insert_text: Some(format!("registry.opentofu.org/{source}")),
+            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+            ..Default::default()
+        });
+    }
     items.sort_by(|a, b| a.label.cmp(&b.label));
     items
 }
@@ -525,14 +548,22 @@ async fn required_provider_version_value_items(source: Option<&str>) -> Vec<Comp
             .await
             {
                 Ok(versions) => {
-                    // Exact-version items.
-                    for v in &versions {
+                    // Exact-version items, tagged with which registry
+                    // published them. Most versions show "terraform +
+                    // opentofu" since the registries usually mirror
+                    // each other; divergent versions (post-license
+                    // forks etc.) show a single-registry label.
+                    for vi in &versions {
                         items.push(CompletionItem {
-                            label: v.clone(),
+                            label: vi.version.clone(),
                             kind: Some(CompletionItemKind::VALUE),
-                            detail: Some(format!("exact version from registry ({}/{})",
-                                source.0, source.1)),
-                            insert_text: Some(v.clone()),
+                            detail: Some(format!(
+                                "{}/{} — {}",
+                                source.0,
+                                source.1,
+                                vi.provenance_label()
+                            )),
+                            insert_text: Some(vi.version.clone()),
                             insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
                             ..Default::default()
                         });
@@ -542,8 +573,8 @@ async fn required_provider_version_value_items(source: Option<&str>) -> Vec<Comp
                     // `~> X.Y` form without typing it.
                     let mut seen_mm: std::collections::BTreeSet<String> =
                         std::collections::BTreeSet::new();
-                    for v in &versions {
-                        if let Some(mm) = major_minor(v) {
+                    for vi in &versions {
+                        if let Some(mm) = major_minor(&vi.version) {
                             seen_mm.insert(mm);
                         }
                     }
