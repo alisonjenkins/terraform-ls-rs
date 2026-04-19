@@ -15,7 +15,8 @@ use lsp_types::{
 };
 use tfls_core::{
     BlockKind, CompletionContext, IndexRootRef, META_ATTRS, PathStep, ResourceAddress,
-    VariableType, classify_context, is_singleton_meta_block, merge_shapes, meta_blocks,
+    VariableType, builtin_blocks, classify_context, is_singleton_meta_block, merge_shapes,
+    meta_blocks,
 };
 use tfls_parser::lsp_position_to_byte_offset;
 use tfls_schema::NestingMode;
@@ -154,6 +155,38 @@ pub async fn completion(
             attr_name,
         } => attribute_value_items(backend, &resource_type, &attr_name),
         CompletionContext::FunctionCall => function_name_items(backend),
+        CompletionContext::TerraformBlockBody => {
+            let filter = compute_body_filter(doc.parsed.body.as_ref(), offset);
+            builtin_body_items(builtin_blocks::TERRAFORM_BLOCK, &filter)
+        }
+        CompletionContext::VariableBlockBody { .. } => {
+            let filter = compute_body_filter(doc.parsed.body.as_ref(), offset);
+            builtin_body_items(builtin_blocks::VARIABLE_BLOCK, &filter)
+        }
+        CompletionContext::OutputBlockBody { .. } => {
+            let filter = compute_body_filter(doc.parsed.body.as_ref(), offset);
+            builtin_body_items(builtin_blocks::OUTPUT_BLOCK, &filter)
+        }
+        CompletionContext::LocalsBlockBody => Vec::new(),
+        CompletionContext::ProviderBlockBody { name } => {
+            let filter = compute_body_filter(doc.parsed.body.as_ref(), offset);
+            provider_block_body_items(backend, &name, &filter)
+        }
+        CompletionContext::BackendBlockBody { name } => {
+            let filter = compute_body_filter(doc.parsed.body.as_ref(), offset);
+            match builtin_blocks::backend_schema(&name) {
+                Some(schema) => builtin_body_items(schema, &filter),
+                None => Vec::new(),
+            }
+        }
+        CompletionContext::RequiredProvidersBody => {
+            let filter = compute_body_filter(doc.parsed.body.as_ref(), offset);
+            required_providers_entry_items(&filter)
+        }
+        CompletionContext::RequiredProvidersEntryBody => {
+            let filter = compute_body_filter(doc.parsed.body.as_ref(), offset);
+            required_provider_entry_attr_items(&filter)
+        }
         CompletionContext::Unknown => Vec::new(),
     };
 
@@ -318,6 +351,159 @@ pub fn resource_scaffold_snippet(type_name: &str, backend: &Backend, kind: &str)
     }
     snippet.push('}');
     snippet
+}
+
+/// Render completion items for a `BuiltinSchema` — used by
+/// `terraform {}`, `variable {}`, `output {}`, and each backend
+/// schema, all of which have a hand-maintained static table.
+fn builtin_body_items(
+    schema: tfls_core::builtin_blocks::BuiltinSchema,
+    filter: &BodyFilter,
+) -> Vec<CompletionItem> {
+    let mut items: Vec<CompletionItem> = schema
+        .attrs
+        .iter()
+        .filter(|a| !filter.present_attrs.contains(a.name))
+        .map(|a| CompletionItem {
+            label: a.name.to_string(),
+            kind: Some(if a.required {
+                CompletionItemKind::FIELD
+            } else {
+                CompletionItemKind::PROPERTY
+            }),
+            detail: Some(a.detail.to_string()),
+            insert_text: Some(format!("{name} = ${{1}}", name = a.name)),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        })
+        .collect();
+    for b in schema.blocks {
+        if filter.present_blocks.contains(b.name) {
+            continue;
+        }
+        items.push(CompletionItem {
+            label: b.name.to_string(),
+            kind: Some(CompletionItemKind::STRUCT),
+            detail: Some(b.detail.to_string()),
+            insert_text: Some(format!("{name} {{\n  $0\n}}", name = b.name)),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        });
+    }
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    items
+}
+
+/// Completions for the body of a `provider "x" { ... }` block. Uses
+/// the loaded provider schema's top-level `provider: Schema` field,
+/// plus `alias` (the universal meta-argument).
+fn provider_block_body_items(
+    backend: &Backend,
+    provider_local_name: &str,
+    filter: &BodyFilter,
+) -> Vec<CompletionItem> {
+    let mut items: Vec<CompletionItem> = Vec::new();
+    // Schema attributes: find the provider whose address type matches
+    // the local name used in `provider "<local>"`. This mirrors how
+    // resource schemas are looked up by unqualified type name.
+    let provider_schema = backend
+        .state
+        .schemas
+        .iter()
+        .find(|e| e.key().r#type == provider_local_name)
+        .map(|e| std::sync::Arc::clone(e.value()));
+    if let Some(ps) = provider_schema {
+        for (name, attr) in &ps.provider.block.attributes {
+            if filter.present_attrs.contains(name.as_str()) {
+                continue;
+            }
+            if !(attr.required || attr.optional) {
+                continue;
+            }
+            items.push(CompletionItem {
+                label: name.clone(),
+                kind: Some(if attr.required {
+                    CompletionItemKind::FIELD
+                } else {
+                    CompletionItemKind::PROPERTY
+                }),
+                detail: Some(attribute_detail(attr)),
+                documentation: attr.description.as_ref().map(|d| {
+                    Documentation::MarkupContent(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: d.clone(),
+                    })
+                }),
+                insert_text: Some(format!("{name} = ${{1}}")),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                ..Default::default()
+            });
+        }
+    }
+    // Universal provider meta-arguments.
+    for a in builtin_blocks::PROVIDER_BLOCK_META_ATTRS {
+        if filter.present_attrs.contains(a.name) {
+            continue;
+        }
+        items.push(CompletionItem {
+            label: a.name.to_string(),
+            kind: Some(CompletionItemKind::PROPERTY),
+            detail: Some(a.detail.to_string()),
+            insert_text: Some(format!("{name} = ${{1}}", name = a.name)),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        });
+    }
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    items
+}
+
+/// Items for `required_providers { | }` — each common provider local
+/// name as a scaffold that expands to the full `NAME = { source = "…",
+/// version = "…" }` entry, with tabstops for the version constraint.
+fn required_providers_entry_items(filter: &BodyFilter) -> Vec<CompletionItem> {
+    let mut items: Vec<CompletionItem> = Vec::new();
+    for (local_name, source, hint) in builtin_blocks::REQUIRED_PROVIDERS_COMMON_ENTRIES {
+        if filter.present_attrs.contains(*local_name) {
+            continue;
+        }
+        items.push(CompletionItem {
+            label: local_name.to_string(),
+            kind: Some(CompletionItemKind::MODULE),
+            detail: Some(format!("{} — source {}", hint, source)),
+            insert_text: Some(format!(
+                "{local_name} = {{\n  source  = \"{source}\"\n  version = \"${{1:~> 1.0}}\"\n}}$0"
+            )),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        });
+    }
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    items
+}
+
+/// Items for the object-literal body of a `required_providers` entry,
+/// e.g. `aws = { | }`. Suggests `source`, `version`,
+/// `configuration_aliases`.
+fn required_provider_entry_attr_items(filter: &BodyFilter) -> Vec<CompletionItem> {
+    let mut items: Vec<CompletionItem> = builtin_blocks::REQUIRED_PROVIDER_ENTRY_ATTRS
+        .iter()
+        .filter(|a| !filter.present_attrs.contains(a.name))
+        .map(|a| CompletionItem {
+            label: a.name.to_string(),
+            kind: Some(if a.required {
+                CompletionItemKind::FIELD
+            } else {
+                CompletionItemKind::PROPERTY
+            }),
+            detail: Some(a.detail.to_string()),
+            insert_text: Some(format!("{name} = \"${{1}}\"", name = a.name)),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        })
+        .collect();
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    items
 }
 
 fn resource_body_items(

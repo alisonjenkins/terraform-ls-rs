@@ -3,6 +3,7 @@
 //! This crate defines the fundamental types used across the language server:
 //! symbol tables, resource addresses, provider addresses, and module identifiers.
 
+pub mod builtin_blocks;
 pub mod completion;
 pub mod error;
 pub mod meta_arguments;

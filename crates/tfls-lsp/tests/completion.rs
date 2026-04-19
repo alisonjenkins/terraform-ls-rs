@@ -1320,3 +1320,196 @@ async fn variable_attr_ref_returns_empty_for_non_object() {
         "primitive var shouldn't expose fields; got: {resp:?}"
     );
 }
+
+// --- Built-in block completion (terraform / variable / output / module /
+// provider / backend / required_providers) -------------------------------
+
+#[tokio::test]
+async fn terraform_block_body_suggests_required_version_and_blocks() {
+    let u = uri("file:///tf.tf");
+    let src = "terraform {\n  \n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(1, 2)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"required_version".to_string()));
+    assert!(ls.contains(&"required_providers".to_string()));
+    assert!(ls.contains(&"backend".to_string()));
+    assert!(ls.contains(&"cloud".to_string()));
+    // Must NOT offer resource/data-specific meta-args.
+    assert!(!ls.contains(&"count".to_string()));
+    assert!(!ls.contains(&"for_each".to_string()));
+}
+
+#[tokio::test]
+async fn variable_block_body_suggests_standard_attrs() {
+    let u = uri("file:///v.tf");
+    let src = "variable \"my_var\" {\n  \n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(1, 2)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"type".to_string()));
+    assert!(ls.contains(&"default".to_string()));
+    assert!(ls.contains(&"description".to_string()));
+    assert!(ls.contains(&"sensitive".to_string()));
+    assert!(ls.contains(&"nullable".to_string()));
+    assert!(ls.contains(&"validation".to_string()));
+}
+
+#[tokio::test]
+async fn output_block_body_suggests_value_and_sensitive() {
+    let u = uri("file:///o.tf");
+    let src = "output \"my_output\" {\n  \n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(1, 2)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"value".to_string()));
+    assert!(ls.contains(&"description".to_string()));
+    assert!(ls.contains(&"sensitive".to_string()));
+}
+
+#[tokio::test]
+async fn locals_block_body_returns_no_completions() {
+    let u = uri("file:///l.tf");
+    let src = "locals {\n  \n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(1, 2)),
+    )
+    .await
+    .expect("ok");
+    assert!(resp.is_none(), "locals body has no fixed schema; got {resp:?}");
+}
+
+#[tokio::test]
+async fn backend_s3_body_suggests_bucket_key_region() {
+    let u = uri("file:///b.tf");
+    let src = "terraform {\n  backend \"s3\" {\n    \n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 4)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"bucket".to_string()));
+    assert!(ls.contains(&"key".to_string()));
+    assert!(ls.contains(&"region".to_string()));
+    // Should NOT leak terraform-block attrs.
+    assert!(!ls.contains(&"required_version".to_string()));
+}
+
+#[tokio::test]
+async fn backend_unknown_name_returns_no_completions() {
+    let u = uri("file:///b.tf");
+    let src = "terraform {\n  backend \"hypothetical\" {\n    \n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 4)),
+    )
+    .await
+    .expect("ok");
+    assert!(
+        resp.is_none(),
+        "unknown backend must not leak any schema; got {resp:?}"
+    );
+}
+
+#[tokio::test]
+async fn required_providers_body_suggests_common_entries() {
+    let u = uri("file:///rp.tf");
+    let src = "terraform {\n  required_providers {\n    \n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 4)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"aws".to_string()));
+    assert!(ls.contains(&"azurerm".to_string()));
+    assert!(ls.contains(&"google".to_string()));
+}
+
+#[tokio::test]
+async fn required_providers_entry_body_suggests_source_and_version() {
+    let u = uri("file:///rpe.tf");
+    let src = "terraform {\n  required_providers {\n    aws = {\n      \n    }\n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(3, 6)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"source".to_string()));
+    assert!(ls.contains(&"version".to_string()));
+    assert!(ls.contains(&"configuration_aliases".to_string()));
+}
+
+#[tokio::test]
+async fn provider_block_body_uses_provider_schema_plus_alias() {
+    // `provider "aws" { }` should offer both the provider's own schema
+    // attrs (here `region`) and the universal `alias` meta-arg.
+    let u = uri("file:///p.tf");
+    let src = "provider \"aws\" {\n  \n}\n";
+    let backend = fresh_backend(src, &u);
+    let schema: ProviderSchemas = sonic_rs::from_str(
+        r#"{
+        "format_version": "1.0",
+        "provider_schemas": {
+            "registry.terraform.io/hashicorp/aws": {
+                "provider": {
+                    "version": 0,
+                    "block": {
+                        "attributes": {
+                            "region":  { "type": "string", "optional": true },
+                            "profile": { "type": "string", "optional": true }
+                        }
+                    }
+                },
+                "resource_schemas": {},
+                "data_source_schemas": {}
+            }
+        }
+    }"#,
+    )
+    .expect("parse schema");
+    backend.state.install_schemas(schema);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(1, 2)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"region".to_string()));
+    assert!(ls.contains(&"profile".to_string()));
+    assert!(ls.contains(&"alias".to_string()));
+}

@@ -29,6 +29,42 @@ pub enum CompletionContext {
     /// one of the child module's input variable names.
     ModuleBody { name: String },
 
+    /// Cursor is inside a top-level `terraform { ... }` block body.
+    /// Expect meta-attributes like `required_version`, `experiments`
+    /// and nested blocks like `required_providers`, `backend`, `cloud`.
+    TerraformBlockBody,
+
+    /// Cursor is inside a `variable "<name>" { ... }` block body.
+    VariableBlockBody { name: String },
+
+    /// Cursor is inside an `output "<name>" { ... }` block body.
+    OutputBlockBody { name: String },
+
+    /// Cursor is inside a `locals { ... }` block body. Locals have no
+    /// fixed schema (each line is a user-defined local), so completion
+    /// intentionally returns nothing here.
+    LocalsBlockBody,
+
+    /// Cursor is inside a top-level `provider "<name>" { ... }` block.
+    /// Attribute completion comes from the provider schema's
+    /// `provider: Schema` field, mirroring resource bodies.
+    ProviderBlockBody { name: String },
+
+    /// Cursor is inside a `backend "<name>" { ... }` block nested inside
+    /// `terraform { }`. Each backend has its own hand-maintained attr
+    /// table in `builtin_blocks`.
+    BackendBlockBody { name: String },
+
+    /// Cursor is inside `required_providers { ... }` nested inside
+    /// `terraform { }`. Suggest common provider local names as keys
+    /// (aws, azurerm, google, …) along with a scaffold snippet.
+    RequiredProvidersBody,
+
+    /// Cursor is inside the object-literal value of a
+    /// `required_providers` entry, e.g. `aws = { | }`. Suggest
+    /// `source` and `version` attribute names.
+    RequiredProvidersEntryBody,
+
     /// Cursor is after `module.<name>.` — expect an output name from
     /// the referenced child module.
     ModuleAttr { module_name: String },
@@ -556,6 +592,18 @@ fn enclosing_block_context(before: &str) -> Option<CompletionContext> {
                     if let Some(ctx) = classify_block_header(header) {
                         return Some(ctx);
                     }
+                    // Object literal `WORD = { ... }`. The only case
+                    // that lights up completion is a
+                    // `required_providers` entry; anything else stays
+                    // Unknown.
+                    if is_object_literal_opener(header) {
+                        return match enclosing_block_context(header) {
+                            Some(CompletionContext::RequiredProvidersBody) => {
+                                Some(CompletionContext::RequiredProvidersEntryBody)
+                            }
+                            _ => None,
+                        };
+                    }
                     if !is_nested_block_opener(header) {
                         return None;
                     }
@@ -569,6 +617,15 @@ fn enclosing_block_context(before: &str) -> Option<CompletionContext> {
         }
     }
     None
+}
+
+/// Does the text immediately before a `{` look like an attribute
+/// assignment ending in `=`? (i.e. the `{` is the start of an object
+/// literal value, not a nested block.)
+fn is_object_literal_opener(header_source: &str) -> bool {
+    let line_start = header_source.rfind('\n').map_or(0, |i| i + 1);
+    let line = header_source[line_start..].trim_end();
+    line.ends_with('=')
 }
 
 /// Does the text immediately before a `{` look like a block opener
@@ -603,22 +660,45 @@ fn is_nested_block_opener(header_source: &str) -> bool {
             .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
 }
 
-/// Given the text up to the `{`, figure out if it's a resource/data/
-/// module block header and what type or name it declares.
+/// Given the text up to the `{`, figure out if it's a recognised
+/// top-level block header (or a built-in nested one like `backend`
+/// or `required_providers`) and what type / name it declares.
 fn classify_block_header(header_source: &str) -> Option<CompletionContext> {
     // Take the last line of the header (block openers live on one line).
     let line_start = header_source.rfind('\n').map_or(0, |i| i + 1);
     let line = header_source[line_start..].trim();
-    let (keyword, rest) = line.split_once(char::is_whitespace)?;
-    let first_label = first_quoted_string(rest)?;
-    match keyword {
-        "resource" => Some(CompletionContext::ResourceBody {
-            resource_type: first_label,
+    // The line might be just a bare keyword (`terraform {`) with no
+    // whitespace inside it. `split_once` fails in that case, so try
+    // bare-keyword matches first.
+    let bare = line.trim_end_matches(|c: char| c.is_whitespace() || c == '{');
+    match bare {
+        "terraform" => return Some(CompletionContext::TerraformBlockBody),
+        "locals" => return Some(CompletionContext::LocalsBlockBody),
+        "required_providers" => return Some(CompletionContext::RequiredProvidersBody),
+        // `cloud`, `provider_meta` and unlabelled nested blocks under
+        // `terraform {}` aren't classified here — they're treated as
+        // unknown nested blocks so `enclosing_block_context` keeps
+        // walking outward to `terraform` and the dispatch descends
+        // the terraform-block schema via `nested_block_path`.
+        _ => {}
+    }
+    let (keyword, rest) = match line.split_once(char::is_whitespace) {
+        Some(v) => v,
+        None => return None,
+    };
+    let first_label = first_quoted_string(rest);
+    match (keyword, first_label) {
+        ("resource", Some(type_name)) => Some(CompletionContext::ResourceBody {
+            resource_type: type_name,
         }),
-        "data" => Some(CompletionContext::DataSourceBody {
-            resource_type: first_label,
+        ("data", Some(type_name)) => Some(CompletionContext::DataSourceBody {
+            resource_type: type_name,
         }),
-        "module" => Some(CompletionContext::ModuleBody { name: first_label }),
+        ("module", Some(name)) => Some(CompletionContext::ModuleBody { name }),
+        ("variable", Some(name)) => Some(CompletionContext::VariableBlockBody { name }),
+        ("output", Some(name)) => Some(CompletionContext::OutputBlockBody { name }),
+        ("provider", Some(name)) => Some(CompletionContext::ProviderBlockBody { name }),
+        ("backend", Some(name)) => Some(CompletionContext::BackendBlockBody { name }),
         _ => None,
     }
 }
