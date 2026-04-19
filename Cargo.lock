@@ -2357,6 +2357,7 @@ dependencies = [
  "hcl-edit",
  "lsp-types",
  "ropey",
+ "serde_json",
  "tfls-core",
  "thiserror",
  "tracing",

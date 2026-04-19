@@ -24,4 +24,7 @@ pub enum ParseError {
 
     #[error("byte offset {offset} exceeds document length {length}")]
     ByteOffsetOutOfBounds { offset: usize, length: usize },
+
+    #[error("terraform JSON syntax error: {message}")]
+    Json { message: String },
 }

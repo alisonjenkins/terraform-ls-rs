@@ -6,7 +6,7 @@ use ropey::Rope;
 use tfls_core::SymbolTable;
 use tfls_parser::{
     ParsedFile, Reference, extract_references, extract_symbols, lsp_position_to_byte_offset,
-    parse_source,
+    parse_source_for_uri,
 };
 
 use crate::error::StateError;
@@ -29,7 +29,7 @@ pub struct DocumentState {
 impl DocumentState {
     pub fn new(uri: Url, text: &str, version: i32) -> Self {
         let rope = Rope::from_str(text);
-        let parsed = parse_source(text);
+        let parsed = parse_source_for_uri(text, uri.as_str());
         let (symbols, references) = compute_analysis(&parsed, &uri, &rope);
         Self {
             uri,
@@ -78,7 +78,7 @@ impl DocumentState {
     /// keeps working while the user is mid-edit.
     pub fn reparse(&mut self) {
         let text = self.rope.to_string();
-        self.parsed = parse_source(&text);
+        self.parsed = parse_source_for_uri(&text, self.uri.as_str());
         if self.parsed.body.is_some() {
             let (symbols, references) =
                 compute_analysis(&self.parsed, &self.uri, &self.rope);

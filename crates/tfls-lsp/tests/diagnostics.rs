@@ -153,3 +153,50 @@ fn definitions_in_unrelated_workspace_dir_do_not_satisfy_references() {
         "cross-workspace reference should still warn: {msgs:?}"
     );
 }
+
+#[test]
+fn parses_tf_json_file_via_document_lifecycle() {
+    // Open a `.tf.json` document and confirm the equivalent HCL-level
+    // diagnostics fire. Specifically: a `variable` declared without a
+    // `type` should trigger `terraform_typed_variables`.
+    let b = backend();
+    let u = uri("file:///proj/input.tf.json");
+    insert(
+        &b,
+        &u,
+        r#"{
+            "variable": {
+                "region": {}
+            }
+        }"#,
+    );
+    let msgs = messages(&b, &u);
+    assert!(
+        msgs.iter().any(|m| m.contains("`region`") && m.contains("no type")),
+        "expected `region` missing-type warning via tf.json; got {msgs:?}"
+    );
+}
+
+#[test]
+fn flags_malformed_tf_json() {
+    let b = backend();
+    let u = uri("file:///proj/broken.tf.json");
+    insert(&b, &u, "{not valid json}");
+    let msgs = messages(&b, &u);
+    assert!(
+        msgs.iter().any(|m| m.contains("JSON") || m.contains("json")),
+        "expected JSON parse error: {msgs:?}"
+    );
+}
+
+#[test]
+fn flags_unknown_top_level_key_in_tf_json() {
+    let b = backend();
+    let u = uri("file:///proj/weird.tf.json");
+    insert(&b, &u, r#"{ "unknown_root": {} }"#);
+    let msgs = messages(&b, &u);
+    assert!(
+        msgs.iter().any(|m| m.contains("unknown") && m.contains("unknown_root")),
+        "expected unknown-top-level-key error: {msgs:?}"
+    );
+}

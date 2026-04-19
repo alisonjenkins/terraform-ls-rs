@@ -42,6 +42,17 @@ pub fn parse_source(source: &str) -> ParsedFile {
     }
 }
 
+/// Parse a document, auto-selecting the HCL or JSON parser based on
+/// the URI extension. `.tf.json` files go through the JSON parser;
+/// everything else uses the HCL parser.
+pub fn parse_source_for_uri(source: &str, uri_or_path: &str) -> ParsedFile {
+    if uri_or_path.ends_with(".tf.json") {
+        crate::json::parse_json_source(source)
+    } else {
+        parse_source(source)
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {

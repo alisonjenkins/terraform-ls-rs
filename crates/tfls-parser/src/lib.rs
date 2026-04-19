@@ -4,13 +4,15 @@
 //! and byte offsets via `ropey`, and incremental parsing support.
 
 pub mod error;
+pub mod json;
 pub mod parse;
 pub mod position;
 pub mod references;
 pub mod traversal;
 
 pub use error::ParseError;
-pub use parse::{ParsedFile, parse_source};
+pub use json::parse_json_source;
+pub use parse::{ParsedFile, parse_source, parse_source_for_uri};
 pub use position::{
     byte_offset_to_lsp_position, hcl_span_to_lsp_range, lsp_position_to_byte_offset,
 };
