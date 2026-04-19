@@ -274,7 +274,7 @@ fn label_closed_after(text: &str, offset: usize) -> bool {
 ///   $0
 /// }
 /// ```
-fn resource_scaffold_snippet(type_name: &str, backend: &Backend, kind: &str) -> String {
+pub fn resource_scaffold_snippet(type_name: &str, backend: &Backend, kind: &str) -> String {
     let schema = if kind == "data" {
         backend.state.data_source_schema(type_name)
     } else {

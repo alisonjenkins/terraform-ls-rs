@@ -80,7 +80,8 @@ pub fn server_capabilities() -> ServerCapabilities {
         experimental: Some(serde_json::json!({
             "terraform-ls": {
                 "searchDocs": { "version": 1 },
-                "getDoc":     { "version": 1 }
+                "getDoc":     { "version": 1 },
+                "getSnippet": { "version": 1 }
             }
         })),
         ..Default::default()

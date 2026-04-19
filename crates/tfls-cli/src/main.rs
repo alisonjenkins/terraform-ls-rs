@@ -31,6 +31,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (service, socket) = LspService::build(Backend::new)
         .custom_method("terraform-ls/searchDocs", Backend::search_docs)
         .custom_method("terraform-ls/getDoc", Backend::get_doc)
+        .custom_method("terraform-ls/getSnippet", Backend::get_snippet)
         .finish();
 
     Server::new(stdin, stdout, socket).serve(service).await;

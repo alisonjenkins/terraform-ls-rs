@@ -89,6 +89,23 @@ pub struct GetDocResult {
     pub registry_url: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct GetSnippetParams {
+    pub name: String,
+    pub kind: Kind,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GetSnippetResult {
+    pub name: String,
+    pub kind: Kind,
+    pub provider: String,
+    /// LSP snippet-format string ready for `lsp_expand`. Includes the
+    /// leading `resource "` / `data "` prefix so clients can expand it
+    /// as a standalone block insertion.
+    pub snippet: String,
+}
+
 // --- Defaults and limits ---------------------------------------------------
 
 const DEFAULT_LIMIT: u32 = 50;
@@ -200,6 +217,36 @@ pub async fn get_doc(
         provider: addr.r#type.clone(),
         markdown,
         registry_url,
+    })
+}
+
+pub async fn get_snippet(
+    backend: &Backend,
+    params: GetSnippetParams,
+) -> jsonrpc::Result<GetSnippetResult> {
+    let name = params.name;
+    let kind = params.kind;
+
+    let addr = match find_entry(&backend.state, kind, &name) {
+        Some((addr, _, _)) => addr,
+        None => return Err(not_found(&name, kind)),
+    };
+
+    let kind_keyword = match kind {
+        Kind::Resource => "resource",
+        Kind::Data => "data",
+    };
+    // `resource_scaffold_snippet` returns the tail after `<kind> "` —
+    // starting with the type name and the closing quote. Prepend the
+    // keyword so the client gets a complete insertable block.
+    let tail = crate::handlers::completion::resource_scaffold_snippet(&name, backend, kind_keyword);
+    let snippet = format!("{kind_keyword} \"{tail}");
+
+    Ok(GetSnippetResult {
+        name,
+        kind,
+        provider: addr.r#type.clone(),
+        snippet,
     })
 }
 
@@ -649,6 +696,97 @@ mod tests {
         .await
         .unwrap_err();
         assert!(format!("{:?}", err).contains("nonexistent_resource"));
+    }
+
+    #[tokio::test]
+    async fn get_snippet_with_required_attrs_has_tabstops_for_each() {
+        let state = state_with_azurerm();
+        let backend = make_backend(state);
+        let result = get_snippet(
+            &backend,
+            GetSnippetParams {
+                name: "azurerm_kubernetes_cluster".to_string(),
+                kind: Kind::Resource,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(result.snippet.starts_with("resource \"azurerm_kubernetes_cluster\""));
+        assert!(result.snippet.contains("${1:name}"));
+        // Required attrs `name` and `location` are alphabetised, so they
+        // take tabstops ${2} and ${3} respectively.
+        assert!(result.snippet.contains("location = \"${2}\""));
+        assert!(result.snippet.contains("name = \"${3}\""));
+        // With required attrs present the snippet must NOT carry `$0` —
+        // the natural exit is after the last tabstop. Matches the
+        // completion handler's behavior.
+        assert!(!result.snippet.contains("$0"));
+        assert!(result.snippet.ends_with('}'));
+    }
+
+    #[tokio::test]
+    async fn get_snippet_data_source_uses_data_prefix() {
+        let state = state_with_azurerm();
+        let backend = make_backend(state);
+        let result = get_snippet(
+            &backend,
+            GetSnippetParams {
+                name: "azurerm_storage_account".to_string(),
+                kind: Kind::Data,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(result.snippet.starts_with("data \"azurerm_storage_account\""));
+        assert!(result.snippet.contains("${1:name}"));
+        assert_eq!(result.kind, Kind::Data);
+    }
+
+    #[tokio::test]
+    async fn get_snippet_no_required_attrs_exits_with_dollar_zero() {
+        let state = StateStore::new();
+        let mut ps = ProviderSchema {
+            provider: Schema { version: 1, block: BlockSchema::default() },
+            resource_schemas: Default::default(),
+            data_source_schemas: Default::default(),
+        };
+        // Resource with only optional attrs — no required fields.
+        let mut block = BlockSchema::default();
+        let opt = AttributeSchema { optional: true, ..Default::default() };
+        block.attributes.insert("length".to_string(), opt);
+        ps.resource_schemas.insert(
+            "random_pet".to_string(),
+            Schema { version: 1, block },
+        );
+        let addr = ProviderAddress::hashicorp("random");
+        state.schemas.insert(addr, Arc::new(ps));
+        let backend = make_backend(state);
+        let result = get_snippet(
+            &backend,
+            GetSnippetParams {
+                name: "random_pet".to_string(),
+                kind: Kind::Resource,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(result.snippet.contains("$0"));
+    }
+
+    #[tokio::test]
+    async fn get_snippet_unknown_returns_error() {
+        let state = state_with_azurerm();
+        let backend = make_backend(state);
+        let err = get_snippet(
+            &backend,
+            GetSnippetParams {
+                name: "nope_not_a_thing".to_string(),
+                kind: Kind::Resource,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{:?}", err).contains("nope_not_a_thing"));
     }
 
     fn make_backend(state: StateStore) -> Backend {

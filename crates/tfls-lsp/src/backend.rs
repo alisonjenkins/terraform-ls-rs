@@ -115,6 +115,16 @@ impl Backend {
     ) -> jsonrpc::Result<handlers::search_docs::GetDocResult> {
         handlers::search_docs::get_doc(self, params).await
     }
+
+    /// Custom LSP extension: `terraform-ls/getSnippet` — the LSP
+    /// snippet-format string for a resource / data source, including
+    /// `${N}` tabstops for required attributes.
+    pub async fn get_snippet(
+        &self,
+        params: handlers::search_docs::GetSnippetParams,
+    ) -> jsonrpc::Result<handlers::search_docs::GetSnippetResult> {
+        handlers::search_docs::get_snippet(self, params).await
+    }
 }
 
 #[tower_lsp::async_trait]
