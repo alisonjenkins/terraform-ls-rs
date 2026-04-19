@@ -75,9 +75,39 @@ async fn fetch_registry_versions(
     name: &str,
 ) -> Result<Vec<String>, ProtocolError> {
     let cache_path = versions_cache_path(registry_slug, namespace, name);
+    // Fast path: a fresh cache (< TTL) wins outright — no network.
     if let Some(cached) = read_fresh_cache(&cache_path).await {
         return Ok(cached);
     }
+    // Otherwise try the network. If anything fails (transport, non-2xx,
+    // malformed body), fall back to any cache on disk regardless of age
+    // so a registry outage doesn't blank the completion list.
+    match try_network_fetch(client, host, namespace, name).await {
+        Ok(versions) => {
+            write_cache(&cache_path, &versions).await;
+            Ok(versions)
+        }
+        Err(e) => {
+            if let Some(stale) = read_any_cache(&cache_path).await {
+                tracing::debug!(
+                    error = %e,
+                    %registry_slug, %namespace, %name,
+                    "registry fetch failed; serving stale cache"
+                );
+                Ok(stale)
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+async fn try_network_fetch(
+    client: &reqwest::Client,
+    host: &str,
+    namespace: &str,
+    name: &str,
+) -> Result<Vec<String>, ProtocolError> {
     let url = format!("{host}/v1/providers/{namespace}/{name}/versions");
     tracing::debug!(%url, "fetching registry versions");
     let resp = client
@@ -97,11 +127,7 @@ async fn fetch_registry_versions(
         .map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
     let parsed: VersionsResponse = serde_json::from_str(&body)
         .map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
-    let versions: Vec<String> = parsed.versions.into_iter().map(|v| v.version).collect();
-    // Write the parsed + filtered form, not the raw response — keeps
-    // the cache portable across registry response shape changes.
-    write_cache(&cache_path, &versions).await;
-    Ok(versions)
+    Ok(parsed.versions.into_iter().map(|v| v.version).collect())
 }
 
 /// Build an HTTP client suitable for registry endpoints. Reuses the
@@ -158,6 +184,17 @@ async fn read_fresh_cache(path: &Path) -> Option<Vec<String>> {
     if age > CACHE_TTL {
         return None;
     }
+    read_cache_contents(path).await
+}
+
+/// Read whatever's on disk, regardless of age. Used as a graceful
+/// fallback when the live fetch fails during an outage and the only
+/// data we have is stale.
+async fn read_any_cache(path: &Path) -> Option<Vec<String>> {
+    read_cache_contents(path).await
+}
+
+async fn read_cache_contents(path: &Path) -> Option<Vec<String>> {
     let body = tokio::fs::read_to_string(path).await.ok()?;
     serde_json::from_str::<Vec<String>>(&body).ok()
 }
@@ -187,10 +224,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sanitise_rejects_path_traversal() {
-        assert_eq!(sanitise("../etc/passwd"), "___etc_passwd");
+    fn sanitise_strips_path_separators() {
+        // `/` in a component becomes `_`, preventing a single value
+        // from injecting a subdirectory into the cache path. `.` is
+        // kept so version strings like "5.10.0" round-trip unchanged.
+        assert_eq!(sanitise("../etc/passwd"), ".._etc_passwd");
         assert_eq!(sanitise("hashicorp"), "hashicorp");
         assert_eq!(sanitise("aws-plus"), "aws-plus");
+        assert_eq!(sanitise("5.10.0"), "5.10.0");
     }
 
     #[test]
@@ -198,5 +239,70 @@ mod tests {
         let p1 = versions_cache_path("terraform", "hashicorp", "aws");
         let p2 = versions_cache_path("opentofu", "hashicorp", "aws");
         assert_ne!(p1, p2, "same provider must cache under different registries");
+    }
+
+    /// An outage with a pre-existing cache — even if the cache is
+    /// past its TTL — must still be served rather than returning an
+    /// empty list. Uses an unreachable localhost port so the live
+    /// fetch fails fast and the fallback path fires.
+    #[tokio::test]
+    async fn stale_cache_serves_during_outage() {
+        // Point the cache root at a fresh temp dir so the test doesn't
+        // race with the real user's cache.
+        let tmp = std::env::temp_dir().join(format!("tfls-test-{}", std::process::id()));
+        // Safety: this test is the only consumer of these env vars
+        // in this test binary. Tokio's `current_thread` runtime won't
+        // run tests concurrently in the same process for this file;
+        // the tfls-lsp lib test crate runs separately. Even if races
+        // mattered, the cache-root resolution only looks at env at
+        // call time.
+        // SAFETY: single-threaded test, called before spawning anything.
+        unsafe {
+            std::env::set_var("XDG_CACHE_HOME", &tmp);
+        }
+
+        let cache_path = versions_cache_path("terraform", "hashicorp", "aws");
+        let payload = vec!["5.99.0".to_string(), "5.98.0".to_string()];
+        write_cache(&cache_path, &payload).await;
+        assert!(tokio::fs::metadata(&cache_path).await.is_ok(), "cache written");
+
+        let client = build_http_client().expect("http client");
+        // 127.0.0.1:1 is the canonical "nothing listens here" port.
+        let result = fetch_registry_versions(
+            &client,
+            "http://127.0.0.1:1",
+            "terraform",
+            "hashicorp",
+            "aws",
+        )
+        .await
+        .expect("outage with cache must not error");
+        assert_eq!(result, payload, "must serve cached versions during outage");
+
+        let _ = tokio::fs::remove_dir_all(&tmp).await;
+    }
+
+    #[tokio::test]
+    async fn no_cache_no_network_returns_error() {
+        // Isolated cache root so we don't stumble onto an unrelated
+        // existing entry.
+        let tmp = std::env::temp_dir().join(format!("tfls-test-nocache-{}", std::process::id()));
+        // SAFETY: see stale_cache_serves_during_outage.
+        unsafe {
+            std::env::set_var("XDG_CACHE_HOME", &tmp);
+        }
+
+        let client = build_http_client().expect("http client");
+        let result = fetch_registry_versions(
+            &client,
+            "http://127.0.0.1:1",
+            "terraform",
+            "no-such-ns-definitely",
+            "no-such-name-definitely",
+        )
+        .await;
+        assert!(result.is_err(), "outage + no cache must surface an error");
+
+        let _ = tokio::fs::remove_dir_all(&tmp).await;
     }
 }
