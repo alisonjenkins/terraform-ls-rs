@@ -41,12 +41,12 @@ const TOP_LEVEL_SNIPPETS: &[(&str, &str, &str)] = &[
     ("data", "data \"", "Data source block"),
     (
         "variable",
-        "variable \"${1:name}\" {\n  type = ${2:string}\n  $0\n}",
+        "variable \"${1:name}\" {\n  type = ${2:string}\n  default = ${3}\n  description = \"${4}\"\n  $0\n}",
         "Variable block",
     ),
     (
         "output",
-        "output \"${1:name}\" {\n  value = $2\n  $0\n}",
+        "output \"${1:name}\" {\n  value = $2\n  description = \"${3}\"\n  $0\n}",
         "Output block",
     ),
     (
@@ -442,21 +442,51 @@ fn builtin_body_items(
     schema: tfls_core::builtin_blocks::BuiltinSchema,
     filter: &BodyFilter,
 ) -> Vec<CompletionItem> {
+    // Identify the variable / output schemas by unique attribute
+    // names: only the variable block has `nullable`, and only the
+    // output block has `depends_on` as a built-in attribute. Pointer
+    // equality on the const slice doesn't reliably deduplicate across
+    // codegen units, so value-based identification is used instead.
+    let schema_is_variable = schema.attrs.iter().any(|a| a.name == "nullable");
+    let schema_is_output = schema.attrs.iter().any(|a| a.name == "depends_on");
+
     let mut items: Vec<CompletionItem> = schema
         .attrs
         .iter()
         .filter(|a| !filter.present_attrs.contains(a.name))
-        .map(|a| CompletionItem {
-            label: a.name.to_string(),
-            kind: Some(if a.required {
-                CompletionItemKind::FIELD
+        .map(|a| {
+            let insert_text = if schema_is_variable && a.name == "type" {
+                let mut s = String::from("type = ${1:string}");
+                let mut tab = 2;
+                if !filter.present_attrs.contains("default") {
+                    s.push_str(&format!("\ndefault = ${{{tab}}}"));
+                    tab += 1;
+                }
+                if !filter.present_attrs.contains("description") {
+                    s.push_str(&format!("\ndescription = \"${{{tab}}}\""));
+                }
+                s
+            } else if schema_is_output && a.name == "value" {
+                let mut s = String::from("value = ${1}");
+                if !filter.present_attrs.contains("description") {
+                    s.push_str("\ndescription = \"${2}\"");
+                }
+                s
             } else {
-                CompletionItemKind::PROPERTY
-            }),
-            detail: Some(a.detail.to_string()),
-            insert_text: Some(format!("{name} = ${{1}}", name = a.name)),
-            insert_text_format: Some(InsertTextFormat::SNIPPET),
-            ..Default::default()
+                format!("{name} = ${{1}}", name = a.name)
+            };
+            CompletionItem {
+                label: a.name.to_string(),
+                kind: Some(if a.required {
+                    CompletionItemKind::FIELD
+                } else {
+                    CompletionItemKind::PROPERTY
+                }),
+                detail: Some(a.detail.to_string()),
+                insert_text: Some(insert_text),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                ..Default::default()
+            }
         })
         .collect();
     for b in schema.blocks {

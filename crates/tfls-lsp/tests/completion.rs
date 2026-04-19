@@ -7,7 +7,7 @@ use tfls_schema::ProviderSchemas;
 use tfls_state::DocumentState;
 use tower_lsp::LspService;
 use tower_lsp::lsp_types::{
-    CompletionContext, CompletionParams, CompletionResponse, CompletionTextEdit,
+    CompletionContext, CompletionItem, CompletionParams, CompletionResponse, CompletionTextEdit,
     CompletionTriggerKind, PartialResultParams, Position, TextDocumentIdentifier,
     TextDocumentPositionParams, Url, WorkDoneProgressParams,
 };
@@ -1773,4 +1773,194 @@ async fn provider_block_body_uses_provider_schema_plus_alias() {
     assert!(ls.contains(&"region".to_string()));
     assert!(ls.contains(&"profile".to_string()));
     assert!(ls.contains(&"alias".to_string()));
+}
+
+// --- `description` / `default` nudge bundling -----------------------------
+//
+// The `variable` and `output` top-level scaffolds, and their body-level
+// `type` / `value` items, bundle extra API-surface attributes
+// (`default`, `description`) so the author is prompted to think about
+// documentation and default-value semantics when defining a module's
+// public interface. The bundling is gated on the attribute not being
+// already present in the block.
+
+fn find_item(resp: CompletionResponse, label: &str) -> CompletionItem {
+    let items = match resp {
+        CompletionResponse::Array(v) => v,
+        CompletionResponse::List(l) => l.items,
+    };
+    items
+        .into_iter()
+        .find(|i| i.label == label)
+        .unwrap_or_else(|| panic!("missing completion item {label}"))
+}
+
+#[tokio::test]
+async fn top_level_variable_scaffold_bundles_default_and_description() {
+    let u = uri("file:///a.tf");
+    let backend = fresh_backend("", &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(0, 0)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let insert = find_item(resp, "variable")
+        .insert_text
+        .expect("variable has insert_text");
+    assert!(
+        insert.contains("default = "),
+        "variable scaffold must bundle default = line; got {insert:?}"
+    );
+    assert!(
+        insert.contains("description = \""),
+        "variable scaffold must bundle description line; got {insert:?}"
+    );
+}
+
+#[tokio::test]
+async fn top_level_output_scaffold_bundles_description_but_not_default() {
+    let u = uri("file:///a.tf");
+    let backend = fresh_backend("", &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(0, 0)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let insert = find_item(resp, "output")
+        .insert_text
+        .expect("output has insert_text");
+    assert!(
+        insert.contains("description = \""),
+        "output scaffold must bundle description line; got {insert:?}"
+    );
+    assert!(
+        !insert.contains("default = "),
+        "output scaffold must not include default (outputs have no default); got {insert:?}"
+    );
+}
+
+#[tokio::test]
+async fn variable_body_type_bundles_default_and_description() {
+    let u = uri("file:///v.tf");
+    // Empty body — the `type` completion should append default + description.
+    let src = "variable \"x\" {\n  \n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(1, 2)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let insert = find_item(resp, "type")
+        .insert_text
+        .expect("type has insert_text");
+    assert!(
+        insert.starts_with("type = ${1:string}"),
+        "type snippet should start with `type = ${{1:string}}`; got {insert:?}"
+    );
+    assert!(
+        insert.contains("\ndefault = "),
+        "type snippet should append default; got {insert:?}"
+    );
+    assert!(
+        insert.contains("\ndescription = \""),
+        "type snippet should append description; got {insert:?}"
+    );
+}
+
+#[tokio::test]
+async fn variable_body_type_skips_default_when_already_present() {
+    let u = uri("file:///v.tf");
+    let src = "variable \"x\" {\n  default = 1\n  \n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 2)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let insert = find_item(resp, "type")
+        .insert_text
+        .expect("type has insert_text");
+    assert!(
+        !insert.contains("default = "),
+        "type snippet must not duplicate default when present; got {insert:?}"
+    );
+    assert!(
+        insert.contains("description = \""),
+        "type snippet should still bundle description; got {insert:?}"
+    );
+}
+
+#[tokio::test]
+async fn variable_body_type_plain_when_all_companions_present() {
+    let u = uri("file:///v.tf");
+    let src = "variable \"x\" {\n  default = 1\n  description = \"y\"\n  \n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(3, 2)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let insert = find_item(resp, "type")
+        .insert_text
+        .expect("type has insert_text");
+    assert_eq!(
+        insert, "type = ${1:string}",
+        "type snippet should be plain when default + description already present"
+    );
+}
+
+#[tokio::test]
+async fn output_body_value_bundles_description() {
+    let u = uri("file:///o.tf");
+    let src = "output \"x\" {\n  \n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(1, 2)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let insert = find_item(resp, "value")
+        .insert_text
+        .expect("value has insert_text");
+    assert!(
+        insert.starts_with("value = ${1}"),
+        "value snippet should start with `value = ${{1}}`; got {insert:?}"
+    );
+    assert!(
+        insert.contains("\ndescription = \""),
+        "value snippet should append description; got {insert:?}"
+    );
+}
+
+#[tokio::test]
+async fn output_body_value_plain_when_description_present() {
+    let u = uri("file:///o.tf");
+    let src = "output \"x\" {\n  description = \"y\"\n  \n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 2)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let insert = find_item(resp, "value")
+        .insert_text
+        .expect("value has insert_text");
+    assert_eq!(
+        insert, "value = ${1}",
+        "value snippet should be plain when description already present"
+    );
 }
