@@ -28,7 +28,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
-    let (service, socket) = LspService::new(Backend::new);
+    let (service, socket) = LspService::build(Backend::new)
+        .custom_method("terraform-ls/searchDocs", Backend::search_docs)
+        .custom_method("terraform-ls/getDoc", Backend::get_doc)
+        .finish();
 
     Server::new(stdin, stdout, socket).serve(service).await;
 

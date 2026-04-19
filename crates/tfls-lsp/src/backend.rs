@@ -96,6 +96,25 @@ impl Backend {
             h.abort();
         }
     }
+
+    /// Custom LSP extension: `terraform-ls/searchDocs` — free-text search
+    /// across loaded provider schemas. Wired via `LspService::build`
+    /// in `tfls-cli`.
+    pub async fn search_docs(
+        &self,
+        params: handlers::search_docs::SearchDocsParams,
+    ) -> jsonrpc::Result<handlers::search_docs::SearchDocsResult> {
+        handlers::search_docs::search_docs(self, params).await
+    }
+
+    /// Custom LSP extension: `terraform-ls/getDoc` — full synthesised
+    /// markdown for a resource or data source by name.
+    pub async fn get_doc(
+        &self,
+        params: handlers::search_docs::GetDocParams,
+    ) -> jsonrpc::Result<handlers::search_docs::GetDocResult> {
+        handlers::search_docs::get_doc(self, params).await
+    }
 }
 
 #[tower_lsp::async_trait]
