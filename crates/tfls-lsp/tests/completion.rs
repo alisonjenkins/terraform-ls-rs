@@ -1492,6 +1492,59 @@ async fn variable_block_body_suggests_standard_attrs() {
     assert!(ls.contains(&"validation".to_string()));
 }
 
+// After a completed `type = …` line the cursor should fall back to
+// body-attribute completion, not keep firing the type-expression
+// detector. Regression: previously the classifier latched onto the
+// last depth-0 `=` forever, so even after `type = object({…})\n` the
+// next line would show `string`, `number`, `list`, etc. instead of
+// `description`, `validation`, `sensitive`, …
+#[tokio::test]
+async fn variable_body_after_complex_type_assignment_offers_attrs_not_type_primitives() {
+    let u = uri("file:///v.tf");
+    let src = "variable \"test\" {\n  type = object({\n    name = string\n  })\n  \n}\n";
+    let backend = fresh_backend(src, &u);
+    // Cursor on the blank line after the `})` that closes the type
+    // expression.
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(4, 2)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(
+        ls.contains(&"description".to_string()),
+        "body position must offer body attrs; got {ls:?}"
+    );
+    assert!(
+        ls.contains(&"validation".to_string()),
+        "body position must offer `validation` block; got {ls:?}"
+    );
+    assert!(
+        !ls.contains(&"string".to_string()),
+        "body position must NOT offer type primitives; got {ls:?}"
+    );
+}
+
+// The simpler form: `type = string\n` on one line, cursor on the next.
+#[tokio::test]
+async fn variable_body_after_primitive_type_assignment_offers_attrs() {
+    let u = uri("file:///v.tf");
+    let src = "variable \"x\" {\n  type = string\n  \n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 2)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"description".to_string()), "got {ls:?}");
+    assert!(!ls.contains(&"number".to_string()), "got {ls:?}");
+}
+
 #[tokio::test]
 async fn output_block_body_suggests_value_and_sensitive() {
     let u = uri("file:///o.tf");

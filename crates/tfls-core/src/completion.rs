@@ -433,6 +433,17 @@ fn type_expression_context(before: &str) -> Option<CompletionContext> {
                     last_eq_at_depth_zero = Some(i);
                 }
             }
+            // In HCL, a newline at depth 0 terminates an attribute
+            // assignment. Without this, once the user writes
+            // `type = object({...})` and moves to the next line, the
+            // old `=` would still be "active" and the cursor would
+            // falsely classify as a type-expression position instead
+            // of a body-attribute position.
+            b'\n' => {
+                if paren == 0 && brace == 0 && bracket == 0 {
+                    last_eq_at_depth_zero = None;
+                }
+            }
             _ => {}
         }
         i += 1;
