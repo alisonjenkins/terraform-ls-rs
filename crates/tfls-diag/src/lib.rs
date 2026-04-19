@@ -1,15 +1,40 @@
 //! Diagnostics engine for terraform-ls-rs.
 
+pub mod deprecated_index;
+pub mod deprecated_interpolation;
+pub mod deprecated_lookup;
+pub mod empty_list_equality;
 pub mod error;
+pub mod expr_walk;
+pub mod map_duplicate_keys;
+pub mod module_pinned_source;
+pub mod module_shallow_clone;
+pub mod module_version_presence;
 pub mod references;
+pub mod required_providers_version;
+pub mod required_version_presence;
 pub mod schema_validation;
 pub mod syntax;
+pub mod typed_variables;
 pub mod variable_default_type;
 pub mod version_constraint;
+pub mod workspace_remote;
 
+pub use deprecated_index::deprecated_index_diagnostics;
+pub use deprecated_interpolation::deprecated_interpolation_diagnostics;
+pub use deprecated_lookup::deprecated_lookup_diagnostics;
+pub use empty_list_equality::empty_list_equality_diagnostics;
 pub use error::DiagError;
+pub use map_duplicate_keys::map_duplicate_keys_diagnostics;
+pub use module_pinned_source::module_pinned_source_diagnostics;
+pub use module_shallow_clone::module_shallow_clone_diagnostics;
+pub use module_version_presence::module_version_presence_diagnostics;
 pub use references::{undefined_reference_diagnostics, undefined_reference_diagnostics_for_document};
+pub use required_providers_version::required_providers_version_diagnostics;
+pub use required_version_presence::required_version_presence_diagnostics;
 pub use schema_validation::resource_diagnostics;
 pub use syntax::diagnostics_for_parse_errors;
+pub use typed_variables::typed_variables_diagnostics;
 pub use variable_default_type::variable_default_type_diagnostics;
 pub use version_constraint::{ConstraintSource, VersionCacheLookup, constraint_diagnostics};
+pub use workspace_remote::workspace_remote_diagnostics;

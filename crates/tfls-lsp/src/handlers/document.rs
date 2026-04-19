@@ -130,6 +130,23 @@ pub fn compute_diagnostics(state: &StateStore, uri: &Url) -> Vec<Diagnostic> {
         out.extend(tfls_diag::variable_default_type_diagnostics(
             body, &doc.rope,
         ));
+        // Tflint parity — in-tree "recommended" preset rules plus the
+        // niche `module_shallow_clone`. Each walker is a single-file
+        // HCL pass that reads the already-parsed `Body`, so the cost
+        // is amortised across the work the document handler already
+        // does.
+        out.extend(tfls_diag::typed_variables_diagnostics(body, &doc.rope));
+        out.extend(tfls_diag::required_version_presence_diagnostics(body, &doc.rope));
+        out.extend(tfls_diag::required_providers_version_diagnostics(body, &doc.rope));
+        out.extend(tfls_diag::module_version_presence_diagnostics(body, &doc.rope));
+        out.extend(tfls_diag::module_pinned_source_diagnostics(body, &doc.rope));
+        out.extend(tfls_diag::module_shallow_clone_diagnostics(body, &doc.rope));
+        out.extend(tfls_diag::workspace_remote_diagnostics(body, &doc.rope));
+        out.extend(tfls_diag::deprecated_index_diagnostics(body, &doc.rope));
+        out.extend(tfls_diag::deprecated_interpolation_diagnostics(body, &doc.rope));
+        out.extend(tfls_diag::deprecated_lookup_diagnostics(body, &doc.rope));
+        out.extend(tfls_diag::empty_list_equality_diagnostics(body, &doc.rope));
+        out.extend(tfls_diag::map_duplicate_keys_diagnostics(body, &doc.rope));
     }
 
     out
