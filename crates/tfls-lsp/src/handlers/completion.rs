@@ -332,7 +332,15 @@ fn resource_body_items(
         .block
         .attributes
         .iter()
-        .filter(|(name, _)| !filter.present_attrs.contains(name.as_str()))
+        .filter(|(name, attr)| {
+            // Skip pure-computed attributes — they're provider outputs
+            // the user can't assign. `optional && computed` stays in:
+            // the user can still set those, the provider just has a
+            // fallback. `required` implies writable regardless of
+            // `computed`.
+            !filter.present_attrs.contains(name.as_str())
+                && (attr.required || attr.optional)
+        })
         .map(|(name, attr)| CompletionItem {
             label: name.clone(),
             kind: Some(if attr.required {

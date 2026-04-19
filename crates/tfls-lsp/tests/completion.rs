@@ -186,6 +186,58 @@ async fn resource_body_suggests_attributes_from_schema() {
     assert!(ls.contains(&"tags".to_string()));
 }
 
+#[tokio::test]
+async fn resource_body_excludes_pure_computed_attributes() {
+    // Regression: attributes with `computed = true` and neither
+    // `required` nor `optional` are pure provider outputs and cannot
+    // be assigned. They must not appear in body completion. The
+    // `optional && computed` case ("computed-optional") is writable
+    // and must stay in.
+    let u = uri("file:///a.tf");
+    let src = "resource \"widget\" \"x\" {\n\n}\n";
+    let backend = fresh_backend(src, &u);
+    let schema: ProviderSchemas = sonic_rs::from_str(
+        r#"{
+        "format_version": "1.0",
+        "provider_schemas": {
+            "registry.terraform.io/acme/widget": {
+                "provider": { "version": 0, "block": {} },
+                "resource_schemas": {
+                    "widget": {
+                        "version": 1,
+                        "block": {
+                            "attributes": {
+                                "name": { "type": "string", "required": true },
+                                "id":   { "type": "string", "computed": true },
+                                "tags": { "type": ["map", "string"], "optional": true, "computed": true }
+                            }
+                        }
+                    }
+                },
+                "data_source_schemas": {}
+            }
+        }
+    }"#,
+    )
+    .expect("parse schema");
+    backend.state.install_schemas(schema);
+
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(1, 0)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"name".to_string()), "required attr should appear");
+    assert!(ls.contains(&"tags".to_string()), "computed-optional attr should appear");
+    assert!(
+        !ls.contains(&"id".to_string()),
+        "pure computed attr must not appear; labels were {ls:?}"
+    );
+}
+
 // Regression: when the cursor is inside an already-closed resource
 // type label (e.g. while editing the `${1:type}` placeholder of the
 // top-level `resource` snippet), emit the type name as plain text
