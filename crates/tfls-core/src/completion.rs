@@ -73,13 +73,32 @@ pub enum CompletionContext {
     /// Cursor is inside the string value of `version = "|"` under a
     /// `required_providers` entry. `source` is the sibling attr's
     /// value if one is already set — the dispatcher uses it to fetch
-    /// per-provider versions from the registries.
-    RequiredProviderVersionValue { source: Option<String> },
+    /// per-provider versions from the registries. `cursor_partial`
+    /// is the substring from the open quote to the cursor, used by
+    /// `version_constraint::cursor_slot` to decide whether to offer
+    /// operators or versions.
+    RequiredProviderVersionValue {
+        source: Option<String>,
+        cursor_partial: String,
+    },
 
     /// Cursor is inside the string value of `required_version = "|"`
     /// directly in the top-level `terraform { }` block. Suggestions
     /// come from Terraform + OpenTofu GitHub release feeds.
-    RequiredVersionValue,
+    /// `cursor_partial` is used the same way as for provider versions.
+    RequiredVersionValue {
+        cursor_partial: String,
+    },
+
+    /// Cursor is inside the string value of `version = "|"` directly
+    /// inside a `module "…" { … }` block. `source` is the sibling
+    /// attribute's value if one is already set — a registry-module
+    /// path (`ns/name/provider`) unlocks live version completion
+    /// from the `/v1/modules/…/versions` endpoint.
+    ModuleVersionValue {
+        source: Option<String>,
+        cursor_partial: String,
+    },
 
     /// Cursor is after `module.<name>.` — expect an output name from
     /// the referenced child module.
@@ -231,6 +250,10 @@ fn string_value_context(before: &str) -> Option<CompletionContext> {
     }
     // Figure out the enclosing block context to scope the match.
     let enclosing = enclosing_block_context(&before[..string_open])?;
+    // `cursor_partial` is the string-body text from just after the
+    // opening quote up to the cursor. Used by constraint-aware
+    // completion to pick operator vs version suggestions.
+    let cursor_partial = before[string_open + 1..].to_string();
     match (attr_name.as_str(), enclosing) {
         ("source", CompletionContext::RequiredProvidersEntryBody) => {
             Some(CompletionContext::RequiredProviderSourceValue)
@@ -239,10 +262,20 @@ fn string_value_context(before: &str) -> Option<CompletionContext> {
             // Best-effort sibling lookup: scan the open object-literal
             // body for a `source = "…"` sibling to scope versions to.
             let source = extract_sibling_source(before, string_open);
-            Some(CompletionContext::RequiredProviderVersionValue { source })
+            Some(CompletionContext::RequiredProviderVersionValue {
+                source,
+                cursor_partial,
+            })
         }
         ("required_version", CompletionContext::TerraformBlockBody) => {
-            Some(CompletionContext::RequiredVersionValue)
+            Some(CompletionContext::RequiredVersionValue { cursor_partial })
+        }
+        ("version", CompletionContext::ModuleBody { .. }) => {
+            let source = extract_sibling_source(before, string_open);
+            Some(CompletionContext::ModuleVersionValue {
+                source,
+                cursor_partial,
+            })
         }
         _ => None,
     }

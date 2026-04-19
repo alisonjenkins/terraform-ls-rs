@@ -170,6 +170,125 @@ fn semver_key(v: &str) -> (i64, i64, i64, i32, String) {
     }
 }
 
+/// Fetch merged module versions for `<namespace>/<name>/<provider>`
+/// from both the Terraform and OpenTofu registries. Same semantics
+/// as `fetch_versions` for providers — parallel join, provenance
+/// tagging, 24h disk cache, stale-cache outage fallback.
+pub async fn fetch_module_versions(
+    client: &reqwest::Client,
+    namespace: &str,
+    name: &str,
+    provider: &str,
+) -> Result<Vec<VersionInfo>, ProtocolError> {
+    let tf = fetch_module_registry_versions(
+        client, TERRAFORM_HOST, "terraform", namespace, name, provider,
+    );
+    let tofu = fetch_module_registry_versions(
+        client, OPENTOFU_HOST, "opentofu", namespace, name, provider,
+    );
+    let (tf_res, tofu_res) = tokio::join!(tf, tofu);
+    Ok(merge_with_provenance(
+        tf_res.unwrap_or_default(),
+        tofu_res.unwrap_or_default(),
+    ))
+}
+
+async fn fetch_module_registry_versions(
+    client: &reqwest::Client,
+    host: &str,
+    registry_slug: &str,
+    namespace: &str,
+    name: &str,
+    provider: &str,
+) -> Result<Vec<String>, ProtocolError> {
+    let cache_path = module_versions_cache_path(registry_slug, namespace, name, provider);
+    if let Some(cached) = read_fresh_cache(&cache_path).await {
+        return Ok(cached);
+    }
+    match try_module_network_fetch(client, host, namespace, name, provider).await {
+        Ok(versions) => {
+            write_cache(&cache_path, &versions).await;
+            Ok(versions)
+        }
+        Err(e) => {
+            if let Some(stale) = read_any_cache(&cache_path).await {
+                tracing::debug!(
+                    error = %e, %registry_slug, %namespace, %name, %provider,
+                    "module registry fetch failed; serving stale cache"
+                );
+                Ok(stale)
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+async fn try_module_network_fetch(
+    client: &reqwest::Client,
+    host: &str,
+    namespace: &str,
+    name: &str,
+    provider: &str,
+) -> Result<Vec<String>, ProtocolError> {
+    let url = format!("{host}/v1/modules/{namespace}/{name}/{provider}/versions");
+    tracing::debug!(%url, "fetching module registry versions");
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
+    if !resp.status().is_success() {
+        return Err(ProtocolError::RegistryHttp(format!(
+            "GET {url} → HTTP {}",
+            resp.status()
+        )));
+    }
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
+    // Module registries return a different envelope than provider
+    // registries: `{ modules: [{ versions: [{ version: "…" }, …] }] }`.
+    // We flatten to the version strings.
+    #[derive(serde::Deserialize)]
+    struct ModuleVersionsResp {
+        #[serde(default)]
+        modules: Vec<ModuleEntry>,
+    }
+    #[derive(serde::Deserialize)]
+    struct ModuleEntry {
+        #[serde(default)]
+        versions: Vec<ModuleVersion>,
+    }
+    #[derive(serde::Deserialize)]
+    struct ModuleVersion {
+        version: String,
+    }
+    let parsed: ModuleVersionsResp =
+        serde_json::from_str(&body).map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
+    Ok(parsed
+        .modules
+        .into_iter()
+        .flat_map(|m| m.versions.into_iter().map(|v| v.version))
+        .collect())
+}
+
+fn module_versions_cache_path(
+    registry: &str,
+    namespace: &str,
+    name: &str,
+    provider: &str,
+) -> PathBuf {
+    cache_root()
+        .join("modules")
+        .join(sanitise(registry))
+        .join(sanitise(namespace))
+        .join(sanitise(name))
+        .join(sanitise(provider))
+        .join("versions.json")
+}
+
 async fn fetch_registry_versions(
     client: &reqwest::Client,
     host: &str,

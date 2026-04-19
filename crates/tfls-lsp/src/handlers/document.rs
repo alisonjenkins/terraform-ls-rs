@@ -113,9 +113,162 @@ pub fn compute_diagnostics(state: &StateStore, uri: &Url) -> Vec<Diagnostic> {
     if let Some(body) = doc.parsed.body.as_ref() {
         let lookup = StateStoreSchemaLookup { state };
         out.extend(resource_diagnostics(body, &doc.rope, uri, &lookup));
+        let cache_lookup = OnDiskVersionCache;
+        out.extend(tfls_diag::constraint_diagnostics(
+            body,
+            &doc.rope,
+            &cache_lookup,
+        ));
     }
 
     out
+}
+
+/// Reads the already-populated on-disk caches used by the completion
+/// path. Returning `None` suppresses the semantic no-match warning
+/// (the completion fetch simply hasn't happened yet); returning a
+/// `Vec<String>` lets `tfls-diag` compare user constraints against
+/// actually-published versions.
+struct OnDiskVersionCache;
+
+impl tfls_diag::VersionCacheLookup for OnDiskVersionCache {
+    fn cached_versions(
+        &self,
+        source: &tfls_diag::ConstraintSource,
+    ) -> Option<Vec<String>> {
+        match source {
+            tfls_diag::ConstraintSource::TerraformCli => {
+                // Cache directly under $XDG_CACHE_HOME/terraform-ls-rs/tool-versions/
+                let path = tool_versions_cache_path("terraform")?;
+                let tf = std::fs::read_to_string(&path).ok()?;
+                let tofu_path = tool_versions_cache_path("opentofu")?;
+                let tofu = std::fs::read_to_string(&tofu_path).ok();
+                let mut out: Vec<String> = serde_json::from_str(&tf).ok()?;
+                if let Some(tofu_body) = tofu {
+                    if let Ok(extra) = serde_json::from_str::<Vec<String>>(&tofu_body) {
+                        for v in extra {
+                            if !out.contains(&v) {
+                                out.push(v);
+                            }
+                        }
+                    }
+                }
+                Some(out)
+            }
+            tfls_diag::ConstraintSource::Provider { namespace, name } => {
+                let mut out = Vec::new();
+                for registry in &["terraform", "opentofu"] {
+                    let path = registry_versions_cache_path(registry, namespace, name)?;
+                    if let Ok(body) = std::fs::read_to_string(&path) {
+                        if let Ok(vs) = serde_json::from_str::<Vec<String>>(&body) {
+                            for v in vs {
+                                if !out.contains(&v) {
+                                    out.push(v);
+                                }
+                            }
+                        }
+                    }
+                }
+                if out.is_empty() {
+                    None
+                } else {
+                    Some(out)
+                }
+            }
+            tfls_diag::ConstraintSource::Module {
+                namespace,
+                name,
+                provider,
+            } => {
+                let mut out = Vec::new();
+                for registry in &["terraform", "opentofu"] {
+                    let path =
+                        module_versions_cache_path(registry, namespace, name, provider)?;
+                    if let Ok(body) = std::fs::read_to_string(&path) {
+                        if let Ok(vs) = serde_json::from_str::<Vec<String>>(&body) {
+                            for v in vs {
+                                if !out.contains(&v) {
+                                    out.push(v);
+                                }
+                            }
+                        }
+                    }
+                }
+                if out.is_empty() {
+                    None
+                } else {
+                    Some(out)
+                }
+            }
+        }
+    }
+}
+
+fn cache_root_dir() -> Option<std::path::PathBuf> {
+    if let Some(dir) = std::env::var_os("XDG_CACHE_HOME") {
+        return Some(std::path::PathBuf::from(dir).join("terraform-ls-rs"));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return Some(
+            std::path::PathBuf::from(home)
+                .join(".cache")
+                .join("terraform-ls-rs"),
+        );
+    }
+    None
+}
+
+fn sanitise(c: &str) -> String {
+    c.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '.' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn tool_versions_cache_path(slug: &str) -> Option<std::path::PathBuf> {
+    Some(
+        cache_root_dir()?
+            .join("tool-versions")
+            .join(format!("{}.json", sanitise(slug))),
+    )
+}
+
+fn registry_versions_cache_path(
+    registry: &str,
+    namespace: &str,
+    name: &str,
+) -> Option<std::path::PathBuf> {
+    Some(
+        cache_root_dir()?
+            .join("registry-versions")
+            .join(sanitise(registry))
+            .join(sanitise(namespace))
+            .join(sanitise(name))
+            .join("versions.json"),
+    )
+}
+
+fn module_versions_cache_path(
+    registry: &str,
+    namespace: &str,
+    name: &str,
+    provider: &str,
+) -> Option<std::path::PathBuf> {
+    Some(
+        cache_root_dir()?
+            .join("registry-versions")
+            .join("modules")
+            .join(sanitise(registry))
+            .join(sanitise(namespace))
+            .join(sanitise(name))
+            .join(sanitise(provider))
+            .join("versions.json"),
+    )
 }
 
 /// True if a definition for `kind` exists somewhere in the workspace index

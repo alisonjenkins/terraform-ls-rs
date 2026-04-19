@@ -9,6 +9,7 @@ pub mod error;
 pub mod meta_arguments;
 pub mod types;
 pub mod variable_type;
+pub mod version_constraint;
 
 pub use completion::{CompletionContext, IndexRootRef, PathStep, classify_context};
 pub use error::CoreError;

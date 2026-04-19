@@ -190,10 +190,15 @@ pub async fn completion(
         CompletionContext::RequiredProviderSourceValue => {
             required_provider_source_value_items().await
         }
-        CompletionContext::RequiredProviderVersionValue { source } => {
-            required_provider_version_value_items(source.as_deref()).await
+        CompletionContext::RequiredProviderVersionValue { source, cursor_partial } => {
+            required_provider_version_value_items(source.as_deref(), &cursor_partial).await
         }
-        CompletionContext::RequiredVersionValue => required_version_value_items().await,
+        CompletionContext::RequiredVersionValue { cursor_partial } => {
+            required_version_value_items(&cursor_partial).await
+        }
+        CompletionContext::ModuleVersionValue { source, cursor_partial } => {
+            module_version_value_items(source.as_deref(), &cursor_partial).await
+        }
         CompletionContext::Unknown => Vec::new(),
     };
 
@@ -591,158 +596,267 @@ async fn required_provider_source_value_items() -> Vec<CompletionItem> {
     items
 }
 
-/// Items for `version = "|"` inside a `required_providers` entry.
-/// When we can determine the sibling `source` value, queries the
-/// Terraform + OpenTofu registries for real versions (cached 24h to
-/// disk) and presents them alongside constraint templates. When we
-/// can't identify the source, falls back to just the templates.
-async fn required_provider_version_value_items(source: Option<&str>) -> Vec<CompletionItem> {
-    let mut items: Vec<CompletionItem> = Vec::new();
-
-    if let Some(source) = source.and_then(|s| parse_source(s)) {
-        if let Ok(client) = tfls_provider_protocol::registry_versions::build_http_client() {
-            match tfls_provider_protocol::registry_versions::fetch_versions(
-                &client,
-                &source.0,
-                &source.1,
-            )
-            .await
-            {
-                Ok(versions) => {
-                    // Exact-version items, tagged with which registry
-                    // published them. Most versions show "terraform +
-                    // opentofu" since the registries usually mirror
-                    // each other; divergent versions (post-license
-                    // forks etc.) show a single-registry label.
-                    for vi in &versions {
-                        items.push(CompletionItem {
-                            label: vi.version.clone(),
-                            kind: Some(CompletionItemKind::VALUE),
-                            detail: Some(format!(
-                                "{}/{} — {}",
-                                source.0,
-                                source.1,
-                                vi.provenance_label()
-                            )),
-                            insert_text: Some(vi.version.clone()),
-                            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
-                            ..Default::default()
-                        });
-                    }
-                    // Pessimistic-constraint items for each distinct
-                    // major.minor pair so users can pick the common
-                    // `~> X.Y` form without typing it.
-                    let mut seen_mm: std::collections::BTreeSet<String> =
-                        std::collections::BTreeSet::new();
-                    for vi in &versions {
-                        if let Some(mm) = major_minor(&vi.version) {
-                            seen_mm.insert(mm);
-                        }
-                    }
-                    for mm in seen_mm.into_iter().rev().take(5) {
-                        let label = format!("~> {mm}");
-                        items.push(CompletionItem {
-                            label: label.clone(),
-                            kind: Some(CompletionItemKind::SNIPPET),
-                            detail: Some("pessimistic (compatible) constraint".to_string()),
-                            insert_text: Some(label),
-                            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
-                            ..Default::default()
-                        });
-                    }
-                }
-                Err(e) => {
-                    tracing::debug!(error = %e, "registry version fetch failed");
-                }
+/// Completion items for every version-constraint operator, each
+/// carrying its shared `short_description` / `long_description` copy
+/// from `tfls_core::version_constraint`. Rendered inline (`detail`)
+/// and on hover (`documentation`).
+fn constraint_operator_items() -> Vec<CompletionItem> {
+    use tfls_core::version_constraint::{ALL_OPERATORS, ConstraintOp};
+    ALL_OPERATORS
+        .iter()
+        .map(|op| {
+            let token = op.token();
+            CompletionItem {
+                label: token.to_string(),
+                kind: Some(CompletionItemKind::OPERATOR),
+                detail: Some(op.short_description().to_string()),
+                documentation: Some(Documentation::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: op.long_description().to_string(),
+                })),
+                insert_text: Some(format!("{token} ${{1}}")),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                // Sort by preferred order — `>=` and `~>` near the top.
+                sort_text: Some(match *op {
+                    ConstraintOp::Gte => "00".to_string(),
+                    ConstraintOp::Pessimistic => "01".to_string(),
+                    ConstraintOp::Eq => "02".to_string(),
+                    ConstraintOp::Ne => "03".to_string(),
+                    ConstraintOp::Gt => "04".to_string(),
+                    ConstraintOp::Lt => "05".to_string(),
+                    ConstraintOp::Lte => "06".to_string(),
+                }),
+                ..Default::default()
             }
+        })
+        .collect()
+}
+
+/// Items for `version = "|"` inside a `required_providers` entry.
+/// Constraint-aware: operator completions at the start / after a
+/// comma, registry versions after an operator or mid-version.
+async fn required_provider_version_value_items(
+    source: Option<&str>,
+    cursor_partial: &str,
+) -> Vec<CompletionItem> {
+    use tfls_core::version_constraint::{CursorSlot, cursor_slot};
+    let slot = cursor_slot(cursor_partial, cursor_partial.len());
+    match slot {
+        CursorSlot::AtOperator | CursorSlot::Trailing => constraint_operator_items(),
+        CursorSlot::AfterOperator(_) | CursorSlot::InsideVersion { .. } => {
+            let mut items = provider_version_items_from_registry(source).await;
+            if items.is_empty() {
+                // Still offer operators if we've got nothing from the
+                // registry — better than an empty list.
+                items = constraint_operator_items();
+            }
+            items
         }
     }
+}
 
-    // Static constraint-form templates always available.
-    for tmpl in &["~> ", ">= ", "= ", "!= ", "> ", "< "] {
+/// Pull exact-version items + `~> MAJOR.MINOR` templates for a given
+/// provider source from the Terraform + OpenTofu registries.
+async fn provider_version_items_from_registry(source: Option<&str>) -> Vec<CompletionItem> {
+    let Some((ns, name)) = source.and_then(parse_source) else {
+        return Vec::new();
+    };
+    let Ok(client) = tfls_provider_protocol::registry_versions::build_http_client() else {
+        return Vec::new();
+    };
+    let versions = match tfls_provider_protocol::registry_versions::fetch_versions(
+        &client, &ns, &name,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!(error = %e, "registry version fetch failed");
+            return Vec::new();
+        }
+    };
+    let mut items: Vec<CompletionItem> = Vec::new();
+    for vi in &versions {
         items.push(CompletionItem {
-            label: tmpl.trim_end().to_string(),
-            kind: Some(CompletionItemKind::OPERATOR),
-            detail: Some("version constraint operator".to_string()),
-            insert_text: Some(format!("{tmpl}${{1:1.0}}")),
-            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            label: vi.version.clone(),
+            kind: Some(CompletionItemKind::VALUE),
+            detail: Some(format!("{ns}/{name} — {}", vi.provenance_label())),
+            insert_text: Some(vi.version.clone()),
+            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
             ..Default::default()
         });
     }
-
-    // De-dup labels (exact version already present might shadow a
-    // template) keeping first occurrence.
-    let mut seen = std::collections::HashSet::new();
-    items.retain(|i| seen.insert(i.label.clone()));
+    let mut seen_mm: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for vi in &versions {
+        if let Some(mm) = major_minor(&vi.version) {
+            seen_mm.insert(mm);
+        }
+    }
+    for mm in seen_mm.into_iter().rev().take(5) {
+        let label = format!("~> {mm}");
+        items.push(CompletionItem {
+            label: label.clone(),
+            kind: Some(CompletionItemKind::SNIPPET),
+            detail: Some("pessimistic (compatible) constraint".to_string()),
+            insert_text: Some(label),
+            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+            ..Default::default()
+        });
+    }
     items
 }
 
 /// Items for `required_version = "|"` inside a top-level `terraform {}`
-/// block. Fetches Terraform + OpenTofu GitHub release feeds (cached
-/// 24h on disk, with stale-cache fallback during outages) and
-/// surfaces each version tagged with which project(s) released it.
-/// Always appends common constraint operator templates so the
-/// completion is useful even if GitHub is totally unreachable and
-/// nothing is cached.
-async fn required_version_value_items() -> Vec<CompletionItem> {
-    let mut items: Vec<CompletionItem> = Vec::new();
-
-    if let Ok(client) = tfls_provider_protocol::tool_versions::build_http_client() {
-        match tfls_provider_protocol::tool_versions::fetch_tool_versions(&client).await {
-            Ok(versions) => {
-                for vi in &versions {
-                    items.push(CompletionItem {
-                        label: vi.version.clone(),
-                        kind: Some(CompletionItemKind::VALUE),
-                        detail: Some(format!("CLI release — {}", vi.provenance_label())),
-                        insert_text: Some(vi.version.clone()),
-                        insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
-                        ..Default::default()
-                    });
-                }
-                // `~> MAJOR.MINOR` constraints for the most recent
-                // handful of minor versions, for users who want to
-                // pin loosely.
-                let mut seen_mm: std::collections::BTreeSet<String> =
-                    std::collections::BTreeSet::new();
-                for vi in &versions {
-                    if let Some(mm) = major_minor(&vi.version) {
-                        seen_mm.insert(mm);
-                    }
-                }
-                for mm in seen_mm.into_iter().rev().take(5) {
-                    let label = format!("~> {mm}");
-                    items.push(CompletionItem {
-                        label: label.clone(),
-                        kind: Some(CompletionItemKind::SNIPPET),
-                        detail: Some("pessimistic (compatible) constraint".to_string()),
-                        insert_text: Some(label),
-                        insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
-                        ..Default::default()
-                    });
-                }
+/// block. Constraint-aware: operator completions at the start / after
+/// a comma, Terraform + OpenTofu CLI versions after an operator.
+async fn required_version_value_items(cursor_partial: &str) -> Vec<CompletionItem> {
+    use tfls_core::version_constraint::{CursorSlot, cursor_slot};
+    let slot = cursor_slot(cursor_partial, cursor_partial.len());
+    match slot {
+        CursorSlot::AtOperator | CursorSlot::Trailing => constraint_operator_items(),
+        CursorSlot::AfterOperator(_) | CursorSlot::InsideVersion { .. } => {
+            let mut items = tool_version_items_from_github().await;
+            if items.is_empty() {
+                items = constraint_operator_items();
             }
-            Err(e) => {
-                tracing::debug!(error = %e, "github release fetch failed");
-            }
+            items
         }
     }
+}
 
-    // Static constraint-form templates always available.
-    for tmpl in &[">= ", "~> ", "= ", ">= 1.0, < 2.0"] {
+async fn tool_version_items_from_github() -> Vec<CompletionItem> {
+    let Ok(client) = tfls_provider_protocol::tool_versions::build_http_client() else {
+        return Vec::new();
+    };
+    let versions =
+        match tfls_provider_protocol::tool_versions::fetch_tool_versions(&client).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!(error = %e, "github release fetch failed");
+                return Vec::new();
+            }
+        };
+    let mut items: Vec<CompletionItem> = Vec::new();
+    for vi in &versions {
         items.push(CompletionItem {
-            label: tmpl.trim_end().to_string(),
-            kind: Some(CompletionItemKind::OPERATOR),
-            detail: Some("version constraint template".to_string()),
-            insert_text: Some(format!("{tmpl}${{1}}")),
-            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            label: vi.version.clone(),
+            kind: Some(CompletionItemKind::VALUE),
+            detail: Some(format!("CLI release — {}", vi.provenance_label())),
+            insert_text: Some(vi.version.clone()),
+            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
             ..Default::default()
         });
     }
-
-    let mut seen = std::collections::HashSet::new();
-    items.retain(|i| seen.insert(i.label.clone()));
+    let mut seen_mm: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for vi in &versions {
+        if let Some(mm) = major_minor(&vi.version) {
+            seen_mm.insert(mm);
+        }
+    }
+    for mm in seen_mm.into_iter().rev().take(5) {
+        let label = format!("~> {mm}");
+        items.push(CompletionItem {
+            label: label.clone(),
+            kind: Some(CompletionItemKind::SNIPPET),
+            detail: Some("pessimistic (compatible) constraint".to_string()),
+            insert_text: Some(label),
+            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+            ..Default::default()
+        });
+    }
     items
+}
+
+/// Items for `version = "|"` inside a `module "…" { … }` block.
+/// Constraint-aware: operators at the start / after comma, real
+/// module registry versions after an operator (when the module's
+/// `source` is a registry path like `ns/name/provider`).
+async fn module_version_value_items(
+    source: Option<&str>,
+    cursor_partial: &str,
+) -> Vec<CompletionItem> {
+    use tfls_core::version_constraint::{CursorSlot, cursor_slot};
+    let slot = cursor_slot(cursor_partial, cursor_partial.len());
+    match slot {
+        CursorSlot::AtOperator | CursorSlot::Trailing => constraint_operator_items(),
+        CursorSlot::AfterOperator(_) | CursorSlot::InsideVersion { .. } => {
+            let mut items = module_version_items_from_registry(source).await;
+            if items.is_empty() {
+                items = constraint_operator_items();
+            }
+            items
+        }
+    }
+}
+
+async fn module_version_items_from_registry(source: Option<&str>) -> Vec<CompletionItem> {
+    let Some((ns, name, provider)) = source.and_then(parse_module_source) else {
+        return Vec::new();
+    };
+    let Ok(client) = tfls_provider_protocol::registry_versions::build_http_client() else {
+        return Vec::new();
+    };
+    let versions = match tfls_provider_protocol::registry_versions::fetch_module_versions(
+        &client, &ns, &name, &provider,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!(error = %e, "module registry version fetch failed");
+            return Vec::new();
+        }
+    };
+    let mut items: Vec<CompletionItem> = Vec::new();
+    for vi in &versions {
+        items.push(CompletionItem {
+            label: vi.version.clone(),
+            kind: Some(CompletionItemKind::VALUE),
+            detail: Some(format!(
+                "{ns}/{name}/{provider} — {}",
+                vi.provenance_label()
+            )),
+            insert_text: Some(vi.version.clone()),
+            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+            ..Default::default()
+        });
+    }
+    let mut seen_mm: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for vi in &versions {
+        if let Some(mm) = major_minor(&vi.version) {
+            seen_mm.insert(mm);
+        }
+    }
+    for mm in seen_mm.into_iter().rev().take(5) {
+        let label = format!("~> {mm}");
+        items.push(CompletionItem {
+            label: label.clone(),
+            kind: Some(CompletionItemKind::SNIPPET),
+            detail: Some("pessimistic (compatible) constraint".to_string()),
+            insert_text: Some(label),
+            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+            ..Default::default()
+        });
+    }
+    items
+}
+
+/// Split a registry module source `"ns/name/provider"` into its
+/// three components. Returns `None` for non-registry sources (git
+/// URLs, local paths, etc.).
+fn parse_module_source(s: &str) -> Option<(String, String, String)> {
+    let s = s.trim_matches('"').trim();
+    // Non-registry forms never start with a bare namespace.
+    if s.starts_with('.') || s.starts_with('/') || s.contains("://") || s.contains("::") {
+        return None;
+    }
+    let parts: Vec<&str> = s.split('/').collect();
+    match parts.as_slice() {
+        [ns, name, provider] if !ns.is_empty() && !name.is_empty() && !provider.is_empty() => {
+            Some((ns.to_string(), name.to_string(), provider.to_string()))
+        }
+        _ => None,
+    }
 }
 
 /// Split `"namespace/name"` into its two components. Returns `None`

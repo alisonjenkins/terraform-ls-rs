@@ -1505,6 +1505,61 @@ async fn required_provider_source_value_offers_curated_sources() {
 }
 
 #[tokio::test]
+async fn required_provider_version_operator_items_have_descriptions() {
+    // Sanity-check that operator completions carry both a `detail`
+    // (one-liner) and a `documentation` body — the regression guard
+    // for the constraint-aware completion wiring.
+    let u = uri("file:///ops.tf");
+    let src = "terraform {\n  required_providers {\n    aws = {\n      version = \"\"\n    }\n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    // Cursor at position 17 — between `"` `"` on the version line.
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(3, 17)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let CompletionResponse::Array(items) = resp else { panic!("expected array") };
+    let tilde = items
+        .iter()
+        .find(|i| i.label == "~>")
+        .expect("`~>` item must be present");
+    assert!(tilde.detail.is_some(), "detail missing on `~>`");
+    let doc = match &tilde.documentation {
+        Some(lsp_types::Documentation::MarkupContent(mc)) => mc.value.clone(),
+        _ => panic!("expected markup documentation on `~>`"),
+    };
+    assert!(
+        doc.contains("patch updates"),
+        "`~>` documentation must mention patch updates; got: {doc}"
+    );
+    // Also sanity check >= is present.
+    assert!(items.iter().any(|i| i.label == ">="), "`>=` item missing");
+}
+
+#[tokio::test]
+async fn module_version_value_offers_operators_at_start() {
+    // Cursor inside `module "x" { version = "|" }` must now route to
+    // the new ModuleVersionValue context and produce operator items.
+    let u = uri("file:///m.tf");
+    let src = "module \"x\" {\n  source  = \"terraform-aws-modules/vpc/aws\"\n  version = \"\"\n}\n";
+    let backend = fresh_backend(src, &u);
+    // Line 2 `  version = ""` — cursor between the two quotes.
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 13)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&">=".to_string()), "got {ls:?}");
+    assert!(ls.contains(&"~>".to_string()));
+    assert!(ls.contains(&"=".to_string()));
+}
+
+#[tokio::test]
 async fn required_version_value_offers_constraint_templates() {
     // Inside `terraform { required_version = "|" }`. We can't
     // guarantee GitHub is reachable (or that the CI has a populated
