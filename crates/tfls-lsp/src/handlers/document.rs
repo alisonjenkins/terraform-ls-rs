@@ -147,6 +147,31 @@ pub fn compute_diagnostics(state: &StateStore, uri: &Url) -> Vec<Diagnostic> {
         out.extend(tfls_diag::deprecated_lookup_diagnostics(body, &doc.rope));
         out.extend(tfls_diag::empty_list_equality_diagnostics(body, &doc.rope));
         out.extend(tfls_diag::map_duplicate_keys_diagnostics(body, &doc.rope));
+
+        // Pass 2 — cross-file / module-scoped rules. The adapter
+        // below queries `StateStore` via `ModuleGraphLookup` so
+        // `tfls-diag` stays free of state-store dependencies.
+        let graph = ModuleGraphAdapter {
+            state,
+            module_dir: module_dir.as_deref(),
+        };
+        out.extend(tfls_diag::unused_declarations_diagnostics(
+            body, &doc.rope, &graph,
+        ));
+        out.extend(tfls_diag::unused_required_providers_diagnostics(
+            body, &doc.rope, &graph,
+        ));
+        let current_file = uri
+            .path_segments()
+            .and_then(|it| it.last())
+            .unwrap_or("")
+            .to_string();
+        out.extend(tfls_diag::standard_module_structure_diagnostics(
+            body,
+            &doc.rope,
+            &current_file,
+            &graph,
+        ));
     }
 
     out
@@ -342,6 +367,219 @@ impl tfls_diag::schema_validation::SchemaLookup for StateStoreSchemaLookup<'_> {
     }
     fn data_source(&self, type_name: &str) -> Option<Schema> {
         self.state.data_source_schema(type_name)
+    }
+}
+
+/// Adapter that answers the Pass 2 cross-file questions by reading
+/// [`StateStore`]. Keyed on the document's own module directory so
+/// references from *other* modules in the same workspace don't
+/// mask an unused declaration here.
+struct ModuleGraphAdapter<'a> {
+    state: &'a StateStore,
+    module_dir: Option<&'a std::path::Path>,
+}
+
+impl ModuleGraphAdapter<'_> {
+    fn has_ref(&self, key: &SymbolKey) -> bool {
+        let Some(locs) = self.state.references_by_name.get(key) else {
+            return false;
+        };
+        match self.module_dir {
+            Some(dir) => locs.iter().any(|loc| location_in_dir(loc, dir)),
+            None => !locs.is_empty(),
+        }
+    }
+}
+
+impl tfls_diag::ModuleGraphLookup for ModuleGraphAdapter<'_> {
+    fn variable_is_referenced(&self, name: &str) -> bool {
+        self.has_ref(&SymbolKey::new(SymbolKind::Variable, name))
+    }
+
+    fn local_is_referenced(&self, name: &str) -> bool {
+        self.has_ref(&SymbolKey::new(SymbolKind::Local, name))
+    }
+
+    fn data_source_is_referenced(&self, type_name: &str, name: &str) -> bool {
+        self.has_ref(&SymbolKey::resource(SymbolKind::DataSource, type_name, name))
+    }
+
+    fn used_provider_locals(&self) -> std::collections::HashSet<String> {
+        // Provider local names are the prefix of resource types
+        // (`aws_instance` → `aws`) plus any explicit local used via
+        // `provider = foo.alias`. Walk every parsed document in the
+        // same module dir to collect them.
+        let mut used = std::collections::HashSet::new();
+        for doc in self.state.documents.iter() {
+            let Some(body) = doc.parsed.body.as_ref() else {
+                continue;
+            };
+            if let Some(dir) = self.module_dir {
+                let doc_dir = crate::handlers::util::parent_dir(doc.key());
+                if doc_dir.as_deref() != Some(dir) {
+                    continue;
+                }
+            }
+            collect_provider_locals(body, &mut used);
+        }
+        used
+    }
+
+    fn present_files(&self) -> std::collections::HashSet<String> {
+        let Some(dir) = self.module_dir else {
+            return std::collections::HashSet::new();
+        };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return std::collections::HashSet::new();
+        };
+        entries
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|s| s.to_string())
+                    .filter(|s| s.ends_with(".tf") || s.ends_with(".tf.json"))
+            })
+            .collect()
+    }
+
+    fn is_root_module(&self) -> bool {
+        // We're a root module if no `module { source = "..." }`
+        // block in any other module resolves to our directory.
+        // Cheap heuristic: check whether any indexed document's
+        // body has a `module` block whose resolved source points
+        // at our dir. Exact path resolution is handled elsewhere;
+        // here we accept any hit as "not root" to keep the check
+        // conservative.
+        let Some(dir) = self.module_dir else {
+            // Without a dir we can't tell — assume root (the user
+            // probably opened a lone file).
+            return true;
+        };
+        for doc in self.state.documents.iter() {
+            let Some(body) = doc.parsed.body.as_ref() else {
+                continue;
+            };
+            let doc_dir = crate::handlers::util::parent_dir(doc.key());
+            // Skip documents in the same module — a module calling
+            // itself isn't a concern, and intra-module `module`
+            // blocks point at sub-dirs, not this dir.
+            if doc_dir.as_deref() == Some(dir) {
+                continue;
+            }
+            for structure in body.iter() {
+                let Some(block) = structure.as_block() else {
+                    continue;
+                };
+                if block.ident.as_str() != "module" {
+                    continue;
+                }
+                for attr in block.body.iter().filter_map(|s| s.as_attribute()) {
+                    if attr.key.as_str() != "source" {
+                        continue;
+                    }
+                    if let hcl_edit::expr::Expression::String(s) = &attr.value {
+                        let src = s.value().as_str();
+                        if source_points_at(src, doc_dir.as_deref(), dir) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+}
+
+/// Resolve a module `source = "..."` string relative to the calling
+/// module's dir and check whether it points at `target`. Only
+/// local-path sources are resolved; everything else (registry, git,
+/// etc.) can't possibly point at a local workspace dir.
+fn source_points_at(
+    source: &str,
+    caller_dir: Option<&std::path::Path>,
+    target: &std::path::Path,
+) -> bool {
+    if !(source.starts_with("./") || source.starts_with("../") || source.starts_with('/')) {
+        return false;
+    }
+    let Some(caller_dir) = caller_dir else {
+        return false;
+    };
+    let resolved = caller_dir.join(source);
+    // Normalise both paths for comparison.
+    let resolved = match std::fs::canonicalize(&resolved) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let target = match std::fs::canonicalize(target) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    resolved == target
+}
+
+/// Walk a body collecting every provider local name used by
+/// `resource`/`data` blocks (via resource-type prefix) and by
+/// explicit `provider = foo.alias` attrs.
+fn collect_provider_locals(
+    body: &hcl_edit::structure::Body,
+    out: &mut std::collections::HashSet<String>,
+) {
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
+        match block.ident.as_str() {
+            "resource" | "data" => {
+                if let Some(label) = block.labels.first() {
+                    let type_name = match label {
+                        hcl_edit::structure::BlockLabel::String(s) => s.value().as_str(),
+                        hcl_edit::structure::BlockLabel::Ident(i) => i.as_str(),
+                    };
+                    if let Some(local) = type_name.split('_').next() {
+                        if !local.is_empty() {
+                            out.insert(local.to_string());
+                        }
+                    }
+                }
+                // `provider = foo.alias` inside the block body.
+                for attr in block.body.iter().filter_map(|s| s.as_attribute()) {
+                    if attr.key.as_str() == "provider" {
+                        if let Some(local) = extract_provider_local(&attr.value) {
+                            out.insert(local);
+                        }
+                    }
+                }
+            }
+            "provider" => {
+                if let Some(label) = block.labels.first() {
+                    let name = match label {
+                        hcl_edit::structure::BlockLabel::String(s) => {
+                            s.value().as_str().to_string()
+                        }
+                        hcl_edit::structure::BlockLabel::Ident(i) => i.as_str().to_string(),
+                    };
+                    out.insert(name);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Extract `foo` from a `provider = foo.alias` expression.
+fn extract_provider_local(expr: &hcl_edit::expr::Expression) -> Option<String> {
+    match expr {
+        hcl_edit::expr::Expression::Variable(v) => Some(v.value().as_str().to_string()),
+        hcl_edit::expr::Expression::Traversal(t) => {
+            if let hcl_edit::expr::Expression::Variable(v) = &t.expr {
+                Some(v.value().as_str().to_string())
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
 
