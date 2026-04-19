@@ -1505,6 +1505,32 @@ async fn required_provider_source_value_offers_curated_sources() {
 }
 
 #[tokio::test]
+async fn required_version_value_offers_constraint_templates() {
+    // Inside `terraform { required_version = "|" }`. We can't
+    // guarantee GitHub is reachable (or that the CI has a populated
+    // cache), so assert only the static constraint templates that
+    // are always appended. If the network call succeeds, the real
+    // versions show up alongside — the test just proves routing.
+    let u = uri("file:///rv.tf");
+    let src = "terraform {\n  required_version = \"\"\n}\n";
+    let backend = fresh_backend(src, &u);
+    // Line 1 = `  required_version = ""` — between the two quotes.
+    // Indices 0-1 spaces, 2-17 `required_version`, 18 space, 19 `=`,
+    // 20 space, 21 open `"`, 22 close `"`. Cursor at 22.
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(1, 22)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&">=".to_string()), "static template missing; got {ls:?}");
+    assert!(ls.contains(&"~>".to_string()));
+    assert!(ls.contains(&"=".to_string()));
+}
+
+#[tokio::test]
 async fn required_provider_version_value_offers_constraint_templates() {
     // Without a sibling `source`, we can't hit the registry — but the
     // static constraint operators should still show.

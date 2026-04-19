@@ -76,6 +76,11 @@ pub enum CompletionContext {
     /// per-provider versions from the registries.
     RequiredProviderVersionValue { source: Option<String> },
 
+    /// Cursor is inside the string value of `required_version = "|"`
+    /// directly in the top-level `terraform { }` block. Suggestions
+    /// come from Terraform + OpenTofu GitHub release feeds.
+    RequiredVersionValue,
+
     /// Cursor is after `module.<name>.` — expect an output name from
     /// the referenced child module.
     ModuleAttr { module_name: String },
@@ -235,6 +240,9 @@ fn string_value_context(before: &str) -> Option<CompletionContext> {
             // body for a `source = "…"` sibling to scope versions to.
             let source = extract_sibling_source(before, string_open);
             Some(CompletionContext::RequiredProviderVersionValue { source })
+        }
+        ("required_version", CompletionContext::TerraformBlockBody) => {
+            Some(CompletionContext::RequiredVersionValue)
         }
         _ => None,
     }

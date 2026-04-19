@@ -191,6 +191,7 @@ pub async fn completion(
         CompletionContext::RequiredProviderVersionValue { source } => {
             required_provider_version_value_items(source.as_deref()).await
         }
+        CompletionContext::RequiredVersionValue => required_version_value_items().await,
         CompletionContext::Unknown => Vec::new(),
     };
 
@@ -611,6 +612,74 @@ async fn required_provider_version_value_items(source: Option<&str>) -> Vec<Comp
 
     // De-dup labels (exact version already present might shadow a
     // template) keeping first occurrence.
+    let mut seen = std::collections::HashSet::new();
+    items.retain(|i| seen.insert(i.label.clone()));
+    items
+}
+
+/// Items for `required_version = "|"` inside a top-level `terraform {}`
+/// block. Fetches Terraform + OpenTofu GitHub release feeds (cached
+/// 24h on disk, with stale-cache fallback during outages) and
+/// surfaces each version tagged with which project(s) released it.
+/// Always appends common constraint operator templates so the
+/// completion is useful even if GitHub is totally unreachable and
+/// nothing is cached.
+async fn required_version_value_items() -> Vec<CompletionItem> {
+    let mut items: Vec<CompletionItem> = Vec::new();
+
+    if let Ok(client) = tfls_provider_protocol::tool_versions::build_http_client() {
+        match tfls_provider_protocol::tool_versions::fetch_tool_versions(&client).await {
+            Ok(versions) => {
+                for vi in &versions {
+                    items.push(CompletionItem {
+                        label: vi.version.clone(),
+                        kind: Some(CompletionItemKind::VALUE),
+                        detail: Some(format!("CLI release — {}", vi.provenance_label())),
+                        insert_text: Some(vi.version.clone()),
+                        insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+                        ..Default::default()
+                    });
+                }
+                // `~> MAJOR.MINOR` constraints for the most recent
+                // handful of minor versions, for users who want to
+                // pin loosely.
+                let mut seen_mm: std::collections::BTreeSet<String> =
+                    std::collections::BTreeSet::new();
+                for vi in &versions {
+                    if let Some(mm) = major_minor(&vi.version) {
+                        seen_mm.insert(mm);
+                    }
+                }
+                for mm in seen_mm.into_iter().rev().take(5) {
+                    let label = format!("~> {mm}");
+                    items.push(CompletionItem {
+                        label: label.clone(),
+                        kind: Some(CompletionItemKind::SNIPPET),
+                        detail: Some("pessimistic (compatible) constraint".to_string()),
+                        insert_text: Some(label),
+                        insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+                        ..Default::default()
+                    });
+                }
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "github release fetch failed");
+            }
+        }
+    }
+
+    // Static constraint-form templates always available.
+    for tmpl in &[">= ", "~> ", "= ", ">= 1.0, < 2.0"] {
+        items.push(CompletionItem {
+            label: tmpl.trim_end().to_string(),
+            kind: Some(CompletionItemKind::OPERATOR),
+            detail: Some("version constraint template".to_string()),
+            insert_text: Some(format!("{tmpl}${{1}}")),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        });
+    }
+
     let mut seen = std::collections::HashSet::new();
     items.retain(|i| seen.insert(i.label.clone()));
     items

@@ -16,6 +16,7 @@ pub mod handshake;
 pub mod registry_docs;
 pub mod registry_versions;
 pub mod tls;
+pub mod tool_versions;
 pub mod translate;
 pub mod translate_v5;
 
