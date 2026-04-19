@@ -41,7 +41,7 @@ const TOP_LEVEL_SNIPPETS: &[(&str, &str, &str)] = &[
     ("data", "data \"", "Data source block"),
     (
         "variable",
-        "variable \"${1:name}\" {\n  description = \"${2}\"\n  type = ${3:string}\n  default = ${4}\n}",
+        "variable \"${1:name}\" {\n  default = ${2}\n  description = \"${3}\"\n  type = ${4:string}\n}",
         "Variable block",
     ),
     (
