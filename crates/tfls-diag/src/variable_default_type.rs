@@ -223,6 +223,43 @@ mod tests {
     }
 
     #[test]
+    fn flags_nested_object_field_type_mismatch_plain_literal() {
+        let d = diags(r#"variable "test" {
+          type    = object({ name = string, age = number })
+          default = {
+            name = "Alison"
+            age  = { years = 38 }
+          }
+        }"#);
+        assert_eq!(d.len(), 1, "got: {d:?}");
+        assert!(
+            d[0].message.contains("`age`"),
+            "expected age field message; got: {}",
+            d[0].message
+        );
+    }
+
+    #[test]
+    fn flags_nested_object_field_type_mismatch_object_call() {
+        // User's specific report: `age = number` declared, but the
+        // default uses `age = object({ years = 38, months = true })`.
+        let d = diags(r#"variable "test" {
+          type    = object({ name = string, sex = string, age = number })
+          default = {
+            name = "Alison"
+            sex  = "female"
+            age  = object({ years = 38, months = true })
+          }
+        }"#);
+        assert_eq!(d.len(), 1, "got: {d:?}");
+        assert!(
+            d[0].message.contains("`age`"),
+            "expected age field message; got: {}",
+            d[0].message
+        );
+    }
+
+    #[test]
     fn flags_object_field_type_mismatch() {
         let d = diags(r#"variable "x" {
           type    = object({ a = string })

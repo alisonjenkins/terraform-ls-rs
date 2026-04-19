@@ -188,6 +188,24 @@ pub fn parse_value_shape(expr: &Expression) -> VariableType {
                     .next()
                     .map(parse_value_shape)
                     .unwrap_or(VariableType::Any),
+                // Users sometimes write `object({ … })` in a value
+                // position by mistake (confusing it with the type
+                // expression). Treat it as the object literal the
+                // user likely meant, so the type-mismatch diagnostic
+                // has something concrete to compare against.
+                "object" => {
+                    if let Some(Expression::Object(obj)) = call.args.iter().next() {
+                        let mut fields = BTreeMap::new();
+                        for (key, value) in obj.iter() {
+                            let Some(name) = object_key_as_ident(key) else {
+                                continue;
+                            };
+                            fields.insert(name, parse_value_shape(value.expr()));
+                        }
+                        return VariableType::Object(fields);
+                    }
+                    VariableType::Any
+                }
                 _ => VariableType::Any,
             }
         }
@@ -661,6 +679,39 @@ mod tests {
             &decl("object({ a = string, b = optional(number) })"),
             &shape(r#"{ a = "x" }"#)
         ));
+    }
+
+    #[test]
+    fn satisfies_nested_object_field_type_mismatch() {
+        // Regression: the inner `age` value is an object literal, but
+        // the declared type says `number` — must be flagged even
+        // though the outer object fields otherwise line up.
+        assert!(!satisfies(
+            &decl("object({ name = string, age = number })"),
+            &shape(r#"{ name = "Alison", age = { years = 38 } }"#)
+        ));
+    }
+
+    #[test]
+    fn value_shape_recognizes_object_function_call() {
+        // `object({...})` as a value is technically a misuse
+        // (Terraform reserves it for type expressions), but users do
+        // write it. Treat it as the object literal they meant so the
+        // mismatch diagnostic can catch the surrounding confusion.
+        let ty = shape_from_src("value = object({ years = 38, months = true })");
+        match ty {
+            VariableType::Object(fields) => {
+                assert_eq!(
+                    fields.get("years"),
+                    Some(&VariableType::Primitive(Primitive::Number))
+                );
+                assert_eq!(
+                    fields.get("months"),
+                    Some(&VariableType::Primitive(Primitive::Bool))
+                );
+            }
+            other => panic!("expected object, got {other:?}"),
+        }
     }
 
     #[test]
