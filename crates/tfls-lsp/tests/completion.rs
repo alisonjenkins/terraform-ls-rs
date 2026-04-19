@@ -1843,6 +1843,64 @@ async fn top_level_output_scaffold_bundles_description_but_not_default() {
     );
 }
 
+// Description is the documentation nudge — it should appear first in
+// both scaffolds so the author sees it immediately when filling in
+// the block. It also keeps the two scaffolds visually consistent.
+// Finally, the scaffold should not trail a blank padding line before
+// the closing brace.
+#[tokio::test]
+async fn top_level_variable_scaffold_puts_description_first_and_no_trailing_blank() {
+    let u = uri("file:///a.tf");
+    let backend = fresh_backend("", &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(0, 0)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let insert = find_item(resp, "variable")
+        .insert_text
+        .expect("variable has insert_text");
+    let desc_idx = insert.find("description = ").expect("has description");
+    let type_idx = insert.find("type = ").expect("has type");
+    let default_idx = insert.find("default = ").expect("has default");
+    assert!(
+        desc_idx < type_idx && type_idx < default_idx,
+        "expected description → type → default ordering; got {insert:?}"
+    );
+    assert!(
+        !insert.contains("\n  \n}") && !insert.contains("\n\n}"),
+        "scaffold must not have a blank/whitespace line before closing brace; got {insert:?}"
+    );
+}
+
+#[tokio::test]
+async fn top_level_output_scaffold_puts_description_first_and_no_trailing_blank() {
+    let u = uri("file:///a.tf");
+    let backend = fresh_backend("", &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(0, 0)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let insert = find_item(resp, "output")
+        .insert_text
+        .expect("output has insert_text");
+    let desc_idx = insert.find("description = ").expect("has description");
+    let value_idx = insert.find("value = ").expect("has value");
+    assert!(
+        desc_idx < value_idx,
+        "expected description before value; got {insert:?}"
+    );
+    assert!(
+        !insert.contains("\n  \n}") && !insert.contains("\n\n}"),
+        "scaffold must not have a blank/whitespace line before closing brace; got {insert:?}"
+    );
+}
+
 #[tokio::test]
 async fn variable_body_type_bundles_default_and_description() {
     let u = uri("file:///v.tf");
