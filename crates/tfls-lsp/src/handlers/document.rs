@@ -127,6 +127,9 @@ pub fn compute_diagnostics(state: &StateStore, uri: &Url) -> Vec<Diagnostic> {
             &doc.rope,
             &cache_lookup,
         ));
+        out.extend(tfls_diag::variable_default_type_diagnostics(
+            body, &doc.rope,
+        ));
     }
 
     out

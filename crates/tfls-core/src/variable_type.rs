@@ -193,6 +193,52 @@ pub fn parse_value_shape(expr: &Expression) -> VariableType {
     }
 }
 
+/// Check whether a value whose inferred shape is `actual` satisfies
+/// the declared `type` constraint. `Any` on either side is a free
+/// pass (we can't statically know), so this is intentionally
+/// conservative — the goal is to catch clear authoring mistakes like
+/// `type = string` + `default = {}`, not to re-implement Terraform's
+/// full type system.
+///
+/// Semantics:
+/// - Primitive mismatches → `false` (e.g. `string` vs `number`)
+/// - Primitive vs collection (or vice versa) → `false`
+/// - Collection inner types: recurse where we can. Array literals
+///   parse as `Tuple`; `list(T)` / `set(T)` accept a `Tuple` if every
+///   element satisfies `T`.
+/// - `map(T)` accepts an object literal if every value satisfies `T`.
+/// - Object vs object: overlapping fields must be compatible.
+///   Missing declared fields and extra actual fields don't fail here
+///   — authors routinely omit optional fields mid-edit, and the
+///   `optional(…)` wrapper isn't modelled in [`VariableType`] yet.
+pub fn satisfies(declared: &VariableType, actual: &VariableType) -> bool {
+    use VariableType::*;
+    match (declared, actual) {
+        (Any, _) | (_, Any) => true,
+        (Primitive(a), Primitive(b)) => a == b,
+        (List(inner), Tuple(items)) | (Set(inner), Tuple(items)) => {
+            items.iter().all(|it| satisfies(inner, it))
+        }
+        (List(_), List(_))
+        | (List(_), Set(_))
+        | (Set(_), Set(_))
+        | (Set(_), List(_))
+        | (Map(_), Map(_)) => true,
+        (Map(inner), Object(fields)) => fields.values().all(|v| satisfies(inner, v)),
+        (Tuple(decl_items), Tuple(act_items)) => {
+            decl_items.len() == act_items.len()
+                && decl_items
+                    .iter()
+                    .zip(act_items.iter())
+                    .all(|(d, a)| satisfies(d, a))
+        }
+        (Object(decl), Object(act)) => decl
+            .iter()
+            .all(|(k, d_ty)| act.get(k).map_or(true, |a_ty| satisfies(d_ty, a_ty))),
+        _ => false,
+    }
+}
+
 /// Combine two inferred shapes: the more informative wins; two
 /// [`VariableType::Object`] shapes union their keys and recursively
 /// merge overlapping values.
@@ -441,6 +487,91 @@ mod tests {
     fn merge_shapes_any_is_identity() {
         let a = VariableType::Primitive(Primitive::Bool);
         assert_eq!(merge_shapes(VariableType::Any, a.clone()), a);
+    }
+
+    // --- satisfies regressions --------------------------------------
+
+    fn decl(src: &str) -> VariableType {
+        type_from_src(&format!("type = {src}"))
+    }
+
+    fn shape(src: &str) -> VariableType {
+        shape_from_src(&format!("value = {src}"))
+    }
+
+    #[test]
+    fn satisfies_any_is_free_pass() {
+        assert!(satisfies(&VariableType::Any, &shape("{}")));
+        assert!(satisfies(&decl("string"), &VariableType::Any));
+    }
+
+    #[test]
+    fn satisfies_matching_primitives() {
+        assert!(satisfies(&decl("string"), &shape(r#""hi""#)));
+        assert!(satisfies(&decl("number"), &shape("42")));
+        assert!(satisfies(&decl("bool"), &shape("true")));
+    }
+
+    #[test]
+    fn satisfies_primitive_vs_collection_is_mismatch() {
+        assert!(!satisfies(&decl("string"), &shape("{}")));
+        assert!(!satisfies(&decl("string"), &shape("[1, 2]")));
+        assert!(!satisfies(&decl("number"), &shape(r#"{ a = 1 }"#)));
+    }
+
+    #[test]
+    fn satisfies_wrong_primitive_is_mismatch() {
+        assert!(!satisfies(&decl("string"), &shape("42")));
+        assert!(!satisfies(&decl("number"), &shape(r#""hi""#)));
+        assert!(!satisfies(&decl("bool"), &shape(r#""true""#)));
+    }
+
+    #[test]
+    fn satisfies_list_of_string_accepts_string_array() {
+        assert!(satisfies(&decl("list(string)"), &shape(r#"["a", "b"]"#)));
+        assert!(!satisfies(&decl("list(string)"), &shape("[1, 2]")));
+    }
+
+    #[test]
+    fn satisfies_set_of_number_accepts_numeric_array() {
+        assert!(satisfies(&decl("set(number)"), &shape("[1, 2]")));
+        assert!(!satisfies(&decl("set(number)"), &shape(r#"["a"]"#)));
+    }
+
+    #[test]
+    fn satisfies_map_of_string_checks_values() {
+        assert!(satisfies(
+            &decl("map(string)"),
+            &shape(r#"{ a = "x", b = "y" }"#)
+        ));
+        assert!(!satisfies(
+            &decl("map(string)"),
+            &shape(r#"{ a = "x", b = 1 }"#)
+        ));
+    }
+
+    #[test]
+    fn satisfies_object_overlapping_fields_must_match() {
+        assert!(satisfies(
+            &decl("object({ a = string, b = number })"),
+            &shape(r#"{ a = "x", b = 1 }"#)
+        ));
+        assert!(!satisfies(
+            &decl("object({ a = string })"),
+            &shape(r#"{ a = 1 }"#)
+        ));
+    }
+
+    #[test]
+    fn satisfies_object_missing_declared_field_is_allowed() {
+        // Missing required fields are allowed here; the shape inference
+        // can't distinguish optional from required. Authors routinely
+        // omit fields while editing, so false positives would be worse
+        // than false negatives.
+        assert!(satisfies(
+            &decl("object({ a = string, b = number })"),
+            &shape(r#"{ a = "x" }"#)
+        ));
     }
 
     #[test]
