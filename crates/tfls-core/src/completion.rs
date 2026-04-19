@@ -536,6 +536,13 @@ fn label_index_at_cursor(line: &str) -> Option<usize> {
 
 fn enclosing_block_context(before: &str) -> Option<CompletionContext> {
     // Walk braces from right-to-left to find the nearest unclosed `{`.
+    // When we pass an unclosed `{` that's a *nested* block opener (e.g.
+    // `root_block_device {`), it doesn't classify as a top-level block
+    // header but it's also not an object literal — keep walking
+    // outward so completion still finds the enclosing resource / data
+    // block. Object-literal openers (`labels = {`) do terminate the
+    // walk: we'd never want to surface block-body completions inside
+    // an expression position.
     let mut depth: i32 = 0;
     let bytes = before.as_bytes();
     let mut i = bytes.len();
@@ -545,15 +552,55 @@ fn enclosing_block_context(before: &str) -> Option<CompletionContext> {
             b'}' => depth += 1,
             b'{' => {
                 if depth == 0 {
-                    // Found the opener for the enclosing block.
-                    return classify_block_header(&before[..i]);
+                    let header = &before[..i];
+                    if let Some(ctx) = classify_block_header(header) {
+                        return Some(ctx);
+                    }
+                    if !is_nested_block_opener(header) {
+                        return None;
+                    }
+                    // It's a nested HCL block — keep walking, the caller
+                    // needs the outer resource/data/module context.
+                } else {
+                    depth -= 1;
                 }
-                depth -= 1;
             }
             _ => {}
         }
     }
     None
+}
+
+/// Does the text immediately before a `{` look like a block opener
+/// (bare identifier with optional quoted labels), as opposed to an
+/// expression/assignment like `labels = {` or `jsonencode({`?
+fn is_nested_block_opener(header_source: &str) -> bool {
+    let line_start = header_source.rfind('\n').map_or(0, |i| i + 1);
+    let line = header_source[line_start..].trim();
+    if line.is_empty() {
+        return false;
+    }
+    // An `=` or `(` outside of quoted strings means we're in an
+    // expression position, not a block header.
+    let mut in_quote = false;
+    for c in line.chars() {
+        if c == '"' {
+            in_quote = !in_quote;
+            continue;
+        }
+        if !in_quote && (c == '=' || c == '(') {
+            return false;
+        }
+    }
+    // First token must be a bare identifier.
+    let first = match line.split_whitespace().next() {
+        Some(t) => t,
+        None => return false,
+    };
+    !first.is_empty()
+        && first
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
 }
 
 /// Given the text up to the `{`, figure out if it's a resource/data/

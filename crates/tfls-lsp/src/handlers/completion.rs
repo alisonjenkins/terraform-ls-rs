@@ -101,12 +101,20 @@ pub async fn completion(
             }
         }
         CompletionContext::ResourceBody { resource_type } => {
-            let filter = compute_body_filter(doc.parsed.body.as_ref(), offset);
-            resource_body_items(backend, &resource_type, /*data=*/ false, &filter)
+            let body = doc.parsed.body.as_ref();
+            let filter = compute_body_filter(body, offset);
+            let nested_path = body
+                .map(|b| nested_block_path(b, offset))
+                .unwrap_or_default();
+            resource_body_items(backend, &resource_type, /*data=*/ false, &filter, &nested_path)
         }
         CompletionContext::DataSourceBody { resource_type } => {
-            let filter = compute_body_filter(doc.parsed.body.as_ref(), offset);
-            resource_body_items(backend, &resource_type, /*data=*/ true, &filter)
+            let body = doc.parsed.body.as_ref();
+            let filter = compute_body_filter(body, offset);
+            let nested_path = body
+                .map(|b| nested_block_path(b, offset))
+                .unwrap_or_default();
+            resource_body_items(backend, &resource_type, /*data=*/ true, &filter, &nested_path)
         }
         CompletionContext::VariableRef => {
             module_symbol_items(backend, &uri, SymbolField::Variables, CompletionItemKind::VARIABLE)
@@ -317,6 +325,7 @@ fn resource_body_items(
     type_name: &str,
     data: bool,
     filter: &BodyFilter,
+    nested_path: &[String],
 ) -> Vec<CompletionItem> {
     let schema = if data {
         backend.state.data_source_schema(type_name)
@@ -328,8 +337,19 @@ fn resource_body_items(
         None => return Vec::new(),
     };
 
-    let mut items: Vec<CompletionItem> = schema
-        .block
+    // Descend through nested block types to land on the schema that
+    // actually governs the cursor's surrounding block. An unknown
+    // nested name (user typo, provider mismatch) yields no suggestions
+    // rather than leaking the outer resource's attributes.
+    let mut block_schema = &schema.block;
+    for step in nested_path {
+        match block_schema.block_types.get(step) {
+            Some(nb) => block_schema = &nb.block,
+            None => return Vec::new(),
+        }
+    }
+
+    let mut items: Vec<CompletionItem> = block_schema
         .attributes
         .iter()
         .filter(|(name, attr)| {
@@ -362,8 +382,7 @@ fn resource_body_items(
         .collect();
 
     items.extend(
-        schema
-            .block
+        block_schema
             .block_types
             .iter()
             .filter(|(name, nb)| {
@@ -383,15 +402,21 @@ fn resource_body_items(
             }),
     );
 
-    let kind = if data { BlockKind::Data } else { BlockKind::Resource };
-    items.extend(
-        meta_argument_items(kind)
-            .into_iter()
-            .filter(|item| !filter.present_attrs.contains(&item.label)),
-    );
-    items.extend(meta_block_items(kind).into_iter().filter(|item| {
-        !(is_singleton_meta_block(kind, &item.label) && filter.present_blocks.contains(&item.label))
-    }));
+    // Meta-arguments (`count`, `for_each`, `lifecycle`, …) are valid
+    // only at the top level of a resource or data body — not inside
+    // nested schema blocks like `root_block_device` or `lifecycle`.
+    if nested_path.is_empty() {
+        let kind = if data { BlockKind::Data } else { BlockKind::Resource };
+        items.extend(
+            meta_argument_items(kind)
+                .into_iter()
+                .filter(|item| !filter.present_attrs.contains(&item.label)),
+        );
+        items.extend(meta_block_items(kind).into_iter().filter(|item| {
+            !(is_singleton_meta_block(kind, &item.label)
+                && filter.present_blocks.contains(&item.label))
+        }));
+    }
 
     items.sort_by(|a, b| a.label.cmp(&b.label));
     items
@@ -435,6 +460,43 @@ fn innermost_block_at(body: &Body, offset: usize) -> Option<&Block> {
         return Some(innermost_block_at(&block.body, offset).unwrap_or(block));
     }
     None
+}
+
+/// Nested-block names from the outer `resource`/`data` body down to
+/// (but not including) the innermost block containing `offset`.
+/// Returns an empty `Vec` when the cursor is directly in the
+/// resource/data body — which is the common case and the current
+/// behaviour of `resource_body_items` before this change.
+fn nested_block_path(body: &Body, offset: usize) -> Vec<String> {
+    let mut path = Vec::new();
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
+        // Skip the outer `resource`/`data`/`module`/etc. block header —
+        // the caller already knows the root type from the
+        // `CompletionContext`. We only record nested-block names below
+        // it.
+        if span_contains_offset(block.span(), offset) {
+            collect_nested_path(&block.body, offset, &mut path);
+            return path;
+        }
+    }
+    path
+}
+
+fn collect_nested_path(body: &Body, offset: usize, path: &mut Vec<String>) {
+    for structure in body.iter() {
+        let Some(nested) = structure.as_block() else {
+            continue;
+        };
+        if !span_contains_offset(nested.span(), offset) {
+            continue;
+        }
+        path.push(nested.ident.as_str().to_string());
+        collect_nested_path(&nested.body, offset, path);
+        return;
+    }
 }
 
 fn span_contains_offset(span: Option<std::ops::Range<usize>>, offset: usize) -> bool {

@@ -238,6 +238,229 @@ async fn resource_body_excludes_pure_computed_attributes() {
     );
 }
 
+#[tokio::test]
+async fn resource_body_inside_nested_block_suggests_nested_attrs() {
+    // Cursor inside `root_block_device { … }` should surface that
+    // nested block's own attributes (e.g. `volume_size`) and suppress
+    // the outer `aws_instance` attributes + all meta-arguments.
+    let u = uri("file:///nested.tf");
+    let src = "resource \"aws_instance\" \"x\" {\n  root_block_device {\n    \n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    install_aws_schema(&backend);
+
+    // Line 2 (0-based), column 4 → inside the nested block body on the
+    // indented blank line.
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 4)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(
+        ls.contains(&"volume_size".to_string()),
+        "nested attr missing; got {ls:?}"
+    );
+    assert!(
+        !ls.contains(&"ami".to_string()),
+        "outer resource attr leaked; got {ls:?}"
+    );
+    assert!(
+        !ls.contains(&"instance_type".to_string()),
+        "outer resource attr leaked; got {ls:?}"
+    );
+    assert!(
+        !ls.contains(&"count".to_string()),
+        "meta-argument leaked into nested block; got {ls:?}"
+    );
+    assert!(
+        !ls.contains(&"for_each".to_string()),
+        "meta-argument leaked into nested block; got {ls:?}"
+    );
+    assert!(
+        !ls.contains(&"lifecycle".to_string()),
+        "meta block leaked into nested block; got {ls:?}"
+    );
+}
+
+#[tokio::test]
+async fn resource_body_inside_nested_block_excludes_pure_computed() {
+    // Same writability filter we apply at the top level should also
+    // apply inside a nested block.
+    let u = uri("file:///nested_computed.tf");
+    let src = "resource \"widget\" \"x\" {\n  shell {\n    \n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    let schema: ProviderSchemas = sonic_rs::from_str(
+        r#"{
+        "format_version": "1.0",
+        "provider_schemas": {
+            "registry.terraform.io/acme/widget": {
+                "provider": { "version": 0, "block": {} },
+                "resource_schemas": {
+                    "widget": {
+                        "version": 1,
+                        "block": {
+                            "attributes": {},
+                            "block_types": {
+                                "shell": {
+                                    "nesting_mode": "single",
+                                    "block": {
+                                        "attributes": {
+                                            "command": { "type": "string", "required": true },
+                                            "exit_code": { "type": "number", "computed": true },
+                                            "env": { "type": ["map", "string"], "optional": true, "computed": true }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "data_source_schemas": {}
+            }
+        }
+    }"#,
+    )
+    .expect("parse schema");
+    backend.state.install_schemas(schema);
+
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 4)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"command".to_string()), "required nested attr missing");
+    assert!(ls.contains(&"env".to_string()), "computed-optional nested attr missing");
+    assert!(
+        !ls.contains(&"exit_code".to_string()),
+        "pure-computed nested attr leaked; got {ls:?}"
+    );
+}
+
+#[tokio::test]
+async fn resource_body_inside_doubly_nested_block_suggests_innermost_attrs() {
+    // Two-level descent: cursor inside `outer { inner { … } }` should
+    // surface `inner`'s attrs only — neither `outer`'s nor the
+    // resource root's.
+    let u = uri("file:///doubly.tf");
+    let src = "resource \"widget\" \"x\" {\n  outer {\n    inner {\n      \n    }\n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    let schema: ProviderSchemas = sonic_rs::from_str(
+        r#"{
+        "format_version": "1.0",
+        "provider_schemas": {
+            "registry.terraform.io/acme/widget": {
+                "provider": { "version": 0, "block": {} },
+                "resource_schemas": {
+                    "widget": {
+                        "version": 1,
+                        "block": {
+                            "attributes": {
+                                "root_attr": { "type": "string", "optional": true }
+                            },
+                            "block_types": {
+                                "outer": {
+                                    "nesting_mode": "single",
+                                    "block": {
+                                        "attributes": {
+                                            "outer_attr": { "type": "string", "optional": true }
+                                        },
+                                        "block_types": {
+                                            "inner": {
+                                                "nesting_mode": "single",
+                                                "block": {
+                                                    "attributes": {
+                                                        "leaf_attr": { "type": "string", "optional": true }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "data_source_schemas": {}
+            }
+        }
+    }"#,
+    )
+    .expect("parse schema");
+    backend.state.install_schemas(schema);
+
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(3, 6)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"leaf_attr".to_string()), "innermost attr missing; got {ls:?}");
+    assert!(!ls.contains(&"outer_attr".to_string()), "outer block attr leaked; got {ls:?}");
+    assert!(!ls.contains(&"root_attr".to_string()), "root attr leaked; got {ls:?}");
+}
+
+#[tokio::test]
+async fn data_body_inside_nested_block_suggests_nested_attrs() {
+    // Same machinery must work for `data` blocks, not just `resource`.
+    let u = uri("file:///data_nested.tf");
+    let src = "data \"aws_bundle\" \"x\" {\n  filter {\n    \n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    let schema: ProviderSchemas = sonic_rs::from_str(
+        r#"{
+        "format_version": "1.0",
+        "provider_schemas": {
+            "registry.terraform.io/hashicorp/aws": {
+                "provider": { "version": 0, "block": {} },
+                "resource_schemas": {},
+                "data_source_schemas": {
+                    "aws_bundle": {
+                        "version": 0,
+                        "block": {
+                            "attributes": {},
+                            "block_types": {
+                                "filter": {
+                                    "nesting_mode": "list",
+                                    "block": {
+                                        "attributes": {
+                                            "name":   { "type": "string", "required": true },
+                                            "values": { "type": ["list", "string"], "required": true }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }"#,
+    )
+    .expect("parse schema");
+    backend.state.install_schemas(schema);
+
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 4)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"name".to_string()), "nested attr missing; got {ls:?}");
+    assert!(ls.contains(&"values".to_string()), "nested attr missing; got {ls:?}");
+    assert!(
+        !ls.contains(&"count".to_string()),
+        "meta-argument leaked into nested data block; got {ls:?}"
+    );
+}
+
 // Regression: when the cursor is inside an already-closed resource
 // type label (e.g. while editing the `${1:type}` placeholder of the
 // top-level `resource` snippet), emit the type name as plain text
