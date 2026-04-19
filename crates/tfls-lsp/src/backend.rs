@@ -64,7 +64,11 @@ impl Backend {
     }
 
     async fn spawn_background(&self) {
-        let worker = indexer::spawn_worker(Arc::clone(&self.state), Arc::clone(&self.jobs));
+        let worker = indexer::spawn_worker(
+            Arc::clone(&self.state),
+            Arc::clone(&self.jobs),
+            Some(self.client.clone()),
+        );
         let mut guard = self.tasks.lock().await;
         guard.push(worker);
     }

@@ -62,7 +62,7 @@ async fn did_open_in_new_directory_indexes_sibling_files() {
     // Start the worker so background ScanDirectory jobs drain.
     let worker_state = Arc::clone(&inner.state);
     let worker_jobs = Arc::clone(&inner.jobs);
-    let worker = indexer::spawn_worker(worker_state, worker_jobs);
+    let worker = indexer::spawn_worker(worker_state, worker_jobs, None);
 
     // Scan the primary workspace (mirrors what `initialize` would do).
     indexer::enqueue_workspace_scan(&inner.state, &inner.jobs, &primary);

@@ -41,7 +41,7 @@ async fn indexer_resolves_definition_in_another_file() {
 
     let state = Arc::new(StateStore::new());
     let jobs = Arc::new(JobQueue::new());
-    let worker = indexer::spawn_worker(Arc::clone(&state), Arc::clone(&jobs));
+    let worker = indexer::spawn_worker(Arc::clone(&state), Arc::clone(&jobs), None);
     indexer::enqueue_workspace_scan(&state, &jobs, &dir);
 
     // Give the worker time to drain.
@@ -92,7 +92,7 @@ async fn parse_file_job_skips_open_documents() {
         42,
     ));
 
-    let worker = indexer::spawn_worker(Arc::clone(&state), Arc::clone(&jobs));
+    let worker = indexer::spawn_worker(Arc::clone(&state), Arc::clone(&jobs), None);
     indexer::enqueue_workspace_scan(&state, &jobs, &dir);
 
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -114,7 +114,7 @@ async fn schema_fetch_job_reports_failure_when_cli_missing() {
     // Force a CLI path that definitely won't resolve.
     let state = Arc::new(StateStore::new());
     let jobs = Arc::new(JobQueue::new());
-    let worker = indexer::spawn_worker(Arc::clone(&state), Arc::clone(&jobs));
+    let worker = indexer::spawn_worker(Arc::clone(&state), Arc::clone(&jobs), None);
 
     jobs.enqueue(
         tfls_state::Job::FetchSchemas {

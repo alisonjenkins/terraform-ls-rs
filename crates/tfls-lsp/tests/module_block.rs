@@ -143,6 +143,7 @@ async fn ensure_module_indexed_triggers_child_scans_even_when_dir_already_scanne
     let worker = tfls_lsp::indexer::spawn_worker(
         Arc::clone(&inner.state),
         Arc::clone(&inner.jobs),
+        None,
     );
 
     // Simulate the workspace-scan pre-population: mark the dir as

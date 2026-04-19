@@ -34,14 +34,22 @@ pub enum IndexerError {
 
 /// Spawn the worker loop. The returned handle can be aborted at
 /// shutdown to stop draining the queue.
+///
+/// `client` is used to publish diagnostics after each `ParseFile`
+/// job so Trouble / other LSP consumers see diagnostics for every
+/// indexed workspace file, not just files currently in a buffer.
+/// Neovim doesn't auto-pull `workspace/diagnostic` even when the
+/// server advertises it, so proactive push is the only reliable way
+/// to populate `vim.diagnostic` across the whole module.
 pub fn spawn_worker(
     state: Arc<StateStore>,
     queue: Arc<JobQueue>,
+    client: Option<tower_lsp::Client>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             let job = queue.next().await;
-            if let Err(e) = handle_job(&state, &queue, job).await {
+            if let Err(e) = handle_job(&state, &queue, client.as_ref(), job).await {
                 tracing::warn!(error = %e, "background job failed");
             }
         }
@@ -186,12 +194,24 @@ pub fn spawn_watcher(
 async fn handle_job(
     state: &StateStore,
     queue: &JobQueue,
+    client: Option<&tower_lsp::Client>,
     job: Job,
 ) -> Result<(), IndexerError> {
     match job {
-        Job::ParseFile(path) => parse_file_into_state(state, &path).await,
+        Job::ParseFile(path) => {
+            let result = parse_file_into_state(state, &path).await;
+            if let Some(c) = client {
+                publish_for_path(state, c, &path).await;
+            }
+            result
+        }
         Job::ReparseDocument(url) => {
             state.reparse_document(&url);
+            if let Some(c) = client {
+                let diagnostics = crate::handlers::document::compute_diagnostics(state, &url);
+                let version = state.documents.get(&url).map(|d| d.version);
+                c.publish_diagnostics(url, diagnostics, version).await;
+            }
             Ok(())
         }
         Job::FetchSchemas { working_dir } => fetch_and_install_schemas(state, &working_dir).await,
@@ -202,8 +222,30 @@ async fn handle_job(
             tracing::info!(count, "installed function signatures");
             Ok(())
         }
-        Job::ScanDirectory(dir) => scan_dir_into_state(state, queue, &dir).await,
+        Job::ScanDirectory(dir) => scan_dir_into_state(state, queue, client, &dir).await,
     }
+}
+
+/// Publish diagnostics for the document at `path` if it exists in
+/// the store. Used after a background parse so workspace-wide views
+/// (e.g. Trouble's `<leader>xx`) see diagnostics for indexed files
+/// the user hasn't opened directly.
+async fn publish_for_path(
+    state: &StateStore,
+    client: &tower_lsp::Client,
+    path: &Path,
+) {
+    let Ok(uri) = tower_lsp::lsp_types::Url::from_file_path(path) else {
+        return;
+    };
+    let version = match state.documents.get(&uri) {
+        Some(doc) => doc.version,
+        None => return,
+    };
+    let diagnostics = crate::handlers::document::compute_diagnostics(state, &uri);
+    client
+        .publish_diagnostics(uri, diagnostics, Some(version))
+        .await;
 }
 
 /// Walk upward from `start` looking for a directory whose
@@ -225,6 +267,7 @@ fn find_terraform_init_root(start: &Path) -> Option<PathBuf> {
 async fn scan_dir_into_state(
     state: &StateStore,
     queue: &JobQueue,
+    client: Option<&tower_lsp::Client>,
     dir: &Path,
 ) -> Result<(), IndexerError> {
     match discover_terraform_files_in_dir(dir) {
@@ -237,6 +280,9 @@ async fn scan_dir_into_state(
             // priority jobs while a directory is being walked.
             for path in files {
                 parse_file_into_state(state, &path).await?;
+                if let Some(c) = client {
+                    publish_for_path(state, c, &path).await;
+                }
             }
             enqueue_child_module_scans(state, queue, dir);
         }
