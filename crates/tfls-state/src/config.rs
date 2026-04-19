@@ -22,6 +22,12 @@ pub struct Config {
     /// Number of days past which an exact-pinned version is flagged
     /// stale by the inlay-hint formatter. Default 180 (~6 months).
     pub stale_version_days: u32,
+    /// Enable the opt-in tflint "style pack" rules:
+    /// `terraform_documented_variables`, `terraform_documented_outputs`,
+    /// `terraform_naming_convention`, `terraform_comment_syntax`.
+    /// Default `false` — matches tflint's own recommended preset
+    /// (these rules live in the `all` preset only).
+    pub style_rules: bool,
 }
 
 impl Default for Config {
@@ -32,6 +38,7 @@ impl Default for Config {
             cli_enabled: true,
             cli_binary: "tofu".to_string(),
             stale_version_days: 180,
+            style_rules: false,
         }
     }
 }
@@ -87,6 +94,9 @@ impl ConfigCell {
         if let Some(v) = obj.get("staleVersionDays").and_then(|v| v.as_u64()) {
             // Clamp to u32 range. 0 means "never flag as stale".
             guard.stale_version_days = v.try_into().unwrap_or(u32::MAX);
+        }
+        if let Some(v) = obj.get("styleRules").and_then(|v| v.as_bool()) {
+            guard.style_rules = v;
         }
     }
 }

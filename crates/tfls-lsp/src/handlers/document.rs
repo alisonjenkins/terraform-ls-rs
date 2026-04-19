@@ -172,6 +172,16 @@ pub fn compute_diagnostics(state: &StateStore, uri: &Url) -> Vec<Diagnostic> {
             &current_file,
             &graph,
         ));
+
+        // Pass 3 — opt-in style pack (tflint's `all`-preset rules
+        // that aren't in `recommended`). Gated on the user's config
+        // so by default we match tflint's default severity footprint.
+        if state.config.snapshot().style_rules {
+            out.extend(tfls_diag::documented_variables_diagnostics(body, &doc.rope));
+            out.extend(tfls_diag::documented_outputs_diagnostics(body, &doc.rope));
+            out.extend(tfls_diag::naming_convention_diagnostics(body, &doc.rope));
+            out.extend(tfls_diag::comment_syntax_diagnostics(&doc.rope));
+        }
     }
 
     out

@@ -1,8 +1,11 @@
 //! Diagnostics engine for terraform-ls-rs.
 
+pub mod comment_syntax;
 pub mod deprecated_index;
 pub mod deprecated_interpolation;
 pub mod deprecated_lookup;
+pub mod documented_outputs;
+pub mod documented_variables;
 pub mod empty_list_equality;
 pub mod error;
 pub mod expr_walk;
@@ -11,6 +14,7 @@ pub mod module_graph;
 pub mod module_pinned_source;
 pub mod module_shallow_clone;
 pub mod module_version_presence;
+pub mod naming_convention;
 pub mod references;
 pub mod required_providers_version;
 pub mod required_version_presence;
@@ -24,9 +28,12 @@ pub mod variable_default_type;
 pub mod version_constraint;
 pub mod workspace_remote;
 
+pub use comment_syntax::comment_syntax_diagnostics;
 pub use deprecated_index::deprecated_index_diagnostics;
 pub use deprecated_interpolation::deprecated_interpolation_diagnostics;
 pub use deprecated_lookup::deprecated_lookup_diagnostics;
+pub use documented_outputs::documented_outputs_diagnostics;
+pub use documented_variables::documented_variables_diagnostics;
 pub use empty_list_equality::empty_list_equality_diagnostics;
 pub use error::DiagError;
 pub use map_duplicate_keys::map_duplicate_keys_diagnostics;
@@ -34,6 +41,7 @@ pub use module_graph::ModuleGraphLookup;
 pub use module_pinned_source::module_pinned_source_diagnostics;
 pub use module_shallow_clone::module_shallow_clone_diagnostics;
 pub use module_version_presence::module_version_presence_diagnostics;
+pub use naming_convention::naming_convention_diagnostics;
 pub use references::{undefined_reference_diagnostics, undefined_reference_diagnostics_for_document};
 pub use required_providers_version::required_providers_version_diagnostics;
 pub use required_version_presence::required_version_presence_diagnostics;
