@@ -393,11 +393,24 @@ fn builtin_body_items(
         if filter.present_blocks.contains(b.name) {
             continue;
         }
+        // Blocks that take a type label (e.g. `backend "s3" { … }`,
+        // `provider_meta "google" { … }`) expand to a snippet with a
+        // first-tabstop placeholder for the label so the user fills
+        // it in immediately. Unlabelled blocks expand straight to the
+        // body.
+        let insert_text = match b.label_placeholder {
+            Some(placeholder) => format!(
+                "{name} \"${{1:{placeholder}}}\" {{\n  $0\n}}",
+                name = b.name,
+                placeholder = placeholder,
+            ),
+            None => format!("{name} {{\n  $0\n}}", name = b.name),
+        };
         items.push(CompletionItem {
             label: b.name.to_string(),
             kind: Some(CompletionItemKind::STRUCT),
             detail: Some(b.detail.to_string()),
-            insert_text: Some(format!("{name} {{\n  $0\n}}", name = b.name)),
+            insert_text: Some(insert_text),
             insert_text_format: Some(InsertTextFormat::SNIPPET),
             ..Default::default()
         });

@@ -26,6 +26,11 @@ pub struct BuiltinAttr {
 pub struct BuiltinBlock {
     pub name: &'static str,
     pub detail: &'static str,
+    /// If `Some`, the block takes a type label (e.g. `backend "s3"`,
+    /// `provider_meta "google"`). The value is the placeholder shown
+    /// to the user in the completion snippet. `None` means a plain
+    /// unlabeled block (e.g. `required_providers { … }`).
+    pub label_placeholder: Option<&'static str>,
 }
 
 /// Schema for one built-in block — attributes + nested blocks.
@@ -54,18 +59,22 @@ pub const TERRAFORM_BLOCK: BuiltinSchema = BuiltinSchema {
         BuiltinBlock {
             name: "required_providers",
             detail: "Pin provider sources + versions for this module",
+            label_placeholder: None,
         },
         BuiltinBlock {
             name: "backend",
             detail: "Remote state backend (e.g. `backend \"s3\" { ... }`)",
+            label_placeholder: Some("s3"),
         },
         BuiltinBlock {
             name: "cloud",
             detail: "HCP Terraform / OpenTofu Cloud configuration",
+            label_placeholder: None,
         },
         BuiltinBlock {
             name: "provider_meta",
             detail: "Metadata the provider reads per-module",
+            label_placeholder: Some("google"),
         },
     ],
 };
@@ -108,6 +117,7 @@ pub const VARIABLE_BLOCK: BuiltinSchema = BuiltinSchema {
     blocks: &[BuiltinBlock {
         name: "validation",
         detail: "Custom condition + error_message the value must satisfy",
+        label_placeholder: None,
     }],
 };
 
@@ -144,6 +154,7 @@ pub const OUTPUT_BLOCK: BuiltinSchema = BuiltinSchema {
     blocks: &[BuiltinBlock {
         name: "precondition",
         detail: "Expression that must be true before the output is evaluated",
+        label_placeholder: None,
     }],
 };
 
@@ -303,8 +314,16 @@ const S3_BACKEND: BuiltinSchema = BuiltinSchema {
         BuiltinAttr { name: "use_path_style", required: false, detail: "Use path-style S3 addressing (TF 1.6+ spelling)" },
     ],
     blocks: &[
-        BuiltinBlock { name: "assume_role", detail: "Nested configuration for sts:AssumeRole" },
-        BuiltinBlock { name: "endpoints", detail: "Per-service endpoint overrides (s3, dynamodb, iam, sts)" },
+        BuiltinBlock {
+            name: "assume_role",
+            detail: "Nested configuration for sts:AssumeRole",
+            label_placeholder: None,
+        },
+        BuiltinBlock {
+            name: "endpoints",
+            detail: "Per-service endpoint overrides (s3, dynamodb, iam, sts)",
+            label_placeholder: None,
+        },
     ],
 };
 
@@ -387,6 +406,7 @@ const REMOTE_BACKEND: BuiltinSchema = BuiltinSchema {
     blocks: &[BuiltinBlock {
         name: "workspaces",
         detail: "Workspaces to bind to (name or prefix)",
+        label_placeholder: None,
     }],
 };
 
@@ -406,6 +426,7 @@ const KUBERNETES_BACKEND: BuiltinSchema = BuiltinSchema {
     blocks: &[BuiltinBlock {
         name: "exec",
         detail: "Exec-based credential plugin configuration",
+        label_placeholder: None,
     }],
 };
 

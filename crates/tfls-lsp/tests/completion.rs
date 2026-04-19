@@ -1336,14 +1336,51 @@ async fn terraform_block_body_suggests_required_version_and_blocks() {
     .await
     .expect("ok")
     .expect("some completions");
-    let ls = labels(resp);
-    assert!(ls.contains(&"required_version".to_string()));
-    assert!(ls.contains(&"required_providers".to_string()));
-    assert!(ls.contains(&"backend".to_string()));
-    assert!(ls.contains(&"cloud".to_string()));
+    let items = match resp {
+        CompletionResponse::Array(v) => v,
+        CompletionResponse::List(l) => l.items,
+    };
+    let labels: Vec<String> = items.iter().map(|i| i.label.clone()).collect();
+    assert!(labels.contains(&"required_version".to_string()));
+    assert!(labels.contains(&"required_providers".to_string()));
+    assert!(labels.contains(&"backend".to_string()));
+    assert!(labels.contains(&"cloud".to_string()));
     // Must NOT offer resource/data-specific meta-args.
-    assert!(!ls.contains(&"count".to_string()));
-    assert!(!ls.contains(&"for_each".to_string()));
+    assert!(!labels.contains(&"count".to_string()));
+    assert!(!labels.contains(&"for_each".to_string()));
+
+    // Labeled blocks MUST expand to a snippet that includes a type
+    // label placeholder — `backend "s3" { ... }`, not `backend { ... }`.
+    let backend_item = items.iter().find(|i| i.label == "backend").unwrap();
+    let backend_insert = backend_item.insert_text.as_deref().unwrap_or("");
+    assert!(
+        backend_insert.starts_with("backend \""),
+        "backend snippet must open a label; got {backend_insert:?}"
+    );
+    assert!(
+        backend_insert.contains("${1:"),
+        "backend snippet must place a tabstop on the label; got {backend_insert:?}"
+    );
+    let provider_meta_item = items.iter().find(|i| i.label == "provider_meta").unwrap();
+    let pm_insert = provider_meta_item.insert_text.as_deref().unwrap_or("");
+    assert!(
+        pm_insert.starts_with("provider_meta \""),
+        "provider_meta snippet must open a label; got {pm_insert:?}"
+    );
+
+    // Unlabeled blocks must NOT include a stray label placeholder.
+    let rp_item = items.iter().find(|i| i.label == "required_providers").unwrap();
+    let rp_insert = rp_item.insert_text.as_deref().unwrap_or("");
+    assert!(
+        rp_insert.starts_with("required_providers {"),
+        "required_providers must be unlabeled; got {rp_insert:?}"
+    );
+    let cloud_item = items.iter().find(|i| i.label == "cloud").unwrap();
+    let cloud_insert = cloud_item.insert_text.as_deref().unwrap_or("");
+    assert!(
+        cloud_insert.starts_with("cloud {"),
+        "cloud must be unlabeled; got {cloud_insert:?}"
+    );
 }
 
 #[tokio::test]
