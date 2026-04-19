@@ -2,12 +2,13 @@
 
 use tower_lsp::lsp_types::{
     CodeActionKind, CodeActionOptions, CodeActionProviderCapability, CodeLensOptions,
-    CompletionOptions, DeclarationCapability, DocumentLinkOptions,
-    DocumentOnTypeFormattingOptions, ExecuteCommandOptions, HoverProviderCapability, OneOf,
-    FoldingRangeProviderCapability, RenameOptions, SelectionRangeProviderCapability,
-    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
-    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelpOptions,
-    TextDocumentSyncCapability, TextDocumentSyncKind, WorkDoneProgressOptions,
+    CompletionOptions, DeclarationCapability, DiagnosticOptions, DiagnosticServerCapabilities,
+    DocumentLinkOptions, DocumentOnTypeFormattingOptions, ExecuteCommandOptions,
+    FoldingRangeProviderCapability, HoverProviderCapability, OneOf, RenameOptions,
+    SelectionRangeProviderCapability, SemanticTokensFullOptions, SemanticTokensLegend,
+    SemanticTokensOptions, SemanticTokensServerCapabilities, ServerCapabilities,
+    SignatureHelpOptions, TextDocumentSyncCapability, TextDocumentSyncKind,
+    WorkDoneProgressOptions,
 };
 
 use crate::handlers::semantic_tokens::SEMANTIC_TOKEN_TYPES;
@@ -77,6 +78,18 @@ pub fn server_capabilities() -> ServerCapabilities {
                 .collect(),
             work_done_progress_options: WorkDoneProgressOptions::default(),
         }),
+        diagnostic_provider: Some(DiagnosticServerCapabilities::Options(DiagnosticOptions {
+            identifier: Some("terraform-ls-rs".to_string()),
+            // Our rules read sibling files in the same module
+            // (undefined-ref resolution, unused-declarations,
+            // required_version / required_providers aggregation,
+            // unused_required_providers, standard_module_structure).
+            // Editing one file legitimately changes diagnostics in
+            // its siblings, so we opt into inter-file dependencies.
+            inter_file_dependencies: true,
+            workspace_diagnostics: true,
+            work_done_progress_options: WorkDoneProgressOptions::default(),
+        })),
         experimental: Some(serde_json::json!({
             "terraform-ls": {
                 "searchDocs": { "version": 1 },

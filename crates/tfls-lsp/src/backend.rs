@@ -11,17 +11,20 @@ use tower_lsp::lsp_types::{
     CodeActionParams, CodeActionResponse, CodeLens, CodeLensParams, CompletionParams,
     CompletionResponse, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
     DidChangeConfigurationParams, DidChangeWatchedFilesParams, DidOpenTextDocumentParams,
-    DidSaveTextDocumentParams, DocumentFormattingParams, ExecuteCommandParams,
+    DidSaveTextDocumentParams, DocumentDiagnosticParams, DocumentDiagnosticReport,
+    DocumentDiagnosticReportResult, DocumentFormattingParams, ExecuteCommandParams,
     DocumentHighlight, DocumentHighlightParams, DocumentLink, DocumentLinkParams,
-    DocumentOnTypeFormattingParams, DocumentRangeFormattingParams, InlayHint, InlayHintParams,
-    DocumentSymbolParams, DocumentSymbolResponse, FoldingRange, FoldingRangeParams,
-    GotoDefinitionParams,
-    GotoDefinitionResponse, Hover, HoverParams, InitializeParams, InitializeResult,
-    InitializedParams, Location, MessageType, ReferenceParams, SemanticTokensParams,
+    DocumentOnTypeFormattingParams, DocumentRangeFormattingParams, FullDocumentDiagnosticReport,
+    InlayHint, InlayHintParams, DocumentSymbolParams, DocumentSymbolResponse, FoldingRange,
+    FoldingRangeParams, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams,
+    InitializeParams, InitializeResult, InitializedParams, Location, MessageType,
+    ReferenceParams, RelatedFullDocumentDiagnosticReport, SemanticTokensParams,
     PrepareRenameResponse, RenameParams, SelectionRange, SelectionRangeParams,
-    SemanticTokensRangeParams, SemanticTokensRangeResult,
-    SemanticTokensResult, ServerInfo, SignatureHelp, SignatureHelpParams, SymbolInformation,
-    TextDocumentPositionParams, TextEdit, WorkspaceEdit, WorkspaceSymbolParams,
+    SemanticTokensRangeParams, SemanticTokensRangeResult, SemanticTokensResult, ServerInfo,
+    SignatureHelp, SignatureHelpParams, SymbolInformation, TextDocumentPositionParams, TextEdit,
+    WorkspaceDiagnosticParams, WorkspaceDiagnosticReport, WorkspaceDiagnosticReportResult,
+    WorkspaceDocumentDiagnosticReport, WorkspaceEdit, WorkspaceFullDocumentDiagnosticReport,
+    WorkspaceSymbolParams,
     request::{GotoDeclarationParams, GotoDeclarationResponse},
 };
 use tower_lsp::{Client, LanguageServer, jsonrpc};
@@ -178,6 +181,61 @@ impl LanguageServer for Backend {
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         handlers::document::did_close(self, params).await;
+    }
+
+    // --- Pull-diagnostics (LSP 3.17) --------------------------------
+    //
+    // Clients that can't read `publishDiagnostics` (or only receive
+    // them for files currently in a buffer) pull via these requests
+    // to get diagnostics for any indexed document. Trouble's
+    // workspace view is the main consumer.
+
+    async fn diagnostic(
+        &self,
+        params: DocumentDiagnosticParams,
+    ) -> jsonrpc::Result<DocumentDiagnosticReportResult> {
+        let uri = params.text_document.uri;
+        let diagnostics = handlers::document::compute_diagnostics(&self.state, &uri);
+        Ok(DocumentDiagnosticReportResult::Report(
+            DocumentDiagnosticReport::Full(RelatedFullDocumentDiagnosticReport {
+                related_documents: None,
+                full_document_diagnostic_report: FullDocumentDiagnosticReport {
+                    result_id: None,
+                    items: diagnostics,
+                },
+            }),
+        ))
+    }
+
+    async fn workspace_diagnostic(
+        &self,
+        _params: WorkspaceDiagnosticParams,
+    ) -> jsonrpc::Result<WorkspaceDiagnosticReportResult> {
+        // Collect URIs first so we don't hold a DashMap iterator
+        // across the per-doc computation (which also hits the store).
+        let uris: Vec<_> = self
+            .state
+            .documents
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.version))
+            .collect();
+        let items: Vec<WorkspaceDocumentDiagnosticReport> = uris
+            .into_iter()
+            .map(|(uri, version)| {
+                let diagnostics = handlers::document::compute_diagnostics(&self.state, &uri);
+                WorkspaceDocumentDiagnosticReport::Full(WorkspaceFullDocumentDiagnosticReport {
+                    uri,
+                    version: Some(version as i64),
+                    full_document_diagnostic_report: FullDocumentDiagnosticReport {
+                        result_id: None,
+                        items: diagnostics,
+                    },
+                })
+            })
+            .collect();
+        Ok(WorkspaceDiagnosticReportResult::Report(
+            WorkspaceDiagnosticReport { items },
+        ))
     }
 
     async fn goto_definition(
