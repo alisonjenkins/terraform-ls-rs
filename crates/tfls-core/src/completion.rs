@@ -271,6 +271,11 @@ fn reference_prefix_context(before: &str) -> Option<CompletionContext> {
     }
     // Multi-segment traversal (TYPE.NAME., data.TYPE.NAME., var.foo.bar.).
     let prefix = trimmed.strip_suffix('.')?;
+    // Strip trailing `[...]` bracket groups so e.g.
+    // `aws_vpc.eu-west-1["vpc"].` classifies the same as
+    // `aws_vpc.eu-west-1.` — the index doesn't change the schema the
+    // referenced attribute comes from.
+    let prefix = strip_trailing_bracket_groups(prefix);
     let segments = traversal_segments_reverse(prefix);
     let segs: Vec<&str> = segments.iter().map(|s| s.as_str()).collect();
     match segs.as_slice() {
@@ -296,6 +301,37 @@ fn reference_prefix_context(before: &str) -> Option<CompletionContext> {
         }),
         _ => None,
     }
+}
+
+/// Walk back through any balanced `[...]` groups at the end of `s`,
+/// returning the prefix with them removed. Leaves the string alone if
+/// it doesn't end in `]` or the brackets aren't balanced.
+fn strip_trailing_bracket_groups(mut s: &str) -> &str {
+    while let Some(trimmed) = s.strip_suffix(']') {
+        let mut depth: i32 = 1;
+        let mut cut_at: Option<usize> = None;
+        let bytes = trimmed.as_bytes();
+        let mut i = bytes.len();
+        while i > 0 {
+            i -= 1;
+            match bytes[i] {
+                b']' => depth += 1,
+                b'[' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        cut_at = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        match cut_at {
+            Some(idx) => s = &trimmed[..idx],
+            None => return s,
+        }
+    }
+    s
 }
 
 fn is_builtin_prefix(s: &str) -> bool {
@@ -932,6 +968,42 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn resource_attr_after_bracket_index_and_dot() {
+        let ctx = at_end("output \"x\" { value = aws_vpc.eu-west-1[\"vpc\"].");
+        assert_eq!(
+            ctx,
+            CompletionContext::ResourceAttr {
+                resource_type: "aws_vpc".to_string(),
+                name: "eu-west-1".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn resource_attr_after_bracket_index_and_partial_attr() {
+        let ctx = at_end("output \"x\" { value = aws_vpc.eu-west-1[\"vpc\"].id");
+        assert_eq!(
+            ctx,
+            CompletionContext::ResourceAttr {
+                resource_type: "aws_vpc".to_string(),
+                name: "eu-west-1".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn data_attr_after_bracket_index_and_dot() {
+        let ctx = at_end("output \"x\" { value = data.aws_ami.web[\"k\"].");
+        assert_eq!(
+            ctx,
+            CompletionContext::DataSourceAttr {
+                resource_type: "aws_ami".to_string(),
+                name: "web".to_string(),
+            }
+        );
     }
 
     #[test]

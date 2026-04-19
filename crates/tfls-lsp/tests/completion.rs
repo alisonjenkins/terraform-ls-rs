@@ -981,6 +981,43 @@ async fn index_key_item_replaces_partial_quoted_key() {
 }
 
 #[tokio::test]
+async fn resource_attr_after_bracket_index_suggests_schema_attrs_without_equals() {
+    // Regression: typing `aws_instance.web["vpc"].` used to fall
+    // through to resource-body completion (inside the enclosing
+    // block), which inserts `name = ${1}`. It should classify as
+    // ResourceAttr and offer plain attribute names.
+    let u = uri("file:///mod/a.tf");
+    let (src, pos) = src_with_cursor(
+        "resource \"aws_instance\" \"x\" {\n  ami = aws_instance.web[\"vpc\"].|xxx\n}\n",
+    );
+    let backend = fresh_backend(&src, &u);
+    install_aws_schema(&backend);
+    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&u, pos))
+        .await
+        .expect("ok")
+        .expect("some completions");
+    let CompletionResponse::Array(items) = resp else {
+        panic!("expected array");
+    };
+    for it in &items {
+        if let Some(text) = &it.insert_text {
+            assert!(
+                !text.contains(" = "),
+                "attribute ref completion must not carry ` = `; item {:?} inserts {text:?}",
+                it.label
+            );
+        }
+    }
+    let labels: Vec<_> = items.iter().map(|i| i.label.clone()).collect();
+    assert!(labels.contains(&"ami".to_string()), "got: {labels:?}");
+    // Should NOT include meta-args like `count` (those are body-only).
+    assert!(
+        !labels.contains(&"count".to_string()),
+        "meta-arg `count` leaked into attribute-ref menu: {labels:?}"
+    );
+}
+
+#[tokio::test]
 async fn index_key_empty_when_for_each_dynamic() {
     let u = uri("file:///mod/a.tf");
     let (src, pos) = src_with_cursor(
