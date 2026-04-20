@@ -12,6 +12,14 @@ use ropey::Rope;
 use crate::error::ParseError;
 
 /// Convert an LSP `Position` to an absolute byte offset in the rope.
+///
+/// Per LSP 3.17 §Position: "If the character value is greater than the
+/// line length it defaults back to the line length." We therefore clamp
+/// `pos.character` to the line's visible length (excluding any trailing
+/// `\n` / `\r\n`). Clients routinely send past-EOL positions — e.g.
+/// when the cursor is at column N on an auto-indented blank line that
+/// the server still sees as empty because a didChange hasn't landed —
+/// and dropping those as errors produces silent empty completion.
 pub fn lsp_position_to_byte_offset(rope: &Rope, pos: Position) -> Result<usize, ParseError> {
     let line_idx = pos.line as usize;
     let total_lines = rope.len_lines();
@@ -25,15 +33,27 @@ pub fn lsp_position_to_byte_offset(rope: &Rope, pos: Position) -> Result<usize, 
     let line_start_byte = rope.line_to_byte(line_idx);
     let line = rope.line(line_idx);
     let line_byte_len = line.len_bytes();
-    let char_offset = pos.character as usize;
 
-    if char_offset > line_byte_len {
-        return Err(ParseError::CharacterOutOfBounds {
-            line: pos.line,
-            character: pos.character,
-        });
-    }
+    // Exclude any trailing newline so the clamped position stays on
+    // the requested line instead of landing at the start of the next.
+    let visible_line_len = {
+        let mut len = line_byte_len;
+        if len > 0 {
+            let last = rope.byte(line_start_byte + len - 1);
+            if last == b'\n' {
+                len -= 1;
+                // Strip the carriage return of a CRLF sequence.
+                if len > 0 && rope.byte(line_start_byte + len - 1) == b'\r' {
+                    len -= 1;
+                }
+            } else if last == b'\r' {
+                len -= 1;
+            }
+        }
+        len
+    };
 
+    let char_offset = (pos.character as usize).min(visible_line_len);
     Ok(line_start_byte + char_offset)
 }
 
@@ -120,13 +140,35 @@ mod tests {
     }
 
     #[test]
-    fn position_rejects_character_out_of_bounds() {
-        let r = rope("short\n");
-        let err = lsp_position_to_byte_offset(&r, Position::new(0, 100));
-        assert!(matches!(
-            err,
-            Err(ParseError::CharacterOutOfBounds { .. })
-        ));
+    fn position_clamps_past_eol_character_to_visible_line_length() {
+        // Past-EOL clamp on a blank line — client may send character > 0
+        // when the server still sees an empty line (autoindent races,
+        // stale didChange). Must not drop the request.
+        let r = rope("resource \"x\" {\n\n}\n");
+        let offset = lsp_position_to_byte_offset(&r, Position::new(1, 2))
+            .expect("past-EOL on blank line clamps rather than errors");
+        // Clamped character=0 on blank line 1 → start of that line.
+        assert_eq!(offset, r.line_to_byte(1));
+        let back = byte_offset_to_lsp_position(&r, offset).expect("valid offset");
+        assert_eq!(back, Position::new(1, 0));
+    }
+
+    #[test]
+    fn position_clamps_past_eol_on_content_line() {
+        // character > visible length on a non-blank line clamps to the
+        // visible length (excluding trailing newline).
+        let r = rope("hello\nworld\n");
+        let offset = lsp_position_to_byte_offset(&r, Position::new(0, 100))
+            .expect("past-EOL on content line clamps");
+        assert_eq!(offset, r.line_to_byte(0) + 5);
+    }
+
+    #[test]
+    fn position_clamps_past_eol_with_crlf() {
+        let r = rope("one\r\ntwo\r\n");
+        let offset = lsp_position_to_byte_offset(&r, Position::new(0, 50))
+            .expect("CRLF visible length");
+        assert_eq!(offset, r.line_to_byte(0) + 3);
     }
 
     #[test]
