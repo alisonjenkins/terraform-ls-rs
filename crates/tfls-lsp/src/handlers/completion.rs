@@ -594,7 +594,7 @@ fn provider_block_body_items(
                         value: d.clone(),
                     })
                 }),
-                insert_text: Some(format!("{name} = ${{1}}")),
+                insert_text: Some(schema_attribute_insert_text(name, attr)),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..Default::default()
             });
@@ -1113,7 +1113,7 @@ fn resource_body_items(
                     value: d.clone(),
                 })
             }),
-            insert_text: Some(format!("{name} = ${{1}}")),
+            insert_text: Some(schema_attribute_insert_text(name, attr)),
             insert_text_format: Some(InsertTextFormat::SNIPPET),
             ..Default::default()
         })
@@ -1283,6 +1283,80 @@ fn meta_block_items(kind: BlockKind) -> Vec<CompletionItem> {
             }
         })
         .collect()
+}
+
+/// Return the `InsertTextFormat::SNIPPET` body to assign to a
+/// provider-schema attribute, shaped around the attribute's
+/// declared `type`. Saves the user a keystroke and avoids
+/// leaving them typing quotes / brackets by hand:
+///
+/// - `string`                 → `name = "$1"`
+/// - `list(T)` / `set(T)` / `tuple` → `name = [$1]`
+/// - `map(T)` / `object(…)`   → `name = {\n  $1\n}` (multi-line; common)
+/// - everything else          → `name = $1` (plain; numbers, bools,
+///   `any`, dynamic references, etc.)
+fn schema_attribute_insert_text(name: &str, attr: &tfls_schema::AttributeSchema) -> String {
+    match classify_schema_type(attr.r#type.as_ref()) {
+        SchemaTypeKind::String => format!("{name} = \"${{1}}\""),
+        SchemaTypeKind::Sequence => format!("{name} = [${{1}}]"),
+        SchemaTypeKind::Mapping => format!("{name} = {{\n  ${{1}}\n}}"),
+        SchemaTypeKind::Scalar => format!("{name} = ${{1}}"),
+    }
+}
+
+/// Shape of a provider-declared `cty` type as it appears in
+/// `terraform providers schema -json` output. We map the raw JSON
+/// down to the four "what bracket do we open?" categories the
+/// snippet builder cares about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SchemaTypeKind {
+    String,
+    Scalar,   // number, bool, or type we don't want to wrap
+    Sequence, // list / set / tuple
+    Mapping,  // map / object
+}
+
+fn classify_schema_type(ty: Option<&sonic_rs::Value>) -> SchemaTypeKind {
+    use sonic_rs::{JsonContainerTrait, JsonValueTrait};
+    let Some(ty) = ty else {
+        return SchemaTypeKind::Scalar;
+    };
+    if let Some(s) = ty.as_str() {
+        return match s {
+            "string" => SchemaTypeKind::String,
+            _ => SchemaTypeKind::Scalar,
+        };
+    }
+    // Compound types arrive as `[kind, inner...]` JSON arrays.
+    if let Some(arr) = ty.as_array() {
+        if let Some(first) = arr.iter().next().and_then(|v| v.as_str()) {
+            return match first {
+                "list" | "set" | "tuple" => SchemaTypeKind::Sequence,
+                "map" | "object" => SchemaTypeKind::Mapping,
+                _ => SchemaTypeKind::Scalar,
+            };
+        }
+    }
+    SchemaTypeKind::Scalar
+}
+
+/// `VariableType` counterpart of [`schema_attribute_insert_text`] —
+/// used for module-input completion where we have the child
+/// module's parsed `variable "…" { type = … }` but not a provider
+/// schema.
+fn variable_insert_text(name: &str, ty: Option<&VariableType>) -> String {
+    match ty {
+        Some(VariableType::Primitive(tfls_core::Primitive::String)) => {
+            format!("{name} = \"${{1}}\"")
+        }
+        Some(VariableType::List(_))
+        | Some(VariableType::Set(_))
+        | Some(VariableType::Tuple(_)) => format!("{name} = [${{1}}]"),
+        Some(VariableType::Map(_)) | Some(VariableType::Object(_)) => {
+            format!("{name} = {{\n  ${{1}}\n}}")
+        }
+        _ => format!("{name} = ${{1}}"),
+    }
 }
 
 fn attribute_detail(attr: &tfls_schema::AttributeSchema) -> String {
@@ -1637,7 +1711,8 @@ fn module_input_items(
             if filter.present_attrs.contains(name) || !seen.insert(name.clone()) {
                 continue;
             }
-            let type_detail = table.variable_types.get(name).map(|t| format!("{t}"));
+            let var_type = table.variable_types.get(name);
+            let type_detail = var_type.map(|t| format!("{t}"));
             let documentation = sym.doc.clone().map(|d| {
                 Documentation::MarkupContent(MarkupContent {
                     kind: MarkupKind::Markdown,
@@ -1649,7 +1724,7 @@ fn module_input_items(
                 kind: Some(CompletionItemKind::PROPERTY),
                 detail: type_detail,
                 documentation,
-                insert_text: Some(format!("{name} = ${{1}}")),
+                insert_text: Some(variable_insert_text(name, var_type)),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..Default::default()
             });
@@ -1900,3 +1975,136 @@ mod compute_index_replace_range_tests {
     }
 }
 
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod type_aware_insert_tests {
+    use super::*;
+    use tfls_schema::AttributeSchema;
+
+    fn schema_with_type(json: &str) -> AttributeSchema {
+        AttributeSchema {
+            r#type: Some(sonic_rs::from_str(json).expect("parse type")),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn string_wraps_in_quotes() {
+        let attr = schema_with_type(r#""string""#);
+        assert_eq!(
+            schema_attribute_insert_text("ami", &attr),
+            "ami = \"${1}\""
+        );
+    }
+
+    #[test]
+    fn number_stays_bare() {
+        let attr = schema_with_type(r#""number""#);
+        assert_eq!(schema_attribute_insert_text("count", &attr), "count = ${1}");
+    }
+
+    #[test]
+    fn bool_stays_bare() {
+        let attr = schema_with_type(r#""bool""#);
+        assert_eq!(
+            schema_attribute_insert_text("enabled", &attr),
+            "enabled = ${1}"
+        );
+    }
+
+    #[test]
+    fn list_of_string_gets_square_brackets() {
+        let attr = schema_with_type(r#"["list", "string"]"#);
+        assert_eq!(
+            schema_attribute_insert_text("tags", &attr),
+            "tags = [${1}]"
+        );
+    }
+
+    #[test]
+    fn set_of_string_gets_square_brackets() {
+        let attr = schema_with_type(r#"["set", "string"]"#);
+        assert_eq!(
+            schema_attribute_insert_text("sg_ids", &attr),
+            "sg_ids = [${1}]"
+        );
+    }
+
+    #[test]
+    fn tuple_gets_square_brackets() {
+        let attr = schema_with_type(r#"["tuple", ["string", "number"]]"#);
+        assert_eq!(
+            schema_attribute_insert_text("pair", &attr),
+            "pair = [${1}]"
+        );
+    }
+
+    #[test]
+    fn map_gets_curly_braces_multiline() {
+        let attr = schema_with_type(r#"["map", "string"]"#);
+        assert_eq!(
+            schema_attribute_insert_text("tags", &attr),
+            "tags = {\n  ${1}\n}"
+        );
+    }
+
+    #[test]
+    fn object_gets_curly_braces_multiline() {
+        let attr = schema_with_type(r#"["object", {"name": "string"}]"#);
+        assert_eq!(
+            schema_attribute_insert_text("cfg", &attr),
+            "cfg = {\n  ${1}\n}"
+        );
+    }
+
+    #[test]
+    fn missing_type_falls_back_to_bare() {
+        let attr = AttributeSchema::default();
+        assert_eq!(schema_attribute_insert_text("x", &attr), "x = ${1}");
+    }
+
+    #[test]
+    fn unknown_primitive_falls_back_to_bare() {
+        let attr = schema_with_type(r#""dynamic""#);
+        assert_eq!(schema_attribute_insert_text("x", &attr), "x = ${1}");
+    }
+
+    // --- variable_insert_text (module inputs) ---
+
+    #[test]
+    fn variable_string_wraps_in_quotes() {
+        let t = VariableType::Primitive(tfls_core::Primitive::String);
+        assert_eq!(variable_insert_text("name", Some(&t)), "name = \"${1}\"");
+    }
+
+    #[test]
+    fn variable_list_gets_square_brackets() {
+        let t = VariableType::List(Box::new(VariableType::Primitive(
+            tfls_core::Primitive::String,
+        )));
+        assert_eq!(variable_insert_text("tags", Some(&t)), "tags = [${1}]");
+    }
+
+    #[test]
+    fn variable_map_gets_curly_braces() {
+        let t = VariableType::Map(Box::new(VariableType::Primitive(
+            tfls_core::Primitive::String,
+        )));
+        assert_eq!(
+            variable_insert_text("tags", Some(&t)),
+            "tags = {\n  ${1}\n}"
+        );
+    }
+
+    #[test]
+    fn variable_any_falls_back_to_bare() {
+        let t = VariableType::Any;
+        assert_eq!(variable_insert_text("x", Some(&t)), "x = ${1}");
+    }
+
+    #[test]
+    fn variable_without_type_falls_back_to_bare() {
+        assert_eq!(variable_insert_text("x", None), "x = ${1}");
+    }
+}
