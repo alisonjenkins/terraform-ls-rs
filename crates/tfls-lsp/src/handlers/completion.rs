@@ -1195,7 +1195,14 @@ fn innermost_block_at(body: &Body, offset: usize) -> Option<&Block> {
         if !span_contains_offset(block.span(), offset) {
             continue;
         }
-        return Some(innermost_block_at(&block.body, offset).unwrap_or(block));
+        // Only descend if the cursor is actually inside the body
+        // (past the opening `{`). A cursor on the block header —
+        // e.g. on the `c` of `condition {` — belongs to the enclosing
+        // block's body, not to the nested block's body.
+        if cursor_in_block_body(block, offset) {
+            return Some(innermost_block_at(&block.body, offset).unwrap_or(block));
+        }
+        return None;
     }
     None
 }
@@ -1215,7 +1222,7 @@ fn nested_block_path(body: &Body, offset: usize) -> Vec<String> {
         // the caller already knows the root type from the
         // `CompletionContext`. We only record nested-block names below
         // it.
-        if span_contains_offset(block.span(), offset) {
+        if span_contains_offset(block.span(), offset) && cursor_in_block_body(block, offset) {
             collect_nested_path(&block.body, offset, &mut path);
             return path;
         }
@@ -1231,6 +1238,14 @@ fn collect_nested_path(body: &Body, offset: usize, path: &mut Vec<String>) {
         if !span_contains_offset(nested.span(), offset) {
             continue;
         }
+        // A cursor on the nested block's header line (before the `{`)
+        // is still "in the parent body". Stop descending so the caller
+        // suggests sibling block names instead of the nested block's
+        // own attrs — which would otherwise all be filtered out as
+        // "already present".
+        if !cursor_in_block_body(nested, offset) {
+            return;
+        }
         path.push(nested.ident.as_str().to_string());
         collect_nested_path(&nested.body, offset, path);
         return;
@@ -1239,6 +1254,20 @@ fn collect_nested_path(body: &Body, offset: usize, path: &mut Vec<String>) {
 
 fn span_contains_offset(span: Option<std::ops::Range<usize>>, offset: usize) -> bool {
     matches!(span, Some(r) if offset >= r.start && offset <= r.end)
+}
+
+/// True when `offset` lies inside the block's body (between `{` and `}`).
+/// Used to distinguish cursors on the block header line from cursors
+/// inside the body — they completion-classify differently.
+fn cursor_in_block_body(block: &Block, offset: usize) -> bool {
+    match block.body.span() {
+        Some(body_span) => offset > body_span.start && offset <= body_span.end,
+        // hcl-edit leaves body span unset for an empty body (`foo {}`).
+        // Fall back to the whole block span — same behaviour as before,
+        // good enough because there are no body contents to classify
+        // against anyway.
+        None => span_contains_offset(block.span(), offset),
+    }
 }
 
 fn meta_argument_items(_kind: BlockKind) -> Vec<CompletionItem> {

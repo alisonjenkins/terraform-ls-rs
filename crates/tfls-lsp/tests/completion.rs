@@ -285,6 +285,52 @@ async fn resource_body_inside_nested_block_suggests_nested_attrs() {
 }
 
 #[tokio::test]
+async fn cursor_on_nested_block_header_suggests_parent_body_not_child_attrs() {
+    // Regression: when the cursor sits on the identifier of an existing
+    // nested block header (e.g. the `r` of `root_block_device {`), the
+    // AST-based descent previously classified us as "inside the child
+    // body". Its present_attrs then listed every attr of the nested
+    // block as already set — filtering all suggestions to zero. The
+    // fix: only descend into a block when the cursor is past its
+    // opening `{`.
+    let u = uri("file:///cursor_on_header.tf");
+    let src = "resource \"aws_instance\" \"x\" {\n  root_block_device {\n    volume_size = 8\n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    install_aws_schema(&backend);
+
+    // Line 1, column 2 — the `r` of `root_block_device` on its header
+    // line. That's inside the outer resource body, before the nested
+    // block's `{`. We should surface the resource-body options, not an
+    // empty list.
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(1, 2)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    // `ami` is a required attr of aws_instance — should appear.
+    assert!(
+        ls.contains(&"ami".to_string()),
+        "resource-body attr missing (header-cursor regression); got {ls:?}"
+    );
+    // `volume_size` belongs to the nested block's schema, not the
+    // outer resource. Must not leak into the outer body.
+    assert!(
+        !ls.contains(&"volume_size".to_string()),
+        "nested-block attr leaked to parent body; got {ls:?}"
+    );
+    // Likewise, `root_block_device` itself should be treated as already
+    // present in the resource body (the header we're cursoring on *is*
+    // that block) — don't suggest it again as a block to add.
+    assert!(
+        !ls.contains(&"root_block_device".to_string()),
+        "existing nested block re-suggested; got {ls:?}"
+    );
+}
+
+#[tokio::test]
 async fn resource_body_inside_nested_block_excludes_pure_computed() {
     // Same writability filter we apply at the top level should also
     // apply inside a nested block.
