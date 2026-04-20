@@ -102,17 +102,44 @@ async fn publish_current_diagnostics(backend: &Backend, uri: &Url, version: Opti
 
 /// Compute the full diagnostic set for a document: syntax errors,
 /// undefined-reference warnings, and schema validation errors.
+///
+/// Builds a fresh [`ModuleGraphAdapter`] per call — fine for
+/// single-doc edits but O(N²) when called for every file in a
+/// workspace scan. The bulk-scan path uses
+/// [`compute_diagnostics_with_lookup`] with a precomputed snapshot
+/// instead.
 pub fn compute_diagnostics(state: &StateStore, uri: &Url) -> Vec<Diagnostic> {
+    let module_dir = crate::handlers::util::parent_dir(uri);
+    let graph = ModuleGraphAdapter {
+        state,
+        module_dir: module_dir.as_deref(),
+        current_uri: uri,
+    };
+    let current_file = uri
+        .path_segments()
+        .and_then(|it| it.last())
+        .unwrap_or("")
+        .to_string();
+    compute_diagnostics_with_lookup(state, uri, &graph, &current_file)
+}
+
+/// Same as [`compute_diagnostics`] but takes an injected
+/// [`tfls_diag::ModuleGraphLookup`]. Lets the bulk-scan path reuse a
+/// cached [`crate::handlers::module_snapshot::ModuleSnapshot`]
+/// across every URI in a module instead of rebuilding the aggregates
+/// per file.
+pub fn compute_diagnostics_with_lookup(
+    state: &StateStore,
+    uri: &Url,
+    graph: &dyn tfls_diag::ModuleGraphLookup,
+    current_file: &str,
+) -> Vec<Diagnostic> {
     let Some(doc) = state.documents.get(uri) else {
         return Vec::new();
     };
 
     let mut out = diagnostics_for_parse_errors(&doc.parsed.errors);
 
-    // Undefined-reference resolution scoped to the referencing document's
-    // parent directory — a Terraform module is one directory, so a reference
-    // in `<dir>/a.tf` is satisfied by any definition in `<dir>/*.tf` but not
-    // by definitions inside `<dir>/modules/**` or unrelated workspace roots.
     let module_dir = crate::handlers::util::parent_dir(uri);
     out.extend(undefined_reference_diagnostics(&doc.references, |kind| {
         is_defined_in_module(state, module_dir.as_deref(), kind)
@@ -130,11 +157,6 @@ pub fn compute_diagnostics(state: &StateStore, uri: &Url) -> Vec<Diagnostic> {
         out.extend(tfls_diag::variable_default_type_diagnostics(
             body, &doc.rope,
         ));
-        // Tflint parity — in-tree "recommended" preset rules plus the
-        // niche `module_shallow_clone`. Each walker is a single-file
-        // HCL pass that reads the already-parsed `Body`, so the cost
-        // is amortised across the work the document handler already
-        // does.
         out.extend(tfls_diag::typed_variables_diagnostics(body, &doc.rope));
         out.extend(tfls_diag::module_version_presence_diagnostics(body, &doc.rope));
         out.extend(tfls_diag::module_pinned_source_diagnostics(body, &doc.rope));
@@ -146,44 +168,29 @@ pub fn compute_diagnostics(state: &StateStore, uri: &Url) -> Vec<Diagnostic> {
         out.extend(tfls_diag::empty_list_equality_diagnostics(body, &doc.rope));
         out.extend(tfls_diag::map_duplicate_keys_diagnostics(body, &doc.rope));
 
-        // Pass 2 — cross-file / module-scoped rules. The adapter
-        // below queries `StateStore` via `ModuleGraphLookup` so
-        // `tfls-diag` stays free of state-store dependencies.
-        let graph = ModuleGraphAdapter {
-            state,
-            module_dir: module_dir.as_deref(),
-            current_uri: uri,
-        };
-        // Module-wide aggregates: these two rules walk every
-        // document in the module for their presence checks, so they
-        // need the graph adapter.
+        // Cross-file / module-scoped rules. `graph` is either the
+        // fresh per-call adapter (from `compute_diagnostics`) or a
+        // cached snapshot (from the bulk-scan path).
         out.extend(tfls_diag::required_version_presence_diagnostics(
-            body, &doc.rope, &graph,
+            body, &doc.rope, graph,
         ));
         out.extend(tfls_diag::required_providers_version_diagnostics(
-            body, &doc.rope, &graph,
+            body, &doc.rope, graph,
         ));
         out.extend(tfls_diag::unused_declarations_diagnostics(
-            body, &doc.rope, &graph,
+            body, &doc.rope, graph,
         ));
         out.extend(tfls_diag::unused_required_providers_diagnostics(
-            body, &doc.rope, &graph,
+            body, &doc.rope, graph,
         ));
-        let current_file = uri
-            .path_segments()
-            .and_then(|it| it.last())
-            .unwrap_or("")
-            .to_string();
         out.extend(tfls_diag::standard_module_structure_diagnostics(
             body,
             &doc.rope,
-            &current_file,
-            &graph,
+            current_file,
+            graph,
         ));
 
-        // Pass 3 — opt-in style pack (tflint's `all`-preset rules
-        // that aren't in `recommended`). Gated on the user's config
-        // so by default we match tflint's default severity footprint.
+        // Pass 3 — opt-in style pack.
         if state.config.snapshot().style_rules {
             out.extend(tfls_diag::documented_variables_diagnostics(body, &doc.rope));
             out.extend(tfls_diag::documented_outputs_diagnostics(body, &doc.rope));

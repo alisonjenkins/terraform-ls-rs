@@ -28,6 +28,13 @@ pub enum Job {
     /// enqueue parse jobs for each. Used when the editor opens a file in
     /// a directory that hasn't been indexed yet.
     ScanDirectory(PathBuf),
+    /// Bulk workspace scan: recursively discover every `.tf` /
+    /// `.tf.json` under the root, parse + publish diagnostics in
+    /// parallel via rayon. Replaces the fan-out of hundreds of
+    /// individual `ParseFile` jobs that used to flood the queue at
+    /// initialize time and serialise through the single-task
+    /// worker loop.
+    BulkWorkspaceScan(PathBuf),
 }
 
 /// Priority levels (ordered: Immediate is highest).

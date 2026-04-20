@@ -56,24 +56,23 @@ pub fn spawn_worker(
     })
 }
 
-/// Enqueue low-priority parse jobs for every `.tf` file under `root`.
-///
-/// As each file is enqueued its parent directory is marked scanned in
-/// [`StateStore::scanned_dirs`], so subsequent `did_open` events for files
-/// in those directories don't trigger a redundant rescan.
+/// Enqueue a single bulk-scan job for the whole workspace. Replaces
+/// the old fan-out of one `ParseFile` job per file, which flooded
+/// the worker's serial queue. The bulk scan parallelises file read,
+/// parse, symbol extract, and diagnostic compute with rayon and
+/// dispatches publishes concurrently.
 pub fn enqueue_workspace_scan(state: &StateStore, queue: &JobQueue, root: &Path) {
-    match discover_terraform_files(root) {
-        Ok(files) => {
-            tracing::info!(count = files.len(), root = %root.display(), "workspace scan");
-            for path in files {
-                if let Some(parent) = path.parent() {
-                    state.scanned_dirs.insert(parent.to_path_buf());
-                }
-                queue.enqueue(Job::ParseFile(path), Priority::Low);
+    // Pre-mark every scanned dir so later `did_open` events don't
+    // re-enqueue `ScanDirectory` jobs for the same dirs.
+    if let Ok(files) = discover_terraform_files(root) {
+        tracing::info!(count = files.len(), root = %root.display(), "workspace scan (bulk)");
+        for path in &files {
+            if let Some(parent) = path.parent() {
+                state.scanned_dirs.insert(parent.to_path_buf());
             }
         }
-        Err(e) => tracing::warn!(error = %e, root = %root.display(), "workspace scan failed"),
     }
+    queue.enqueue(Job::BulkWorkspaceScan(root.to_path_buf()), Priority::Low);
 }
 
 /// Enqueue a scan for the single directory containing `file_uri` if it
@@ -223,7 +222,156 @@ async fn handle_job(
             Ok(())
         }
         Job::ScanDirectory(dir) => scan_dir_into_state(state, queue, client, &dir).await,
+        Job::BulkWorkspaceScan(root) => bulk_workspace_scan(state, client, &root).await,
     }
+}
+
+/// Parallel workspace scan: discover, read, parse, extract, compute
+/// diagnostics, and publish for every `.tf` / `.tf.json` file under
+/// `root` — mostly with rayon, finishing with a concurrent publish
+/// fan-out. Replaces the previous pattern of enqueueing one
+/// `ParseFile` job per file and processing them serially through
+/// the single-task worker loop.
+async fn bulk_workspace_scan(
+    state: &StateStore,
+    client: Option<&tower_lsp::Client>,
+    root: &Path,
+) -> Result<(), IndexerError> {
+    use rayon::prelude::*;
+
+    let files = match discover_terraform_files(root) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!(error = %e, root = %root.display(), "bulk scan: discovery failed");
+            return Ok(());
+        }
+    };
+
+    // 1. Parallel read + parse + symbol-extract. Skip files already
+    //    present in the store (editor is authoritative on their
+    //    in-memory contents).
+    let parsed: Vec<(PathBuf, DocumentState)> = tokio::task::spawn_blocking({
+        let files = files.clone();
+        let urls_in_store: Vec<lsp_types::Url> = state
+            .documents
+            .iter()
+            .map(|e| e.key().clone())
+            .collect();
+        let skip: std::collections::HashSet<lsp_types::Url> =
+            urls_in_store.into_iter().collect();
+        move || {
+            files
+                .into_par_iter()
+                .filter_map(|path| {
+                    let url = path_to_url(&path)?;
+                    if skip.contains(&url) {
+                        return None;
+                    }
+                    let text = std::fs::read_to_string(&path).ok()?;
+                    let doc = DocumentState::new(url, &text, 0);
+                    Some((path, doc))
+                })
+                .collect()
+        }
+    })
+    .await
+    .unwrap_or_default();
+
+    // 2. Sequential upserts into the store — DashMap writes are
+    //    cheap and contention-prone writes in parallel don't help
+    //    much.
+    let mut all_uris: Vec<lsp_types::Url> = Vec::with_capacity(parsed.len());
+    for (_, doc) in &parsed {
+        all_uris.push(doc.uri.clone());
+    }
+    for (_, doc) in parsed {
+        state.upsert_document(doc);
+    }
+
+    // Also publish for files that were already open — the caller
+    // might have added them via did_open, and we want the full
+    // workspace represented in the first publish pass.
+    for doc in state.documents.iter() {
+        if !all_uris.contains(doc.key()) {
+            all_uris.push(doc.key().clone());
+        }
+    }
+
+    // 3. Build one `ModuleSnapshot` per distinct parent directory so
+    //    every compute_diagnostics call in step 4 gets O(1)
+    //    cross-file aggregates instead of walking the document map.
+    let by_module: std::collections::HashMap<Option<PathBuf>, Vec<lsp_types::Url>> = {
+        let mut m: std::collections::HashMap<Option<PathBuf>, Vec<lsp_types::Url>> =
+            std::collections::HashMap::new();
+        for uri in all_uris {
+            let dir = crate::handlers::util::parent_dir(&uri);
+            m.entry(dir).or_default().push(uri);
+        }
+        m
+    };
+
+    let Some(client) = client else {
+        // No client to publish to — just finish; the upserts above
+        // are the only externally-visible effect we want.
+        return Ok(());
+    };
+
+    // 4. Parallel diagnostic compute + concurrent publish. For each
+    //    module directory:
+    //    a) build snapshot once
+    //    b) rayon-compute diagnostics for every URI using cached lookup
+    //    c) publish concurrently via FuturesUnordered
+    for (dir, uris) in by_module {
+        let snapshot = crate::handlers::module_snapshot::ModuleSnapshot::build(
+            state,
+            dir.as_deref(),
+        );
+        // compute_diagnostics is CPU-bound and safe to call from
+        // rayon workers — it only reads DashMap entries.
+        let snapshot_ref = &snapshot;
+        let results: Vec<(lsp_types::Url, i32, Vec<lsp_types::Diagnostic>)> =
+            tokio::task::block_in_place(|| {
+                uris.par_iter()
+                    .filter_map(|uri| {
+                        let version = state.documents.get(uri)?.version;
+                        let lookup = crate::handlers::module_snapshot::CachedModuleLookup {
+                            snapshot: snapshot_ref,
+                            state,
+                            current_uri: uri,
+                        };
+                        let current_file = uri
+                            .path_segments()
+                            .and_then(|it| it.last())
+                            .unwrap_or("")
+                            .to_string();
+                        let diagnostics =
+                            crate::handlers::document::compute_diagnostics_with_lookup(
+                                state,
+                                uri,
+                                &lookup,
+                                &current_file,
+                            );
+                        Some((uri.clone(), version, diagnostics))
+                    })
+                    .collect()
+            });
+
+        // Publish concurrently. tower-lsp's publish is an unbounded
+        // channel send, so this effectively just enqueues — no
+        // per-URI latency chain.
+        use futures::stream::{FuturesUnordered, StreamExt};
+        let mut pending: FuturesUnordered<_> = results
+            .into_iter()
+            .map(|(uri, version, diagnostics)| {
+                let c = client.clone();
+                async move {
+                    c.publish_diagnostics(uri, diagnostics, Some(version)).await;
+                }
+            })
+            .collect();
+        while pending.next().await.is_some() {}
+    }
+    Ok(())
 }
 
 /// Publish diagnostics for the document at `path` if it exists in
