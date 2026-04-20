@@ -164,3 +164,76 @@ async fn hover_on_attribute_falls_back_when_attribute_not_in_schema() {
         "expected a hint that the attribute is unknown, got: {md}"
     );
 }
+
+// -------------------------------------------------------------------------
+//  Meta-block attributes (lifecycle, provisioner, connection) aren't
+//  in provider schemas. The hover shouldn't falsely report them as
+//  "not in the schema for aws_foo" — it should render a language-
+//  level description instead.
+// -------------------------------------------------------------------------
+
+#[tokio::test]
+async fn hover_on_lifecycle_create_before_destroy_does_not_blame_provider() {
+    let u = uri("file:///c.tf");
+    let src = "resource \"aws_instance\" \"web\" {\n  lifecycle {\n    create_before_destroy = true\n  }\n}\n";
+    let b = backend_with(src, &u);
+    // no schemas installed on purpose — we want to confirm the
+    // hover renders even without the provider schema loaded.
+    let md = hover_markdown(&b, &u, Position::new(2, 10))
+        .await
+        .expect("some hover");
+    assert!(
+        md.contains("create_before_destroy"),
+        "expected attr name: {md}"
+    );
+    assert!(
+        md.contains("lifecycle"),
+        "expected path to mention lifecycle: {md}"
+    );
+    assert!(
+        !md.contains("not in the schema"),
+        "must NOT claim it's missing from the provider schema: {md}"
+    );
+    assert!(
+        !md.contains("aws_instance"),
+        "resource type shouldn't appear in a lifecycle-attr hover: {md}"
+    );
+}
+
+#[tokio::test]
+async fn hover_on_lifecycle_enabled_in_tf_file_warns_about_portability() {
+    let u = uri("file:///c.tf");
+    let src = "resource \"aws_instance\" \"web\" {\n  lifecycle {\n    enabled = false\n  }\n}\n";
+    let b = backend_with(src, &u);
+    let md = hover_markdown(&b, &u, Position::new(2, 5))
+        .await
+        .expect("some hover");
+    assert!(md.contains("enabled"), "got: {md}");
+    assert!(md.contains("OpenTofu"), "expected OpenTofu note: {md}");
+    assert!(
+        md.contains("Terraform"),
+        "expected Terraform portability warning: {md}"
+    );
+    assert!(
+        !md.contains("not in the schema"),
+        "must NOT claim it's missing from provider schema: {md}"
+    );
+}
+
+#[tokio::test]
+async fn hover_on_lifecycle_enabled_in_tofu_file_is_silent_about_portability() {
+    let u = uri("file:///c.tofu");
+    let src = "resource \"aws_instance\" \"web\" {\n  lifecycle {\n    enabled = false\n  }\n}\n";
+    let b = backend_with(src, &u);
+    let md = hover_markdown(&b, &u, Position::new(2, 5))
+        .await
+        .expect("some hover");
+    assert!(md.contains("enabled"), "got: {md}");
+    // Still mentions OpenTofu (it's documenting the feature) — but no
+    // ⚠ portability warning.
+    assert!(!md.contains("⚠"), "should be silent: {md}");
+    assert!(
+        !md.contains("Terraform does not support"),
+        "should not warn about Terraform on a .tofu file: {md}"
+    );
+}

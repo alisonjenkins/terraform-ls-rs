@@ -94,7 +94,7 @@ pub async fn hover(backend: &Backend, params: HoverParams) -> jsonrpc::Result<Op
     // Prefer the narrowest match: attribute hover beats symbol hover when the
     // cursor is on an attribute key inside a resource body, because the
     // resource's symbol range contains the attribute's position too.
-    if let Some(hover) = hover_attribute::attribute_hover(&backend.state, &doc, pos) {
+    if let Some(hover) = hover_attribute::attribute_hover(&backend.state, &doc, pos, &uri) {
         return Ok(Some(hover));
     }
 

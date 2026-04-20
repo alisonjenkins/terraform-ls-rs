@@ -15,8 +15,9 @@
 
 use hcl_edit::repr::Span;
 use hcl_edit::structure::{Attribute, Body};
-use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind, Position};
+use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind, Position, Url};
 use std::sync::Arc;
+use tfls_core::builtin_blocks::{BuiltinAttr, LIFECYCLE_DATA_BLOCK, LIFECYCLE_RESOURCE_BLOCK};
 use tfls_parser::hcl_span_to_lsp_range;
 use tfls_schema::{AttributeSchema, BlockSchema, ProviderSchema};
 use tfls_state::{DocumentState, StateStore};
@@ -30,15 +31,25 @@ pub fn attribute_hover(
     state: &StateStore,
     doc: &DocumentState,
     pos: Position,
+    uri: &Url,
 ) -> Option<Hover> {
     let body = doc.parsed.body.as_ref()?;
     let hit = find_attribute_at(body, doc, pos)?;
 
-    let markdown = match resolve_attribute_schema(state, &hit) {
-        AttributeLookup::Found(schema) => render_attribute(&hit, &schema),
-        AttributeLookup::SchemasNotLoaded => render_schemas_not_loaded(&hit),
-        AttributeLookup::ProviderMissing => render_provider_missing(&hit),
-        AttributeLookup::AttributeUnknown => render_attribute_unknown(&hit),
+    // Meta-block attributes (`lifecycle { create_before_destroy = … }`,
+    // `lifecycle.precondition.condition`, `provisioner`, `connection`)
+    // aren't in provider schemas — they're Terraform/OpenTofu language
+    // constructs. Route those to a dedicated renderer so we don't
+    // falsely claim "attribute is not in the schema for aws_foo".
+    let markdown = if is_meta_block_path(&hit.nested_path) {
+        render_meta_attribute(&hit, uri)
+    } else {
+        match resolve_attribute_schema(state, &hit) {
+            AttributeLookup::Found(schema) => render_attribute(&hit, &schema),
+            AttributeLookup::SchemasNotLoaded => render_schemas_not_loaded(&hit),
+            AttributeLookup::ProviderMissing => render_provider_missing(&hit),
+            AttributeLookup::AttributeUnknown => render_attribute_unknown(&hit),
+        }
     };
     let range = hcl_span_to_lsp_range(&doc.rope, hit.key_span).ok()?;
 
@@ -49,6 +60,99 @@ pub fn attribute_hover(
         }),
         range: Some(range),
     })
+}
+
+/// True if the nested path passes through a meta-block whose contents
+/// are language-level, not provider-schema-defined.
+fn is_meta_block_path(path: &[String]) -> bool {
+    path.first().is_some_and(|n| {
+        matches!(
+            n.as_str(),
+            "lifecycle" | "provisioner" | "connection"
+        )
+    })
+}
+
+fn render_meta_attribute(hit: &AttributeHit, uri: &Url) -> String {
+    // Lifecycle is the block we actually have built-in schemas for;
+    // provisioner / connection contents are too varied to model and
+    // get a generic "language meta-argument" note.
+    let path_join = hit.nested_path.join(".");
+    if hit.nested_path.first().map(|s| s.as_str()) == Some("lifecycle") {
+        return render_lifecycle_attribute(hit, uri, &path_join);
+    }
+    format!(
+        "**attribute** `{attr}` in `{path}` (Terraform/OpenTofu language meta-argument)\n\n\
+         Meta-block contents aren't provider-defined; their valid keys are part of the Terraform / OpenTofu language specification rather than the provider schema.",
+        attr = hit.attr_name,
+        path = path_join,
+    )
+}
+
+fn render_lifecycle_attribute(hit: &AttributeHit, uri: &Url, path: &str) -> String {
+    // Pick the right lifecycle schema per outer block kind.
+    let schema_attrs: &[BuiltinAttr] = match hit.root_kind {
+        RootBlockKind::Resource => LIFECYCLE_RESOURCE_BLOCK.attrs,
+        RootBlockKind::DataSource => LIFECYCLE_DATA_BLOCK.attrs,
+        // `lifecycle` doesn't belong in a provider block; fall back
+        // to the resource list for tolerance.
+        RootBlockKind::Provider => LIFECYCLE_RESOURCE_BLOCK.attrs,
+    };
+    // Deeper meta paths (e.g. `lifecycle.precondition.condition`):
+    // the valid keys there are `condition` / `error_message`, described
+    // in `VALIDATION_BLOCK`. For simplicity just name the path and a
+    // brief description when we recognise it.
+    let detail = if hit.nested_path.len() == 1 {
+        schema_attrs
+            .iter()
+            .find(|a| a.name == hit.attr_name)
+            .map(|a| a.detail.to_string())
+    } else if matches!(
+        hit.nested_path.get(1).map(|s| s.as_str()),
+        Some("precondition") | Some("postcondition")
+    ) {
+        match hit.attr_name.as_str() {
+            "condition" => Some("Boolean expression — must evaluate to true.".to_string()),
+            "error_message" => {
+                Some("Message shown when the condition fails.".to_string())
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    let mut out = format!(
+        "**attribute** `{attr}` in `{path}`",
+        attr = hit.attr_name,
+        path = path,
+    );
+    if let Some(d) = &detail {
+        out.push_str(&format!("\n\n{d}"));
+    }
+
+    // `enabled` is OpenTofu-only. Surface that fact plainly in the
+    // hover so users don't have to cross-reference the inlay hint.
+    if hit.attr_name == "enabled" {
+        let tofu_file = is_opentofu_file(uri);
+        if tofu_file {
+            out.push_str("\n\n_OpenTofu 1.11+ meta-argument. ([docs](https://opentofu.org/docs/language/meta-arguments/enabled/))_");
+        } else {
+            out.push_str(
+                "\n\n⚠ _OpenTofu 1.11+ meta-argument — Terraform does not support it. \
+Rename this file to `.tofu` (or `.tofu.json`) if this module is OpenTofu-only, \
+or use `count = var.create ? 1 : 0` / `for_each` for Terraform compatibility. \
+([docs](https://opentofu.org/docs/language/meta-arguments/enabled/))_",
+            );
+        }
+    }
+
+    out
+}
+
+fn is_opentofu_file(uri: &Url) -> bool {
+    let path = uri.path();
+    path.ends_with(".tofu") || path.ends_with(".tofu.json")
 }
 
 enum AttributeLookup {
