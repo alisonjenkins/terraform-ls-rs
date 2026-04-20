@@ -614,6 +614,7 @@ pub const LIFECYCLE_RESOURCE_BLOCK: BuiltinSchema = BuiltinSchema {
         BuiltinAttr { name: "prevent_destroy", required: false, detail: "Reject any plan that would destroy this resource" },
         BuiltinAttr { name: "ignore_changes", required: false, detail: "List of attributes (or `all`) to ignore when detecting drift" },
         BuiltinAttr { name: "replace_triggered_by", required: false, detail: "References whose change forces replacement" },
+        BuiltinAttr { name: "enabled", required: false, detail: "Boolean gate for the resource (OpenTofu 1.11+; warned on `.tf` files)" },
     ],
     blocks: &[
         BuiltinBlock {
@@ -644,7 +645,9 @@ fn lifecycle_resource_schema() -> BuiltinSchema { LIFECYCLE_RESOURCE_BLOCK }
 /// is permitted; `create_before_destroy`/`prevent_destroy`/
 /// `ignore_changes`/`replace_triggered_by` don't apply.
 pub const LIFECYCLE_DATA_BLOCK: BuiltinSchema = BuiltinSchema {
-    attrs: &[],
+    attrs: &[
+        BuiltinAttr { name: "enabled", required: false, detail: "Boolean gate for the data source (OpenTofu 1.11+; warned on `.tf` files)" },
+    ],
     blocks: &[BuiltinBlock {
         name: "postcondition",
         detail: "Condition that must hold after the data source is read",

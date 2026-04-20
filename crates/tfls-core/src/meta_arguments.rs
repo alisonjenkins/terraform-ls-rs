@@ -33,6 +33,14 @@ pub fn meta_blocks(kind: BlockKind) -> &'static [&'static str] {
 /// Attributes allowed directly inside a `lifecycle { ... }` block. Data
 /// sources have no meta-attrs here — only the `postcondition` sub-block
 /// (Terraform 1.2+).
+///
+/// `enabled` is OpenTofu-only (v1.11+). It's accepted here so the
+/// schema-validation pass doesn't flag it as "unknown attribute";
+/// whether its use is *correct* in the current file's language
+/// dialect is checked separately against the filename extension (see
+/// [`tfls_diag::schema_validation`]) — `.tofu` / `.tofu.json` files
+/// get it silently; `.tf` / `.tf.json` files get a warning pointing
+/// out that Terraform doesn't support it.
 pub fn lifecycle_attrs(kind: BlockKind) -> &'static [&'static str] {
     match kind {
         BlockKind::Resource => &[
@@ -40,8 +48,9 @@ pub fn lifecycle_attrs(kind: BlockKind) -> &'static [&'static str] {
             "prevent_destroy",
             "ignore_changes",
             "replace_triggered_by",
+            "enabled",
         ],
-        BlockKind::Data => &[],
+        BlockKind::Data => &["enabled"],
     }
 }
 
