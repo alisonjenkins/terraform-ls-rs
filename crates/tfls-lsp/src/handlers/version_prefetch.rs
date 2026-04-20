@@ -69,6 +69,15 @@ async fn prefetch_and_refresh(
         return;
     };
 
+    // User-visible progress for the batch. Individual fetches run
+    // concurrently so we can't report "provider 3/10" meaningfully
+    // — just show the set of targets at begin time.
+    let progress = crate::progress::ProgressReporter::begin(
+        &client,
+        format!("Fetching {} version catalog(s)", targets.len()),
+    )
+    .await;
+
     let mut joins = Vec::new();
     for target in targets {
         let http = http.clone();
@@ -99,6 +108,10 @@ async fn prefetch_and_refresh(
     }
     for j in joins {
         let _ = j.await;
+    }
+
+    if let Some(p) = progress {
+        p.end(Some("version catalogs ready".to_string())).await;
     }
 
     // Ask the client to re-request inlay hints. The standard LSP

@@ -213,12 +213,37 @@ async fn handle_job(
             }
             Ok(())
         }
-        Job::FetchSchemas { working_dir } => fetch_and_install_schemas(state, &working_dir).await,
+        Job::FetchSchemas { working_dir } => {
+            let progress = match client {
+                Some(c) => {
+                    crate::progress::ProgressReporter::begin(c, "Fetching provider schemas").await
+                }
+                None => None,
+            };
+            let result = fetch_and_install_schemas(state, &working_dir).await;
+            if let Some(p) = progress {
+                let message = match &result {
+                    Ok(_) => Some("schemas ready".to_string()),
+                    Err(_) => Some("schema fetch failed".to_string()),
+                };
+                p.end(message).await;
+            }
+            result
+        }
         Job::FetchFunctions { binary } => {
+            let progress = match client {
+                Some(c) => {
+                    crate::progress::ProgressReporter::begin(c, "Loading function signatures").await
+                }
+                None => None,
+            };
             let schema = functions_cache::load_functions(&binary).await;
             let count = schema.function_signatures.len();
             state.install_functions(schema);
             tracing::info!(count, "installed function signatures");
+            if let Some(p) = progress {
+                p.end(Some(format!("{count} signatures"))).await;
+            }
             Ok(())
         }
         Job::ScanDirectory(dir) => scan_dir_into_state(state, queue, client, &dir).await,
@@ -312,6 +337,15 @@ async fn scan_files_parallel(
 ) {
     use rayon::prelude::*;
 
+    let file_count = files.len();
+    // Begin a progress token if we have a client attached. Silent
+    // if the client declines the workDoneProgress/create request
+    // (older clients).
+    let progress = match client {
+        Some(c) => crate::progress::ProgressReporter::begin(c, "Indexing Terraform workspace").await,
+        None => None,
+    };
+
     let parsed: Vec<DocumentState> = tokio::task::spawn_blocking({
         let files = files.clone();
         let skip: std::collections::HashSet<lsp_types::Url> = state
@@ -336,6 +370,15 @@ async fn scan_files_parallel(
     .await
     .unwrap_or_default();
 
+    let parsed_count = parsed.len();
+    if let Some(p) = progress.as_ref() {
+        p.report(
+            Some(format!("parsed {parsed_count}/{file_count}")),
+            Some(33),
+        )
+        .await;
+    }
+
     let mut uris: Vec<lsp_types::Url> = parsed.iter().map(|d| d.uri.clone()).collect();
     for doc in parsed {
         state.upsert_document(doc);
@@ -351,7 +394,17 @@ async fn scan_files_parallel(
         }
     }
 
-    let Some(client) = client else { return };
+    let Some(client) = client else {
+        if let Some(p) = progress {
+            p.end(None).await;
+        }
+        return;
+    };
+
+    if let Some(p) = progress.as_ref() {
+        p.report(Some("computing diagnostics".to_string()), Some(66))
+            .await;
+    }
 
     // Group by parent dir so we build one ModuleSnapshot per module.
     let mut by_module: std::collections::HashMap<Option<PathBuf>, Vec<lsp_types::Url>> =
@@ -361,6 +414,7 @@ async fn scan_files_parallel(
         by_module.entry(dir).or_default().push(uri);
     }
 
+    let mut published = 0usize;
     for (dir, uris_in_module) in by_module {
         let snapshot = crate::handlers::module_snapshot::ModuleSnapshot::build(
             state,
@@ -396,6 +450,7 @@ async fn scan_files_parallel(
                     .collect()
             });
 
+        published += results.len();
         use futures::stream::{FuturesUnordered, StreamExt};
         let mut pending: FuturesUnordered<_> = results
             .into_iter()
@@ -407,6 +462,10 @@ async fn scan_files_parallel(
             })
             .collect();
         while pending.next().await.is_some() {}
+    }
+
+    if let Some(p) = progress {
+        p.end(Some(format!("indexed {published} files"))).await;
     }
 }
 
