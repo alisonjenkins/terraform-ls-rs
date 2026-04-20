@@ -17,7 +17,10 @@
 use hcl_edit::expr::Expression;
 use hcl_edit::repr::Span;
 use hcl_edit::structure::{Block, BlockLabel, Body};
-use lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams, Range};
+use lsp_types::{
+    InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams, InlayHintTooltip, MarkupContent,
+    MarkupKind, Range, Url,
+};
 use ropey::Rope;
 use std::collections::HashMap;
 use tfls_parser::{ReferenceKind, hcl_span_to_lsp_range};
@@ -73,7 +76,80 @@ pub async fn inlay_hint(
         config.stale_version_days,
     ));
 
+    // --- OpenTofu-only portability hints --------------------------------
+    hints.extend(lifecycle_enabled_hints(
+        body,
+        &doc.rope,
+        &params.range,
+        &uri,
+    ));
+
     if hints.is_empty() { Ok(None) } else { Ok(Some(hints)) }
+}
+
+// -------------------------------------------------------------------------
+//  `lifecycle { enabled = … }` portability hints
+//
+//  `enabled` is OpenTofu 1.11+. On portable (`.tf` / `.tf.json`) files
+//  we surface a quiet inline marker so the author knows the code
+//  won't run under Terraform — no squiggle, no problems-panel entry.
+//  Silent on `.tofu` / `.tofu.json`.
+// -------------------------------------------------------------------------
+
+fn is_opentofu_file(uri: &Url) -> bool {
+    let path = uri.path();
+    path.ends_with(".tofu") || path.ends_with(".tofu.json")
+}
+
+fn lifecycle_enabled_hints(
+    body: &Body,
+    rope: &Rope,
+    visible: &Range,
+    uri: &Url,
+) -> Vec<InlayHint> {
+    let mut out = Vec::new();
+    if is_opentofu_file(uri) {
+        return out;
+    }
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else { continue };
+        if !matches!(block.ident.as_str(), "resource" | "data") {
+            continue;
+        }
+        for inner in block.body.iter() {
+            let Some(lifecycle) = inner.as_block() else { continue };
+            if lifecycle.ident.as_str() != "lifecycle" {
+                continue;
+            }
+            for entry in lifecycle.body.iter() {
+                let Some(attr) = entry.as_attribute() else { continue };
+                if attr.key.as_str() != "enabled" {
+                    continue;
+                }
+                let Some(span) = attr.value.span() else { continue };
+                let Ok(range) = hcl_span_to_lsp_range(rope, span) else { continue };
+                if !within(visible, range) {
+                    continue;
+                }
+                out.push(InlayHint {
+                    position: range.end,
+                    label: InlayHintLabel::String(" OpenTofu 1.11+".to_string()),
+                    kind: Some(InlayHintKind::PARAMETER),
+                    tooltip: Some(InlayHintTooltip::MarkupContent(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value:
+                            "`enabled` is an [OpenTofu 1.11+ meta-argument](https://opentofu.org/docs/language/meta-arguments/enabled/).\n\nTerraform does not support it — if this module is OpenTofu-only, rename the file to `.tofu` (or `.tofu.json`) to suppress this hint. For Terraform-compatible code, use `count = var.create ? 1 : 0` or `for_each` instead."
+                                .to_string(),
+                    })),
+                    text_edits: None,
+                    padding_left: Some(true),
+                    padding_right: None,
+                    data: None,
+                });
+            }
+        }
+    }
+    out
 }
 
 // -------------------------------------------------------------------------
@@ -682,5 +758,117 @@ mod tests {
         let body = parse_source(r#"variable "x" {}"#).body.expect("parses");
         let defs = collect_variable_defaults(&body);
         assert!(defs.is_empty());
+    }
+
+    // --- lifecycle.enabled portability hint --------------------------
+
+    fn wide_range() -> Range {
+        Range {
+            start: lsp_types::Position::new(0, 0),
+            end: lsp_types::Position::new(9999, 9999),
+        }
+    }
+
+    fn make_hints(src: &str, uri_str: &str) -> Vec<InlayHint> {
+        let body = parse_source(src).body.expect("parses");
+        let rope = Rope::from_str(src);
+        let uri = Url::parse(uri_str).expect("url");
+        lifecycle_enabled_hints(&body, &rope, &wide_range(), &uri)
+    }
+
+    #[test]
+    fn enabled_in_tf_file_emits_hint() {
+        let hints = make_hints(
+            r#"resource "aws_instance" "x" {
+              ami = "ami-1"
+              lifecycle {
+                enabled = true
+              }
+            }"#,
+            "file:///m/main.tf",
+        );
+        assert_eq!(hints.len(), 1, "got: {hints:?}");
+        let h = &hints[0];
+        match &h.label {
+            InlayHintLabel::String(s) => {
+                assert!(
+                    s.contains("OpenTofu"),
+                    "label should mention OpenTofu; got {s:?}"
+                );
+            }
+            other => panic!("expected string label, got {other:?}"),
+        }
+        match &h.tooltip {
+            Some(InlayHintTooltip::MarkupContent(mc)) => {
+                assert!(mc.value.contains("OpenTofu"), "tooltip missing 'OpenTofu'");
+                assert!(mc.value.contains("count"), "tooltip missing 'count' fallback");
+            }
+            other => panic!("expected markdown tooltip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enabled_in_tf_json_file_emits_hint() {
+        let hints = make_hints(
+            r#"resource "aws_instance" "x" {
+              lifecycle {
+                enabled = true
+              }
+            }"#,
+            "file:///m/main.tf.json",
+        );
+        assert_eq!(hints.len(), 1, "got: {hints:?}");
+    }
+
+    #[test]
+    fn enabled_in_tofu_file_emits_no_hint() {
+        let hints = make_hints(
+            r#"resource "aws_instance" "x" {
+              lifecycle {
+                enabled = true
+              }
+            }"#,
+            "file:///m/main.tofu",
+        );
+        assert!(hints.is_empty(), "got: {hints:?}");
+    }
+
+    #[test]
+    fn enabled_in_tofu_json_file_emits_no_hint() {
+        let hints = make_hints(
+            r#"resource "aws_instance" "x" {
+              lifecycle {
+                enabled = true
+              }
+            }"#,
+            "file:///m/main.tofu.json",
+        );
+        assert!(hints.is_empty(), "got: {hints:?}");
+    }
+
+    #[test]
+    fn enabled_in_data_lifecycle_is_also_hinted() {
+        let hints = make_hints(
+            r#"data "aws_ami" "x" {
+              lifecycle {
+                enabled = true
+              }
+            }"#,
+            "file:///m/main.tf",
+        );
+        assert_eq!(hints.len(), 1, "got: {hints:?}");
+    }
+
+    #[test]
+    fn no_hint_when_enabled_is_absent() {
+        let hints = make_hints(
+            r#"resource "aws_instance" "x" {
+              lifecycle {
+                create_before_destroy = true
+              }
+            }"#,
+            "file:///m/main.tf",
+        );
+        assert!(hints.is_empty(), "got: {hints:?}");
     }
 }

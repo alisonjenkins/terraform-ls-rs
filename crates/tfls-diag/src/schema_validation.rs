@@ -33,7 +33,7 @@ impl SchemaLookup for ProviderSchemas {
 pub fn resource_diagnostics(
     body: &Body,
     rope: &Rope,
-    uri: &Url,
+    _uri: &Url,
     lookup: &impl SchemaLookup,
 ) -> Vec<Diagnostic> {
     let mut out = Vec::new();
@@ -52,24 +52,15 @@ pub fn resource_diagnostics(
         };
         let Some(schema) = schema else { continue };
 
-        validate_block(block, rope, uri, &schema, kind, &mut out);
+        validate_block(block, rope, &schema, kind, &mut out);
     }
 
     out
 }
 
-/// True when the URI's path ends with `.tofu` or `.tofu.json` —
-/// OpenTofu-only source files where OpenTofu-specific features can
-/// be used without portability warnings.
-fn is_opentofu_file(uri: &Url) -> bool {
-    let path = uri.path();
-    path.ends_with(".tofu") || path.ends_with(".tofu.json")
-}
-
 fn validate_block(
     block: &Block,
     rope: &Rope,
-    uri: &Url,
     schema: &Schema,
     kind: BlockKind,
     out: &mut Vec<Diagnostic>,
@@ -133,7 +124,7 @@ fn validate_block(
         };
         let name = inner.ident.as_str();
         match (kind, name) {
-            (_, "lifecycle") => validate_lifecycle_block(inner, rope, uri, kind, out),
+            (_, "lifecycle") => validate_lifecycle_block(inner, rope, kind, out),
             (BlockKind::Resource, "provisioner") | (BlockKind::Resource, "connection") => {
                 // Allowed; inner body is too variable to validate here.
             }
@@ -254,37 +245,21 @@ fn validate_block(
 fn validate_lifecycle_block(
     block: &Block,
     rope: &Rope,
-    uri: &Url,
     kind: BlockKind,
     out: &mut Vec<Diagnostic>,
 ) {
     let attrs = lifecycle_attrs(kind);
     let blocks = lifecycle_blocks(kind);
-    let tofu_file = is_opentofu_file(uri);
     for structure in block.body.iter() {
         if let Some(attr) = structure.as_attribute() {
             let name = attr.key.as_str();
             if attrs.contains(&name) {
-                // `enabled` is an OpenTofu-1.11+ meta-argument.
-                // Accepted in `lifecycle_attrs` so the "unknown
-                // attribute" pass stays quiet, but on a portable
-                // `.tf` / `.tf.json` file its use is non-portable —
-                // Terraform treats it as an unknown attribute at
-                // plan time. Warn the author so they either rename
-                // the file to `.tofu` or drop the feature.
-                if name == "enabled" && !tofu_file {
-                    let span = attr.span().unwrap_or(0..0);
-                    let range = hcl_span_to_lsp_range(rope, span).unwrap_or_default();
-                    out.push(Diagnostic {
-                        range,
-                        severity: Some(DiagnosticSeverity::WARNING),
-                        source: Some("terraform-ls-rs".to_string()),
-                        message:
-                            "`enabled` is an OpenTofu 1.11+ meta-argument; Terraform doesn't support it — rename this file to `.tofu` (or `.tofu.json`) if this module is OpenTofu-only, or use `count`/`for_each` for Terraform compatibility"
-                                .to_string(),
-                        ..Default::default()
-                    });
-                }
+                // `enabled` is an OpenTofu-1.11+ meta-argument;
+                // listed in `lifecycle_attrs` so we don't flag it
+                // as "unknown attribute". Portability feedback
+                // (OpenTofu vs Terraform) is surfaced as an inlay
+                // hint in `handlers/inlay_hints.rs`, not a
+                // diagnostic — see that file for the emitter.
                 continue;
             }
             let span = attr.span().unwrap_or(0..0);
@@ -680,108 +655,39 @@ mod tests {
         assert!(has_unknown(&d, "typo"), "got: {d:?}");
     }
 
-    // `enabled` is OpenTofu 1.11+ only. In `.tf` / `.tf.json` files
-    // it should warn (not error — rename to `.tofu` is a valid fix,
-    // so the file isn't strictly broken). In `.tofu` / `.tofu.json`
-    // files it's silent.
-
-    fn diags_with_uri(src: &str, u: &Url) -> Vec<Diagnostic> {
-        let rope = Rope::from_str(src);
-        let body = parse_source(src).body.expect("parses");
-        resource_diagnostics(&body, &rope, u, &schemas_aws_instance())
-    }
+    // `enabled` is OpenTofu 1.11+ only. It's accepted in
+    // `lifecycle_attrs` so this pass doesn't flag it as "unknown
+    // attribute"; portability feedback lives in the inlay-hints
+    // module, not here. Two minimal regressions: presence doesn't
+    // produce a diagnostic in either file kind.
 
     #[test]
-    fn lifecycle_enabled_warns_in_tf_file() {
-        let u = Url::parse("file:///m/main.tf").expect("url");
-        let d = diags_with_uri(
+    fn lifecycle_enabled_is_not_flagged_as_unknown() {
+        let d = diags(
             r#"resource "aws_instance" "x" {
               ami = "ami-1"
               lifecycle {
                 enabled = true
               }
             }"#,
-            &u,
-        );
-        let diag = d
-            .iter()
-            .find(|x| x.message.contains("OpenTofu"))
-            .expect("expected an OpenTofu warning");
-        assert_eq!(diag.severity, Some(DiagnosticSeverity::WARNING));
-        // Not flagged as unknown — just warned about portability.
-        assert!(!has_unknown(&d, "enabled"), "should not be 'unknown': {d:?}");
-    }
-
-    #[test]
-    fn lifecycle_enabled_warns_in_tf_json_file() {
-        let u = Url::parse("file:///m/main.tf.json").expect("url");
-        let d = diags_with_uri(
-            r#"resource "aws_instance" "x" {
-              ami = "ami-1"
-              lifecycle {
-                enabled = true
-              }
-            }"#,
-            &u,
-        );
-        assert!(
-            d.iter().any(|x| x.message.contains("OpenTofu")),
-            "got: {d:?}"
-        );
-    }
-
-    #[test]
-    fn lifecycle_enabled_silent_in_tofu_file() {
-        let u = Url::parse("file:///m/main.tofu").expect("url");
-        let d = diags_with_uri(
-            r#"resource "aws_instance" "x" {
-              ami = "ami-1"
-              lifecycle {
-                enabled = true
-              }
-            }"#,
-            &u,
-        );
-        assert!(
-            d.iter().all(|x| !x.message.contains("OpenTofu")),
-            "got: {d:?}"
         );
         assert!(!has_unknown(&d, "enabled"), "got: {d:?}");
-    }
-
-    #[test]
-    fn lifecycle_enabled_silent_in_tofu_json_file() {
-        let u = Url::parse("file:///m/main.tofu.json").expect("url");
-        let d = diags_with_uri(
-            r#"resource "aws_instance" "x" {
-              ami = "ami-1"
-              lifecycle {
-                enabled = true
-              }
-            }"#,
-            &u,
-        );
         assert!(
             d.iter().all(|x| !x.message.contains("OpenTofu")),
-            "got: {d:?}"
+            "portability feedback should be an inlay hint, not a diagnostic: {d:?}"
         );
     }
 
     #[test]
-    fn lifecycle_enabled_in_data_warns_in_tf_file() {
-        let u = Url::parse("file:///m/main.tf").expect("url");
-        let d = diags_with_uri(
+    fn lifecycle_enabled_in_data_is_not_flagged() {
+        let d = diags(
             r#"data "aws_ami" "x" {
               lifecycle {
                 enabled = true
               }
             }"#,
-            &u,
         );
-        assert!(
-            d.iter().any(|x| x.message.contains("OpenTofu")),
-            "got: {d:?}"
-        );
+        assert!(!has_unknown(&d, "enabled"), "got: {d:?}");
     }
 
     #[test]
