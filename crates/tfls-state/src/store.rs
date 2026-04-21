@@ -65,11 +65,58 @@ pub struct StateStore {
     /// subtree) we have already enqueued a schema fetch for. Dedupes the
     /// cross-module FetchSchemas enqueues triggered from did_open.
     pub fetched_schema_dirs: dashmap::DashSet<std::path::PathBuf>,
+
+    /// Set to `true` during `initialize` when the client advertises
+    /// support for pull-based diagnostics
+    /// (`capabilities.textDocument.diagnostic`). When `true` the
+    /// server skips push-based `publishDiagnostics` for open
+    /// buffers — otherwise nvim (and any other client that stores
+    /// both channels separately) ends up with duplicate
+    /// diagnostic entries. Default `false` preserves push-only
+    /// behaviour for clients that don't do pull.
+    pub client_supports_pull_diagnostics:
+        std::sync::atomic::AtomicBool,
+
+    /// URIs currently open in the client (received `didOpen`, no
+    /// matching `didClose` yet). Used to distinguish "client will
+    /// pull this" (open) from "client will only see this via push"
+    /// (unopened workspace files surfaced by bulk scan).
+    pub open_docs: dashmap::DashSet<Url>,
 }
 
 impl StateStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Record whether the client advertised support for pull
+    /// diagnostics (`textDocument/diagnostic`) at `initialize`
+    /// time. Call once from the `initialize` handler.
+    pub fn set_client_supports_pull_diagnostics(&self, v: bool) {
+        self.client_supports_pull_diagnostics
+            .store(v, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// True when the server should *skip* push-based
+    /// `publishDiagnostics` for `uri` and rely on the client
+    /// pulling via `textDocument/diagnostic` instead. Applies
+    /// only to URIs currently open in the client — unopened
+    /// workspace files are still pushed so workspace-wide views
+    /// (`:Trouble workspace_diagnostics`) populate.
+    pub fn should_skip_push_diagnostics(&self, uri: &Url) -> bool {
+        self.client_supports_pull_diagnostics
+            .load(std::sync::atomic::Ordering::Relaxed)
+            && self.open_docs.contains(uri)
+    }
+
+    /// Mark a URI as open in the client.
+    pub fn mark_open(&self, uri: Url) {
+        self.open_docs.insert(uri);
+    }
+
+    /// Unmark a URI on `didClose`.
+    pub fn mark_closed(&self, uri: &Url) {
+        self.open_docs.remove(uri);
     }
 
     /// Install a batch of function signatures, replacing any previous set.

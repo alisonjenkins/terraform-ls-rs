@@ -20,6 +20,7 @@ use crate::backend::Backend;
 
 pub async fn did_open(backend: &Backend, params: DidOpenTextDocumentParams) {
     let uri = params.text_document.uri.clone();
+    backend.state.mark_open(uri.clone());
     let doc = DocumentState::new(
         uri.clone(),
         &params.text_document.text,
@@ -85,7 +86,10 @@ pub async fn did_save(backend: &Backend, params: DidSaveTextDocumentParams) {
 
 pub async fn did_close(backend: &Backend, params: DidCloseTextDocumentParams) {
     let uri = params.text_document.uri;
+    backend.state.mark_closed(&uri);
     backend.state.remove_document(&uri);
+    // Always clear on close; the empty-publish is a no-op from the
+    // client's perspective even under pull-only mode.
     backend
         .client
         .publish_diagnostics(uri, Vec::new(), None)
@@ -93,6 +97,15 @@ pub async fn did_close(backend: &Backend, params: DidCloseTextDocumentParams) {
 }
 
 async fn publish_current_diagnostics(backend: &Backend, uri: &Url, version: Option<i32>) {
+    // When the client negotiated pull diagnostics at initialize time,
+    // pushing for an open buffer would duplicate the same issue in
+    // the client's store (nvim tracks push + pull in separate
+    // namespaces). Skip push; client will pull on demand. For
+    // unopened workspace files we still push so `:Trouble
+    // workspace_diagnostics` etc. populate.
+    if backend.state.should_skip_push_diagnostics(uri) {
+        return;
+    }
     let diagnostics = compute_diagnostics(&backend.state, uri);
     backend
         .client

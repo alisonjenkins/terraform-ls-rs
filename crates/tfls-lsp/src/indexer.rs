@@ -236,9 +236,11 @@ async fn dispatch_job(
         Job::ReparseDocument(url) => {
             state.reparse_document(&url);
             if let Some(c) = client {
-                let diagnostics = crate::handlers::document::compute_diagnostics(&state, &url);
-                let version = state.documents.get(&url).map(|d| d.version);
-                c.publish_diagnostics(url, diagnostics, version).await;
+                if !state.should_skip_push_diagnostics(&url) {
+                    let diagnostics = crate::handlers::document::compute_diagnostics(&state, &url);
+                    let version = state.documents.get(&url).map(|d| d.version);
+                    c.publish_diagnostics(url, diagnostics, version).await;
+                }
             }
             Ok(())
         }
@@ -349,6 +351,9 @@ async fn publish_for_path(
     let Ok(uri) = tower_lsp::lsp_types::Url::from_file_path(path) else {
         return;
     };
+    if state.should_skip_push_diagnostics(&uri) {
+        return;
+    }
     let version = match state.documents.get(&uri) {
         Some(doc) => doc.version,
         None => return,
@@ -530,6 +535,7 @@ async fn scan_files_parallel(
         use futures::stream::{FuturesUnordered, StreamExt};
         let mut pending: FuturesUnordered<_> = results
             .into_iter()
+            .filter(|(uri, _, _)| !state.should_skip_push_diagnostics(uri))
             .map(|(uri, version, diagnostics)| {
                 let c = client.clone();
                 async move {

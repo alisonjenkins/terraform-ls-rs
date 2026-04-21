@@ -137,6 +137,19 @@ impl Backend {
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> jsonrpc::Result<InitializeResult> {
+        // Record whether the client speaks LSP 3.17 pull diagnostics.
+        // If so we suppress push-based `publishDiagnostics` — clients
+        // like neovim track push and pull in separate stores and end
+        // up with duplicate entries when we feed both.
+        let client_does_pull = params
+            .capabilities
+            .text_document
+            .as_ref()
+            .and_then(|td| td.diagnostic.as_ref())
+            .is_some();
+        self.state
+            .set_client_supports_pull_diagnostics(client_does_pull);
+
         self.spawn_background().await;
 
         for folder in params.workspace_folders.unwrap_or_default() {
