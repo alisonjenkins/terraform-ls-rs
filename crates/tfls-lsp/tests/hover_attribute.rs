@@ -375,6 +375,102 @@ async fn hover_on_terraform_required_version_attr_shows_builtin_docs() {
 }
 
 #[tokio::test]
+async fn hover_on_provider_alias_meta_attr_shows_description() {
+    // `alias` isn't part of any provider's own config schema — it's
+    // a language-level meta-attribute in PROVIDER_BLOCK_META_ATTRS.
+    // Hover must NOT fall through to "attribute is not in the
+    // schema for `aws`".
+    let u = uri("file:///alias.tf");
+    let src = "provider \"aws\" {\n  alias = \"east\"\n  region = \"us-east-1\"\n}\n";
+    let b = backend_with(src, &u);
+    let md = hover_markdown(&b, &u, Position::new(1, 3))
+        .await
+        .expect("some hover");
+    assert!(
+        md.contains("**meta-argument** `alias`"),
+        "expected meta-argument header; got: {md}"
+    );
+    assert!(
+        md.contains("provider `aws`"),
+        "expected provider label; got: {md}"
+    );
+    assert!(
+        md.contains("Named alias"),
+        "expected alias description; got: {md}"
+    );
+    assert!(
+        !md.contains("not in the schema"),
+        "must NOT route to provider-schema-missing path; got: {md}"
+    );
+}
+
+#[tokio::test]
+async fn hover_on_variable_type_attr_shows_builtin_description() {
+    let u = uri("file:///var_type.tf");
+    let src = "variable \"foo\" {\n  type = string\n  default = \"x\"\n}\n";
+    let b = backend_with(src, &u);
+    let md = hover_markdown(&b, &u, Position::new(1, 3))
+        .await
+        .expect("some hover");
+    assert!(
+        md.contains("**attribute** `type`"),
+        "expected attr header; got: {md}"
+    );
+    assert!(
+        md.contains("in `variable`"),
+        "expected variable path; got: {md}"
+    );
+    assert!(
+        md.contains("Type constraint"),
+        "expected description from VARIABLE_BLOCK; got: {md}"
+    );
+}
+
+#[tokio::test]
+async fn hover_on_module_source_attr_shows_builtin_description() {
+    let u = uri("file:///mod.tf");
+    let src = "module \"net\" {\n  source = \"./modules/net\"\n}\n";
+    let b = backend_with(src, &u);
+    let md = hover_markdown(&b, &u, Position::new(1, 3))
+        .await
+        .expect("some hover");
+    assert!(
+        md.contains("**attribute** `source`"),
+        "expected attr header; got: {md}"
+    );
+    assert!(
+        md.contains("in `module`"),
+        "expected module path; got: {md}"
+    );
+    assert!(
+        md.contains("Module source"),
+        "expected source description; got: {md}"
+    );
+}
+
+#[tokio::test]
+async fn hover_on_output_value_attr_shows_builtin_description() {
+    let u = uri("file:///out.tf");
+    let src = "output \"foo\" {\n  value = \"x\"\n}\n";
+    let b = backend_with(src, &u);
+    let md = hover_markdown(&b, &u, Position::new(1, 3))
+        .await
+        .expect("some hover");
+    assert!(
+        md.contains("**attribute** `value`"),
+        "expected attr header; got: {md}"
+    );
+    assert!(
+        md.contains("in `output`"),
+        "expected output path; got: {md}"
+    );
+    assert!(
+        md.contains("Expression the output exports"),
+        "expected value description; got: {md}"
+    );
+}
+
+#[tokio::test]
 async fn hover_on_nested_block_header_returns_block_docs_not_resource_label() {
     // Cursor on a nested block's identifier (e.g. the `r` of
     // `root_block_device`) should surface that block's schema

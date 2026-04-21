@@ -641,6 +641,10 @@ fn provider_block_body_items(
             label: a.name.to_string(),
             kind: Some(CompletionItemKind::PROPERTY),
             detail: Some(a.detail.to_string()),
+            documentation: Some(Documentation::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: a.detail.to_string(),
+            })),
             insert_text: Some(format!("{name} = ${{1}}", name = a.name)),
             insert_text_format: Some(InsertTextFormat::SNIPPET),
             ..Default::default()

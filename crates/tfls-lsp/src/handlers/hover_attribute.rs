@@ -46,8 +46,36 @@ pub fn attribute_hover(
             // Also handle top-level meta-args (count / for_each /
             // depends_on / provider) that sit directly on a resource/data
             // body — they aren't in the provider schema either.
-            let markdown = if matches!(hit.root_kind, RootBlockKind::Terraform) {
-                render_builtin_attribute(&hit)
+            // Built-in roots (terraform / variable / output / module):
+            // attempt a built-in attribute hover. If the attr isn't
+            // in the built-in schema AND the root is `module`, return
+            // None so the module-input hover path downstream can
+            // resolve it to the child module's variable declaration.
+            // For terraform / variable / output the fallback is an
+            // "unknown attribute" placeholder — those roots don't
+            // have a downstream hover handler that could do better.
+            if let Some(keyword) = hit.root_kind.builtin_root_keyword() {
+                if let Some(md) = render_builtin_attribute_for_hit(&hit, keyword) {
+                    let range = hcl_span_to_lsp_range(&doc.rope, hit.key_span).ok()?;
+                    return Some(Hover {
+                        contents: HoverContents::Markup(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value: md,
+                        }),
+                        range: Some(range),
+                    });
+                }
+                return None;
+            }
+            let markdown = if matches!(hit.root_kind, RootBlockKind::Provider)
+                && hit.nested_path.is_empty()
+                && provider_meta_attr(&hit.attr_name).is_some()
+            {
+                // Provider meta-attrs (`alias`, `version`) aren't in
+                // the provider's own config schema — they're Terraform-
+                // language additions declared in
+                // `PROVIDER_BLOCK_META_ATTRS`.
+                render_provider_meta_attr(&hit)
             } else if is_meta_block_path(&hit.nested_path) {
                 render_meta_attribute(&hit, uri)
             } else if hit.nested_path.is_empty()
@@ -72,7 +100,7 @@ pub fn attribute_hover(
             })
         }
         Hit::NestedBlockHeader(hit) => {
-            let markdown = if matches!(hit.root_kind, RootBlockKind::Terraform) {
+            let markdown = if hit.root_kind.builtin_root_keyword().is_some() {
                 render_builtin_nested_block(&hit)
             } else {
                 match resolve_nested_block_schema(state, &hit) {
@@ -147,12 +175,14 @@ fn render_lifecycle_attribute(hit: &AttributeHit, uri: &Url, path: &str) -> Stri
     let schema_attrs: &[BuiltinAttr] = match hit.root_kind {
         RootBlockKind::Resource => LIFECYCLE_RESOURCE_BLOCK.attrs,
         RootBlockKind::DataSource => LIFECYCLE_DATA_BLOCK.attrs,
-        // `lifecycle` doesn't belong in a provider or terraform
-        // block; fall back to the resource list for tolerance so we
-        // never panic if we somehow end up here.
-        RootBlockKind::Provider | RootBlockKind::Terraform => {
-            LIFECYCLE_RESOURCE_BLOCK.attrs
-        }
+        // `lifecycle` doesn't belong in any non-resource/data block;
+        // fall back to the resource list for tolerance so we never
+        // panic if we somehow end up here.
+        RootBlockKind::Provider
+        | RootBlockKind::Terraform
+        | RootBlockKind::Variable
+        | RootBlockKind::Output
+        | RootBlockKind::Module => LIFECYCLE_RESOURCE_BLOCK.attrs,
     };
     // Prefer the richer language-reference description from tfls_core
     // (multi-line markdown); fall back to the shorter `BuiltinAttr.detail`
@@ -218,21 +248,28 @@ fn is_opentofu_file(uri: &Url) -> bool {
     path.ends_with(".tofu") || path.ends_with(".tofu.json")
 }
 
-/// Render hover for an attribute inside a `terraform { … }` block
-/// (or any deeper nested built-in — `backend "s3" { bucket = … }`,
-/// `required_providers { aws = { source = … } }`, etc.). These never
-/// appear in provider schemas; they're built-ins resolved against
-/// `tfls_core::builtin_blocks`.
-fn render_builtin_attribute(hit: &AttributeHit) -> String {
-    // Walk `TERRAFORM_BLOCK + hit.nested_path` to the parent schema
-    // holding the attribute.
-    let schema = resolve_builtin_schema_for_hit(&hit.nested_path);
+/// Render hover markdown for an attribute inside a built-in root
+/// block (`terraform`, `variable`, `output`, `module`, and their
+/// deeper nested blocks). Returns `Some(markdown)` when the
+/// attribute is known in the built-in schema tree. Returns `None`
+/// for unknown attrs on `module` roots so the caller can delegate
+/// to the module-input hover path (which resolves `region = ...`
+/// to the referenced child module's variable declaration). Other
+/// roots surface an "unknown attribute" placeholder rather than
+/// `None`, since they have no downstream hover handler that could
+/// do better.
+fn render_builtin_attribute_for_hit(hit: &AttributeHit, root_keyword: &str) -> Option<String> {
+    let schema = resolve_builtin_schema_for_hit(root_keyword, &hit.nested_path);
     let attr = schema.and_then(|s| s.attrs.iter().find(|a| a.name == hit.attr_name).copied());
 
+    if attr.is_none() && matches!(hit.root_kind, RootBlockKind::Module) {
+        return None;
+    }
+
     let path_suffix = if hit.nested_path.is_empty() {
-        "terraform".to_string()
+        root_keyword.to_string()
     } else {
-        format!("terraform.{}", hit.nested_path.join("."))
+        format!("{root_keyword}.{}", hit.nested_path.join("."))
     };
 
     let mut out = format!(
@@ -255,20 +292,22 @@ fn render_builtin_attribute(hit: &AttributeHit) -> String {
             out.push_str("\n\n_Unknown attribute for this built-in block._");
         }
     }
-    out
+    Some(out)
 }
 
 /// Render hover for the identifier of a nested built-in block
-/// (e.g. `backend` / `required_providers` / `cloud` inside
-/// `terraform { … }`, or `workspaces` inside `cloud { … }`).
+/// inside any built-in root (`terraform`, `variable`, `output`,
+/// `module`).
 fn render_builtin_nested_block(hit: &NestedBlockHeaderHit) -> String {
-    // Path we need to resolve: parent_path + block_name — ending at
-    // the nested block whose header the cursor is on. Convert into
-    // `Vec<BlockStep>` that starts with the "terraform" root keyword
-    // (what `resolve_nested_schema` expects).
+    let Some(root_keyword) = hit.root_kind.builtin_root_keyword() else {
+        return render_nested_block_unknown(hit);
+    };
+    // Walk from the root → through parent_path → to the target
+    // block's own slot, so the returned schema is the block body
+    // the cursor opens into.
     let mut steps: Vec<tfls_core::BlockStep> = Vec::with_capacity(hit.parent_path.len() + 2);
     steps.push(tfls_core::BlockStep {
-        keyword: "terraform".to_string(),
+        keyword: root_keyword.to_string(),
         label: None,
     });
     for keyword in &hit.parent_path {
@@ -277,14 +316,6 @@ fn render_builtin_nested_block(hit: &NestedBlockHeaderHit) -> String {
             label: None,
         });
     }
-    // For the target nested block itself we include a synthetic
-    // placeholder label when the block type is labelled
-    // (backend "<label>"), so `resolve_nested_schema` can dispatch.
-    // In practice the user has a concrete label in the source which
-    // we'd need to pick up from the hcl-edit block — but hover is on
-    // the identifier only, and if the label is relevant we'd want to
-    // render the shared view for the block family rather than a
-    // specific instance. Use `None` and rely on the schema fallback.
     steps.push(tfls_core::BlockStep {
         keyword: hit.block_name.clone(),
         label: None,
@@ -294,7 +325,7 @@ fn render_builtin_nested_block(hit: &NestedBlockHeaderHit) -> String {
     // Also look up the *parent*'s BuiltinBlock entry to read the
     // block's own `detail` line (which lives on the parent's
     // `.blocks[name]`, not on the resolved body schema).
-    let parent_schema = resolve_builtin_schema_for_hit(&hit.parent_path);
+    let parent_schema = resolve_builtin_schema_for_hit(root_keyword, &hit.parent_path);
     let block_info = parent_schema.and_then(|s| {
         s.blocks
             .iter()
@@ -302,12 +333,21 @@ fn render_builtin_nested_block(hit: &NestedBlockHeaderHit) -> String {
             .copied()
     });
 
-    // Header: `**block** `backend` on terraform block`
+    let root_label = match hit.root_kind {
+        RootBlockKind::Terraform => "terraform block".to_string(),
+        RootBlockKind::Variable => format!("variable `{}`", hit.root_type),
+        RootBlockKind::Output => format!("output `{}`", hit.root_type),
+        RootBlockKind::Module => format!("module `{}`", hit.root_type),
+        _ => "built-in block".to_string(),
+    };
     let mut out = format!("**block** `{name}`", name = hit.block_name);
     if hit.parent_path.is_empty() {
-        out.push_str(" on terraform block");
+        out.push_str(&format!(" on {root_label}"));
     } else {
-        out.push_str(&format!(" inside `terraform.{}`", hit.parent_path.join(".")));
+        out.push_str(&format!(
+            " inside `{root_keyword}.{}`",
+            hit.parent_path.join("."),
+        ));
     }
 
     // Block detail from the parent's BuiltinBlock entry (one-line
@@ -381,17 +421,18 @@ fn render_builtin_nested_block(hit: &NestedBlockHeaderHit) -> String {
     out
 }
 
-/// Walk `TERRAFORM_BLOCK` down `path` (block keywords only — labels
-/// aren't currently picked up for built-in hover resolution). Returns
-/// the schema at the end of the path, or `None` if any step doesn't
-/// match. Used by both built-in attribute hover and built-in nested-
-/// block hover for pulling block detail / attr lists.
+/// Walk the built-in schema tree for a given root keyword
+/// (`terraform` / `variable` / `output` / `module`) down `path`
+/// (block keywords only — labels aren't currently picked up for
+/// built-in hover resolution). Returns the schema at the end of the
+/// path, or `None` if any step doesn't match.
 fn resolve_builtin_schema_for_hit(
+    root_keyword: &str,
     path: &[String],
 ) -> Option<tfls_core::builtin_blocks::BuiltinSchema> {
     let mut steps: Vec<tfls_core::BlockStep> = Vec::with_capacity(path.len() + 1);
     steps.push(tfls_core::BlockStep {
-        keyword: "terraform".to_string(),
+        keyword: root_keyword.to_string(),
         label: None,
     });
     for keyword in path {
@@ -401,6 +442,39 @@ fn resolve_builtin_schema_for_hit(
         });
     }
     tfls_core::resolve_nested_schema(&steps)
+}
+
+/// Look up an attribute in `PROVIDER_BLOCK_META_ATTRS` by name.
+/// Returns `None` for names not in the meta list.
+fn provider_meta_attr(
+    name: &str,
+) -> Option<&'static tfls_core::builtin_blocks::BuiltinAttr> {
+    tfls_core::builtin_blocks::PROVIDER_BLOCK_META_ATTRS
+        .iter()
+        .find(|a| a.name == name)
+}
+
+/// Render hover for a provider meta-attribute (`alias`, `version`
+/// — both declared in `PROVIDER_BLOCK_META_ATTRS`, both never in
+/// the provider's own config schema).
+fn render_provider_meta_attr(hit: &AttributeHit) -> String {
+    let attr = match provider_meta_attr(&hit.attr_name) {
+        Some(a) => a,
+        None => return render_attribute_unknown(hit),
+    };
+    let mut out = format!(
+        "**meta-argument** `{attr}` on provider `{root}`",
+        attr = hit.attr_name,
+        root = hit.root_type,
+    );
+    if attr.required {
+        out.push_str(" — required");
+    }
+    if !attr.detail.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(attr.detail);
+    }
+    out
 }
 
 /// Render hover for a top-level meta-argument
@@ -416,9 +490,13 @@ fn render_top_level_meta_arg(hit: &AttributeHit) -> String {
         RootBlockKind::Resource => "resource",
         RootBlockKind::DataSource => "data source",
         RootBlockKind::Provider => "provider",
-        // Meta-args aren't used directly on terraform blocks; this
-        // branch is dead in practice but keeps the match exhaustive.
+        // Meta-args aren't used directly on built-in blocks; these
+        // branches are dead in practice but keep the match
+        // exhaustive.
         RootBlockKind::Terraform => "terraform",
+        RootBlockKind::Variable => "variable",
+        RootBlockKind::Output => "output",
+        RootBlockKind::Module => "module",
     };
     let body = tfls_core::meta_attr_description(&hit.attr_name);
     format!(
@@ -454,9 +532,12 @@ fn resolve_attribute_schema(state: &StateStore, hit: &AttributeHit) -> Attribute
         RootBlockKind::Provider => {
             find_provider_schema(state, &hit.root_type).map(|ps| ps.provider.clone())
         }
-        // Terraform-root hits are routed to `render_builtin_attribute`
+        // Built-in-root hits are routed through `render_builtin_*`
         // before reaching this function.
-        RootBlockKind::Terraform => return AttributeLookup::AttributeUnknown,
+        RootBlockKind::Terraform
+        | RootBlockKind::Variable
+        | RootBlockKind::Output
+        | RootBlockKind::Module => return AttributeLookup::AttributeUnknown,
     };
     let Some(root_schema) = root_schema else {
         return AttributeLookup::ProviderMissing;
@@ -482,13 +563,32 @@ fn find_provider_schema(state: &StateStore, name: &str) -> Option<Arc<ProviderSc
 
 /// Root-level block flavour that owns this attribute — decides whether we
 /// look the attribute up as a resource, data source, or provider attribute,
-/// or whether it's a built-in language block like `terraform { … }`.
+/// or whether it's a built-in language block (`terraform`, `variable`,
+/// `output`, `module`).
 #[derive(Debug, Clone, Copy)]
 enum RootBlockKind {
     Resource,
     DataSource,
     Provider,
     Terraform,
+    Variable,
+    Output,
+    Module,
+}
+
+impl RootBlockKind {
+    /// For built-in roots: the root keyword that
+    /// `tfls_core::resolve_nested_schema` uses to pick the starting
+    /// schema. Returns `None` for provider-schema-driven roots.
+    fn builtin_root_keyword(self) -> Option<&'static str> {
+        match self {
+            RootBlockKind::Terraform => Some("terraform"),
+            RootBlockKind::Variable => Some("variable"),
+            RootBlockKind::Output => Some("output"),
+            RootBlockKind::Module => Some("module"),
+            _ => None,
+        }
+    }
 }
 
 struct AttributeHit {
@@ -517,12 +617,17 @@ fn find_hit_at(body: &Body, doc: &DocumentState, pos: Position) -> Option<Hit> {
             "data" => RootBlockKind::DataSource,
             "provider" => RootBlockKind::Provider,
             "terraform" => RootBlockKind::Terraform,
+            "variable" => RootBlockKind::Variable,
+            "output" => RootBlockKind::Output,
+            "module" => RootBlockKind::Module,
             _ => continue,
         };
 
-        // `terraform` blocks are unlabelled — fabricate a stable
-        // synthetic label for AttributeHit.root_type so the rest of
-        // the scanner can stay label-aware without special casing.
+        // `terraform` is unlabelled — synthesise a stable
+        // `AttributeHit.root_type` so the rest of the scanner can
+        // stay label-aware without special casing. variable / output
+        // / module DO carry a label (the declared name) — fall
+        // through to the normal label lookup.
         let type_label = match root_kind {
             RootBlockKind::Terraform => "terraform".to_string(),
             _ => match block.labels.first().map(label_text) {
@@ -626,10 +731,13 @@ fn render_attribute(hit: &AttributeHit, schema: &AttributeSchema) -> String {
         RootBlockKind::Resource => "resource",
         RootBlockKind::DataSource => "data source",
         RootBlockKind::Provider => "provider",
-        // Terraform-root hits are handled by render_builtin_attribute
+        // Built-in-root hits are handled by render_builtin_attribute
         // before this function runs; fall back to "built-in" for
         // defensive exhaustiveness.
-        RootBlockKind::Terraform => "built-in",
+        RootBlockKind::Terraform
+        | RootBlockKind::Variable
+        | RootBlockKind::Output
+        | RootBlockKind::Module => "built-in",
     };
 
     out.push_str(&format!(
@@ -697,7 +805,10 @@ fn attribute_header(hit: &AttributeHit) -> String {
         RootBlockKind::Resource => "resource",
         RootBlockKind::DataSource => "data source",
         RootBlockKind::Provider => "provider",
-        RootBlockKind::Terraform => "built-in",
+        RootBlockKind::Terraform
+        | RootBlockKind::Variable
+        | RootBlockKind::Output
+        | RootBlockKind::Module => "built-in",
     };
     let mut out = format!("**attribute** `{attr}` on {kind} `{root}`",
         attr = hit.attr_name,
@@ -759,9 +870,12 @@ fn resolve_nested_block_schema(state: &StateStore, hit: &NestedBlockHeaderHit) -
         RootBlockKind::Provider => {
             find_provider_schema(state, &hit.root_type).map(|ps| ps.provider.clone())
         }
-        // Terraform-root hits are handled by render_builtin_nested_block
+        // Built-in-root hits are handled by render_builtin_nested_block
         // before this function runs.
-        RootBlockKind::Terraform => return NestedBlockLookup::BlockUnknown,
+        RootBlockKind::Terraform
+        | RootBlockKind::Variable
+        | RootBlockKind::Output
+        | RootBlockKind::Module => return NestedBlockLookup::BlockUnknown,
     };
     let Some(root_schema) = root_schema else {
         return NestedBlockLookup::ProviderMissing;
@@ -781,9 +895,12 @@ fn nested_block_header(hit: &NestedBlockHeaderHit) -> String {
         RootBlockKind::Resource => "resource",
         RootBlockKind::DataSource => "data source",
         RootBlockKind::Provider => "provider",
-        // Terraform-root hits go through render_builtin_nested_block;
+        // Built-in-root hits go through render_builtin_nested_block;
         // this branch is defensive.
-        RootBlockKind::Terraform => "built-in",
+        RootBlockKind::Terraform
+        | RootBlockKind::Variable
+        | RootBlockKind::Output
+        | RootBlockKind::Module => "built-in",
     };
     let mut out = format!(
         "**block** `{block}` on {kind} `{root}`",
