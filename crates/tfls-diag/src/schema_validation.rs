@@ -11,7 +11,7 @@ use lsp_types::{Diagnostic, DiagnosticSeverity, Url};
 use ropey::Rope;
 use tfls_core::{BlockKind, CONDITION_ATTRS, is_meta_attr, lifecycle_attrs, lifecycle_blocks};
 use tfls_parser::hcl_span_to_lsp_range;
-use tfls_schema::{ProviderSchemas, Schema};
+use tfls_schema::{BlockSchema, ProviderSchemas, Schema};
 
 /// How we look up a schema by (kind, type_name).
 pub trait SchemaLookup {
@@ -116,8 +116,8 @@ fn validate_block(
         }
     }
 
-    // Validate meta-blocks (lifecycle, provisioner, connection) that
-    // are embedded directly in this resource/data body.
+    // Validate meta-blocks (lifecycle, provisioner, connection,
+    // dynamic) that are embedded directly in this resource/data body.
     for structure in block.body.iter() {
         let Some(inner) = structure.as_block() else {
             continue;
@@ -125,6 +125,7 @@ fn validate_block(
         let name = inner.ident.as_str();
         match (kind, name) {
             (_, "lifecycle") => validate_lifecycle_block(inner, rope, kind, out),
+            (_, "dynamic") => validate_dynamic_block(inner, &schema.block, rope, out),
             (BlockKind::Resource, "provisioner") | (BlockKind::Resource, "connection") => {
                 // Allowed; inner body is too variable to validate here.
             }
@@ -308,6 +309,124 @@ fn validate_condition_block(block: &Block, rope: &Rope, out: &mut Vec<Diagnostic
             severity: Some(DiagnosticSeverity::ERROR),
             source: Some("terraform-ls-rs".to_string()),
             message: format!("unknown attribute `{name}`"),
+            ..Default::default()
+        });
+    }
+}
+
+/// Validate a `dynamic "<label>" { for_each = …; content { … } }`
+/// meta-block embedded in a resource / data body. Emits:
+///
+/// - `unknown nested block …` (error, on the label span) when the
+///   label isn't a real nested block type in the parent schema.
+/// - `missing required \`for_each\`` (error, on the `dynamic` ident)
+///   when the for_each attr is absent from the dynamic body.
+/// - `missing required attribute \`N\` inside \`content\`` (error,
+///   on the `content` ident) once per required attr the target
+///   nested block declares but `content {}` doesn't set.
+fn validate_dynamic_block(
+    block: &Block,
+    parent_schema: &BlockSchema,
+    rope: &Rope,
+    out: &mut Vec<Diagnostic>,
+) {
+    let Some(label) = first_label(block) else {
+        // Parse-level error (no label) — surface is elsewhere.
+        return;
+    };
+    let label_owned = label.to_string();
+
+    // 1. Resolve the target nested block type in the parent schema.
+    //    Unknown → error on the label span; bail, since we can't
+    //    validate required attrs against a schema we don't have.
+    let Some(nb) = parent_schema.block_types.get(&label_owned) else {
+        if let Some(first) = block.labels.first() {
+            if let Some(span) = first.span() {
+                let range = hcl_span_to_lsp_range(rope, span).unwrap_or_default();
+                out.push(Diagnostic {
+                    range,
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    source: Some("terraform-ls-rs".to_string()),
+                    message: format!(
+                        "unknown nested block `{label_owned}` on this resource/data"
+                    ),
+                    ..Default::default()
+                });
+            }
+        }
+        return;
+    };
+    let target = &nb.block;
+
+    // 2. Scan the dynamic body: record for_each presence and find
+    //    the content { } child (if any).
+    let mut has_for_each = false;
+    let mut content_block: Option<&Block> = None;
+    for structure in block.body.iter() {
+        if let Some(attr) = structure.as_attribute() {
+            if attr.key.as_str() == "for_each" {
+                has_for_each = true;
+            }
+        } else if let Some(inner) = structure.as_block() {
+            if inner.ident.as_str() == "content" {
+                content_block = Some(inner);
+            }
+        }
+    }
+
+    // 3. for_each is mandatory.
+    if !has_for_each {
+        if let Some(range) = header_range(block, rope) {
+            out.push(Diagnostic {
+                range,
+                severity: Some(DiagnosticSeverity::ERROR),
+                source: Some("terraform-ls-rs".to_string()),
+                message: format!(
+                    "dynamic \"{label_owned}\" missing required `for_each`"
+                ),
+                ..Default::default()
+            });
+        }
+    }
+
+    // 4. Required attrs of the target block must appear inside
+    //    `content { }`. No content block? The language requires it
+    //    but that's a parser-level concern — we still report missing
+    //    required attrs with the dynamic header as the anchor so the
+    //    user sees which attrs are outstanding.
+    let content_ident_range = match &content_block {
+        Some(c) => c
+            .ident
+            .span()
+            .and_then(|s| hcl_span_to_lsp_range(rope, s).ok()),
+        None => None,
+    };
+    let mut content_attrs: Vec<&str> = Vec::new();
+    if let Some(content) = content_block {
+        for structure in content.body.iter() {
+            if let Some(attr) = structure.as_attribute() {
+                content_attrs.push(attr.key.as_str());
+            }
+        }
+    }
+
+    for (attr_name, attr_schema) in &target.attributes {
+        if !attr_schema.required {
+            continue;
+        }
+        if content_attrs.contains(&attr_name.as_str()) {
+            continue;
+        }
+        let range = content_ident_range
+            .or_else(|| header_range(block, rope))
+            .unwrap_or_default();
+        out.push(Diagnostic {
+            range,
+            severity: Some(DiagnosticSeverity::ERROR),
+            source: Some("terraform-ls-rs".to_string()),
+            message: format!(
+                "dynamic \"{label_owned}\" — missing required attribute `{attr_name}` inside `content`"
+            ),
             ..Default::default()
         });
     }
@@ -761,6 +880,162 @@ mod tests {
         assert!(
             d.iter().all(|d| !d.message.contains("requires")),
             "unexpected required-with warning: {d:?}"
+        );
+    }
+
+    // --- Dynamic-block regression tests ------------------------------
+    //
+    // `dynamic "<label>" { for_each = …; content { … } }` is a
+    // language meta-construct. We validate it against the target
+    // nested block's schema in the enclosing resource / data.
+
+    fn schemas_with_ebs_block_device() -> ProviderSchemas {
+        sonic_rs::from_str(
+            r#"{
+                "format_version": "1.0",
+                "provider_schemas": {
+                    "registry.terraform.io/hashicorp/aws": {
+                        "provider": { "version": 0, "block": {} },
+                        "resource_schemas": {
+                            "aws_instance": {
+                                "version": 1,
+                                "block": {
+                                    "attributes": {
+                                        "ami": { "type": "string", "required": true }
+                                    },
+                                    "block_types": {
+                                        "ebs_block_device": {
+                                            "nesting_mode": "list",
+                                            "block": {
+                                                "attributes": {
+                                                    "device_name": { "type": "string", "required": true },
+                                                    "volume_size": { "type": "number", "optional": true }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("parse")
+    }
+
+    #[test]
+    fn dynamic_missing_for_each_is_flagged() {
+        let schemas = schemas_with_ebs_block_device();
+        let src = r#"resource "aws_instance" "x" {
+              ami = "ami-1"
+              dynamic "ebs_block_device" {
+                content {
+                  device_name = "/dev/sda1"
+                }
+              }
+            }"#;
+        let d = diags_with(&schemas, src);
+        let hit = d
+            .iter()
+            .find(|diag| diag.message.contains("missing required `for_each`"))
+            .expect("for_each missing diagnostic");
+        assert_eq!(hit.severity, Some(DiagnosticSeverity::ERROR));
+    }
+
+    #[test]
+    fn dynamic_missing_required_attr_inside_content_is_flagged() {
+        let schemas = schemas_with_ebs_block_device();
+        // `device_name` is required on ebs_block_device — the dynamic
+        // content body must set it. Omit it and expect a diagnostic
+        // naming both the dynamic label and the attribute.
+        let src = r#"resource "aws_instance" "x" {
+              ami = "ami-1"
+              dynamic "ebs_block_device" {
+                for_each = []
+                content {
+                  volume_size = 20
+                }
+              }
+            }"#;
+        let d = diags_with(&schemas, src);
+        let hit = d
+            .iter()
+            .find(|diag| {
+                diag.message.contains("device_name")
+                    && diag.message.contains("ebs_block_device")
+                    && diag.message.contains("content")
+            })
+            .expect("required-attr-in-content diagnostic");
+        assert_eq!(hit.severity, Some(DiagnosticSeverity::ERROR));
+    }
+
+    #[test]
+    fn dynamic_unknown_label_is_flagged() {
+        let schemas = schemas_with_ebs_block_device();
+        // `nonsense_block` isn't a nested block on aws_instance.
+        let src = r#"resource "aws_instance" "x" {
+              ami = "ami-1"
+              dynamic "nonsense_block" {
+                for_each = []
+                content {}
+              }
+            }"#;
+        let d = diags_with(&schemas, src);
+        let hit = d
+            .iter()
+            .find(|diag| {
+                diag.message.contains("unknown nested block")
+                    && diag.message.contains("nonsense_block")
+            })
+            .expect("unknown-label diagnostic");
+        assert_eq!(hit.severity, Some(DiagnosticSeverity::ERROR));
+    }
+
+    #[test]
+    fn well_formed_dynamic_yields_no_diagnostic() {
+        let schemas = schemas_with_ebs_block_device();
+        let src = r#"resource "aws_instance" "x" {
+              ami = "ami-1"
+              dynamic "ebs_block_device" {
+                for_each = []
+                content {
+                  device_name = "/dev/sda1"
+                  volume_size = 20
+                }
+              }
+            }"#;
+        let d = diags_with(&schemas, src);
+        // No diagnostics should mention `dynamic`, `for_each`,
+        // `device_name`, or `nonsense_block`.
+        assert!(
+            d.iter().all(|diag| !diag.message.contains("dynamic")
+                && !diag.message.contains("for_each")
+                && !diag.message.contains("device_name")),
+            "well-formed dynamic produced spurious diagnostics: {d:?}"
+        );
+    }
+
+    #[test]
+    fn dynamic_does_not_leak_as_unknown_nested_block_on_resource() {
+        // Before this commit, the `_ => { … }` catch-all silently
+        // allowed `dynamic` at resource depth. Now it's a
+        // recognised meta-block; make sure we didn't accidentally
+        // start flagging it as an unknown attribute / block either.
+        let schemas = schemas_with_ebs_block_device();
+        let src = r#"resource "aws_instance" "x" {
+              ami = "ami-1"
+              dynamic "ebs_block_device" {
+                for_each = []
+                content {
+                  device_name = "x"
+                }
+              }
+            }"#;
+        let d = diags_with(&schemas, src);
+        assert!(
+            !has_unknown(&d, "dynamic"),
+            "dynamic misflagged as unknown attribute: {d:?}"
         );
     }
 }
