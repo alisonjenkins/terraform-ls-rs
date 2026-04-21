@@ -165,6 +165,77 @@ fn find_module_output_segment_at(body: &Body, offset: usize) -> Option<(String, 
     None
 }
 
+/// Given the operator list of a `module.…` traversal, decide whether
+/// the cursor at `offset` is on an output-name segment (or a
+/// drill-in segment after it) and return `(LABEL, OUTPUT)` on hit.
+///
+/// Accepted shapes:
+///
+/// - `module.LABEL.OUTPUT`
+/// - `module.LABEL.OUTPUT.field…`       (drill-in into object output)
+/// - `module.LABEL.OUTPUT[n]`, `…[n].f` (drill-in through indexing)
+/// - `module.LABEL[key].OUTPUT…`        (for-each / count module)
+/// - `module.LABEL[key].OUTPUT[n].f…`   (for-each module + list output)
+///
+/// Cursor on the LABEL segment (or on anything inside an index
+/// expression between the label and the output) deliberately does
+/// NOT match — those positions route to the generic
+/// `ReferenceKind::Module { name }` path so the user lands on the
+/// `module "LABEL" { }` call-site header.
+fn module_output_hit(
+    operators: &[hcl_edit::repr::Decorated<TraversalOperator>],
+    offset: usize,
+) -> Option<(String, String)> {
+    // First operator must be `GetAttr` carrying the module label.
+    let label_ident = match operators.first().map(|o| o.value()) {
+        Some(TraversalOperator::GetAttr(i)) => i,
+        _ => return None,
+    };
+    let label = label_ident.as_str().to_string();
+
+    // Skip any `Index` operators sitting between the label and the
+    // output name — `module.LABEL[each.key].OUTPUT` is idiomatic for
+    // `for_each`/`count` modules, and the indexing doesn't change
+    // the per-module symbol table.
+    let mut i = 1;
+    while i < operators.len() {
+        match operators[i].value() {
+            TraversalOperator::Index(_) => i += 1,
+            _ => break,
+        }
+    }
+
+    // The next operator (if any) is the output-name GetAttr.
+    let out_ident = match operators.get(i).map(|o| o.value()) {
+        Some(TraversalOperator::GetAttr(ident)) => ident,
+        _ => return None,
+    };
+    let out_span = out_ident.span()?;
+    let output = out_ident.as_str().to_string();
+
+    // Drill-in tail: cursor may sit anywhere on subsequent GetAttr
+    // segments (e.g. `output.foo.bar` where `foo` is an object
+    // output). We still resolve to the output declaration — we
+    // don't walk into its structure. Index operators in the tail
+    // aren't themselves cursor targets (they carry sub-expressions
+    // handled by the caller's descent).
+    let last_end = operators[i..]
+        .iter()
+        .filter_map(|op| match op.value() {
+            TraversalOperator::GetAttr(ident) => ident.span(),
+            _ => None,
+        })
+        .last()
+        .map(|s| s.end)
+        .unwrap_or(out_span.end);
+
+    if offset >= out_span.start && offset <= last_end {
+        Some((label, output))
+    } else {
+        None
+    }
+}
+
 fn find_module_output_segment_in_expr(
     expr: &Expression,
     offset: usize,
@@ -176,40 +247,8 @@ fn find_module_output_segment_in_expr(
             // `GetAttr` segment.
             if let Expression::Variable(v) = &tv.expr {
                 if v.as_str() == "module" {
-                    // Collect the full trailing `.ident.ident...` prefix
-                    // so drill-in expressions like `module.foo.bar.baz`
-                    // (where `bar` is an object output and `baz` is one
-                    // of its fields) still resolve to `output "bar" { }`.
-                    // Structural drill-down into object output fields is
-                    // deliberately out of scope — we stop at the output
-                    // declaration.
-                    let mut segments: Vec<(String, std::ops::Range<usize>)> = Vec::new();
-                    for op in &tv.operators {
-                        if let TraversalOperator::GetAttr(ident) = op.value() {
-                            let Some(span) = ident.span() else {
-                                break;
-                            };
-                            segments.push((ident.as_str().to_string(), span));
-                        } else {
-                            break;
-                        }
-                    }
-                    if segments.len() >= 2 {
-                        let (label, _) = segments[0].clone();
-                        let (output, out_span) = segments[1].clone();
-                        let last_end = segments
-                            .last()
-                            .map(|(_, s)| s.end)
-                            .unwrap_or(out_span.end);
-                        // Match when the cursor is anywhere from the
-                        // output-name segment through the tail of the
-                        // traversal. Cursor on `module` or the LABEL
-                        // segment falls through — those positions go
-                        // to the `module "LABEL" { }` call header via
-                        // the generic reference path.
-                        if offset >= out_span.start && offset <= last_end {
-                            return Some((label, output));
-                        }
+                    if let Some(hit) = module_output_hit(&tv.operators, offset) {
+                        return Some(hit);
                     }
                 }
             }

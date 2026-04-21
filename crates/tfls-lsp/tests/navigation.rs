@@ -502,6 +502,47 @@ async fn goto_def_on_unknown_module_input_returns_none() {
 }
 
 #[tokio::test]
+async fn goto_def_on_output_segment_of_indexed_module() {
+    // `module.foo[each.key].output_name` / `module.foo[0].output_name`
+    // — when a module uses `for_each` or `count`, consumers index it
+    // before reading an output. The `[…]` operator sits between the
+    // module label and the output name. Cursor on the output name
+    // must still jump to the child's `output "name" {}` declaration.
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let child_dir = root.join("child");
+    std::fs::create_dir(&child_dir).unwrap();
+
+    let (service, _socket) = LspService::new(Backend::new);
+    let inner = service.inner();
+    let backend = Backend::with_shared_state(
+        inner.client.clone(),
+        inner.state.clone(),
+        inner.jobs.clone(),
+    );
+
+    let child_u = upsert_file(
+        &backend,
+        &child_dir.join("outputs.tf"),
+        "output \"k3s_asg\" { value = \"\" }\n",
+    );
+
+    let caller_path = root.join("main.tf");
+    let caller_src = "module \"minecraft_servers\" {\n  source   = \"./child\"\n  for_each = { a = 1 }\n}\n\noutput \"x\" { value = module.minecraft_servers[each.key].k3s_asg.arn }\n";
+    let caller_u = upsert_file(&backend, &caller_path, caller_src);
+
+    // Locate `k3s_asg` inside the traversal on line 5 so we don't
+    // have to hand-count columns.
+    let line = caller_src.lines().nth(5).expect("line 5 present");
+    let col = line.find("k3s_asg").expect("k3s_asg on line 5");
+    let loc = single_location(
+        goto_def_at(&backend, &caller_u, Position::new(5, col as u32 + 3)).await,
+    );
+    assert_eq!(loc.uri, child_u, "should land in child's outputs.tf");
+    assert_eq!(loc.range.start.line, 0);
+}
+
+#[tokio::test]
 async fn goto_def_on_module_input_resolved_via_modules_json() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
