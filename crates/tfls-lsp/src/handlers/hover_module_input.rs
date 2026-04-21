@@ -47,14 +47,14 @@ pub fn module_input_hover(
     })
 }
 
-fn label_str(label: &hcl_edit::structure::BlockLabel) -> Option<String> {
+pub(crate) fn label_str(label: &hcl_edit::structure::BlockLabel) -> Option<String> {
     Some(match label {
         hcl_edit::structure::BlockLabel::String(s) => s.value().to_string(),
         hcl_edit::structure::BlockLabel::Ident(i) => i.as_str().to_string(),
     })
 }
 
-fn string_attribute(block: &Block, key: &str) -> Option<String> {
+pub(crate) fn string_attribute(block: &Block, key: &str) -> Option<String> {
     for structure in block.body.iter() {
         let Some(attr) = structure.as_attribute() else {
             continue;
@@ -69,7 +69,7 @@ fn string_attribute(block: &Block, key: &str) -> Option<String> {
     None
 }
 
-fn find_module_block_at(body: &Body, offset: usize) -> Option<&Block> {
+pub(crate) fn find_module_block_at(body: &Body, offset: usize) -> Option<&Block> {
     for structure in body.iter() {
         let Some(block) = structure.as_block() else {
             continue;
@@ -84,7 +84,7 @@ fn find_module_block_at(body: &Body, offset: usize) -> Option<&Block> {
     None
 }
 
-fn attribute_key_at(
+pub(crate) fn attribute_key_at(
     body: &Body,
     offset: usize,
     rope: &ropey::Rope,

@@ -2,14 +2,16 @@
 
 use lsp_types::{
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams, Location,
-    MarkupContent, MarkupKind, ReferenceParams,
+    MarkupContent, MarkupKind, Position, ReferenceParams, Url,
 };
 use tfls_core::SymbolKind;
-use tfls_state::{SymbolKey, reference_at_position, reference_key};
+use tfls_parser::lsp_position_to_byte_offset;
+use tfls_state::{DocumentState, SymbolKey, reference_at_position, reference_key};
 use tower_lsp::jsonrpc;
 
 use crate::backend::Backend;
 use crate::handlers::cursor::{find_symbol_at_cursor, key_at_cursor};
+use crate::handlers::util::{lookup_child_module_symbol, parent_dir, resolve_module_source};
 use crate::handlers::{hover_attribute, hover_function, hover_module_input};
 
 /// `textDocument/declaration` — for HCL this is identical to
@@ -29,6 +31,18 @@ pub async fn goto_definition(
 ) -> jsonrpc::Result<Option<GotoDefinitionResponse>> {
     let pos = params.text_document_position_params.position;
     let uri = params.text_document_position_params.text_document.uri;
+
+    // Module-scoped goto-def — handled BEFORE the generic
+    // `reference_at_position` path because those positions (an
+    // attribute key inside a module block, the output-name segment
+    // of `module.foo.bar`) are not modelled as cross-block
+    // references in the symbol index. Both descend *into* the child
+    // module's source, so they run first and fall through on miss.
+    if let Some(doc) = backend.state.documents.get(&uri) {
+        if let Some(loc) = module_input_goto_at(&backend.state, doc.value(), &uri, pos) {
+            return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
+        }
+    }
 
     let key = match backend.state.documents.get(&uri) {
         Some(doc) => reference_at_position(&doc, pos).map(|r| reference_key(&r.kind)),
@@ -52,6 +66,47 @@ pub async fn goto_definition(
         // to keep the handler branch-free.
         Ok(Some(GotoDefinitionResponse::Array(locations)))
     }
+}
+
+/// Goto-def target for a cursor sitting on an attribute key inside a
+/// `module "LABEL" { KEY = … }` block. Returns the LSP location of
+/// the `variable "KEY" { }` declaration in the child module — or
+/// `None` if the cursor isn't on such a key, if the child module's
+/// source can't be resolved to a directory, or if the child module
+/// doesn't declare a variable with that name.
+fn module_input_goto_at(
+    state: &tfls_state::StateStore,
+    doc: &DocumentState,
+    uri: &Url,
+    pos: Position,
+) -> Option<Location> {
+    let body = doc.parsed.body.as_ref()?;
+    let offset = lsp_position_to_byte_offset(&doc.rope, pos).ok()?;
+
+    let module_block = hover_module_input::find_module_block_at(body, offset)?;
+    let module_label = module_block
+        .labels
+        .first()
+        .and_then(hover_module_input::label_str)?;
+    let source = hover_module_input::string_attribute(module_block, "source")?;
+
+    // Cursor must be on an attribute key inside the module body.
+    let (attr_name, _range) =
+        hover_module_input::attribute_key_at(&module_block.body, offset, &doc.rope)?;
+    // Don't intercept the `source` / `version` / `providers` /
+    // `count` / `for_each` / `depends_on` keys themselves — those
+    // aren't user-declared inputs of the child module.
+    if matches!(
+        attr_name.as_str(),
+        "source" | "version" | "providers" | "count" | "for_each" | "depends_on"
+    ) {
+        return None;
+    }
+
+    let parent = parent_dir(uri)?;
+    let child = resolve_module_source(&parent, &module_label, &source)?;
+
+    lookup_child_module_symbol(state, &child, SymbolKind::Variable, &attr_name)
 }
 
 pub async fn references(
