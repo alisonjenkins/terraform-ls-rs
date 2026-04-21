@@ -505,6 +505,44 @@ async fn resource_body_inside_doubly_nested_block_suggests_innermost_attrs() {
 }
 
 #[tokio::test]
+async fn completion_inside_dynamic_content_resolves_target_block_schema() {
+    // `dynamic "ebs_block_device" { content { … } }` is a meta-construct
+    // that at plan-time generates one `ebs_block_device { … }` per
+    // element of `for_each`. For schema-lookup purposes the nested-path
+    // walker must substitute the label (`ebs_block_device`) for the
+    // literal keyword `dynamic` and step through the `content {}`
+    // wrapper, so completion inside the content body lands on the same
+    // schema as a plain `ebs_block_device { }` would.
+    let u = uri("file:///dyn_content.tf");
+    let src = "resource \"aws_instance\" \"x\" {\n  dynamic \"ebs_block_device\" {\n    content {\n      \n    }\n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    install_aws_schema(&backend);
+
+    // Line 3 (0-based), column 6 → inside `content { }` on the indented
+    // blank line.
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(3, 6)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(
+        ls.contains(&"device_name".to_string()),
+        "target-block attr missing; got {ls:?}"
+    );
+    assert!(
+        !ls.contains(&"ami".to_string()),
+        "outer resource attr leaked through dynamic+content; got {ls:?}"
+    );
+    assert!(
+        !ls.contains(&"instance_type".to_string()),
+        "outer resource attr leaked through dynamic+content; got {ls:?}"
+    );
+}
+
+#[tokio::test]
 async fn data_body_inside_nested_block_suggests_nested_attrs() {
     // Same machinery must work for `data` blocks, not just `resource`.
     let u = uri("file:///data_nested.tf");

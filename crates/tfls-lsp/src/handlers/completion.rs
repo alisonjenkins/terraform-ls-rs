@@ -1236,6 +1236,15 @@ fn innermost_block_at(body: &Body, offset: usize) -> Option<&Block> {
         // e.g. on the `c` of `condition {` — belongs to the enclosing
         // block's body, not to the nested block's body.
         if cursor_in_block_body(block, offset) {
+            // For `dynamic "<label>" { content { … } }` the
+            // innermost body we care about for filtering is the
+            // content body (if the cursor is inside it) — that's
+            // where present_attrs live from the user's POV.
+            if block.ident.as_str() == "dynamic" {
+                if let Some(content) = find_content_child(&block.body, offset) {
+                    return Some(innermost_block_at(&content.body, offset).unwrap_or(content));
+                }
+            }
             return Some(innermost_block_at(&block.body, offset).unwrap_or(block));
         }
         return None;
@@ -1282,9 +1291,59 @@ fn collect_nested_path(body: &Body, offset: usize, path: &mut Vec<String>) {
         if !cursor_in_block_body(nested, offset) {
             return;
         }
-        path.push(nested.ident.as_str().to_string());
+        let ident = nested.ident.as_str();
+        if ident == "dynamic" {
+            // A `dynamic "<label>" {}` is a meta-construct that
+            // generates instances of `<label>` at plan time. For
+            // schema-lookup purposes treat it as if it were a
+            // plain `<label> { content { … } }` — push the label
+            // onto the path (so the target block's schema is
+            // resolved), then look through the `content {}`
+            // wrapper if the cursor is inside it.
+            let Some(label) = nested.labels.first().map(block_label_text) else {
+                // Malformed dynamic (no label) — don't descend.
+                return;
+            };
+            path.push(label);
+            // The content {} child is a schema-less wrapper —
+            // step through its body without pushing onto the path.
+            if let Some(content) = find_content_child(&nested.body, offset) {
+                collect_nested_path(&content.body, offset, path);
+            }
+            return;
+        }
+        path.push(ident.to_string());
         collect_nested_path(&nested.body, offset, path);
         return;
+    }
+}
+
+/// Find a `content { }` child inside a dynamic-block body that
+/// contains `offset`. Returns `None` when the cursor is elsewhere
+/// in the dynamic body (e.g. on `for_each = …`), so the caller
+/// can stop descending at the dynamic level and let
+/// `DynamicBlockBody` classification kick in.
+fn find_content_child(body: &Body, offset: usize) -> Option<&Block> {
+    for structure in body.iter() {
+        let Some(child) = structure.as_block() else {
+            continue;
+        };
+        if child.ident.as_str() != "content" {
+            continue;
+        }
+        if cursor_in_block_body(child, offset) {
+            return Some(child);
+        }
+    }
+    None
+}
+
+/// Extract the text value of a block label — strings get their
+/// inner text, identifiers get their raw chars.
+fn block_label_text(label: &hcl_edit::structure::BlockLabel) -> String {
+    match label {
+        hcl_edit::structure::BlockLabel::String(s) => s.value().to_string(),
+        hcl_edit::structure::BlockLabel::Ident(i) => i.as_str().to_string(),
     }
 }
 

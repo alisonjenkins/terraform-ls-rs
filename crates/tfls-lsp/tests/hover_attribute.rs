@@ -548,3 +548,72 @@ async fn hover_on_nested_block_header_returns_block_docs_not_resource_label() {
         "must not fall through to resource-label hover; got: {md}"
     );
 }
+
+#[tokio::test]
+async fn hover_on_attr_inside_dynamic_content_renders_target_attr_docs() {
+    // `dynamic "ebs_block_device" { content { device_name = … } }` —
+    // cursor on `device_name` should resolve to the same attribute
+    // schema as a plain `ebs_block_device { device_name = … }` would,
+    // since the path walker substitutes the label for `dynamic` and
+    // steps through the `content {}` wrapper.
+    let u = uri("file:///dyn_content_attr.tf");
+    let src = "resource \"aws_instance\" \"x\" {\n  dynamic \"ebs_block_device\" {\n    content {\n      device_name = \"/dev/sda1\"\n    }\n  }\n}\n";
+    let b = backend_with(src, &u);
+    let schema: ProviderSchemas = sonic_rs::from_str(
+        r#"{
+        "format_version": "1.0",
+        "provider_schemas": {
+            "registry.terraform.io/hashicorp/aws": {
+                "provider": { "version": 0, "block": {} },
+                "resource_schemas": {
+                    "aws_instance": {
+                        "version": 1,
+                        "block": {
+                            "attributes": {},
+                            "block_types": {
+                                "ebs_block_device": {
+                                    "nesting_mode": "list",
+                                    "block": {
+                                        "attributes": {
+                                            "device_name": {
+                                                "type": "string",
+                                                "required": true,
+                                                "description": "Block-device name exposed to the instance."
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "data_source_schemas": {}
+            }
+        }
+    }"#,
+    )
+    .expect("parse schema");
+    b.state.install_schemas(schema);
+
+    // Cursor on `d` of `device_name` (line 3, col 6).
+    let md = hover_markdown(&b, &u, Position::new(3, 8))
+        .await
+        .expect("some hover");
+
+    assert!(
+        md.contains("`device_name`"),
+        "expected attribute name; got: {md}"
+    );
+    assert!(
+        md.contains("Block-device name exposed to the instance."),
+        "expected target-attr description; got: {md}"
+    );
+    assert!(
+        !md.contains("not in the schema"),
+        "must NOT route to schema-missing fallback; got: {md}"
+    );
+    assert!(
+        !md.to_lowercase().contains("dynamic"),
+        "attr hover shouldn't mention the dynamic wrapper; got: {md}"
+    );
+}

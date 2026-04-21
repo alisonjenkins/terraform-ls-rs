@@ -688,6 +688,33 @@ fn scan_block(
                 }));
             }
         }
+
+        // `dynamic "<label>" { content { … } }` — for schema-lookup
+        // purposes treat this as a plain `<label> { … }` block.
+        // Push the label (not "dynamic") onto the path, and step
+        // through the `content {}` wrapper without pushing anything
+        // for it so the recursive scan lands on the attribute's
+        // target nested-block schema.
+        if name == "dynamic" {
+            let Some(label) = block.labels.first().map(hover_label_text) else {
+                // Malformed — stop descending.
+                return None;
+            };
+            path.push(label);
+            // Walk the dynamic body; if the cursor is inside the
+            // content { } wrapper, recurse into its body so attrs
+            // resolve to the target block's schema.
+            let hit = scan_block_dynamic_body(
+                &block.body,
+                offset,
+                path,
+                root_kind,
+                root_type,
+            );
+            path.pop();
+            return hit;
+        }
+
         path.push(name);
         let hit = scan_block(&block.body, offset, path, root_kind, root_type);
         path.pop();
@@ -696,6 +723,74 @@ fn scan_block(
         }
     }
     None
+}
+
+/// Walk the body of a `dynamic "<label>" {}` block. `path` is
+/// already set to the pushed target label; on `content {}` we
+/// recurse into its body without further push. On attrs directly
+/// on the dynamic body (`for_each`, `iterator`, `labels`) we
+/// return a hit that downstream hover can route specifically.
+fn scan_block_dynamic_body(
+    body: &Body,
+    offset: usize,
+    path: &mut Vec<String>,
+    root_kind: RootBlockKind,
+    root_type: &str,
+) -> Option<Hit> {
+    for structure in body.iter() {
+        if let Some(attr) = structure.as_attribute() {
+            if attribute_key_contains(attr, offset) {
+                let key_span = attr.key.span()?;
+                // Attrs sit on the dynamic construct itself —
+                // report a synthetic AttributeHit with the pushed
+                // nested_path so downstream hover sees this the
+                // same as a plain-block meta-attr.
+                return Some(Hit::Attribute(AttributeHit {
+                    root_kind,
+                    root_type: root_type.to_string(),
+                    nested_path: path.clone(),
+                    attr_name: attr.key.as_str().to_string(),
+                    key_span,
+                }));
+            }
+            continue;
+        }
+        let Some(child) = structure.as_block() else {
+            continue;
+        };
+        if !span_contains(child.span(), offset) {
+            continue;
+        }
+        if child.ident.as_str() == "content" {
+            // Cursor on `content` keyword itself — report it as a
+            // nested-block header so downstream hover can special-
+            // case it with dynamic-body docs.
+            if let Some(ident_span) = child.ident.span() {
+                if span_contains(Some(ident_span.clone()), offset) {
+                    return Some(Hit::NestedBlockHeader(NestedBlockHeaderHit {
+                        root_kind,
+                        root_type: root_type.to_string(),
+                        parent_path: path.clone(),
+                        block_name: "content".to_string(),
+                        ident_span,
+                    }));
+                }
+            }
+            // Cursor inside the content body — recurse without
+            // pushing "content" onto the path.
+            return scan_block(&child.body, offset, path, root_kind, root_type);
+        }
+        // Any other block inside dynamic body is malformed — don't
+        // descend, let the caller's outer scan handle it.
+    }
+    None
+}
+
+fn hover_label_text(label: &hcl_edit::structure::BlockLabel) -> String {
+    match label {
+        hcl_edit::structure::BlockLabel::String(s) => s.value().to_string(),
+        hcl_edit::structure::BlockLabel::Ident(i) => i.as_str().to_string(),
+    }
 }
 
 fn attribute_key_contains(attr: &Attribute, offset: usize) -> bool {
