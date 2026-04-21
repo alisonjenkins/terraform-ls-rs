@@ -77,6 +77,17 @@ pub struct StateStore {
     pub client_supports_pull_diagnostics:
         std::sync::atomic::AtomicBool,
 
+    /// True when the client advertised support for
+    /// `workspace/diagnostic/refresh` at `initialize`
+    /// (`capabilities.workspace.diagnostic.refresh_support`). When
+    /// `true` the server can nudge the client to re-pull diagnostics
+    /// after an async background scan added new cross-file symbols
+    /// that could invalidate previous per-file results. Default
+    /// `false` so clients that don't advertise it don't get spurious
+    /// requests.
+    pub client_supports_diagnostic_refresh:
+        std::sync::atomic::AtomicBool,
+
     /// URIs currently open in the client (received `didOpen`, no
     /// matching `didClose` yet). Used to distinguish "client will
     /// pull this" (open) from "client will only see this via push"
@@ -95,6 +106,23 @@ impl StateStore {
     pub fn set_client_supports_pull_diagnostics(&self, v: bool) {
         self.client_supports_pull_diagnostics
             .store(v, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Record whether the client advertised
+    /// `workspace.diagnostic.refresh_support` at `initialize`.
+    /// Call once from the `initialize` handler.
+    pub fn set_client_supports_diagnostic_refresh(&self, v: bool) {
+        self.client_supports_diagnostic_refresh
+            .store(v, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether the server may send `workspace/diagnostic/refresh`
+    /// to this client. Read from the indexer's scan-completion
+    /// hooks so we don't spam clients that haven't advertised the
+    /// capability.
+    pub fn client_supports_diagnostic_refresh(&self) -> bool {
+        self.client_supports_diagnostic_refresh
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// True when the server should *skip* push-based

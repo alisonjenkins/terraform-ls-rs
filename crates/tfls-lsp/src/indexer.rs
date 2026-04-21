@@ -297,6 +297,14 @@ async fn dispatch_job(
                 )
                 .await;
             }
+            // Provider schemas are the basis for attribute-level
+            // validation diagnostics. Before they're installed, open
+            // buffers either have no schema-based diagnostics at all
+            // or have ones computed against a stale / missing schema
+            // — refresh so they reflect the new install.
+            if result.is_ok() {
+                maybe_refresh_diagnostics(&state, client).await;
+            }
             result
         }
         Job::FetchFunctions { binary } => {
@@ -336,7 +344,36 @@ async fn bulk_workspace_scan(
         }
     };
     scan_files_parallel(state, client, files).await;
+    // The bulk scan just filled the store with peer files open
+    // buffers may depend on (cross-file symbols, modules declared in
+    // siblings). Nudge the client to re-pull diagnostics so those
+    // open buffers don't sit on false-positives from the earlier
+    // `did_open` pass that only saw the buffer itself.
+    maybe_refresh_diagnostics(state, client).await;
     Ok(())
+}
+
+/// Ask the client to invalidate its diagnostic cache and re-pull
+/// via `textDocument/diagnostic`. Called after a background scan
+/// adds documents to the store that might retroactively clear a
+/// false-positive emitted during an earlier `did_open` on an open
+/// buffer — those buffers sit on stale diagnostics under
+/// pull-only mode because we deliberately don't push for them.
+/// No-op when the client didn't advertise
+/// `workspace.diagnostic.refresh_support` at initialize time.
+async fn maybe_refresh_diagnostics(
+    state: &StateStore,
+    client: Option<&tower_lsp::Client>,
+) {
+    let Some(c) = client else {
+        return;
+    };
+    if !state.client_supports_diagnostic_refresh() {
+        return;
+    }
+    if let Err(e) = c.workspace_diagnostic_refresh().await {
+        tracing::warn!(error = ?e, "workspace/diagnostic/refresh failed");
+    }
 }
 
 /// Publish diagnostics for the document at `path` if it exists in
@@ -391,6 +428,10 @@ async fn scan_dir_into_state(
             tracing::info!(count = files.len(), dir = %dir.display(), "module scan");
             scan_files_parallel(state, client, files).await;
             enqueue_child_module_scans(state, queue, dir);
+            // Cross-file symbols just changed — any open buffer in
+            // this directory (or referencing this directory via a
+            // module source) may have stale diagnostics. Refresh.
+            maybe_refresh_diagnostics(state, client).await;
         }
         Err(e) => tracing::warn!(error = %e, dir = %dir.display(), "module scan failed"),
     }

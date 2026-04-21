@@ -89,6 +89,57 @@ fn variable_reference_resolves_across_files_in_same_directory() {
 }
 
 #[test]
+fn module_reference_is_false_positive_until_sibling_is_indexed() {
+    // Regression: on `did_open`, only the current buffer is in the
+    // store — the peer `.tf` that declares `module "k3s_cluster"`
+    // hasn't been parsed yet, so the synchronous diagnostic pass
+    // sees an empty peer set and emits
+    // "undefined module `k3s_cluster`". Once the peer is upserted
+    // (by the background indexer), the check must flip to "no
+    // diagnostic", and the server nudges the client to re-pull via
+    // `workspace/diagnostic/refresh`. This test pins the store-level
+    // half of that handshake; the wire call is verified separately
+    // by interactive smoke.
+    let b = backend();
+    let ref_uri = uri("file:///project/cloudflare.tf");
+    let def_uri = uri("file:///project/k3s_cluster.tf");
+
+    // Phase 1: only the referencing file is in the store. Expect the
+    // false-positive "undefined module" — this is the state the user
+    // sees when opening `cloudflare.tf` before the bulk scan runs.
+    insert(
+        &b,
+        &ref_uri,
+        r#"output "api" { value = module.k3s_cluster.master_eip }
+"#,
+    );
+    let before = messages(&b, &ref_uri);
+    assert!(
+        before.iter().any(|m| m.contains("undefined module")
+            && m.contains("k3s_cluster")),
+        "expected false-positive diagnostic pre-indexing: {before:?}"
+    );
+
+    // Phase 2: the peer file is now in the store (simulating what
+    // the background scan does). The false-positive must clear on
+    // re-run — the check is cross-file aware, so once
+    // `state.definitions_by_name` contains the module key, the
+    // filter in `is_defined_in_module` passes.
+    insert(
+        &b,
+        &def_uri,
+        r#"module "k3s_cluster" { source = "./modules/k3s-cluster" }
+"#,
+    );
+    let after = messages(&b, &ref_uri);
+    assert!(
+        after.iter().all(|m| !(m.contains("undefined module")
+            && m.contains("k3s_cluster"))),
+        "diagnostic should clear once peer indexed: {after:?}"
+    );
+}
+
+#[test]
 fn submodule_definitions_do_not_satisfy_parent_references() {
     // Variable is defined inside a nested module directory. The root-level
     // reference must STILL warn — sub-module definitions aren't in scope.

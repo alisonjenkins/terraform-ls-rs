@@ -150,6 +150,23 @@ impl LanguageServer for Backend {
         self.state
             .set_client_supports_pull_diagnostics(client_does_pull);
 
+        // Record whether the client supports
+        // `workspace/diagnostic/refresh`. The indexer's
+        // scan-completion hooks use this to nudge the client into
+        // re-pulling diagnostics after cross-file symbols enter
+        // the store — otherwise open buffers hang on to stale
+        // results from the synchronous `did_open` pass that saw
+        // an incomplete module.
+        let client_does_refresh = params
+            .capabilities
+            .workspace
+            .as_ref()
+            .and_then(|w| w.diagnostic.as_ref())
+            .and_then(|d| d.refresh_support)
+            .unwrap_or(false);
+        self.state
+            .set_client_supports_diagnostic_refresh(client_does_refresh);
+
         self.spawn_background().await;
 
         for folder in params.workspace_folders.unwrap_or_default() {
