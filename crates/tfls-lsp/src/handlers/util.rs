@@ -2,8 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
-use lsp_types::Url;
+use lsp_types::{Location, Url};
 use serde::Deserialize;
+use tfls_core::SymbolKind;
+use tfls_state::StateStore;
 
 /// Filesystem parent directory of a `file://` URI. Returns `None` for
 /// URIs that can't be mapped to a path (e.g. exotic or non-file
@@ -67,6 +69,47 @@ pub(crate) fn resolve_module_source(
     None
 }
 
+/// Look up a declared symbol (variable or output) inside a child
+/// module whose source files have been indexed under `child_dir`.
+/// Returns the LSP `Location` of the declaring block, suitable for a
+/// `textDocument/definition` response.
+///
+/// Only `SymbolKind::Variable` and `SymbolKind::Output` are
+/// meaningful here — the helper is built for "navigate from a module
+/// input key / output consumer into the child module's declaration".
+/// Any other kind yields `None`.
+///
+/// The child module's symbols must already live in
+/// [`StateStore::documents`] — the workspace indexer populates these
+/// recursively via `enqueue_child_module_scans`, so by the time a
+/// user triggers goto-definition the tables are ready. We do not
+/// trigger on-demand parsing here.
+pub(crate) fn lookup_child_module_symbol(
+    state: &StateStore,
+    child_dir: &Path,
+    kind: SymbolKind,
+    name: &str,
+) -> Option<Location> {
+    for entry in state.documents.iter() {
+        let Ok(doc_path) = entry.key().to_file_path() else {
+            continue;
+        };
+        if doc_path.parent() != Some(child_dir) {
+            continue;
+        }
+        let table = &entry.value().symbols;
+        let sym = match kind {
+            SymbolKind::Variable => table.variables.get(name),
+            SymbolKind::Output => table.outputs.get(name),
+            _ => None,
+        };
+        if let Some(s) = sym {
+            return Some(s.location.to_lsp_location());
+        }
+    }
+    None
+}
+
 #[derive(Debug, Deserialize)]
 struct ModulesManifest {
     #[serde(rename = "Modules", default)]
@@ -115,5 +158,96 @@ mod tests {
     fn returns_none_when_nothing_matches() {
         let temp = tempfile::tempdir().unwrap();
         assert!(resolve_module_source(temp.path(), "web", "hashicorp/x/aws").is_none());
+    }
+
+    // --- lookup_child_module_symbol ----------------------------------
+
+    use tfls_state::{DocumentState, StateStore};
+
+    /// Build a URI for a file sitting directly inside `dir`.
+    fn uri_in(dir: &Path, name: &str) -> Url {
+        Url::from_file_path(dir.join(name)).unwrap()
+    }
+
+    #[test]
+    fn lookup_child_module_variable_hit() {
+        let temp = tempfile::tempdir().unwrap();
+        let child = temp.path().canonicalize().unwrap();
+        let store = StateStore::new();
+        let u = uri_in(&child, "variables.tf");
+        store.upsert_document(DocumentState::new(
+            u.clone(),
+            r#"variable "region" { type = string }"#,
+            1,
+        ));
+        let got = lookup_child_module_symbol(
+            &store,
+            &child,
+            SymbolKind::Variable,
+            "region",
+        );
+        let got = got.expect("variable should resolve");
+        assert_eq!(got.uri, u);
+    }
+
+    #[test]
+    fn lookup_child_module_output_hit() {
+        let temp = tempfile::tempdir().unwrap();
+        let child = temp.path().canonicalize().unwrap();
+        let store = StateStore::new();
+        let u = uri_in(&child, "outputs.tf");
+        store.upsert_document(DocumentState::new(
+            u.clone(),
+            r#"output "subnet_id" { value = "" }"#,
+            1,
+        ));
+        let got = lookup_child_module_symbol(
+            &store,
+            &child,
+            SymbolKind::Output,
+            "subnet_id",
+        );
+        assert!(got.is_some(), "output should resolve");
+    }
+
+    #[test]
+    fn lookup_child_module_miss_on_unknown_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let child = temp.path().canonicalize().unwrap();
+        let store = StateStore::new();
+        let u = uri_in(&child, "variables.tf");
+        store.upsert_document(DocumentState::new(
+            u,
+            r#"variable "region" {}"#,
+            1,
+        ));
+        assert!(
+            lookup_child_module_symbol(&store, &child, SymbolKind::Variable, "nope")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn lookup_child_module_ignores_docs_outside_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let child = temp.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        let child = child.canonicalize().unwrap();
+        let sibling = temp.path().join("sibling");
+        std::fs::create_dir(&sibling).unwrap();
+        let sibling = sibling.canonicalize().unwrap();
+
+        let store = StateStore::new();
+        // Declaration lives in `sibling`, not `child` — lookup must
+        // treat the `child` directory as authoritative.
+        store.upsert_document(DocumentState::new(
+            uri_in(&sibling, "variables.tf"),
+            r#"variable "region" {}"#,
+            1,
+        ));
+        assert!(
+            lookup_child_module_symbol(&store, &child, SymbolKind::Variable, "region")
+                .is_none()
+        );
     }
 }
