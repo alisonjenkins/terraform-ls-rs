@@ -40,6 +40,25 @@ impl SymbolKey {
     }
 }
 
+/// Lifecycle state for a workspace directory tracked by the
+/// background indexer. Used by [`StateStore::dir_scans`] to
+/// distinguish "scan enqueued but not run yet" from "scan finished;
+/// peer files are in `documents`". The distinction matters for
+/// correctness-sensitive callers (diagnostics, goto-definition) that
+/// rely on cross-file symbols being present.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirScanState {
+    /// A scan job has been enqueued for this directory, but the
+    /// worker hasn't finished processing it yet. Peer files in this
+    /// dir may not be in the store. Dedupe callers (e.g. "don't
+    /// re-queue") accept this state; correctness callers don't.
+    Scheduled,
+    /// The scan job has run to completion. Every discoverable `.tf`
+    /// file in this dir has been parsed and upserted into
+    /// [`StateStore::documents`] — cross-file lookups are safe.
+    Completed,
+}
+
 #[derive(Debug, Default)]
 pub struct StateStore {
     pub documents: DashMap<Url, DocumentState>,
@@ -54,12 +73,17 @@ pub struct StateStore {
     pub functions: DashMap<String, Arc<FunctionSignature>>,
     /// Runtime configuration updated via `workspace/didChangeConfiguration`.
     pub config: crate::config::ConfigCell,
-    /// Directories we have already enumerated for `.tf` files. Each Terraform
-    /// module is a single directory, so when a file from a not-yet-seen
-    /// directory is opened in the editor we enqueue a scan of that dir so
-    /// sibling files' symbols become resolvable (fixes false-positive
-    /// undefined-reference diagnostics across unrelated workspace roots).
-    pub scanned_dirs: dashmap::DashSet<std::path::PathBuf>,
+    /// Directories tracked by the background scanner. Each entry
+    /// records the state of that directory's `.tf` file indexing:
+    /// [`DirScanState::Scheduled`] (a job has been enqueued; its
+    /// files aren't necessarily in the store yet) or
+    /// [`DirScanState::Completed`] (the scan has finished and peer
+    /// files are guaranteed to be in [`Self::documents`]). Consumers
+    /// that need correctness — e.g. "all peer variables are
+    /// resolvable" — should gate on `Completed`; consumers that just
+    /// need dedupe of scan enqueues — e.g. "don't re-queue this dir"
+    /// — check for presence regardless of state.
+    pub dir_scans: dashmap::DashMap<std::path::PathBuf, DirScanState>,
 
     /// Terraform init-root directories (containing a `.terraform/providers/`
     /// subtree) we have already enqueued a schema fetch for. Dedupes the
@@ -145,6 +169,53 @@ impl StateStore {
     /// Unmark a URI on `didClose`.
     pub fn mark_closed(&self, uri: &Url) {
         self.open_docs.remove(uri);
+    }
+
+    /// Record that a scan has been enqueued for `dir`. Returns
+    /// `true` if this is the first time the dir is being tracked —
+    /// caller should enqueue the scan job. Returns `false` if the
+    /// dir is already `Scheduled` or `Completed`, meaning a scan is
+    /// either in flight or has already run; the caller should skip
+    /// to avoid redundant work.
+    ///
+    /// Does NOT overwrite a `Completed` entry — a completed scan's
+    /// files are already in the store; re-marking as `Scheduled`
+    /// would lie about that.
+    pub fn mark_scan_scheduled(&self, dir: std::path::PathBuf) -> bool {
+        use dashmap::mapref::entry::Entry;
+        match self.dir_scans.entry(dir) {
+            Entry::Occupied(_) => false,
+            Entry::Vacant(v) => {
+                v.insert(DirScanState::Scheduled);
+                true
+            }
+        }
+    }
+
+    /// Upgrade `dir`'s scan state to `Completed`. Called by the scan
+    /// worker once `scan_files_parallel` has upserted every file in
+    /// the directory. Overwrites any prior `Scheduled` entry and
+    /// inserts a fresh `Completed` if the dir hadn't been tracked
+    /// yet (can happen when the bulk scan discovers a dir that no
+    /// `did_open` ever touched).
+    pub fn mark_scan_completed(&self, dir: std::path::PathBuf) {
+        self.dir_scans.insert(dir, DirScanState::Completed);
+    }
+
+    /// True when `dir` is tracked in any state. Use for
+    /// dedupe-level checks (don't re-queue).
+    pub fn is_scan_tracked(&self, dir: &std::path::Path) -> bool {
+        self.dir_scans.contains_key(dir)
+    }
+
+    /// True when `dir`'s scan has reached `Completed`. Use for
+    /// correctness checks that require peer files to be in the
+    /// store.
+    pub fn is_scan_completed(&self, dir: &std::path::Path) -> bool {
+        self.dir_scans
+            .get(dir)
+            .map(|v| *v == DirScanState::Completed)
+            .unwrap_or(false)
     }
 
     /// Install a batch of function signatures, replacing any previous set.
@@ -573,5 +644,63 @@ mod tests {
                 .definitions_by_name
                 .contains_key(&SymbolKey::new(SymbolKind::Variable, "new"))
         );
+    }
+
+    // --- dir_scans state machine ------------------------------------
+
+    #[test]
+    fn mark_scan_scheduled_is_idempotent() {
+        let store = StateStore::new();
+        let d = std::path::PathBuf::from("/module/a");
+        assert!(
+            store.mark_scan_scheduled(d.clone()),
+            "first mark should return true"
+        );
+        assert!(
+            !store.mark_scan_scheduled(d.clone()),
+            "second mark should return false"
+        );
+        assert!(store.is_scan_tracked(&d));
+        assert!(!store.is_scan_completed(&d));
+    }
+
+    #[test]
+    fn mark_scan_completed_upgrades_scheduled() {
+        let store = StateStore::new();
+        let d = std::path::PathBuf::from("/module/a");
+        store.mark_scan_scheduled(d.clone());
+        store.mark_scan_completed(d.clone());
+        assert!(store.is_scan_completed(&d));
+        // Another schedule attempt must NOT flip back — Completed
+        // should be a sticky terminal state for the correctness
+        // reading; the peer files are already in the store.
+        assert!(
+            !store.mark_scan_scheduled(d.clone()),
+            "scheduling an already-completed dir must no-op"
+        );
+        assert!(
+            store.is_scan_completed(&d),
+            "Completed state must not regress to Scheduled"
+        );
+    }
+
+    #[test]
+    fn mark_scan_completed_without_prior_schedule() {
+        // Bulk scan can mark a dir Completed directly without a
+        // prior Scheduled entry (the discovery + scan happen
+        // atomically from the point of view of any outside caller).
+        let store = StateStore::new();
+        let d = std::path::PathBuf::from("/module/a");
+        store.mark_scan_completed(d.clone());
+        assert!(store.is_scan_tracked(&d));
+        assert!(store.is_scan_completed(&d));
+    }
+
+    #[test]
+    fn untracked_dir_is_neither_tracked_nor_completed() {
+        let store = StateStore::new();
+        let d = std::path::PathBuf::from("/module/never-seen");
+        assert!(!store.is_scan_tracked(&d));
+        assert!(!store.is_scan_completed(&d));
     }
 }

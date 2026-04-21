@@ -16,4 +16,4 @@ pub use document::DocumentState;
 pub use error::StateError;
 pub use jobs::{Job, JobQueue, Priority};
 pub use lookup::reference_at_position;
-pub use store::{StateStore, SymbolKey, reference_key};
+pub use store::{DirScanState, StateStore, SymbolKey, reference_key};

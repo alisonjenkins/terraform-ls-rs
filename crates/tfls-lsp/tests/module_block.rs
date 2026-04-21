@@ -110,7 +110,7 @@ fn src_with_cursor(marked: &str) -> (String, Position) {
 /// an earlier workspace scan) and then the user opens a file in it
 /// via `did_open`, the child-module scan *must* still be triggered.
 /// Previously `ensure_module_indexed` short-circuited on the first
-/// `scanned_dirs` hit and skipped child discovery.
+/// `dir_scans` hit and skipped child discovery.
 #[tokio::test]
 async fn ensure_module_indexed_triggers_child_scans_even_when_dir_already_scanned() {
     use std::sync::Arc;
@@ -147,11 +147,9 @@ async fn ensure_module_indexed_triggers_child_scans_even_when_dir_already_scanne
     );
 
     // Simulate the workspace-scan pre-population: mark the dir as
-    // scanned without enqueueing a ScanDirectory job.
-    inner
-        .state
-        .scanned_dirs
-        .insert(tree.clone());
+    // Completed without enqueueing a ScanDirectory job. A `Completed`
+    // entry is the state a finished bulk scan would leave behind.
+    inner.state.mark_scan_completed(tree.clone());
     inner.state.upsert_document(DocumentState::new(
         Url::from_file_path(&root_main).unwrap(),
         &fs::read_to_string(&root_main).unwrap(),

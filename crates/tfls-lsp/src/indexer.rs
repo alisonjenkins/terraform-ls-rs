@@ -101,14 +101,18 @@ pub fn ensure_module_indexed(state: &StateStore, queue: &JobQueue, file_uri: &ls
         }
     }
 
-    // Enqueue a sibling-dir scan if this dir hasn't been scanned yet.
-    // The workspace scanner pre-populates `scanned_dirs`, so a later
-    // did_open may find the dir already marked — that's fine, the
-    // workspace scan covered the same files. But we still need to
-    // discover the module blocks they declare so child modules get
-    // indexed.
-    if state.scanned_dirs.insert(dir_buf.clone()) {
-        queue.enqueue(Job::ScanDirectory(dir_buf.clone()), Priority::Normal);
+    // Enqueue a sibling-dir scan only if nobody has scheduled one
+    // yet. The bulk workspace scan marks dirs as `Scheduled` as
+    // part of its discovery phase, so if this `did_open` fires
+    // after that, `mark_scan_scheduled` returns `false` and we
+    // skip (the bulk scan will cover it).
+    //
+    // Use `Priority::High` here because the user is actively
+    // looking at a file in this dir — if neither the bulk scan
+    // nor an earlier `did_open` has scheduled it, do it now,
+    // ahead of schema fetch / other background work.
+    if state.mark_scan_scheduled(dir_buf.clone()) {
+        queue.enqueue(Job::ScanDirectory(dir_buf.clone()), Priority::High);
     }
     enqueue_child_module_scans(state, queue, &dir_buf);
 }
@@ -377,14 +381,21 @@ async fn bulk_workspace_scan(
         "workspace scan (bulk)"
     );
 
-    // Pre-mark every discovered dir in `scanned_dirs` so `did_open`
-    // events for files in those dirs don't redundantly enqueue
-    // `ScanDirectory` jobs. (C3 revisits this state machine's
-    // semantics more fundamentally.)
+    // Collect the unique set of dirs containing at least one
+    // discovered `.tf` file, then mark them `Scheduled`. Any
+    // `did_open` that fires while the bulk scan is running will
+    // see the `Scheduled` state and skip enqueueing its own
+    // redundant `ScanDirectory`. We upgrade to `Completed` below
+    // once `scan_files_parallel` has actually parsed everything.
+    let mut dirs: std::collections::HashSet<PathBuf> =
+        std::collections::HashSet::new();
     for path in &files {
         if let Some(parent) = path.parent() {
-            state.scanned_dirs.insert(parent.to_path_buf());
+            dirs.insert(parent.to_path_buf());
         }
+    }
+    for dir in &dirs {
+        state.mark_scan_scheduled(dir.clone());
     }
     if let Some(p) = discover_progress {
         p.end(Some(format!("{} files", files.len()))).await;
@@ -393,6 +404,15 @@ async fn bulk_workspace_scan(
     // Hand off to the parallel scan — it opens its own "Indexing
     // Terraform workspace" progress span with per-phase detail.
     scan_files_parallel(state, client, files).await;
+
+    // The bulk scan has parsed every discoverable `.tf` in every
+    // dir. Upgrade each to `Completed` so correctness-sensitive
+    // callers (e.g. diagnostic passes that depend on cross-file
+    // symbols being present) can gate on it.
+    for dir in dirs {
+        state.mark_scan_completed(dir);
+    }
+
     // The bulk scan just filled the store with peer files open
     // buffers may depend on (cross-file symbols, modules declared in
     // siblings). Nudge the client to re-pull diagnostics so those
@@ -476,6 +496,7 @@ async fn scan_dir_into_state(
         Ok(files) => {
             tracing::info!(count = files.len(), dir = %dir.display(), "module scan");
             scan_files_parallel(state, client, files).await;
+            state.mark_scan_completed(dir.to_path_buf());
             enqueue_child_module_scans(state, queue, dir);
             // Cross-file symbols just changed — any open buffer in
             // this directory (or referencing this directory via a
@@ -665,11 +686,14 @@ fn enqueue_child_module_scans(state: &StateStore, queue: &JobQueue, dir: &Path) 
             else {
                 continue;
             };
-            if state.scanned_dirs.contains(&child) {
-                continue;
+            // `mark_scan_scheduled` returns `false` if the child dir
+            // is already Scheduled or Completed — either way we
+            // shouldn't enqueue again. Background priority: child
+            // module scanning isn't tied to a specific user
+            // cursor, so Normal (not High) is the right tier.
+            if state.mark_scan_scheduled(child.clone()) {
+                queue.enqueue(Job::ScanDirectory(child), Priority::Normal);
             }
-            state.scanned_dirs.insert(child.clone());
-            queue.enqueue(Job::ScanDirectory(child), Priority::Normal);
         }
     }
 }

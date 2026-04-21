@@ -95,12 +95,12 @@ async fn did_open_in_new_directory_indexes_sibling_files() {
 
     assert!(
         inner.state.documents.contains_key(&vars_url),
-        "sibling variables.tf was never parsed — scanned_dirs contains: {:?}",
+        "sibling variables.tf was never parsed — dir_scans contains: {:?}",
         inner
             .state
-            .scanned_dirs
+            .dir_scans
             .iter()
-            .map(|d| d.key().clone())
+            .map(|d| (d.key().clone(), *d.value()))
             .collect::<Vec<_>>()
     );
 
