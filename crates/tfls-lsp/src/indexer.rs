@@ -101,20 +101,103 @@ pub fn ensure_module_indexed(state: &StateStore, queue: &JobQueue, file_uri: &ls
         }
     }
 
+    // Synchronous peer-index pull. Read + parse + upsert every
+    // `.tf` in this directory BEFORE the caller's
+    // `compute_diagnostics` runs. Without this, the first
+    // diagnostic pass sees a half-populated store (only the
+    // just-opened file is in it) and emits false-positive
+    // "undefined variable" / "undefined module" diagnostics for
+    // every peer-declared symbol. Latency: tens of ms for a
+    // typical module; scales with file count in a single
+    // directory (not the whole workspace), so the cost is
+    // bounded by module size, not monorepo size.
+    //
+    // The trade-off: `did_open` is slower by the time it takes
+    // to read + parse those files. Previous commits tried the
+    // async-plus-`workspace/diagnostic/refresh` route to keep
+    // `did_open` fast, but the refresh signal turned out to be
+    // unreliable in the user's client — each "fix" surfaced a
+    // new symptom rooted in the same timing race. Eating the
+    // synchronous cost here eliminates the entire class of bug
+    // at the cost of a one-time latency hit per buffer open.
+    index_module_dir_sync(state, &dir_buf);
+
     // Enqueue a sibling-dir scan only if nobody has scheduled one
     // yet. The bulk workspace scan marks dirs as `Scheduled` as
     // part of its discovery phase, so if this `did_open` fires
     // after that, `mark_scan_scheduled` returns `false` and we
     // skip (the bulk scan will cover it).
     //
-    // Use `Priority::High` here because the user is actively
-    // looking at a file in this dir — if neither the bulk scan
-    // nor an earlier `did_open` has scheduled it, do it now,
-    // ahead of schema fetch / other background work.
+    // The sync pull above has already populated peer files, so
+    // this is just for downstream work: discovering + scanning
+    // child modules referenced via `module.X { source = "..." }`,
+    // and populating the push namespace for
+    // `:Trouble workspace_diagnostics` coverage of unopened
+    // peers.
     if state.mark_scan_scheduled(dir_buf.clone()) {
         queue.enqueue(Job::ScanDirectory(dir_buf.clone()), Priority::High);
     }
     enqueue_child_module_scans(state, queue, &dir_buf);
+}
+
+/// Synchronously read + parse + upsert every `.tf` / `.tf.json`
+/// file in `dir` that isn't already in the store. Idempotent:
+/// files already indexed (via prior did_open, editor-driven
+/// edit, or completed async scan) are skipped.
+///
+/// Called from [`ensure_module_indexed`] to guarantee peer
+/// files are in the store before `compute_diagnostics` runs on
+/// the just-opened buffer. Without this pre-population, the
+/// first diagnostic pass falsely reports cross-file references
+/// as undefined because their declaring files haven't been
+/// parsed yet.
+///
+/// Does NOT mark `dir` as Completed — that's the async
+/// `ScanDirectory` job's responsibility, which ALSO computes
+/// diagnostics for every file in the dir and pushes them
+/// (workspace-view coverage, `:Trouble workspace_diagnostics`).
+/// The sync pull is scoped strictly to "symbols in the store so
+/// diagnostics for the opened buffer see them"; it doesn't
+/// cover the push-publish side.
+pub fn index_module_dir_sync(state: &StateStore, dir: &Path) {
+    let files = match discover_terraform_files_in_dir(dir) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                dir = %dir.display(),
+                "sync module index: discovery failed"
+            );
+            return;
+        }
+    };
+    let mut indexed = 0usize;
+    for path in files {
+        let Some(url) = path_to_url(&path) else {
+            continue;
+        };
+        if state.documents.contains_key(&url) {
+            continue;
+        }
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    path = %path.display(),
+                    "sync module index: file read failed"
+                );
+                continue;
+            }
+        };
+        state.upsert_document(DocumentState::new(url, &text, 0));
+        indexed += 1;
+    }
+    tracing::debug!(
+        dir = %dir.display(),
+        indexed,
+        "sync module index: complete"
+    );
 }
 
 /// Enqueue a one-shot schema fetch for `root` at normal priority.
@@ -949,12 +1032,29 @@ mod tests {
     //! output enumerates exactly what the async wrapper will do,
     //! and `SendRefresh` is the ONLY variant that can trigger
     //! client-side I/O.
-    use super::{RefreshDecision, decide_refresh};
+    use super::{RefreshDecision, decide_refresh, index_module_dir_sync};
+    use std::fs;
+    use std::path::PathBuf;
     use tfls_state::StateStore;
     use tower_lsp::lsp_types::Url;
 
     fn u(s: &str) -> Url {
         Url::parse(s).expect("valid url")
+    }
+
+    fn tmp_dir(label: &str) -> PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "tfls-indexer-{label}-{}-{nanos}",
+            std::process::id(),
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create tmpdir");
+        dir
     }
 
     #[test]
@@ -1043,5 +1143,101 @@ mod tests {
                 | RefreshDecision::NoOp => {}
             }
         }
+    }
+
+    // --- `index_module_dir_sync` ------------------------------------
+
+    #[test]
+    fn index_module_dir_sync_reads_parses_upserts() {
+        let dir = tmp_dir("sync-reads-parses-upserts");
+        fs::write(
+            dir.join("variables.tf"),
+            "variable \"region\" {}\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("outputs.tf"),
+            "output \"x\" { value = var.region }\n",
+        )
+        .unwrap();
+
+        let store = StateStore::new();
+        index_module_dir_sync(&store, &dir);
+
+        let vars_uri = Url::from_file_path(dir.join("variables.tf")).unwrap();
+        let out_uri = Url::from_file_path(dir.join("outputs.tf")).unwrap();
+        assert!(
+            store.documents.contains_key(&vars_uri),
+            "variables.tf must be upserted"
+        );
+        assert!(
+            store.documents.contains_key(&out_uri),
+            "outputs.tf must be upserted"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn index_module_dir_sync_skips_already_indexed() {
+        let dir = tmp_dir("sync-skips-already-indexed");
+        let path = dir.join("variables.tf");
+        fs::write(&path, "variable \"region\" {}\n").unwrap();
+
+        let store = StateStore::new();
+        let uri = Url::from_file_path(&path).unwrap();
+        // Pre-populate with a SPECIFIC version so we can tell if
+        // the sync helper overwrote it.
+        store.upsert_document(tfls_state::DocumentState::new(
+            uri.clone(),
+            "variable \"DIFFERENT\" {}\n",
+            42,
+        ));
+
+        index_module_dir_sync(&store, &dir);
+
+        let doc = store.documents.get(&uri).expect("still there");
+        assert_eq!(
+            doc.version, 42,
+            "sync index must skip already-indexed files — found overwrite"
+        );
+        assert!(
+            doc.symbols.variables.contains_key("DIFFERENT"),
+            "sync index overwrote an already-indexed document"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn index_module_dir_sync_tolerates_missing_dir() {
+        // Nonexistent directory must NOT panic. `discover_*`
+        // returns an error that we log and continue past.
+        let store = StateStore::new();
+        let dir = std::env::temp_dir().join("tfls-indexer-does-not-exist");
+        let _ = fs::remove_dir_all(&dir);
+        index_module_dir_sync(&store, &dir);
+        // Store should be empty and no panic.
+        assert_eq!(store.documents.len(), 0);
+    }
+
+    #[test]
+    fn index_module_dir_sync_does_not_mark_completed() {
+        // The async `ScanDirectory` job is responsible for
+        // marking Completed (because it ALSO runs the diagnostic
+        // compute + publish loop that completes the state
+        // transition's contract). The sync pull only pre-
+        // populates the store; it must NOT claim the dir is
+        // Completed because the diagnostic-publish side hasn't
+        // run yet.
+        let dir = tmp_dir("sync-does-not-mark-completed");
+        fs::write(dir.join("a.tf"), "variable \"x\" {}\n").unwrap();
+        let store = StateStore::new();
+        index_module_dir_sync(&store, &dir);
+        assert!(
+            !store.is_scan_completed(&dir),
+            "sync index must NOT mark Completed — that's the async job's job"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }

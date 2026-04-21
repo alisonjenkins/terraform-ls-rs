@@ -149,3 +149,82 @@ async fn second_open_in_same_directory_does_not_rescan() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// Regression: the first diagnostic pull after `did_open` must
+/// see peer `.tf` files in the store, so cross-file references
+/// don't produce false-positive "undefined" warnings. Without
+/// the synchronous peer-index pull, the initial `did_open` →
+/// `compute_diagnostics` call saw only the just-opened file and
+/// reported every peer-declared symbol as undefined. Fix:
+/// `ensure_module_indexed` now indexes peers inline before
+/// returning.
+#[tokio::test]
+async fn did_open_synchronously_indexes_peers_so_first_diagnostic_pull_is_correct() {
+    let dir = tmp_dir("sync-peer-index");
+    let main_path = dir.join("main.tf");
+    let modules_path = dir.join("k3s_cluster.tf");
+    // The opened file references a module declared in a peer.
+    fs::write(
+        &main_path,
+        "resource \"aws_iam_role_policy\" \"mas_ses\" {\n  role = module.k3s_cluster.irsa_roles[\"mas-ses\"].id\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        &modules_path,
+        "module \"k3s_cluster\" { source = \"./modules/k3s-cluster\" }\n",
+    )
+    .unwrap();
+
+    let (service, _socket) = LspService::new(Backend::new);
+    let inner = service.inner();
+    let backend = Backend::with_shared_state(
+        inner.client.clone(),
+        inner.state.clone(),
+        inner.jobs.clone(),
+    );
+
+    // Explicitly DO NOT start a worker or call workspace_scan —
+    // this pins the sync-indexing behaviour: `did_open` alone
+    // must get peer files into the store. Any reliance on
+    // async scanning here would let the test pass by luck
+    // rather than by the sync contract.
+
+    let main_uri = Url::from_file_path(&main_path).unwrap();
+    let main_text = fs::read_to_string(&main_path).unwrap();
+    tfls_lsp::handlers::document::did_open(
+        &backend,
+        DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: main_uri.clone(),
+                language_id: "terraform".to_string(),
+                version: 1,
+                text: main_text,
+            },
+        },
+    )
+    .await;
+
+    // Peer should now be in the store — no waiting on a
+    // background job.
+    let peer_uri = Url::from_file_path(&modules_path).unwrap();
+    assert!(
+        inner.state.documents.contains_key(&peer_uri),
+        "peer file must be in the store immediately after did_open returns"
+    );
+
+    // The first synchronous diagnostic pull on the opened
+    // buffer must NOT flag the reference as undefined — the
+    // peer's module declaration is in the store.
+    let diags = tfls_lsp::handlers::document::compute_diagnostics(
+        &inner.state,
+        &main_uri,
+    );
+    let messages: Vec<String> = diags.iter().map(|d| d.message.clone()).collect();
+    assert!(
+        messages.iter().all(|m| !(m.contains("undefined module")
+            && m.contains("k3s_cluster"))),
+        "peer-declared module must resolve on first pull: {messages:?}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
