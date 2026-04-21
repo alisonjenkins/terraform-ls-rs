@@ -422,66 +422,66 @@ async fn bulk_workspace_scan(
     Ok(())
 }
 
+/// What the server should do after a background scan changes the
+/// store — pure decision function so the invariants are unit-
+/// testable without mocking the `tower_lsp::Client`.
+///
+/// Critical invariant: under pull-diagnostics mode, the server
+/// MUST NOT `publishDiagnostics` for open buffers. Nvim (and
+/// other clients that track push and pull in separate namespaces)
+/// will display the pushed entry AND the subsequent pull entry as
+/// two diagnostics with the same message — the exact "duplicate
+/// diagnostic" symptom we've regressed into twice now. The only
+/// workspace-wide notification mechanism compatible with
+/// pull-mode is `workspace/diagnostic/refresh`, so we either send
+/// that or do nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefreshDecision {
+    /// No client attached — tests or headless runs.
+    NoClient,
+    /// Send `workspace/diagnostic/refresh`. Client re-pulls,
+    /// replacing its single-namespace pull entry with fresh data.
+    SendRefresh,
+    /// Do nothing. Either the client is push-only (open buffers
+    /// already got pushed by the regular scan flow) or it's
+    /// pull-without-refresh (any push would duplicate against
+    /// the pull namespace — user sees "variable has no type"
+    /// listed twice). Pull-without-refresh clients keep a stale
+    /// pre-scan pull result until their next edit-triggered
+    /// pull; that's strictly better than visible duplicates.
+    NoOp,
+}
+
+fn decide_refresh(
+    state: &StateStore,
+    client_attached: bool,
+) -> RefreshDecision {
+    if !client_attached {
+        return RefreshDecision::NoClient;
+    }
+    if state.client_supports_diagnostic_refresh() {
+        return RefreshDecision::SendRefresh;
+    }
+    RefreshDecision::NoOp
+}
+
 /// Notify the client that diagnostics for open buffers may have
 /// changed because a background scan added peer files to the
-/// store. Dispatches between three client capability shapes:
-///
-/// 1. **Refresh supported** — send
-///    `workspace/diagnostic/refresh`, the LSP-native server-
-///    initiated refresh. Client re-pulls via
-///    `textDocument/diagnostic`; single namespace, no
-///    duplicates.
-/// 2. **Pull supported but no refresh** — manually re-publish
-///    diagnostics for every currently-open buffer via
-///    `publishDiagnostics`. Pull-only mode normally suppresses
-///    push for open buffers to avoid duplicating entries across
-///    push + pull namespaces, but without a refresh signal the
-///    client has no way to know the state is stale. Pushing a
-///    single fresh set is strictly better than letting a
-///    false-positive linger until the user edits. Some clients
-///    (including nvim) will see the pushed entry and the
-///    subsequent pull entry as duplicates; we accept that
-///    cosmetic trade-off until either we or the client picks up
-///    refresh.
-/// 3. **Neither** — no-op here. The regular push loop in
-///    `scan_files_parallel` already pushed to open buffers
-///    because `should_skip_push_diagnostics` returns `false`
-///    when pull isn't advertised.
+/// store. Thin async wrapper around [`decide_refresh`] — the
+/// decision logic lives there so tests can verify the
+/// no-duplicate-push invariant without mocking the client.
 async fn maybe_refresh_diagnostics(
     state: &StateStore,
     client: Option<&tower_lsp::Client>,
 ) {
-    let Some(c) = client else {
-        return;
-    };
-    if state.client_supports_diagnostic_refresh() {
-        if let Err(e) = c.workspace_diagnostic_refresh().await {
-            tracing::warn!(error = ?e, "workspace/diagnostic/refresh failed");
-        }
-        return;
-    }
-    // Pull-advertised-but-no-refresh clients need an explicit
-    // push — they won't re-pull on their own. Clients that
-    // don't advertise pull were already pushed to by the
-    // regular scan flow; nothing else to do for them.
-    if state
-        .client_supports_pull_diagnostics
-        .load(std::sync::atomic::Ordering::Relaxed)
-    {
-        let open_uris: Vec<lsp_types::Url> =
-            state.open_docs.iter().map(|e| e.key().clone()).collect();
-        for uri in open_uris {
-            let Some(doc) = state.documents.get(&uri) else {
-                continue;
-            };
-            let version = doc.version;
-            // Drop the dashmap guard before awaiting so we
-            // don't hold the read lock across the network
-            // call; compute_diagnostics re-acquires it.
-            drop(doc);
-            let diagnostics =
-                crate::handlers::document::compute_diagnostics(state, &uri);
-            c.publish_diagnostics(uri, diagnostics, Some(version)).await;
+    match decide_refresh(state, client.is_some()) {
+        RefreshDecision::NoClient | RefreshDecision::NoOp => {}
+        RefreshDecision::SendRefresh => {
+            if let Some(c) = client {
+                if let Err(e) = c.workspace_diagnostic_refresh().await {
+                    tracing::warn!(error = ?e, "workspace/diagnostic/refresh failed");
+                }
+            }
         }
     }
 }
@@ -926,4 +926,122 @@ fn spawn_background_enrichment(
             }
         }
     });
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    //! Invariant tests for the background scan's
+    //! "notify-diagnostics-changed" path.
+    //!
+    //! **The invariant:** under pull-diagnostics mode the server
+    //! must never `publishDiagnostics` for an open buffer. Nvim
+    //! (and any client that stores push and pull diagnostics in
+    //! separate namespaces) shows the pushed entry AND the
+    //! subsequent pull entry as two duplicate diagnostics on the
+    //! same line — the "duplicate diagnostic" bug we've regressed
+    //! into twice. These tests pin the decision logic so a future
+    //! commit can't silently reintroduce a push branch into
+    //! `maybe_refresh_diagnostics`.
+    //!
+    //! The pure [`decide_refresh`] function makes the contract
+    //! testable without mocking the `tower_lsp::Client`: its
+    //! output enumerates exactly what the async wrapper will do,
+    //! and `SendRefresh` is the ONLY variant that can trigger
+    //! client-side I/O.
+    use super::{RefreshDecision, decide_refresh};
+    use tfls_state::StateStore;
+    use tower_lsp::lsp_types::Url;
+
+    fn u(s: &str) -> Url {
+        Url::parse(s).expect("valid url")
+    }
+
+    #[test]
+    fn decide_refresh_no_client_is_a_noop() {
+        let store = StateStore::new();
+        assert_eq!(
+            decide_refresh(&store, /*client_attached=*/ false),
+            RefreshDecision::NoClient
+        );
+    }
+
+    #[test]
+    fn decide_refresh_sends_when_client_supports_refresh() {
+        let store = StateStore::new();
+        store.set_client_supports_diagnostic_refresh(true);
+        assert_eq!(
+            decide_refresh(&store, true),
+            RefreshDecision::SendRefresh
+        );
+    }
+
+    #[test]
+    fn decide_refresh_no_push_for_pull_without_refresh() {
+        // CRITICAL regression test: a client that advertises pull
+        // diagnostics but NOT `refresh_support` must get a `NoOp`.
+        // Pushing here would duplicate against the pull namespace,
+        // which is the exact "variable has no type" / "variable
+        // has no type" duplicate users keep hitting.
+        let store = StateStore::new();
+        store.set_client_supports_pull_diagnostics(true);
+        store.set_client_supports_diagnostic_refresh(false);
+        store.mark_open(u("file:///stack/main.tf"));
+        assert_eq!(
+            decide_refresh(&store, true),
+            RefreshDecision::NoOp,
+            "pull-without-refresh MUST be a no-op; \
+             pushing here duplicates against pull namespace"
+        );
+    }
+
+    #[test]
+    fn decide_refresh_no_push_for_push_only_client() {
+        // Push-only clients (neither pull nor refresh advertised)
+        // already got their open buffers pushed by the regular
+        // scan-publish loop in `scan_files_parallel`. No further
+        // action needed here.
+        let store = StateStore::new();
+        // Both flags default to false.
+        assert_eq!(decide_refresh(&store, true), RefreshDecision::NoOp);
+    }
+
+    #[test]
+    fn decide_refresh_refresh_wins_over_pull() {
+        // When a client advertises BOTH pull and refresh, refresh
+        // is authoritative. We never fall through to any push
+        // path, regardless of how many open buffers are in the
+        // state.
+        let store = StateStore::new();
+        store.set_client_supports_pull_diagnostics(true);
+        store.set_client_supports_diagnostic_refresh(true);
+        store.mark_open(u("file:///stack/main.tf"));
+        store.mark_open(u("file:///stack/other.tf"));
+        assert_eq!(
+            decide_refresh(&store, true),
+            RefreshDecision::SendRefresh
+        );
+    }
+
+    #[test]
+    fn refresh_decision_has_no_push_variant() {
+        // Meta-invariant: the `RefreshDecision` enum must not
+        // gain a variant that publishes diagnostics. If someone
+        // adds e.g. `PushToOpenBuffers`, this test needs updating
+        // — and the code reviewer must consciously accept the
+        // duplicate-diagnostic risk before doing so. Match
+        // exhaustively so adding a variant forces a decision.
+        let variants = [
+            RefreshDecision::NoClient,
+            RefreshDecision::SendRefresh,
+            RefreshDecision::NoOp,
+        ];
+        for v in variants {
+            match v {
+                RefreshDecision::NoClient
+                | RefreshDecision::SendRefresh
+                | RefreshDecision::NoOp => {}
+            }
+        }
+    }
 }

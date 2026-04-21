@@ -703,4 +703,57 @@ mod tests {
         assert!(!store.is_scan_tracked(&d));
         assert!(!store.is_scan_completed(&d));
     }
+
+    // --- should_skip_push_diagnostics invariants --------------------
+    //
+    // These pin the contract the indexer relies on to avoid
+    // duplicate diagnostics (push + pull showing the same entry
+    // twice in nvim's two separate namespaces). The rule:
+    //
+    //   push is skipped ⇔ pull is advertised AND the URI is open
+    //
+    // Every change to `should_skip_push_diagnostics` must keep
+    // the four cases below passing.
+
+    #[test]
+    fn skip_push_when_pull_advertised_and_buffer_open() {
+        let store = StateStore::new();
+        let u = uri("file:///a.tf");
+        store.set_client_supports_pull_diagnostics(true);
+        store.mark_open(u.clone());
+        assert!(
+            store.should_skip_push_diagnostics(&u),
+            "open + pull must skip push (otherwise it duplicates \
+             against the pull namespace)"
+        );
+    }
+
+    #[test]
+    fn do_not_skip_push_for_closed_buffer_even_under_pull() {
+        // Workspace-wide views (`:Trouble workspace_diagnostics`)
+        // need pushes for files the user hasn't opened, because
+        // pull only targets open buffers.
+        let store = StateStore::new();
+        let u = uri("file:///a.tf");
+        store.set_client_supports_pull_diagnostics(true);
+        // Don't mark open.
+        assert!(!store.should_skip_push_diagnostics(&u));
+    }
+
+    #[test]
+    fn do_not_skip_push_for_open_buffer_without_pull() {
+        // Push-only clients need push for their open buffers too.
+        let store = StateStore::new();
+        let u = uri("file:///a.tf");
+        store.mark_open(u.clone());
+        // Pull not advertised.
+        assert!(!store.should_skip_push_diagnostics(&u));
+    }
+
+    #[test]
+    fn do_not_skip_push_for_closed_push_only_client() {
+        let store = StateStore::new();
+        let u = uri("file:///a.tf");
+        assert!(!store.should_skip_push_diagnostics(&u));
+    }
 }
