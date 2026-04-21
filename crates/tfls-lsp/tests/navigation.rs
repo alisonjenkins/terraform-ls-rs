@@ -543,6 +543,116 @@ async fn goto_def_on_output_segment_of_indexed_module() {
 }
 
 #[tokio::test]
+async fn goto_def_scopes_variable_to_reference_module_not_child_module() {
+    // The case the user is hitting day-to-day: a stack's root
+    // module and one of its child modules both declare
+    // `variable "region" {}`. Goto-def on `var.region` in the
+    // root's `main.tf` must land on the root's own declaration —
+    // not on every variable of that name across the workspace.
+    // Terraform module scope is per-directory; cross-module leak
+    // is the bug.
+    let b = backend();
+    let root_main = uri("file:///stack/main.tf");
+    let root_vars = uri("file:///stack/variables.tf");
+    let child_vars = uri("file:///stack/modules/k3s/variables.tf");
+
+    backend_insert(&b, &root_vars, "variable \"region\" {}\n");
+    backend_insert(
+        &b,
+        &child_vars,
+        "variable \"region\" { default = \"eu-west-1\" }\n",
+    );
+    backend_insert(
+        &b,
+        &root_main,
+        "output \"r\" { value = var.region }\n",
+    );
+
+    // Cursor on `region` in `var.region` (line 0, inside the
+    // variable reference).
+    let resp = goto_def_at(&b, &root_main, Position::new(0, 28)).await;
+    let locs = match resp {
+        Some(GotoDefinitionResponse::Array(v)) => v,
+        other => panic!("expected Array response, got {other:?}"),
+    };
+    assert_eq!(
+        locs.len(),
+        1,
+        "expected exactly one in-scope location, got {locs:?}"
+    );
+    assert_eq!(locs[0].uri, root_vars, "should resolve to stack root's variables.tf");
+}
+
+#[tokio::test]
+async fn goto_def_does_not_leak_across_unrelated_stacks() {
+    // Two unrelated stacks in the workspace, each declaring their
+    // own `variable "region"`. Goto-def from stack A must never
+    // return stack B's declaration.
+    let b = backend();
+    let a_vars = uri("file:///stackA/variables.tf");
+    let b_vars = uri("file:///stackB/variables.tf");
+    let a_main = uri("file:///stackA/main.tf");
+
+    backend_insert(&b, &a_vars, "variable \"region\" {}\n");
+    backend_insert(&b, &b_vars, "variable \"region\" {}\n");
+    backend_insert(&b, &a_main, "output \"r\" { value = var.region }\n");
+
+    let resp = goto_def_at(&b, &a_main, Position::new(0, 28)).await;
+    let locs = match resp {
+        Some(GotoDefinitionResponse::Array(v)) => v,
+        other => panic!("expected Array response, got {other:?}"),
+    };
+    assert_eq!(locs.len(), 1);
+    assert_eq!(locs[0].uri, a_vars);
+    assert!(
+        !locs.iter().any(|l| l.uri == b_vars),
+        "stack-B declaration leaked into stack-A goto-def: {locs:?}"
+    );
+}
+
+#[tokio::test]
+async fn goto_def_still_resolves_peer_file_in_same_module() {
+    // Guard rail: the scope filter must not over-tighten to
+    // "same file". Peer `.tf` files in the same directory ARE the
+    // same Terraform module — a reference in `main.tf` to a
+    // variable declared in `variables.tf` still resolves.
+    let b = backend();
+    let vars = uri("file:///stack/variables.tf");
+    let main = uri("file:///stack/main.tf");
+
+    backend_insert(&b, &vars, "variable \"region\" {}\n");
+    backend_insert(&b, &main, "output \"r\" { value = var.region }\n");
+
+    let resp = goto_def_at(&b, &main, Position::new(0, 28)).await;
+    let locs = match resp {
+        Some(GotoDefinitionResponse::Array(v)) => v,
+        other => panic!("expected Array response, got {other:?}"),
+    };
+    assert_eq!(locs.len(), 1);
+    assert_eq!(locs[0].uri, vars);
+}
+
+/// Thin helper to upsert a doc into the test backend's state.
+fn backend_insert(backend: &Backend, u: &Url, src: &str) {
+    backend
+        .state
+        .upsert_document(DocumentState::new(u.clone(), src, 1));
+}
+
+/// Empty Backend for tests that need to upsert multiple docs
+/// before exercising a handler. `backend_with` is for the common
+/// "one doc, then query" case; this is the multi-doc variant.
+fn backend() -> Backend {
+    let (service, _socket) = LspService::new(Backend::new);
+    let inner = service.inner();
+    Backend::with_shared_state(
+        inner.client.clone(),
+        inner.state.clone(),
+        inner.jobs.clone(),
+    )
+}
+
+#[tokio::test]
 async fn goto_def_on_module_input_resolved_via_modules_json() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();

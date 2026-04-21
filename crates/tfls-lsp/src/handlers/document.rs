@@ -4,7 +4,7 @@
 //! reference indexes in sync) and publishes the union of all
 //! diagnostic families back to the client.
 
-use tfls_core::{SymbolKind, SymbolLocation};
+use tfls_core::SymbolKind;
 use tfls_diag::{
     diagnostics_for_parse_errors, resource_diagnostics, undefined_reference_diagnostics,
 };
@@ -386,11 +386,8 @@ fn is_defined_in_module(
         // to avoid false positives on exotic URIs.
         return !locs.is_empty();
     };
-    locs.iter().any(|loc| location_in_dir(loc, module_dir))
-}
-
-fn location_in_dir(loc: &SymbolLocation, dir: &std::path::Path) -> bool {
-    crate::handlers::util::parent_dir(&loc.uri).as_deref() == Some(dir)
+    locs.iter()
+        .any(|loc| crate::handlers::util::location_in_dir(loc, module_dir))
 }
 
 /// Adapter so `tfls-diag` can query [`StateStore`]-installed schemas
@@ -424,7 +421,9 @@ impl ModuleGraphAdapter<'_> {
             return false;
         };
         match self.module_dir {
-            Some(dir) => locs.iter().any(|loc| location_in_dir(loc, dir)),
+            Some(dir) => locs
+                .iter()
+                .any(|loc| crate::handlers::util::location_in_dir(loc, dir)),
             None => !locs.is_empty(),
         }
     }

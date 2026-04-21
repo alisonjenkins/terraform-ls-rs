@@ -14,7 +14,9 @@ use tower_lsp::jsonrpc;
 
 use crate::backend::Backend;
 use crate::handlers::cursor::{find_symbol_at_cursor, key_at_cursor};
-use crate::handlers::util::{lookup_child_module_symbol, parent_dir, resolve_module_source};
+use crate::handlers::util::{
+    location_in_dir, lookup_child_module_symbol, parent_dir, resolve_module_source,
+};
 use crate::handlers::{hover_attribute, hover_function, hover_module_input};
 
 /// `textDocument/declaration` — for HCL this is identical to
@@ -58,12 +60,41 @@ pub async fn goto_definition(
         return Ok(None);
     };
 
-    let locations: Vec<Location> = backend
-        .state
-        .definitions_by_name
-        .get(&key)
-        .map(|entry| entry.iter().map(|l| l.to_lsp_location()).collect())
-        .unwrap_or_default();
+    // `definitions_by_name` is a workspace-wide index — a
+    // `variable "region" { }` declared in the stack root, in every
+    // child module, and in every unrelated stack in the workspace
+    // all land under the same `(Variable, "region")` key. Scope the
+    // result to the reference's own module (its parent directory):
+    // Terraform's module boundary is a directory, so only those
+    // declarations are visible from the reference. Cross-module
+    // / cross-stack leaks are what produces the "goto-def shows
+    // every `region` in the workspace" symptom.
+    let reference_dir = parent_dir(&uri);
+    let locations: Vec<Location> = match backend.state.definitions_by_name.get(&key) {
+        Some(entry) => {
+            match reference_dir.as_deref() {
+                Some(dir) => {
+                    let scoped: Vec<Location> = entry
+                        .iter()
+                        .filter(|loc| location_in_dir(loc, dir))
+                        .map(|l| l.to_lsp_location())
+                        .collect();
+                    // If nothing in the reference's own module
+                    // matches, the reference is genuinely
+                    // unresolved (the undefined-reference
+                    // diagnostic will flag it). Don't fall back to
+                    // cross-module matches — that's the bug.
+                    scoped
+                }
+                // Pathological URI (no parseable parent directory).
+                // Be lenient and return every match so the user
+                // isn't stuck on an unnavigable file — same
+                // fallback `is_defined_in_module` uses.
+                None => entry.iter().map(|l| l.to_lsp_location()).collect(),
+            }
+        }
+        None => Vec::new(),
+    };
 
     if locations.is_empty() {
         Ok(None)

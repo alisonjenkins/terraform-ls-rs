@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use lsp_types::{Location, Url};
 use serde::Deserialize;
-use tfls_core::SymbolKind;
+use tfls_core::{SymbolKind, SymbolLocation};
 use tfls_state::StateStore;
 
 /// Filesystem parent directory of a `file://` URI. Returns `None` for
@@ -67,6 +67,16 @@ pub(crate) fn resolve_module_source(
     }
 
     None
+}
+
+/// True when the given symbol location sits directly inside
+/// `dir`. "Inside" means "its file's parent directory equals
+/// `dir`" — a Terraform module is a single directory, so this is
+/// the per-module-scope check for "is this symbol in scope from a
+/// reference in `dir`". Child-module and unrelated-stack
+/// locations return `false`.
+pub(crate) fn location_in_dir(loc: &SymbolLocation, dir: &Path) -> bool {
+    parent_dir(&loc.uri).as_deref() == Some(dir)
 }
 
 /// Look up a declared symbol (variable or output) inside a child
