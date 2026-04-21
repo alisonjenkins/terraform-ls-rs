@@ -22,11 +22,13 @@ pub fn is_meta_attr(name: &str) -> bool {
 }
 
 /// Block-style meta-blocks accepted in a given block kind. `data` blocks
-/// don't get `provisioner`/`connection`.
+/// don't get `provisioner`/`connection`. `dynamic` is repeatable (per
+/// label) and valid in both, for generating instances of nested blocks
+/// at plan time.
 pub fn meta_blocks(kind: BlockKind) -> &'static [&'static str] {
     match kind {
-        BlockKind::Resource => &["lifecycle", "provisioner", "connection"],
-        BlockKind::Data => &["lifecycle"],
+        BlockKind::Resource => &["dynamic", "lifecycle", "provisioner", "connection"],
+        BlockKind::Data => &["dynamic", "lifecycle"],
     }
 }
 
@@ -66,7 +68,8 @@ pub fn lifecycle_blocks(kind: BlockKind) -> &'static [&'static str] {
 pub const CONDITION_ATTRS: &[&str] = &["condition", "error_message"];
 
 /// Whether a meta-block name is restricted to one occurrence per block.
-/// `provisioner` is labelled and repeatable; everything else is single.
+/// `provisioner` / `dynamic` are labelled and repeatable; everything
+/// else is single.
 pub fn is_singleton_meta_block(kind: BlockKind, name: &str) -> bool {
     match kind {
         BlockKind::Resource => matches!(name, "lifecycle" | "connection"),
@@ -107,7 +110,7 @@ pub fn meta_attr_description(name: &str) -> &'static str {
 }
 
 /// Canonical description for a meta-block name (`lifecycle`,
-/// `provisioner`, `connection`). Same semantics as
+/// `provisioner`, `connection`, `dynamic`). Same semantics as
 /// [`meta_attr_description`].
 pub fn meta_block_description(name: &str) -> &'static str {
     match name {
@@ -125,8 +128,49 @@ pub fn meta_block_description(name: &str) -> &'static str {
             Declares how Terraform should SSH / WinRM into the instance \
             to run `remote-exec` or copy files. Attributes include `type`, \
             `host`, `user`, `private_key`, `port`.",
+        "dynamic" => "**dynamic** — Generate multiple instances of a nested block from a collection.\n\n\
+            Takes a label matching a repeatable nested block in the \
+            enclosing resource / data schema. Attributes: `for_each` \
+            (required), `iterator` (optional — rename `each`), `labels` \
+            (optional — for blocks that themselves take labels). The \
+            `content { … }` sub-block holds the body template, evaluated \
+            once per element of `for_each`. See [dynamic-blocks docs](https://developer.hashicorp.com/terraform/language/expressions/dynamic-blocks).",
         _ => "",
     }
+}
+
+/// Canonical description for an attribute inside a `dynamic "<label>"
+/// { ... }` meta-block (`for_each`, `iterator`, `labels`). The
+/// `content { }` sub-block is a separate meta-construct — use
+/// [`content_meta_block_description`].
+pub fn dynamic_meta_attr_description(name: &str) -> &'static str {
+    match name {
+        "for_each" => "**for_each** — Required. Collection to iterate over.\n\n\
+            `list`, `set`, or `map`. Terraform generates one instance of \
+            the target nested block per element. Inside `content { … }` \
+            use `each.key` / `each.value` to reference the current element.",
+        "iterator" => "**iterator** — Optional. Rename the `each` binding.\n\n\
+            String identifier. Default is the dynamic block's label \
+            (e.g. `for_each` over `dynamic \"setting\"` binds `setting.key` \
+            / `setting.value`). Use when the default name collides with \
+            an outer `each` in a `for_each`'d resource.",
+        "labels" => "**labels** — Optional. Labels for the generated blocks.\n\n\
+            `list(string)`. Only applicable when the target nested block \
+            itself takes labels. Each element of `for_each` must yield \
+            one label per entry in this list.",
+        _ => "",
+    }
+}
+
+/// Canonical description for the `content { }` sub-block inside a
+/// `dynamic "<label>" { … }` meta-block.
+pub fn content_meta_block_description() -> &'static str {
+    "**content** — Body template for each generated block instance.\n\n\
+    Evaluated once per element of the enclosing `dynamic` block's \
+    `for_each`. The attributes permitted inside `content` are exactly \
+    the attributes of the target nested block — schema-driven, not \
+    language-defined. Reference the current element via `each.key` / \
+    `each.value` (or the configured `iterator`)."
 }
 
 /// Canonical description for an attribute inside a `lifecycle { ... }`

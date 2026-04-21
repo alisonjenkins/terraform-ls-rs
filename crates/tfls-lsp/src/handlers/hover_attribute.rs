@@ -18,6 +18,7 @@ use hcl_edit::structure::{Attribute, Body};
 use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind, Position, Url};
 use std::sync::Arc;
 use tfls_core::builtin_blocks::{BuiltinAttr, LIFECYCLE_DATA_BLOCK, LIFECYCLE_RESOURCE_BLOCK};
+use tfls_core::{content_meta_block_description, dynamic_meta_attr_description, meta_block_description};
 use tfls_parser::hcl_span_to_lsp_range;
 use tfls_schema::{AttributeSchema, BlockSchema, NestedBlockSchema, NestingMode, ProviderSchema};
 use tfls_state::{DocumentState, StateStore};
@@ -100,7 +101,15 @@ pub fn attribute_hover(
             })
         }
         Hit::NestedBlockHeader(hit) => {
-            let markdown = if hit.root_kind.builtin_root_keyword().is_some() {
+            // `dynamic "<label>"` and `content { }` (inside dynamic)
+            // aren't schema-defined blocks; short-circuit to the
+            // Terraform-language meta-block renderers so we don't
+            // falsely claim "unknown nested block".
+            let markdown = if hit.block_name == "dynamic" {
+                render_dynamic_meta_block(&hit)
+            } else if hit.block_name == "content" && hit.target_label.is_some() {
+                render_content_meta_block(&hit)
+            } else if hit.root_kind.builtin_root_keyword().is_some() {
                 render_builtin_nested_block(&hit)
             } else {
                 match resolve_nested_block_schema(state, &hit) {
@@ -121,14 +130,62 @@ pub fn attribute_hover(
                 range: Some(range),
             })
         }
+        Hit::BlockLabel(hit) => {
+            // Cursor on the `"X"` of `dynamic "X"` — resolve X in the
+            // enclosing resource/data schema and render its docs, so
+            // the hover shows the target nested block the dynamic
+            // will generate instances of.
+            let header = NestedBlockHeaderHit {
+                root_kind: hit.root_kind,
+                root_type: hit.root_type.clone(),
+                parent_path: hit.parent_path.clone(),
+                block_name: hit.target_label.clone(),
+                target_label: None,
+                ident_span: hit.label_span.clone(),
+            };
+            let markdown = if header.root_kind.builtin_root_keyword().is_some() {
+                render_builtin_nested_block(&header)
+            } else {
+                match resolve_nested_block_schema(state, &header) {
+                    NestedBlockLookup::Found(nb) => render_nested_block(&header, &nb),
+                    NestedBlockLookup::SchemasNotLoaded => {
+                        render_nested_block_schemas_not_loaded(&header)
+                    }
+                    NestedBlockLookup::ProviderMissing => render_nested_block_provider_missing(&header),
+                    NestedBlockLookup::BlockUnknown => render_nested_block_unknown(&header),
+                }
+            };
+            let range = hcl_span_to_lsp_range(&doc.rope, hit.label_span).ok()?;
+            Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: markdown,
+                }),
+                range: Some(range),
+            })
+        }
+        Hit::DynamicMetaAttr(hit) => {
+            let markdown = render_dynamic_meta_attr(&hit);
+            let range = hcl_span_to_lsp_range(&doc.rope, hit.key_span).ok()?;
+            Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: markdown,
+                }),
+                range: Some(range),
+            })
+        }
     }
 }
 
-/// Cursor landed on either an attribute key or a nested-block header —
-/// these render differently.
+/// Cursor landed on either an attribute key, a nested-block header,
+/// a quoted block label (only `dynamic "<label>"` today), or one of
+/// the meta-attributes on a `dynamic` body. All render differently.
 enum Hit {
     Attribute(AttributeHit),
     NestedBlockHeader(NestedBlockHeaderHit),
+    BlockLabel(BlockLabelHit),
+    DynamicMetaAttr(DynamicMetaAttrHit),
 }
 
 struct NestedBlockHeaderHit {
@@ -140,7 +197,39 @@ struct NestedBlockHeaderHit {
     parent_path: Vec<String>,
     /// Name of the nested block whose header we're hovering on.
     block_name: String,
+    /// For `dynamic "<label>" { }` and `content { }` inside dynamic:
+    /// the target label (`<label>`). `None` for ordinary nested
+    /// blocks. Carried so the rendering path can distinguish
+    /// dynamic/content headers from regular schema-bearing blocks
+    /// (whose `content` sub-block would be interpreted completely
+    /// differently).
+    target_label: Option<String>,
     ident_span: std::ops::Range<usize>,
+}
+
+/// Cursor on the quoted label of a `dynamic "<label>"` header. The
+/// hover resolves the label as a nested block in the enclosing
+/// resource/data schema and renders the same docs as if the cursor
+/// were on a plain `<label> { … }` header.
+struct BlockLabelHit {
+    root_kind: RootBlockKind,
+    root_type: String,
+    /// Path from the root block down to the dynamic block's parent
+    /// body (same semantic as `NestedBlockHeaderHit.parent_path`).
+    parent_path: Vec<String>,
+    /// The label text (the `X` in `dynamic "X"`).
+    target_label: String,
+    label_span: std::ops::Range<usize>,
+}
+
+/// Cursor on `for_each` / `iterator` / `labels` directly on a
+/// `dynamic` body (not inside `content`). These are Terraform
+/// language meta-arguments — not in any provider schema — and
+/// render from `dynamic_meta_attr_description`.
+struct DynamicMetaAttrHit {
+    target_label: String,
+    attr_name: String,
+    key_span: std::ops::Range<usize>,
 }
 
 /// True if the nested path passes through a meta-block whose contents
@@ -676,6 +765,18 @@ fn scan_block(
             continue;
         }
         let name = block.ident.as_str().to_string();
+
+        // `dynamic "<label>" { content { … } }` is a Terraform
+        // language meta-construct, not a schema-bearing nested
+        // block. Route it through dedicated detection so the
+        // dynamic-keyword, label, content-keyword, and meta-attr
+        // hovers each produce the right markdown instead of falling
+        // through to the provider-schema lookup (which would claim
+        // they're unknown).
+        if name == "dynamic" {
+            return scan_dynamic_block(block, offset, path, root_kind, root_type);
+        }
+
         // Cursor on the nested block's header keyword — hover that.
         if let Some(ident_span) = block.ident.span() {
             if span_contains(Some(ident_span.clone()), offset) {
@@ -684,35 +785,10 @@ fn scan_block(
                     root_type: root_type.to_string(),
                     parent_path: path.clone(),
                     block_name: name,
+                    target_label: None,
                     ident_span,
                 }));
             }
-        }
-
-        // `dynamic "<label>" { content { … } }` — for schema-lookup
-        // purposes treat this as a plain `<label> { … }` block.
-        // Push the label (not "dynamic") onto the path, and step
-        // through the `content {}` wrapper without pushing anything
-        // for it so the recursive scan lands on the attribute's
-        // target nested-block schema.
-        if name == "dynamic" {
-            let Some(label) = block.labels.first().map(hover_label_text) else {
-                // Malformed — stop descending.
-                return None;
-            };
-            path.push(label);
-            // Walk the dynamic body; if the cursor is inside the
-            // content { } wrapper, recurse into its body so attrs
-            // resolve to the target block's schema.
-            let hit = scan_block_dynamic_body(
-                &block.body,
-                offset,
-                path,
-                root_kind,
-                root_type,
-            );
-            path.pop();
-            return hit;
         }
 
         path.push(name);
@@ -725,15 +801,77 @@ fn scan_block(
     None
 }
 
-/// Walk the body of a `dynamic "<label>" {}` block. `path` is
-/// already set to the pushed target label; on `content {}` we
-/// recurse into its body without further push. On attrs directly
-/// on the dynamic body (`for_each`, `iterator`, `labels`) we
-/// return a hit that downstream hover can route specifically.
-fn scan_block_dynamic_body(
+/// Scan a `dynamic "<label>" { … }` block. Emits:
+/// - `Hit::NestedBlockHeader { block_name: "dynamic", target_label }`
+///   for cursor on the `dynamic` keyword.
+/// - `Hit::BlockLabel` for cursor on the quoted label.
+/// - For cursor inside the body, delegates to
+///   [`scan_dynamic_body`] which may return `NestedBlockHeader`
+///   (content keyword), `DynamicMetaAttr` (for_each / iterator /
+///   labels), or a recursive `scan_block` hit (anything inside
+///   `content { }`).
+fn scan_dynamic_block(
+    block: &hcl_edit::structure::Block,
+    offset: usize,
+    path: &mut Vec<String>,
+    root_kind: RootBlockKind,
+    root_type: &str,
+) -> Option<Hit> {
+    let target_label = block.labels.first().map(hover_label_text);
+
+    // Cursor on the `dynamic` keyword itself.
+    if let Some(ident_span) = block.ident.span() {
+        if span_contains(Some(ident_span.clone()), offset) {
+            return Some(Hit::NestedBlockHeader(NestedBlockHeaderHit {
+                root_kind,
+                root_type: root_type.to_string(),
+                parent_path: path.clone(),
+                block_name: "dynamic".to_string(),
+                target_label: target_label.clone(),
+                ident_span,
+            }));
+        }
+    }
+
+    // Cursor on the quoted label (the `"X"` in `dynamic "X"`).
+    if let Some(label) = block.labels.first() {
+        if let Some(label_span) = label.span() {
+            if span_contains(Some(label_span.clone()), offset) {
+                let Some(lbl) = target_label.clone() else {
+                    return None;
+                };
+                return Some(Hit::BlockLabel(BlockLabelHit {
+                    root_kind,
+                    root_type: root_type.to_string(),
+                    parent_path: path.clone(),
+                    target_label: lbl,
+                    label_span,
+                }));
+            }
+        }
+    }
+
+    // Descend into the dynamic body. Push the target label onto the
+    // path so attrs inside `content { }` resolve to the target
+    // block's schema for free (reusing the normal attribute-hover
+    // path). Attrs and `content` on the *dynamic* body itself are
+    // handled by `scan_dynamic_body` directly.
+    let Some(target_label) = target_label else {
+        return None;
+    };
+    path.push(target_label.clone());
+    let hit = scan_dynamic_body(&block.body, offset, path, &target_label, root_kind, root_type);
+    path.pop();
+    hit
+}
+
+/// Walk the body of a `dynamic "<label>" {}` block. `path` has the
+/// target label already pushed onto it.
+fn scan_dynamic_body(
     body: &Body,
     offset: usize,
     path: &mut Vec<String>,
+    target_label: &str,
     root_kind: RootBlockKind,
     root_type: &str,
 ) -> Option<Hit> {
@@ -741,15 +879,25 @@ fn scan_block_dynamic_body(
         if let Some(attr) = structure.as_attribute() {
             if attribute_key_contains(attr, offset) {
                 let key_span = attr.key.span()?;
-                // Attrs sit on the dynamic construct itself —
-                // report a synthetic AttributeHit with the pushed
-                // nested_path so downstream hover sees this the
-                // same as a plain-block meta-attr.
+                let attr_name = attr.key.as_str().to_string();
+                // `for_each` / `iterator` / `labels` are language
+                // meta-attrs on the dynamic construct itself — route
+                // to the dedicated renderer. Anything else on this
+                // body is malformed (won't parse as valid dynamic),
+                // but fall through to the generic attribute path so
+                // the user gets *some* feedback rather than silence.
+                if matches!(attr_name.as_str(), "for_each" | "iterator" | "labels") {
+                    return Some(Hit::DynamicMetaAttr(DynamicMetaAttrHit {
+                        target_label: target_label.to_string(),
+                        attr_name,
+                        key_span,
+                    }));
+                }
                 return Some(Hit::Attribute(AttributeHit {
                     root_kind,
                     root_type: root_type.to_string(),
                     nested_path: path.clone(),
-                    attr_name: attr.key.as_str().to_string(),
+                    attr_name,
                     key_span,
                 }));
             }
@@ -762,9 +910,10 @@ fn scan_block_dynamic_body(
             continue;
         }
         if child.ident.as_str() == "content" {
-            // Cursor on `content` keyword itself — report it as a
-            // nested-block header so downstream hover can special-
-            // case it with dynamic-body docs.
+            // Cursor on `content` keyword: emit NestedBlockHeader
+            // carrying target_label so the dispatcher can pick the
+            // content-meta-block renderer instead of trying to
+            // resolve `content` through the provider schema.
             if let Some(ident_span) = child.ident.span() {
                 if span_contains(Some(ident_span.clone()), offset) {
                     return Some(Hit::NestedBlockHeader(NestedBlockHeaderHit {
@@ -772,16 +921,18 @@ fn scan_block_dynamic_body(
                         root_type: root_type.to_string(),
                         parent_path: path.clone(),
                         block_name: "content".to_string(),
+                        target_label: Some(target_label.to_string()),
                         ident_span,
                     }));
                 }
             }
             // Cursor inside the content body — recurse without
-            // pushing "content" onto the path.
+            // pushing "content" onto the path so attrs resolve to
+            // the target block's schema.
             return scan_block(&child.body, offset, path, root_kind, root_type);
         }
-        // Any other block inside dynamic body is malformed — don't
-        // descend, let the caller's outer scan handle it.
+        // Any other block inside a dynamic body is malformed — stop
+        // descending; the caller's outer scan can't do better.
     }
     None
 }
@@ -1121,5 +1272,40 @@ fn render_nested_block_unknown(hit: &NestedBlockHeaderHit) -> String {
         header = nested_block_header(hit),
         block = hit.block_name,
         root = hit.root_type,
+    )
+}
+
+/// Hover for the `dynamic` keyword itself — a Terraform-language
+/// meta-block, not a schema-defined nested block. Description comes
+/// from `tfls_core::meta_block_description("dynamic")` so the text
+/// stays in lockstep with the completion popup.
+fn render_dynamic_meta_block(hit: &NestedBlockHeaderHit) -> String {
+    let body = meta_block_description("dynamic");
+    match &hit.target_label {
+        Some(label) => format!(
+            "**meta-block** `dynamic \"{label}\"` — generates instances of `{label}`\n\n{body}"
+        ),
+        None => format!("**meta-block** `dynamic`\n\n{body}"),
+    }
+}
+
+/// Hover for the `content { }` keyword inside a dynamic body.
+fn render_content_meta_block(hit: &NestedBlockHeaderHit) -> String {
+    let body = content_meta_block_description();
+    match &hit.target_label {
+        Some(label) => format!(
+            "**meta-block** `content` — body template for `dynamic \"{label}\"`\n\n{body}"
+        ),
+        None => format!("**meta-block** `content`\n\n{body}"),
+    }
+}
+
+/// Hover for `for_each` / `iterator` / `labels` on a `dynamic` body.
+fn render_dynamic_meta_attr(hit: &DynamicMetaAttrHit) -> String {
+    let body = dynamic_meta_attr_description(&hit.attr_name);
+    format!(
+        "**meta-argument** `{attr}` on `dynamic \"{label}\"`\n\n{body}",
+        attr = hit.attr_name,
+        label = hit.target_label,
     )
 }

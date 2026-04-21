@@ -617,3 +617,179 @@ async fn hover_on_attr_inside_dynamic_content_renders_target_attr_docs() {
         "attr hover shouldn't mention the dynamic wrapper; got: {md}"
     );
 }
+
+/// Helper: install a minimal aws_instance schema with a nested
+/// `ebs_block_device { device_name (required) }` block, sufficient
+/// for the dynamic-block hover tests below.
+fn install_aws_dynamic_fixture(b: &Backend) {
+    let schema: ProviderSchemas = sonic_rs::from_str(
+        r#"{
+        "format_version": "1.0",
+        "provider_schemas": {
+            "registry.terraform.io/hashicorp/aws": {
+                "provider": { "version": 0, "block": {} },
+                "resource_schemas": {
+                    "aws_instance": {
+                        "version": 1,
+                        "block": {
+                            "attributes": {},
+                            "block_types": {
+                                "ebs_block_device": {
+                                    "nesting_mode": "list",
+                                    "block": {
+                                        "description": "Additional EBS-backed block devices to attach to the instance.",
+                                        "attributes": {
+                                            "device_name": {
+                                                "type": "string",
+                                                "required": true,
+                                                "description": "Block-device name exposed to the instance."
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "data_source_schemas": {}
+            }
+        }
+    }"#,
+    )
+    .expect("parse schema");
+    b.state.install_schemas(schema);
+}
+
+#[tokio::test]
+async fn hover_on_dynamic_keyword_shows_meta_block_description() {
+    // Cursor on the `dynamic` keyword of
+    // `dynamic "ebs_block_device" { … }` — render the Terraform-
+    // language meta-block description, not "unknown nested block
+    // `dynamic`".
+    let u = uri("file:///dyn_kw.tf");
+    let src = "resource \"aws_instance\" \"x\" {\n  dynamic \"ebs_block_device\" {\n    for_each = []\n    content { device_name = \"x\" }\n  }\n}\n";
+    let b = backend_with(src, &u);
+    install_aws_dynamic_fixture(&b);
+
+    // Cursor on `d` of `dynamic` (line 1, col 2).
+    let md = hover_markdown(&b, &u, Position::new(1, 4))
+        .await
+        .expect("some hover");
+
+    assert!(
+        md.contains("**meta-block** `dynamic"),
+        "expected meta-block dynamic header; got: {md}"
+    );
+    assert!(
+        md.contains("ebs_block_device"),
+        "expected target label mention; got: {md}"
+    );
+    assert!(
+        md.contains("dynamic-blocks"),
+        "expected link to dynamic-blocks docs; got: {md}"
+    );
+    assert!(
+        !md.contains("not in the schema"),
+        "must NOT route to schema-missing; got: {md}"
+    );
+}
+
+#[tokio::test]
+async fn hover_on_dynamic_label_shows_target_block_schema() {
+    // Cursor on the quoted `"ebs_block_device"` label of a
+    // `dynamic` header — hover should show the TARGET block's
+    // docs (the same thing a cursor on a plain `ebs_block_device
+    // { }` ident would produce), so users learn what attributes
+    // belong inside the generated instances.
+    let u = uri("file:///dyn_label.tf");
+    let src = "resource \"aws_instance\" \"x\" {\n  dynamic \"ebs_block_device\" {\n    for_each = []\n    content { device_name = \"x\" }\n  }\n}\n";
+    let b = backend_with(src, &u);
+    install_aws_dynamic_fixture(&b);
+
+    // Cursor inside the quoted label (line 1, col 15 — on `b` of
+    // `ebs_block_device`).
+    let md = hover_markdown(&b, &u, Position::new(1, 15))
+        .await
+        .expect("some hover");
+
+    assert!(
+        md.contains("**block** `ebs_block_device`"),
+        "expected nested-block header for the target; got: {md}"
+    );
+    assert!(
+        md.contains("Additional EBS-backed block devices"),
+        "expected target-block description; got: {md}"
+    );
+    assert!(
+        md.contains("`device_name`"),
+        "expected target-block attribute summary; got: {md}"
+    );
+    assert!(
+        !md.contains("**meta-block** `dynamic"),
+        "label hover must not show dynamic meta docs; got: {md}"
+    );
+}
+
+#[tokio::test]
+async fn hover_on_content_keyword_shows_meta_block_description() {
+    // Cursor on the `content` keyword inside a dynamic body —
+    // renders the content-meta-block description, not a schema
+    // lookup failure.
+    let u = uri("file:///content_kw.tf");
+    let src = "resource \"aws_instance\" \"x\" {\n  dynamic \"ebs_block_device\" {\n    for_each = []\n    content { device_name = \"x\" }\n  }\n}\n";
+    let b = backend_with(src, &u);
+    install_aws_dynamic_fixture(&b);
+
+    // Cursor on `c` of `content` (line 3, col 4).
+    let md = hover_markdown(&b, &u, Position::new(3, 6))
+        .await
+        .expect("some hover");
+
+    assert!(
+        md.contains("**meta-block** `content`"),
+        "expected meta-block content header; got: {md}"
+    );
+    assert!(
+        md.contains("ebs_block_device"),
+        "expected target-label reference; got: {md}"
+    );
+    assert!(
+        md.to_lowercase().contains("body template")
+            || md.contains("evaluated"),
+        "expected content semantics described; got: {md}"
+    );
+}
+
+#[tokio::test]
+async fn hover_on_dynamic_for_each_shows_meta_arg_description() {
+    // Cursor on `for_each` directly on the dynamic body — render
+    // the dynamic-meta-arg description, not a provider-schema
+    // lookup for a `for_each` attribute on `ebs_block_device`
+    // (which doesn't exist).
+    let u = uri("file:///dyn_for_each.tf");
+    let src = "resource \"aws_instance\" \"x\" {\n  dynamic \"ebs_block_device\" {\n    for_each = []\n    content { device_name = \"x\" }\n  }\n}\n";
+    let b = backend_with(src, &u);
+    install_aws_dynamic_fixture(&b);
+
+    // Cursor on `f` of `for_each` (line 2, col 4).
+    let md = hover_markdown(&b, &u, Position::new(2, 6))
+        .await
+        .expect("some hover");
+
+    assert!(
+        md.contains("**meta-argument** `for_each`"),
+        "expected meta-argument header; got: {md}"
+    );
+    assert!(
+        md.contains("dynamic \"ebs_block_device\""),
+        "expected dynamic+label context in header; got: {md}"
+    );
+    assert!(
+        md.contains("Collection to iterate over") || md.contains("Required"),
+        "expected for_each description; got: {md}"
+    );
+    assert!(
+        !md.contains("not in the schema"),
+        "must NOT route to schema-missing; got: {md}"
+    );
+}
