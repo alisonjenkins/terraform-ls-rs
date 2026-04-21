@@ -314,3 +314,230 @@ async fn goto_definition_on_nothing_returns_none() {
 
     assert!(result.is_none());
 }
+
+// --- Module goto-def regressions ------------------------------------
+//
+// These tests set up a real on-disk directory layout so the full
+// chain — module_sources → resolve_module_source →
+// lookup_child_module_symbol — runs end-to-end, just like it would in
+// a live editor session. Using a tempdir keeps the tests hermetic.
+
+use std::path::Path;
+
+fn file_uri(path: &Path) -> Url {
+    Url::from_file_path(path).expect("file URL")
+}
+
+/// Register a .tf file on disk AND in the StateStore so the indexer
+/// would have seen it. Returns the URI.
+fn upsert_file(backend: &Backend, path: &Path, source: &str) -> Url {
+    std::fs::write(path, source).expect("write .tf file");
+    let u = file_uri(path);
+    backend
+        .state
+        .upsert_document(DocumentState::new(u.clone(), source, 1));
+    u
+}
+
+async fn goto_def_at(backend: &Backend, uri: &Url, pos: Position) -> Option<GotoDefinitionResponse> {
+    tfls_lsp::handlers::navigation::goto_definition(
+        backend,
+        GotoDefinitionParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position: pos,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        },
+    )
+    .await
+    .expect("ok")
+}
+
+fn single_location(resp: Option<GotoDefinitionResponse>) -> tower_lsp::lsp_types::Location {
+    match resp {
+        Some(GotoDefinitionResponse::Scalar(loc)) => loc,
+        Some(GotoDefinitionResponse::Array(v)) if v.len() == 1 => v.into_iter().next().unwrap(),
+        other => panic!("expected single location, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn goto_def_on_module_input_attr_jumps_to_variable_decl() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let child_dir = root.join("child");
+    std::fs::create_dir(&child_dir).unwrap();
+
+    let (service, _socket) = LspService::new(Backend::new);
+    let inner = service.inner();
+    let backend = Backend::with_shared_state(
+        inner.client.clone(),
+        inner.state.clone(),
+        inner.jobs.clone(),
+    );
+
+    // Child module declares a `region` variable.
+    let child_u = upsert_file(
+        &backend,
+        &child_dir.join("variables.tf"),
+        "variable \"region\" { type = string }\n",
+    );
+
+    // Caller references the child module and sets `region = "eu"`.
+    let caller_path = root.join("main.tf");
+    let caller_src = "module \"net\" {\n  source = \"./child\"\n  region = \"eu\"\n}\n";
+    let caller_u = upsert_file(&backend, &caller_path, caller_src);
+
+    // Line 2, col 4 → on the `r` of `region = "eu"`.
+    let loc = single_location(goto_def_at(&backend, &caller_u, Position::new(2, 4)).await);
+    assert_eq!(loc.uri, child_u, "should land in child's variables.tf");
+    assert_eq!(loc.range.start.line, 0, "variable is on line 0");
+}
+
+#[tokio::test]
+async fn goto_def_on_module_output_segment_jumps_to_output_decl() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let child_dir = root.join("child");
+    std::fs::create_dir(&child_dir).unwrap();
+
+    let (service, _socket) = LspService::new(Backend::new);
+    let inner = service.inner();
+    let backend = Backend::with_shared_state(
+        inner.client.clone(),
+        inner.state.clone(),
+        inner.jobs.clone(),
+    );
+
+    let child_u = upsert_file(
+        &backend,
+        &child_dir.join("outputs.tf"),
+        "output \"subnet_id\" { value = \"\" }\n",
+    );
+
+    let caller_path = root.join("main.tf");
+    let caller_src =
+        "module \"net\" {\n  source = \"./child\"\n}\n\noutput \"x\" { value = module.net.subnet_id }\n";
+    let caller_u = upsert_file(&backend, &caller_path, caller_src);
+
+    // Line 4, col 36 → cursor on `s` of `subnet_id` in
+    // `output "x" { value = module.net.subnet_id }`.
+    let loc = single_location(goto_def_at(&backend, &caller_u, Position::new(4, 36)).await);
+    assert_eq!(loc.uri, child_u, "should land in child's outputs.tf");
+    assert_eq!(loc.range.start.line, 0, "output is on line 0");
+}
+
+#[tokio::test]
+async fn goto_def_on_module_label_still_jumps_to_module_block() {
+    // Cursor on the `net` segment of `module.net.subnet_id` must keep
+    // resolving to the `module "net" { }` call header in the SAME
+    // file — NOT into the child module. The user is navigating on
+    // the module name, not on a value inside it.
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let child_dir = root.join("child");
+    std::fs::create_dir(&child_dir).unwrap();
+
+    let (service, _socket) = LspService::new(Backend::new);
+    let inner = service.inner();
+    let backend = Backend::with_shared_state(
+        inner.client.clone(),
+        inner.state.clone(),
+        inner.jobs.clone(),
+    );
+
+    upsert_file(
+        &backend,
+        &child_dir.join("outputs.tf"),
+        "output \"subnet_id\" { value = \"\" }\n",
+    );
+
+    let caller_path = root.join("main.tf");
+    let caller_src =
+        "module \"net\" {\n  source = \"./child\"\n}\n\noutput \"x\" { value = module.net.subnet_id }\n";
+    let caller_u = upsert_file(&backend, &caller_path, caller_src);
+
+    // Line 4, col 29 → on `n` of `net` in `module.net.subnet_id`.
+    let loc = single_location(goto_def_at(&backend, &caller_u, Position::new(4, 29)).await);
+    assert_eq!(loc.uri, caller_u, "label goto-def stays in the caller");
+    assert_eq!(
+        loc.range.start.line, 0,
+        "should point at `module \"net\"` call header on line 0"
+    );
+}
+
+#[tokio::test]
+async fn goto_def_on_unknown_module_input_returns_none() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let child_dir = root.join("child");
+    std::fs::create_dir(&child_dir).unwrap();
+
+    let (service, _socket) = LspService::new(Backend::new);
+    let inner = service.inner();
+    let backend = Backend::with_shared_state(
+        inner.client.clone(),
+        inner.state.clone(),
+        inner.jobs.clone(),
+    );
+
+    // Child declares `region` — the caller sets a typo `regin`.
+    upsert_file(
+        &backend,
+        &child_dir.join("variables.tf"),
+        "variable \"region\" {}\n",
+    );
+
+    let caller_path = root.join("main.tf");
+    let caller_src = "module \"net\" {\n  source = \"./child\"\n  regin = \"eu\"\n}\n";
+    let caller_u = upsert_file(&backend, &caller_path, caller_src);
+
+    // Cursor on `regin` — unknown in the child. Goto-def must return
+    // None (don't fall through to something bogus like jumping to the
+    // module's own call header, which would be confusing).
+    let result = goto_def_at(&backend, &caller_u, Position::new(2, 4)).await;
+    assert!(result.is_none(), "unknown input should yield None, got {result:?}");
+}
+
+#[tokio::test]
+async fn goto_def_on_module_input_resolved_via_modules_json() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+
+    // Simulate a registry/git module: the actual code lives at
+    // `root/cached/net`, advertised via `.terraform/modules/modules.json`
+    // under the key `net`.
+    let cached = root.join("cached").join("net");
+    std::fs::create_dir_all(&cached).unwrap();
+    std::fs::create_dir_all(root.join(".terraform").join("modules")).unwrap();
+    std::fs::write(
+        root.join(".terraform").join("modules").join("modules.json"),
+        r#"{"Modules":[{"Key":"net","Source":"hashicorp/net/aws","Dir":"cached/net"}]}"#,
+    )
+    .unwrap();
+
+    let (service, _socket) = LspService::new(Backend::new);
+    let inner = service.inner();
+    let backend = Backend::with_shared_state(
+        inner.client.clone(),
+        inner.state.clone(),
+        inner.jobs.clone(),
+    );
+
+    let child_u = upsert_file(
+        &backend,
+        &cached.join("variables.tf"),
+        "variable \"region\" { type = string }\n",
+    );
+
+    let caller_path = root.join("main.tf");
+    let caller_src =
+        "module \"net\" {\n  source = \"hashicorp/net/aws\"\n  region = \"eu\"\n}\n";
+    let caller_u = upsert_file(&backend, &caller_path, caller_src);
+
+    let loc = single_location(goto_def_at(&backend, &caller_u, Position::new(2, 4)).await);
+    assert_eq!(loc.uri, child_u, "should resolve through modules.json");
+    assert_eq!(loc.range.start.line, 0);
+}
