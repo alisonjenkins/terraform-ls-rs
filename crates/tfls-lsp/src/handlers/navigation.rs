@@ -1,5 +1,8 @@
 //! Navigation handlers: goto-definition, find-references, hover.
 
+use hcl_edit::expr::{Expression, TraversalOperator};
+use hcl_edit::repr::Span;
+use hcl_edit::structure::Body;
 use lsp_types::{
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams, Location,
     MarkupContent, MarkupKind, Position, ReferenceParams, Url,
@@ -40,6 +43,9 @@ pub async fn goto_definition(
     // module's source, so they run first and fall through on miss.
     if let Some(doc) = backend.state.documents.get(&uri) {
         if let Some(loc) = module_input_goto_at(&backend.state, doc.value(), &uri, pos) {
+            return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
+        }
+        if let Some(loc) = module_output_goto_at(&backend.state, doc.value(), &uri, pos) {
             return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
         }
     }
@@ -107,6 +113,156 @@ fn module_input_goto_at(
     let child = resolve_module_source(&parent, &module_label, &source)?;
 
     lookup_child_module_symbol(state, &child, SymbolKind::Variable, &attr_name)
+}
+
+/// Goto-def target for a cursor on the output-name segment of a
+/// `module.LABEL.OUTPUT` (or deeper) expression — e.g. cursor on
+/// `subnet_id` in `module.network.subnet_id`. Returns the LSP
+/// location of the `output "OUTPUT" { }` declaration inside the
+/// child module.
+///
+/// Deliberately does NOT fire when the cursor is on the `module`
+/// keyword or on the `LABEL` segment — those positions continue to
+/// go through the generic `ReferenceKind::Module { name }` path,
+/// which jumps to the `module "LABEL" { }` call-site header. The
+/// mental model: navigating *on the module name* takes you to the
+/// call declaration; navigating *on a value inside the module*
+/// takes you to the child's source.
+fn module_output_goto_at(
+    state: &tfls_state::StateStore,
+    doc: &DocumentState,
+    uri: &Url,
+    pos: Position,
+) -> Option<Location> {
+    let body = doc.parsed.body.as_ref()?;
+    let offset = lsp_position_to_byte_offset(&doc.rope, pos).ok()?;
+
+    let (module_label, output_name) = find_module_output_segment_at(body, offset)?;
+    let source = doc.symbols.module_sources.get(&module_label)?.clone();
+    let parent = parent_dir(uri)?;
+    let child = resolve_module_source(&parent, &module_label, &source)?;
+
+    lookup_child_module_symbol(state, &child, SymbolKind::Output, &output_name)
+}
+
+/// Walk the body for a `module.LABEL.OUTPUT` traversal whose OUTPUT
+/// segment contains `offset`. Returns `(LABEL, OUTPUT)` on hit.
+/// Descends into every nested expression shape that can contain
+/// another expression, mirroring
+/// `tfls_parser::references::visit_expression`.
+fn find_module_output_segment_at(body: &Body, offset: usize) -> Option<(String, String)> {
+    for structure in body.iter() {
+        if let Some(attr) = structure.as_attribute() {
+            if let Some(hit) = find_module_output_segment_in_expr(&attr.value, offset) {
+                return Some(hit);
+            }
+        } else if let Some(block) = structure.as_block() {
+            if let Some(hit) = find_module_output_segment_at(&block.body, offset) {
+                return Some(hit);
+            }
+        }
+    }
+    None
+}
+
+fn find_module_output_segment_in_expr(
+    expr: &Expression,
+    offset: usize,
+) -> Option<(String, String)> {
+    match expr {
+        Expression::Traversal(tv) => {
+            // Check this traversal's shape first; it's only a hit if
+            // the base is `module` and the cursor sits on the second
+            // `GetAttr` segment.
+            if let Expression::Variable(v) = &tv.expr {
+                if v.as_str() == "module" {
+                    // Collect the full trailing `.ident.ident...` prefix
+                    // so drill-in expressions like `module.foo.bar.baz`
+                    // (where `bar` is an object output and `baz` is one
+                    // of its fields) still resolve to `output "bar" { }`.
+                    // Structural drill-down into object output fields is
+                    // deliberately out of scope — we stop at the output
+                    // declaration.
+                    let mut segments: Vec<(String, std::ops::Range<usize>)> = Vec::new();
+                    for op in &tv.operators {
+                        if let TraversalOperator::GetAttr(ident) = op.value() {
+                            let Some(span) = ident.span() else {
+                                break;
+                            };
+                            segments.push((ident.as_str().to_string(), span));
+                        } else {
+                            break;
+                        }
+                    }
+                    if segments.len() >= 2 {
+                        let (label, _) = segments[0].clone();
+                        let (output, out_span) = segments[1].clone();
+                        let last_end = segments
+                            .last()
+                            .map(|(_, s)| s.end)
+                            .unwrap_or(out_span.end);
+                        // Match when the cursor is anywhere from the
+                        // output-name segment through the tail of the
+                        // traversal. Cursor on `module` or the LABEL
+                        // segment falls through — those positions go
+                        // to the `module "LABEL" { }` call header via
+                        // the generic reference path.
+                        if offset >= out_span.start && offset <= last_end {
+                            return Some((label, output));
+                        }
+                    }
+                }
+            }
+            // Not a direct hit — descend into children in case a
+            // nested expression matches. Index operators carry their
+            // own expressions (e.g. `foo[module.x.y]`).
+            if let Some(hit) = find_module_output_segment_in_expr(&tv.expr, offset) {
+                return Some(hit);
+            }
+            for op in &tv.operators {
+                if let TraversalOperator::Index(e) = op.value() {
+                    if let Some(hit) = find_module_output_segment_in_expr(e, offset) {
+                        return Some(hit);
+                    }
+                }
+            }
+            None
+        }
+        Expression::FuncCall(fc) => {
+            for arg in fc.args.iter() {
+                if let Some(hit) = find_module_output_segment_in_expr(arg, offset) {
+                    return Some(hit);
+                }
+            }
+            None
+        }
+        Expression::Conditional(c) => find_module_output_segment_in_expr(&c.cond_expr, offset)
+            .or_else(|| find_module_output_segment_in_expr(&c.true_expr, offset))
+            .or_else(|| find_module_output_segment_in_expr(&c.false_expr, offset)),
+        Expression::BinaryOp(o) => find_module_output_segment_in_expr(&o.lhs_expr, offset)
+            .or_else(|| find_module_output_segment_in_expr(&o.rhs_expr, offset)),
+        Expression::UnaryOp(o) => find_module_output_segment_in_expr(&o.expr, offset),
+        Expression::Parenthesis(p) => find_module_output_segment_in_expr(p.inner(), offset),
+        Expression::Array(a) => {
+            for e in a.iter() {
+                if let Some(hit) = find_module_output_segment_in_expr(e, offset) {
+                    return Some(hit);
+                }
+            }
+            None
+        }
+        Expression::Object(o) => {
+            for (_k, v) in o.iter() {
+                if let Some(hit) = find_module_output_segment_in_expr(v.expr(), offset) {
+                    return Some(hit);
+                }
+            }
+            None
+        }
+        Expression::ForExpr(f) => find_module_output_segment_in_expr(&f.intro.collection_expr, offset)
+            .or_else(|| find_module_output_segment_in_expr(&f.value_expr, offset)),
+        _ => None,
+    }
 }
 
 pub async fn references(
