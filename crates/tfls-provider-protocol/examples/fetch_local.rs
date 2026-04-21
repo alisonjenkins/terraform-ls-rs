@@ -24,6 +24,33 @@ async fn main() {
         .install_default()
         .ok();
 
+    // Optional CPU profiler — set `TFLS_FLAMEGRAPH=/tmp/out.svg` to
+    // capture an in-process flamegraph of everything from here to
+    // program exit. Uses `pprof` (signal-based sampler), no perf
+    // permissions needed. No-op when the env var is unset.
+    //
+    // pprof is Unix-only; on Windows the env var is silently ignored
+    // and profiling isn't supported from this harness (use
+    // WPR/WPA or Superluminal instead).
+    #[cfg(unix)]
+    let guard = std::env::var("TFLS_FLAMEGRAPH").ok().map(|_| {
+        pprof::ProfilerGuardBuilder::default()
+            .frequency(997)
+            .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+            .build()
+            .expect("pprof guard")
+    });
+    #[cfg(not(unix))]
+    let guard: Option<()> = {
+        if std::env::var("TFLS_FLAMEGRAPH").is_ok() {
+            eprintln!(
+                "TFLS_FLAMEGRAPH is set but pprof is Unix-only; \
+                 ignoring — use WPR/WPA or Superluminal on Windows."
+            );
+        }
+        None
+    };
+
     let workspace = std::env::args()
         .nth(1)
         .map(PathBuf::from)
@@ -76,7 +103,7 @@ async fn main() {
             }
         }
     }
-    let schemas = tfls_provider_protocol::fetch_schemas_from_plugins(&terraform_dir)
+    let schemas = tfls_provider_protocol::fetch_schemas_from_plugins(&terraform_dir, None)
         .await
         .expect("fetch");
     let elapsed = start.elapsed();
@@ -112,4 +139,19 @@ async fn main() {
             }
         }
     }
+
+    // Write flamegraph if profiler was armed (Unix only).
+    #[cfg(unix)]
+    if let (Some(g), Ok(out)) = (guard, std::env::var("TFLS_FLAMEGRAPH")) {
+        match g.report().build() {
+            Ok(report) => {
+                let f = std::fs::File::create(&out).expect("create flamegraph file");
+                report.flamegraph(f).expect("write flamegraph");
+                println!("flamegraph written to {out}");
+            }
+            Err(e) => eprintln!("failed to build profile report: {e}"),
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = guard;
 }

@@ -19,7 +19,7 @@ async fn main() {
     };
 
     let terraform_dir = std::path::PathBuf::from(workspace).join(".terraform");
-    let schemas = tfls_provider_protocol::fetch_schemas_from_plugins(&terraform_dir)
+    let schemas = tfls_provider_protocol::fetch_schemas_from_plugins(&terraform_dir, None)
         .await
         .expect("fetch");
 

@@ -383,6 +383,7 @@ pub async fn enrich_schemas_with_registry_docs(
     let mut total_updated = 0usize;
 
     for pc in providers {
+        let provider_start = std::time::Instant::now();
         let index = match fetch_index(&client, &pc.namespace, &pc.name, &pc.version).await {
             Ok(i) => i,
             Err(e) => {
@@ -487,6 +488,7 @@ pub async fn enrich_schemas_with_registry_docs(
         tracing::info!(
             provider = %format!("{}/{}@{}", pc.namespace, pc.name, pc.version),
             updated = provider_updated,
+            elapsed_ms = provider_start.elapsed().as_millis() as u64,
             "registry enrichment complete"
         );
         total_updated += provider_updated;

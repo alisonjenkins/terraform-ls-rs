@@ -49,7 +49,7 @@ pub fn spawn_worker(
     tokio::spawn(async move {
         loop {
             let job = queue.next().await;
-            if let Err(e) = handle_job(&state, &queue, client.as_ref(), job).await {
+            if let Err(e) = handle_job(Arc::clone(&state), &queue, client.as_ref(), job).await {
                 tracing::warn!(error = %e, "background job failed");
             }
         }
@@ -191,23 +191,52 @@ pub fn spawn_watcher(
 }
 
 async fn handle_job(
-    state: &StateStore,
+    state: Arc<StateStore>,
+    queue: &JobQueue,
+    client: Option<&tower_lsp::Client>,
+    job: Job,
+) -> Result<(), IndexerError> {
+    let job_kind = job_kind_str(&job);
+    let started = std::time::Instant::now();
+    let result = dispatch_job(state, queue, client, job).await;
+    tracing::info!(
+        job_kind,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        ok = result.is_ok(),
+        "job done"
+    );
+    result
+}
+
+fn job_kind_str(job: &Job) -> &'static str {
+    match job {
+        Job::ParseFile(_) => "ParseFile",
+        Job::ReparseDocument(_) => "ReparseDocument",
+        Job::FetchSchemas { .. } => "FetchSchemas",
+        Job::FetchFunctions { .. } => "FetchFunctions",
+        Job::ScanDirectory(_) => "ScanDirectory",
+        Job::BulkWorkspaceScan(_) => "BulkWorkspaceScan",
+    }
+}
+
+async fn dispatch_job(
+    state: Arc<StateStore>,
     queue: &JobQueue,
     client: Option<&tower_lsp::Client>,
     job: Job,
 ) -> Result<(), IndexerError> {
     match job {
         Job::ParseFile(path) => {
-            let result = parse_file_into_state(state, &path).await;
+            let result = parse_file_into_state(&state, &path).await;
             if let Some(c) = client {
-                publish_for_path(state, c, &path).await;
+                publish_for_path(&state, c, &path).await;
             }
             result
         }
         Job::ReparseDocument(url) => {
             state.reparse_document(&url);
             if let Some(c) = client {
-                let diagnostics = crate::handlers::document::compute_diagnostics(state, &url);
+                let diagnostics = crate::handlers::document::compute_diagnostics(&state, &url);
                 let version = state.documents.get(&url).map(|d| d.version);
                 c.publish_diagnostics(url, diagnostics, version).await;
             }
@@ -220,13 +249,51 @@ async fn handle_job(
                 }
                 None => None,
             };
-            let result = fetch_and_install_schemas(state, &working_dir).await;
+            // Per-provider progress callback — forwards schema-fetch
+            // ticks to the LSP progress widget so the user sees e.g.
+            // "3/14 — cloudflare" instead of a frozen "Fetching".
+            let on_provider_done: Option<tfls_provider_protocol::SchemaProgressCallback> =
+                progress.as_ref().map(|p| {
+                    let sender = p.sender();
+                    let cb: tfls_provider_protocol::SchemaProgressCallback =
+                        std::sync::Arc::new(move |addr: &str, done: usize, total: usize| {
+                            let addr_short = addr.rsplit('/').next().unwrap_or(addr).to_string();
+                            let msg = format!("{done}/{total} — {addr_short}");
+                            let pct =
+                                if total > 0 { Some((done * 100 / total) as u32) } else { None };
+                            sender.send_detached(Some(msg), pct);
+                        });
+                    cb
+                });
+            let result = fetch_and_install_schemas(
+                Arc::clone(&state),
+                &working_dir,
+                on_provider_done,
+            )
+            .await;
             if let Some(p) = progress {
                 let message = match &result {
                     Ok(_) => Some("schemas ready".to_string()),
                     Err(_) => Some("schema fetch failed".to_string()),
                 };
                 p.end(message).await;
+            }
+            // User-visible "completion is ready to use" signal —
+            // logMessage is durable in :LspLog and non-intrusive.
+            // The count of installed providers gives the user a
+            // confidence signal ("14 providers loaded") vs. the
+            // previous "completion just doesn't work" confusion.
+            if let (Some(c), Ok(())) = (client, result.as_ref()) {
+                let count = state.schemas.len();
+                c.log_message(
+                    lsp_types::MessageType::INFO,
+                    format!(
+                        "terraform-ls-rs: schemas ready — {count} providers installed. \
+                         Completion + hover structure work now; attribute descriptions \
+                         load in the background."
+                    ),
+                )
+                .await;
             }
             result
         }
@@ -246,8 +313,8 @@ async fn handle_job(
             }
             Ok(())
         }
-        Job::ScanDirectory(dir) => scan_dir_into_state(state, queue, client, &dir).await,
-        Job::BulkWorkspaceScan(root) => bulk_workspace_scan(state, client, &root).await,
+        Job::ScanDirectory(dir) => scan_dir_into_state(&state, queue, client, &dir).await,
+        Job::BulkWorkspaceScan(root) => bulk_workspace_scan(&state, client, &root).await,
     }
 }
 
@@ -338,6 +405,7 @@ async fn scan_files_parallel(
     use rayon::prelude::*;
 
     let file_count = files.len();
+    let total_start = std::time::Instant::now();
     // Begin a progress token if we have a client attached. Silent
     // if the client declines the workDoneProgress/create request
     // (older clients).
@@ -346,6 +414,7 @@ async fn scan_files_parallel(
         None => None,
     };
 
+    let parse_start = std::time::Instant::now();
     let parsed: Vec<DocumentState> = tokio::task::spawn_blocking({
         let files = files.clone();
         let skip: std::collections::HashSet<lsp_types::Url> = state
@@ -371,6 +440,12 @@ async fn scan_files_parallel(
     .unwrap_or_default();
 
     let parsed_count = parsed.len();
+    tracing::info!(
+        parsed = parsed_count,
+        total = file_count,
+        elapsed_ms = parse_start.elapsed().as_millis() as u64,
+        "scan_files_parallel: parse done"
+    );
     if let Some(p) = progress.as_ref() {
         p.report(
             Some(format!("parsed {parsed_count}/{file_count}")),
@@ -405,6 +480,7 @@ async fn scan_files_parallel(
         p.report(Some("computing diagnostics".to_string()), Some(66))
             .await;
     }
+    let diag_start = std::time::Instant::now();
 
     // Group by parent dir so we build one ModuleSnapshot per module.
     let mut by_module: std::collections::HashMap<Option<PathBuf>, Vec<lsp_types::Url>> =
@@ -464,6 +540,12 @@ async fn scan_files_parallel(
         while pending.next().await.is_some() {}
     }
 
+    tracing::info!(
+        published,
+        elapsed_ms = diag_start.elapsed().as_millis() as u64,
+        total_ms = total_start.elapsed().as_millis() as u64,
+        "scan_files_parallel: diagnostics + publish done"
+    );
     if let Some(p) = progress {
         p.end(Some(format!("indexed {published} files"))).await;
     }
@@ -522,8 +604,9 @@ async fn parse_file_into_state(
 }
 
 async fn fetch_and_install_schemas(
-    state: &StateStore,
+    state: Arc<StateStore>,
     working_dir: &Path,
+    on_provider_done: Option<tfls_provider_protocol::SchemaProgressCallback>,
 ) -> Result<(), IndexerError> {
     // Prefer the plugin-protocol path when `.terraform/providers/` exists:
     // it doesn't require credentials or backend init, and it reuses the
@@ -535,11 +618,33 @@ async fn fetch_and_install_schemas(
             dir = %terraform_dir.display(),
             "fetching provider schemas via plugin protocol",
         );
-        match tfls_provider_protocol::fetch_schemas_from_plugins(&terraform_dir).await {
-            Ok(schemas) if !schemas.provider_schemas.is_empty() => {
-                let count = schemas.provider_schemas.len();
-                state.install_schemas(schemas);
-                tracing::info!(providers = count, "installed provider schemas (plugin)");
+        match tfls_provider_protocol::fetch_schemas_from_plugins_raw(
+            &terraform_dir,
+            on_provider_done,
+        ).await {
+            Ok(raw) if !raw.schemas.provider_schemas.is_empty() => {
+                let count = raw.schemas.provider_schemas.len();
+                // Install the bare schemas IMMEDIATELY so completion /
+                // hover see them. Attribute descriptions arrive
+                // asynchronously via the enrichment task we spawn
+                // below — without this split, users wait the full
+                // registry-doc round-trip (~60 s for aws) before
+                // completion unblocks.
+                state.install_schemas(raw.schemas.clone());
+                tracing::info!(
+                    providers = count,
+                    "installed provider schemas (plugin, pre-enrichment)"
+                );
+
+                // Enrichment in the background. Clones the current
+                // installed ProviderSchemas, mutates it, and
+                // re-installs once done so hover descriptions light
+                // up without blocking completion.
+                spawn_background_enrichment(
+                    Arc::clone(&state),
+                    raw.schemas,
+                    raw.coords,
+                );
 
                 // Also fetch provider-defined functions from v6 providers.
                 if let Ok(binaries) = tfls_provider_protocol::discover_providers(&terraform_dir) {
@@ -595,4 +700,52 @@ async fn fetch_and_install_schemas(
 
 fn path_to_url(path: &Path) -> Option<lsp_types::Url> {
     lsp_types::Url::from_file_path(path).ok()
+}
+
+/// Run registry-doc enrichment off the critical path. Completion and
+/// hover already work against the bare schemas we installed
+/// synchronously; this fills in attribute descriptions (hover docs)
+/// as the registry round-trips complete. Re-installs the enriched
+/// schemas at the end, which overwrites the existing
+/// `Arc<ProviderSchema>` entries atomically in the DashMap — any
+/// concurrent reader sees either the old or the new, never a torn
+/// view.
+fn spawn_background_enrichment(
+    state: Arc<StateStore>,
+    mut schemas: tfls_schema::ProviderSchemas,
+    coords: Vec<tfls_provider_protocol::registry_docs::ProviderCoords>,
+) {
+    tokio::spawn(async move {
+        let start = std::time::Instant::now();
+        match tfls_provider_protocol::registry_docs::enrich_schemas_with_registry_docs(
+            &mut schemas,
+            &coords,
+        )
+        .await
+        {
+            Ok(updated) => {
+                let elapsed_ms = start.elapsed().as_millis() as u64;
+                if updated == 0 {
+                    tracing::info!(
+                        elapsed_ms,
+                        "registry enrichment produced no updates; no re-install"
+                    );
+                    return;
+                }
+                state.install_schemas(schemas);
+                tracing::info!(
+                    attributes_updated = updated,
+                    elapsed_ms,
+                    "registry enrichment complete; re-installed enriched schemas",
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    "registry enrichment failed — bare schemas remain installed",
+                );
+            }
+        }
+    });
 }

@@ -81,18 +81,22 @@ impl ProgressReporter {
     /// detail line; `percentage` is ignored by clients for
     /// indeterminate work (just don't pass it in that case).
     pub async fn report(&self, message: Option<String>, percentage: Option<u32>) {
-        self.client
-            .send_notification::<Progress>(ProgressParams {
-                token: self.token.clone(),
-                value: ProgressParamsValue::WorkDone(WorkDoneProgress::Report(
-                    WorkDoneProgressReport {
-                        cancellable: Some(false),
-                        message,
-                        percentage,
-                    },
-                )),
-            })
-            .await;
+        self.sender().send(message, percentage).await;
+    }
+
+    /// Get a cheap, cloneable handle that can send `Report`
+    /// notifications from either sync or async callers. Used when a
+    /// sync callback (e.g. the schema-fetch per-provider hook) needs
+    /// to tick the same progress token that an async orchestrator
+    /// began. The sender shares the client + token but not the
+    /// `ended` state — calling `send()` after `end()` is a harmless
+    /// no-op on the wire (the client tolerates stray reports on a
+    /// closed token).
+    pub fn sender(&self) -> ReportSender {
+        ReportSender {
+            client: self.client.clone(),
+            token: self.token.clone(),
+        }
     }
 
     /// Send `End` and consume the reporter. Idempotent: if already
@@ -110,5 +114,51 @@ impl ProgressReporter {
                 )),
             })
             .await;
+    }
+}
+
+/// Cheap cloneable handle for sending `Report` notifications on an
+/// existing progress token from sync callers.
+#[derive(Clone)]
+pub struct ReportSender {
+    client: Client,
+    token: ProgressToken,
+}
+
+impl ReportSender {
+    /// Send a `Report` asynchronously. When called from a sync
+    /// context (e.g. a closure passed to a gRPC worker pool),
+    /// spawns a detached task so the caller doesn't block on the
+    /// `client.send_notification` await. When called from an async
+    /// context, `.await` the returned future if you want ordering
+    /// guarantees with surrounding work; otherwise discard.
+    pub fn send(
+        &self,
+        message: Option<String>,
+        percentage: Option<u32>,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let client = self.client.clone();
+        let token = self.token.clone();
+        async move {
+            client
+                .send_notification::<Progress>(ProgressParams {
+                    token,
+                    value: ProgressParamsValue::WorkDone(WorkDoneProgress::Report(
+                        WorkDoneProgressReport {
+                            cancellable: Some(false),
+                            message,
+                            percentage,
+                        },
+                    )),
+                })
+                .await;
+        }
+    }
+
+    /// Fire-and-forget variant for sync callers — spawns the
+    /// notification onto the current tokio runtime.
+    pub fn send_detached(&self, message: Option<String>, percentage: Option<u32>) {
+        let fut = self.send(message, percentage);
+        tokio::spawn(fut);
     }
 }

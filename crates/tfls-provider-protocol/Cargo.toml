@@ -42,3 +42,9 @@ tonic-build = { version = "0.12", default-features = false, features = ["prost"]
 [dev-dependencies]
 tokio = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# pprof is Unix-only (Linux, macOS, *BSD). Gate the dep so Windows
+# still builds the examples — the flamegraph feature in fetch_local
+# is a no-op on non-Unix.
+[target.'cfg(unix)'.dev-dependencies]
+pprof = { version = "0.14", default-features = false, features = ["flamegraph"] }
