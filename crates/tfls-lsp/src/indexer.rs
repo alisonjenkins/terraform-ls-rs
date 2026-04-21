@@ -61,17 +61,14 @@ pub fn spawn_worker(
 /// the worker's serial queue. The bulk scan parallelises file read,
 /// parse, symbol extract, and diagnostic compute with rayon and
 /// dispatches publishes concurrently.
-pub fn enqueue_workspace_scan(state: &StateStore, queue: &JobQueue, root: &Path) {
-    // Pre-mark every scanned dir so later `did_open` events don't
-    // re-enqueue `ScanDirectory` jobs for the same dirs.
-    if let Ok(files) = discover_terraform_files(root) {
-        tracing::info!(count = files.len(), root = %root.display(), "workspace scan (bulk)");
-        for path in &files {
-            if let Some(parent) = path.parent() {
-                state.scanned_dirs.insert(parent.to_path_buf());
-            }
-        }
-    }
+pub fn enqueue_workspace_scan(_state: &StateStore, queue: &JobQueue, root: &Path) {
+    // Discovery and pre-marking happen inside the
+    // `BulkWorkspaceScan` job now, not here. Doing them inline in
+    // `initialize` blocks the LSP initialize roundtrip on a
+    // filesystem walk — seconds on large monorepos — which leaves
+    // Fidget silent and makes the server feel hung. The job itself
+    // opens a progress span before scanning so `$/progress`
+    // notifications arrive as soon as the worker picks it up.
     queue.enqueue(Job::BulkWorkspaceScan(root.to_path_buf()), Priority::Low);
 }
 
@@ -247,7 +244,23 @@ async fn dispatch_job(
         Job::FetchSchemas { working_dir } => {
             let progress = match client {
                 Some(c) => {
-                    crate::progress::ProgressReporter::begin(c, "Fetching provider schemas").await
+                    let rep = crate::progress::ProgressReporter::begin(
+                        c,
+                        "Fetching provider schemas",
+                    )
+                    .await;
+                    // Clue the user in that other startup work is
+                    // behind this job in the queue — otherwise the
+                    // progress feels like "just one thing happening"
+                    // when the workspace scan is waiting to run.
+                    if let Some(r) = rep.as_ref() {
+                        r.report(
+                            Some("workspace indexing queued after schemas".to_string()),
+                            None,
+                        )
+                        .await;
+                    }
+                    rep
                 }
                 None => None,
             };
@@ -336,13 +349,49 @@ async fn bulk_workspace_scan(
     client: Option<&tower_lsp::Client>,
     root: &Path,
 ) -> Result<(), IndexerError> {
+    // Discovery happens here (not in `initialize`) so the LSP
+    // initialize roundtrip returns immediately and the
+    // `spawn_blocking` inside `scan_files_parallel` can overlap
+    // with any other background jobs. Emit a short progress span
+    // around the filesystem walk — a bare `Job::BulkWorkspaceScan`
+    // with no prior progress would leave Fidget silent for the
+    // (potentially multi-second) duration of the walk on large
+    // repos.
+    let discover_progress = match client {
+        Some(c) => crate::progress::ProgressReporter::begin(c, "Discovering Terraform files").await,
+        None => None,
+    };
     let files = match discover_terraform_files(root) {
         Ok(f) => f,
         Err(e) => {
             tracing::warn!(error = %e, root = %root.display(), "bulk scan: discovery failed");
+            if let Some(p) = discover_progress {
+                p.end(Some("discovery failed".to_string())).await;
+            }
             return Ok(());
         }
     };
+    tracing::info!(
+        count = files.len(),
+        root = %root.display(),
+        "workspace scan (bulk)"
+    );
+
+    // Pre-mark every discovered dir in `scanned_dirs` so `did_open`
+    // events for files in those dirs don't redundantly enqueue
+    // `ScanDirectory` jobs. (C3 revisits this state machine's
+    // semantics more fundamentally.)
+    for path in &files {
+        if let Some(parent) = path.parent() {
+            state.scanned_dirs.insert(parent.to_path_buf());
+        }
+    }
+    if let Some(p) = discover_progress {
+        p.end(Some(format!("{} files", files.len()))).await;
+    }
+
+    // Hand off to the parallel scan — it opens its own "Indexing
+    // Terraform workspace" progress span with per-phase detail.
     scan_files_parallel(state, client, files).await;
     // The bulk scan just filled the store with peer files open
     // buffers may depend on (cross-file symbols, modules declared in
