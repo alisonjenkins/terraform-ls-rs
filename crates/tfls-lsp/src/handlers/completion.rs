@@ -335,6 +335,38 @@ fn label_closed_after(text: &str, offset: usize) -> bool {
 ///   $0
 /// }
 /// ```
+/// Snippet for a nested-block completion — `name { … }` with each
+/// required attr pre-filled on its own line and given a type-aware
+/// placeholder. Tabstops are numbered so the user can Tab through
+/// required values in order; when there are no required attrs the
+/// body is a single `$0` so the cursor lands inside the block.
+fn nested_block_scaffold_snippet(name: &str, block: &tfls_schema::BlockSchema) -> String {
+    let mut required: Vec<(&String, &tfls_schema::AttributeSchema)> = block
+        .attributes
+        .iter()
+        .filter(|(_, a)| a.required)
+        .collect();
+    required.sort_by_key(|(n, _)| n.as_str());
+
+    if required.is_empty() {
+        return format!("{name} {{\n  $0\n}}");
+    }
+
+    let mut out = format!("{name} {{\n");
+    for (i, (attr_name, attr)) in required.iter().enumerate() {
+        let tab = i + 1;
+        let placeholder = match classify_schema_type(attr.r#type.as_ref()) {
+            SchemaTypeKind::String => format!("\"${{{tab}}}\""),
+            SchemaTypeKind::Sequence => format!("[${{{tab}}}]"),
+            SchemaTypeKind::Mapping => format!("{{\n    ${{{tab}}}\n  }}"),
+            SchemaTypeKind::Scalar => format!("${{{tab}}}"),
+        };
+        out.push_str(&format!("  {attr_name} = {placeholder}\n"));
+    }
+    out.push('}');
+    out
+}
+
 pub fn resource_scaffold_snippet(type_name: &str, backend: &Backend, kind: &str) -> String {
     let schema = if kind == "data" {
         backend.state.data_source_schema(type_name)
@@ -1130,11 +1162,11 @@ fn resource_body_items(
                 nb.nesting_mode != NestingMode::Single
                     || !filter.present_blocks.contains(name.as_str())
             })
-            .map(|(name, _)| CompletionItem {
+            .map(|(name, nb)| CompletionItem {
                 label: name.clone(),
                 kind: Some(CompletionItemKind::STRUCT),
                 detail: Some("nested block".to_string()),
-                insert_text: Some(format!("{name} {{\n  $0\n}}")),
+                insert_text: Some(nested_block_scaffold_snippet(name, &nb.block)),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..Default::default()
             }),

@@ -237,3 +237,82 @@ async fn hover_on_lifecycle_enabled_in_tofu_file_is_silent_about_portability() {
         "should not warn about Terraform on a .tofu file: {md}"
     );
 }
+
+#[tokio::test]
+async fn hover_on_nested_block_header_returns_block_docs_not_resource_label() {
+    // Cursor on a nested block's identifier (e.g. the `r` of
+    // `root_block_device`) should surface that block's schema
+    // documentation — nesting mode, min/max_items, description,
+    // attribute summary. Previously fell through to the enclosing
+    // resource's symbol hover, which just said "resource aws_instance.x".
+    let u = uri("file:///nested_block_hover.tf");
+    let src = "resource \"aws_instance\" \"x\" {\n  root_block_device {\n  }\n}\n";
+    let b = backend_with(src, &u);
+    let schema: ProviderSchemas = sonic_rs::from_str(
+        r#"{
+        "format_version": "1.0",
+        "provider_schemas": {
+            "registry.terraform.io/hashicorp/aws": {
+                "provider": { "version": 0, "block": {} },
+                "resource_schemas": {
+                    "aws_instance": {
+                        "version": 1,
+                        "block": {
+                            "attributes": {},
+                            "block_types": {
+                                "root_block_device": {
+                                    "nesting_mode": "single",
+                                    "max_items": 1,
+                                    "block": {
+                                        "description": "Customize details about the root block device of the instance.",
+                                        "attributes": {
+                                            "volume_size": { "type": "number", "optional": true }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "data_source_schemas": {}
+            }
+        }
+    }"#,
+    )
+    .expect("parse schema");
+    b.state.install_schemas(schema);
+
+    // Cursor on `r` of `root_block_device` (line 1, col 2).
+    let md = hover_markdown(&b, &u, Position::new(1, 2))
+        .await
+        .expect("some hover");
+
+    assert!(
+        md.contains("**block** `root_block_device`"),
+        "expected nested-block header; got: {md}"
+    );
+    assert!(
+        md.contains("aws_instance"),
+        "expected enclosing resource type; got: {md}"
+    );
+    assert!(
+        md.contains("nesting: single"),
+        "expected nesting mode metadata; got: {md}"
+    );
+    assert!(
+        md.contains("max_items: 1"),
+        "expected cardinality metadata; got: {md}"
+    );
+    assert!(
+        md.contains("Customize details about the root block device"),
+        "expected block description; got: {md}"
+    );
+    assert!(
+        md.contains("`volume_size`"),
+        "expected attribute summary; got: {md}"
+    );
+    assert!(
+        !md.starts_with("**resource**"),
+        "must not fall through to resource-label hover; got: {md}"
+    );
+}

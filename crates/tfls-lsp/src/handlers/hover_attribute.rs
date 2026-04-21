@@ -19,7 +19,7 @@ use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind, Position, Url};
 use std::sync::Arc;
 use tfls_core::builtin_blocks::{BuiltinAttr, LIFECYCLE_DATA_BLOCK, LIFECYCLE_RESOURCE_BLOCK};
 use tfls_parser::hcl_span_to_lsp_range;
-use tfls_schema::{AttributeSchema, BlockSchema, ProviderSchema};
+use tfls_schema::{AttributeSchema, BlockSchema, NestedBlockSchema, NestingMode, ProviderSchema};
 use tfls_state::{DocumentState, StateStore};
 
 /// Try to produce a hover for an attribute key under the cursor. Always
@@ -34,32 +34,72 @@ pub fn attribute_hover(
     uri: &Url,
 ) -> Option<Hover> {
     let body = doc.parsed.body.as_ref()?;
-    let hit = find_attribute_at(body, doc, pos)?;
+    let hit = find_hit_at(body, doc, pos)?;
 
-    // Meta-block attributes (`lifecycle { create_before_destroy = … }`,
-    // `lifecycle.precondition.condition`, `provisioner`, `connection`)
-    // aren't in provider schemas — they're Terraform/OpenTofu language
-    // constructs. Route those to a dedicated renderer so we don't
-    // falsely claim "attribute is not in the schema for aws_foo".
-    let markdown = if is_meta_block_path(&hit.nested_path) {
-        render_meta_attribute(&hit, uri)
-    } else {
-        match resolve_attribute_schema(state, &hit) {
-            AttributeLookup::Found(schema) => render_attribute(&hit, &schema),
-            AttributeLookup::SchemasNotLoaded => render_schemas_not_loaded(&hit),
-            AttributeLookup::ProviderMissing => render_provider_missing(&hit),
-            AttributeLookup::AttributeUnknown => render_attribute_unknown(&hit),
+    match hit {
+        Hit::Attribute(hit) => {
+            // Meta-block attributes (`lifecycle { create_before_destroy = … }`,
+            // `lifecycle.precondition.condition`, `provisioner`, `connection`)
+            // aren't in provider schemas — they're Terraform/OpenTofu language
+            // constructs. Route those to a dedicated renderer so we don't
+            // falsely claim "attribute is not in the schema for aws_foo".
+            let markdown = if is_meta_block_path(&hit.nested_path) {
+                render_meta_attribute(&hit, uri)
+            } else {
+                match resolve_attribute_schema(state, &hit) {
+                    AttributeLookup::Found(schema) => render_attribute(&hit, &schema),
+                    AttributeLookup::SchemasNotLoaded => render_schemas_not_loaded(&hit),
+                    AttributeLookup::ProviderMissing => render_provider_missing(&hit),
+                    AttributeLookup::AttributeUnknown => render_attribute_unknown(&hit),
+                }
+            };
+            let range = hcl_span_to_lsp_range(&doc.rope, hit.key_span).ok()?;
+            Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: markdown,
+                }),
+                range: Some(range),
+            })
         }
-    };
-    let range = hcl_span_to_lsp_range(&doc.rope, hit.key_span).ok()?;
+        Hit::NestedBlockHeader(hit) => {
+            let markdown = match resolve_nested_block_schema(state, &hit) {
+                NestedBlockLookup::Found(nb) => render_nested_block(&hit, &nb),
+                NestedBlockLookup::SchemasNotLoaded => {
+                    render_nested_block_schemas_not_loaded(&hit)
+                }
+                NestedBlockLookup::ProviderMissing => render_nested_block_provider_missing(&hit),
+                NestedBlockLookup::BlockUnknown => render_nested_block_unknown(&hit),
+            };
+            let range = hcl_span_to_lsp_range(&doc.rope, hit.ident_span).ok()?;
+            Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: markdown,
+                }),
+                range: Some(range),
+            })
+        }
+    }
+}
 
-    Some(Hover {
-        contents: HoverContents::Markup(MarkupContent {
-            kind: MarkupKind::Markdown,
-            value: markdown,
-        }),
-        range: Some(range),
-    })
+/// Cursor landed on either an attribute key or a nested-block header —
+/// these render differently.
+enum Hit {
+    Attribute(AttributeHit),
+    NestedBlockHeader(NestedBlockHeaderHit),
+}
+
+struct NestedBlockHeaderHit {
+    root_kind: RootBlockKind,
+    root_type: String,
+    /// Path from the root block down to (but not including) the
+    /// block whose header the cursor sits on. Empty when the cursor
+    /// is on an immediate child of the root body.
+    parent_path: Vec<String>,
+    /// Name of the nested block whose header we're hovering on.
+    block_name: String,
+    ident_span: std::ops::Range<usize>,
 }
 
 /// True if the nested path passes through a meta-block whose contents
@@ -224,7 +264,7 @@ struct AttributeHit {
     key_span: std::ops::Range<usize>,
 }
 
-fn find_attribute_at(body: &Body, doc: &DocumentState, pos: Position) -> Option<AttributeHit> {
+fn find_hit_at(body: &Body, doc: &DocumentState, pos: Position) -> Option<Hit> {
     let offset = tfls_parser::lsp_position_to_byte_offset(&doc.rope, pos).ok()?;
 
     for structure in body.iter() {
@@ -248,40 +288,59 @@ fn find_attribute_at(body: &Body, doc: &DocumentState, pos: Position) -> Option<
             continue;
         }
 
-        if let Some(mut hit) = scan_block(&block.body, offset, &mut Vec::new()) {
-            hit.root_kind = root_kind;
-            hit.root_type = type_label;
+        if let Some(hit) = scan_block(&block.body, offset, &mut Vec::new(), root_kind, &type_label)
+        {
             return Some(hit);
         }
     }
     None
 }
 
-fn scan_block(body: &Body, offset: usize, nested: &mut Vec<String>) -> Option<AttributeHit> {
+fn scan_block(
+    body: &Body,
+    offset: usize,
+    path: &mut Vec<String>,
+    root_kind: RootBlockKind,
+    root_type: &str,
+) -> Option<Hit> {
     for structure in body.iter() {
         if let Some(attr) = structure.as_attribute() {
             if attribute_key_contains(attr, offset) {
                 let key_span = attr.key.span()?;
-                return Some(AttributeHit {
-                    // overwritten by caller in find_attribute_at
-                    root_kind: RootBlockKind::Resource,
-                    root_type: String::new(),
-                    nested_path: nested.clone(),
+                return Some(Hit::Attribute(AttributeHit {
+                    root_kind,
+                    root_type: root_type.to_string(),
+                    nested_path: path.clone(),
                     attr_name: attr.key.as_str().to_string(),
                     key_span,
-                });
+                }));
             }
-        } else if let Some(block) = structure.as_block() {
-            if !span_contains(block.span(), offset) {
-                continue;
+            continue;
+        }
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
+        if !span_contains(block.span(), offset) {
+            continue;
+        }
+        let name = block.ident.as_str().to_string();
+        // Cursor on the nested block's header keyword — hover that.
+        if let Some(ident_span) = block.ident.span() {
+            if span_contains(Some(ident_span.clone()), offset) {
+                return Some(Hit::NestedBlockHeader(NestedBlockHeaderHit {
+                    root_kind,
+                    root_type: root_type.to_string(),
+                    parent_path: path.clone(),
+                    block_name: name,
+                    ident_span,
+                }));
             }
-            let name = block.ident.as_str().to_string();
-            nested.push(name);
-            let hit = scan_block(&block.body, offset, nested);
-            nested.pop();
-            if let Some(h) = hit {
-                return Some(h);
-            }
+        }
+        path.push(name);
+        let hit = scan_block(&block.body, offset, path, root_kind, root_type);
+        path.pop();
+        if hit.is_some() {
+            return hit;
         }
     }
     None
@@ -420,6 +479,172 @@ fn render_attribute_unknown(hit: &AttributeHit) -> String {
 Check the spelling or provider version.",
         header = attribute_header(hit),
         attr = hit.attr_name,
+        root = hit.root_type,
+    )
+}
+
+enum NestedBlockLookup {
+    Found(NestedBlockSchema),
+    SchemasNotLoaded,
+    ProviderMissing,
+    BlockUnknown,
+}
+
+fn resolve_nested_block_schema(state: &StateStore, hit: &NestedBlockHeaderHit) -> NestedBlockLookup {
+    if state.schemas.is_empty() {
+        return NestedBlockLookup::SchemasNotLoaded;
+    }
+
+    let root_schema = match hit.root_kind {
+        RootBlockKind::Resource => state
+            .find_resource_schema(&hit.root_type)
+            .and_then(|ps| ps.resource_schemas.get(&hit.root_type).cloned()),
+        RootBlockKind::DataSource => state
+            .find_data_source_schema(&hit.root_type)
+            .and_then(|ps| ps.data_source_schemas.get(&hit.root_type).cloned()),
+        RootBlockKind::Provider => {
+            find_provider_schema(state, &hit.root_type).map(|ps| ps.provider.clone())
+        }
+    };
+    let Some(root_schema) = root_schema else {
+        return NestedBlockLookup::ProviderMissing;
+    };
+
+    let Some(parent) = descend_schema(&root_schema.block, &hit.parent_path) else {
+        return NestedBlockLookup::BlockUnknown;
+    };
+    match parent.block_types.get(&hit.block_name).cloned() {
+        Some(nb) => NestedBlockLookup::Found(nb),
+        None => NestedBlockLookup::BlockUnknown,
+    }
+}
+
+fn nested_block_header(hit: &NestedBlockHeaderHit) -> String {
+    let kind = match hit.root_kind {
+        RootBlockKind::Resource => "resource",
+        RootBlockKind::DataSource => "data source",
+        RootBlockKind::Provider => "provider",
+    };
+    let mut out = format!(
+        "**block** `{block}` on {kind} `{root}`",
+        block = hit.block_name,
+        kind = kind,
+        root = hit.root_type,
+    );
+    if !hit.parent_path.is_empty() {
+        out.push_str(&format!(" (inside `{}`)", hit.parent_path.join(".")));
+    }
+    out
+}
+
+fn render_nested_block(hit: &NestedBlockHeaderHit, nb: &NestedBlockSchema) -> String {
+    let mut out = nested_block_header(hit);
+
+    // Nesting + cardinality metadata.
+    let nesting = match nb.nesting_mode {
+        NestingMode::Single => "single",
+        NestingMode::List => "list",
+        NestingMode::Set => "set",
+        NestingMode::Map => "map",
+        NestingMode::Group => "group",
+    };
+    let mut flags = vec![format!("nesting: {nesting}")];
+    if nb.min_items > 0 {
+        flags.push(format!("min_items: {}", nb.min_items));
+    }
+    if nb.max_items > 0 {
+        flags.push(format!("max_items: {}", nb.max_items));
+    }
+    if nb.block.deprecated {
+        flags.push("deprecated".to_string());
+    }
+    out.push_str(&format!(" _{}_\n", flags.join(", ")));
+
+    if let Some(desc) = nb.block.description.as_deref() {
+        if !desc.trim().is_empty() {
+            out.push('\n');
+            out.push_str(desc);
+        }
+    }
+
+    // Summarise what attributes the block contains — matches the
+    // level of detail users get from the provider registry's block
+    // reference pages.
+    if !nb.block.attributes.is_empty() {
+        let mut required: Vec<&String> = nb
+            .block
+            .attributes
+            .iter()
+            .filter(|(_, a)| a.required)
+            .map(|(n, _)| n)
+            .collect();
+        let mut optional: Vec<&String> = nb
+            .block
+            .attributes
+            .iter()
+            .filter(|(_, a)| a.optional && !a.required)
+            .map(|(n, _)| n)
+            .collect();
+        required.sort();
+        optional.sort();
+        if !required.is_empty() {
+            out.push_str("\n\n_Required attrs:_ ");
+            out.push_str(
+                &required
+                    .iter()
+                    .map(|n| format!("`{n}`"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
+        if !optional.is_empty() {
+            out.push_str("\n\n_Optional attrs:_ ");
+            out.push_str(
+                &optional
+                    .iter()
+                    .map(|n| format!("`{n}`"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
+    }
+    if !nb.block.block_types.is_empty() {
+        let mut nested: Vec<&String> = nb.block.block_types.keys().collect();
+        nested.sort();
+        out.push_str("\n\n_Nested blocks:_ ");
+        out.push_str(
+            &nested
+                .iter()
+                .map(|n| format!("`{n}`"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
+
+    out
+}
+
+fn render_nested_block_schemas_not_loaded(hit: &NestedBlockHeaderHit) -> String {
+    format!(
+        "{header}\n\n_No provider schemas are loaded._ \
+Run `terraform init` (or `tofu init`) so tfls can fetch block documentation.",
+        header = nested_block_header(hit),
+    )
+}
+
+fn render_nested_block_provider_missing(hit: &NestedBlockHeaderHit) -> String {
+    format!(
+        "{header}\n\n_No schema for `{root}` is loaded._",
+        header = nested_block_header(hit),
+        root = hit.root_type,
+    )
+}
+
+fn render_nested_block_unknown(hit: &NestedBlockHeaderHit) -> String {
+    format!(
+        "{header}\n\n_Block `{block}` is not in the schema for `{root}`._",
+        header = nested_block_header(hit),
+        block = hit.block_name,
         root = hit.root_type,
     )
 }

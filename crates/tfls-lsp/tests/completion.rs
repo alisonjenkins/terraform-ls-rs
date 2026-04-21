@@ -285,6 +285,58 @@ async fn resource_body_inside_nested_block_suggests_nested_attrs() {
 }
 
 #[tokio::test]
+async fn nested_block_completion_prefills_required_attrs() {
+    // When the user completes a nested block whose schema has required
+    // attrs, the inserted snippet should pre-fill each required attr
+    // on its own line with a type-aware placeholder — mirroring the
+    // top-level resource scaffold. `ebs_block_device` has
+    // `device_name` (string, required); the snippet must include it.
+    let u = uri("file:///nested_required.tf");
+    let src = "resource \"aws_instance\" \"x\" {\n  \n}\n";
+    let backend = fresh_backend(src, &u);
+    install_aws_schema(&backend);
+
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(1, 2)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+
+    let items: Vec<CompletionItem> = match resp {
+        CompletionResponse::Array(a) => a,
+        CompletionResponse::List(l) => l.items,
+    };
+    let item = items
+        .iter()
+        .find(|i| i.label == "ebs_block_device")
+        .expect("ebs_block_device suggestion present");
+    let text = item.insert_text.as_deref().expect("insert_text set");
+    assert!(
+        text.contains("device_name = \"${1}\""),
+        "required string attr should be pre-filled with type-aware placeholder; got {text:?}"
+    );
+    assert!(
+        text.starts_with("ebs_block_device {\n"),
+        "snippet should open the block; got {text:?}"
+    );
+    assert!(
+        text.trim_end().ends_with('}'),
+        "snippet should close the block; got {text:?}"
+    );
+
+    // `root_block_device` has only optional attrs — no prefill, empty
+    // body with `$0` tabstop.
+    let root_item = items
+        .iter()
+        .find(|i| i.label == "root_block_device")
+        .expect("root_block_device suggestion present");
+    let root_text = root_item.insert_text.as_deref().expect("insert_text set");
+    assert_eq!(root_text, "root_block_device {\n  $0\n}");
+}
+
+#[tokio::test]
 async fn cursor_on_nested_block_header_suggests_parent_body_not_child_attrs() {
     // Regression: when the cursor sits on the identifier of an existing
     // nested block header (e.g. the `r` of `root_block_device {`), the
