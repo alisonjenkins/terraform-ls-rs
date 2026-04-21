@@ -88,6 +88,168 @@ fn variable_reference_resolves_across_files_in_same_directory() {
     );
 }
 
+// --- Variable-scope test matrix -----------------------------------
+//
+// These tests pin the end-to-end `compute_diagnostics` behaviour for
+// `var.X` references across the scoping edge cases that production
+// modules actually hit. Regressions in reference extraction,
+// `is_defined_in_module`, or path comparison surface here.
+//
+// Each test uses `multi_file_diags` to drop several `.tf` files into
+// the store and return the diagnostics for one of them. The helper
+// keeps the assertion shape small so new cases are cheap to add.
+
+fn multi_file_diags(files: &[(&Url, &str)], target: &Url) -> Vec<String> {
+    let b = backend();
+    for (u, src) in files {
+        insert(&b, u, src);
+    }
+    messages(&b, target)
+}
+
+fn expect_no_undefined_variable(msgs: &[String], name: &str, context: &str) {
+    assert!(
+        msgs.iter()
+            .all(|m| !(m.contains("undefined variable") && m.contains(name))),
+        "{context}: `{name}` flagged as undefined; diagnostics were: {msgs:?}"
+    );
+}
+
+fn expect_undefined_variable(msgs: &[String], name: &str, context: &str) {
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("undefined variable") && m.contains(name)),
+        "{context}: `{name}` should be undefined but wasn't; diagnostics were: {msgs:?}"
+    );
+}
+
+#[test]
+fn scope_var_ref_inside_module_block_same_dir_decl_resolves() {
+    // Case 2 from the matrix: reference inside a module block's
+    // body, declaration in a peer file. Bug the user hit.
+    let vars = uri("file:///stack/variables.tf");
+    let call = uri("file:///stack/k3s_cluster.tf");
+    let msgs = multi_file_diags(
+        &[
+            (&vars, "variable \"account_number\" {}\n"),
+            (
+                &call,
+                "module \"k3s_cluster\" {\n  source         = \"./modules/k3s\"\n  account_number = var.account_number\n}\n",
+            ),
+        ],
+        &call,
+    );
+    expect_no_undefined_variable(&msgs, "account_number", "module-block ref + peer decl");
+}
+
+#[test]
+fn scope_var_ref_inside_module_block_child_only_decl_still_warns() {
+    // Case 3: the declaration exists only in a CHILD module,
+    // not in the caller's scope. The `var.X` at the caller
+    // resolves to the caller's scope — child-module vars are
+    // invisible from there — so this must still warn.
+    let call = uri("file:///stack/k3s_cluster.tf");
+    let child_vars = uri("file:///stack/modules/k3s/variables.tf");
+    let msgs = multi_file_diags(
+        &[
+            (&child_vars, "variable \"account_number\" {}\n"),
+            (
+                &call,
+                "module \"k3s_cluster\" {\n  source         = \"./modules/k3s\"\n  account_number = var.account_number\n}\n",
+            ),
+        ],
+        &call,
+    );
+    expect_undefined_variable(&msgs, "account_number", "child-only decl, caller ref");
+}
+
+#[test]
+fn scope_var_shadowing_root_and_child_declaration_resolves_at_root() {
+    // Case 4: both the stack root AND a child module declare
+    // the same variable name. A reference at the root resolves
+    // to the root's declaration — the child's copy is not in
+    // scope for the root body.
+    let root_vars = uri("file:///stack/variables.tf");
+    let call = uri("file:///stack/k3s_cluster.tf");
+    let child_vars = uri("file:///stack/modules/k3s/variables.tf");
+    let msgs = multi_file_diags(
+        &[
+            (&root_vars, "variable \"account_number\" {}\n"),
+            (&child_vars, "variable \"account_number\" {}\n"),
+            (
+                &call,
+                "module \"k3s_cluster\" {\n  source         = \"./modules/k3s\"\n  account_number = var.account_number\n}\n",
+            ),
+        ],
+        &call,
+    );
+    expect_no_undefined_variable(&msgs, "account_number", "root+child shadow");
+}
+
+#[test]
+fn scope_var_shadowing_across_unrelated_stacks_resolves_in_each() {
+    // Case 5: `stackA` and `stackB` each declare their own
+    // `variable "region" {}`; references in each stack must
+    // resolve to their own declaration without flagging.
+    let a_vars = uri("file:///stackA/variables.tf");
+    let a_main = uri("file:///stackA/main.tf");
+    let b_vars = uri("file:///stackB/variables.tf");
+    let b_main = uri("file:///stackB/main.tf");
+    let files: &[(&Url, &str)] = &[
+        (&a_vars, "variable \"region\" {}\n"),
+        (&a_main, "output \"r\" { value = var.region }\n"),
+        (&b_vars, "variable \"region\" {}\n"),
+        (&b_main, "output \"r\" { value = var.region }\n"),
+    ];
+    expect_no_undefined_variable(
+        &multi_file_diags(files, &a_main),
+        "region",
+        "stackA ref",
+    );
+    expect_no_undefined_variable(
+        &multi_file_diags(files, &b_main),
+        "region",
+        "stackB ref",
+    );
+}
+
+#[test]
+fn scope_var_ref_inside_dynamic_content_resolves_against_caller_scope() {
+    // Case 6: references inside `dynamic "X" { content { foo =
+    // var.Y } }` must still resolve against the caller's own
+    // module scope — the `dynamic` / `content` wrapper doesn't
+    // change variable visibility.
+    let vars = uri("file:///stack/variables.tf");
+    let main = uri("file:///stack/main.tf");
+    let msgs = multi_file_diags(
+        &[
+            (&vars, "variable \"tags\" {}\n"),
+            (
+                &main,
+                "resource \"aws_instance\" \"x\" {\n  dynamic \"tag\" {\n    for_each = var.tags\n    content {\n      key = var.tags\n    }\n  }\n}\n",
+            ),
+        ],
+        &main,
+    );
+    expect_no_undefined_variable(&msgs, "tags", "dynamic/content ref");
+}
+
+#[test]
+fn scope_var_ref_inside_locals_block_resolves() {
+    // Case 7: references inside `locals { x = var.Y }` must
+    // resolve to the module's own variable declarations.
+    let vars = uri("file:///stack/variables.tf");
+    let main = uri("file:///stack/main.tf");
+    let msgs = multi_file_diags(
+        &[
+            (&vars, "variable \"region\" {}\n"),
+            (&main, "locals { r = var.region }\n"),
+        ],
+        &main,
+    );
+    expect_no_undefined_variable(&msgs, "region", "locals-block ref");
+}
+
 #[test]
 fn module_reference_is_false_positive_until_sibling_is_indexed() {
     // Regression: on `did_open`, only the current buffer is in the

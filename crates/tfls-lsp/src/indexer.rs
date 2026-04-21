@@ -422,14 +422,31 @@ async fn bulk_workspace_scan(
     Ok(())
 }
 
-/// Ask the client to invalidate its diagnostic cache and re-pull
-/// via `textDocument/diagnostic`. Called after a background scan
-/// adds documents to the store that might retroactively clear a
-/// false-positive emitted during an earlier `did_open` on an open
-/// buffer — those buffers sit on stale diagnostics under
-/// pull-only mode because we deliberately don't push for them.
-/// No-op when the client didn't advertise
-/// `workspace.diagnostic.refresh_support` at initialize time.
+/// Notify the client that diagnostics for open buffers may have
+/// changed because a background scan added peer files to the
+/// store. Dispatches between three client capability shapes:
+///
+/// 1. **Refresh supported** — send
+///    `workspace/diagnostic/refresh`, the LSP-native server-
+///    initiated refresh. Client re-pulls via
+///    `textDocument/diagnostic`; single namespace, no
+///    duplicates.
+/// 2. **Pull supported but no refresh** — manually re-publish
+///    diagnostics for every currently-open buffer via
+///    `publishDiagnostics`. Pull-only mode normally suppresses
+///    push for open buffers to avoid duplicating entries across
+///    push + pull namespaces, but without a refresh signal the
+///    client has no way to know the state is stale. Pushing a
+///    single fresh set is strictly better than letting a
+///    false-positive linger until the user edits. Some clients
+///    (including nvim) will see the pushed entry and the
+///    subsequent pull entry as duplicates; we accept that
+///    cosmetic trade-off until either we or the client picks up
+///    refresh.
+/// 3. **Neither** — no-op here. The regular push loop in
+///    `scan_files_parallel` already pushed to open buffers
+///    because `should_skip_push_diagnostics` returns `false`
+///    when pull isn't advertised.
 async fn maybe_refresh_diagnostics(
     state: &StateStore,
     client: Option<&tower_lsp::Client>,
@@ -437,11 +454,35 @@ async fn maybe_refresh_diagnostics(
     let Some(c) = client else {
         return;
     };
-    if !state.client_supports_diagnostic_refresh() {
+    if state.client_supports_diagnostic_refresh() {
+        if let Err(e) = c.workspace_diagnostic_refresh().await {
+            tracing::warn!(error = ?e, "workspace/diagnostic/refresh failed");
+        }
         return;
     }
-    if let Err(e) = c.workspace_diagnostic_refresh().await {
-        tracing::warn!(error = ?e, "workspace/diagnostic/refresh failed");
+    // Pull-advertised-but-no-refresh clients need an explicit
+    // push — they won't re-pull on their own. Clients that
+    // don't advertise pull were already pushed to by the
+    // regular scan flow; nothing else to do for them.
+    if state
+        .client_supports_pull_diagnostics
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        let open_uris: Vec<lsp_types::Url> =
+            state.open_docs.iter().map(|e| e.key().clone()).collect();
+        for uri in open_uris {
+            let Some(doc) = state.documents.get(&uri) else {
+                continue;
+            };
+            let version = doc.version;
+            // Drop the dashmap guard before awaiting so we
+            // don't hold the read lock across the network
+            // call; compute_diagnostics re-acquires it.
+            drop(doc);
+            let diagnostics =
+                crate::handlers::document::compute_diagnostics(state, &uri);
+            c.publish_diagnostics(uri, diagnostics, Some(version)).await;
+        }
     }
 }
 
