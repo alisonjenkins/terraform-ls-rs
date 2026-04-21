@@ -495,6 +495,11 @@ fn render_nested_block_summary(out: &mut String, name: &str, nb: &NestedBlockSch
     out.push_str(&format!("### `{}`", name));
 
     // Inline flags: nesting mode, min/max items, deprecation.
+    // Rendered as em-dash-prefixed plain text rather than
+    // `_italic_` because neovim's markdown hover view doesn't
+    // reliably italicise an underscore run that sits immediately
+    // after an inline-code span (see screenshot 2026-04-21); plain
+    // text renders cleanly everywhere.
     let mut flags: Vec<String> = Vec::new();
     flags.push(nesting_mode_label(nb.nesting_mode).to_string());
     if nb.min_items > 0 {
@@ -506,7 +511,7 @@ fn render_nested_block_summary(out: &mut String, name: &str, nb: &NestedBlockSch
     if nb.block.deprecated {
         flags.push("deprecated".to_string());
     }
-    out.push_str(&format!(" _{}_\n\n", flags.join(", ")));
+    out.push_str(&format!(" — {}\n\n", flags.join(", ")));
 
     if has_desc {
         out.push_str(nb.block.description.as_deref().unwrap().trim());
@@ -864,8 +869,8 @@ mod tests {
         assert!(md.contains("### `root_block_device`"), "md: {md}");
         // Nesting mode + cardinality flag.
         assert!(
-            md.contains("_list, max 1_"),
-            "expected cardinality flag; md: {md}"
+            md.contains("### `root_block_device` — list, max 1"),
+            "expected em-dash cardinality flag; md: {md}"
         );
         // Description paragraph.
         assert!(
