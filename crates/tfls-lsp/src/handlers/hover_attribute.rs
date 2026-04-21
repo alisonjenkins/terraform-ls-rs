@@ -409,7 +409,9 @@ fn render_attribute(hit: &AttributeHit, schema: &AttributeSchema) -> String {
         flags.push("deprecated");
     }
     if !flags.is_empty() {
-        out.push_str(&format!(" _{}_", flags.join(", ")));
+        // Em-dash + plain text — see render_nested_block for the
+        // renderer quirk that breaks `_..._` after inline-code.
+        out.push_str(&format!(" — {}", flags.join(", ")));
     }
     out.push('\n');
 
@@ -436,7 +438,7 @@ fn append_related(out: &mut String, label: &str, names: &[String]) {
         return;
     }
     let list: Vec<String> = names.iter().map(|n| format!("`{n}`")).collect();
-    out.push_str(&format!("\n\n_{label}:_ {}", list.join(", ")));
+    out.push_str(&format!("\n\n**{label}:** {}", list.join(", ")));
 }
 
 fn attribute_header(hit: &AttributeHit) -> String {
@@ -558,7 +560,10 @@ fn render_nested_block(hit: &NestedBlockHeaderHit, nb: &NestedBlockSchema) -> St
     if nb.block.deprecated {
         flags.push("deprecated".to_string());
     }
-    out.push_str(&format!(" _{}_\n", flags.join(", ")));
+    // Em-dash separator with plain text. Neovim's markdown hover
+    // view doesn't reliably italicise `_..._` after an inline-code
+    // span; em-dash + plain text renders cleanly everywhere.
+    out.push_str(&format!(" — {}\n", flags.join(", ")));
 
     if let Some(desc) = nb.block.description.as_deref() {
         if !desc.trim().is_empty() {
@@ -588,7 +593,7 @@ fn render_nested_block(hit: &NestedBlockHeaderHit, nb: &NestedBlockSchema) -> St
         required.sort();
         optional.sort();
         if !required.is_empty() {
-            out.push_str("\n\n_Required attrs:_ ");
+            out.push_str("\n\n**Required attrs:** ");
             out.push_str(
                 &required
                     .iter()
@@ -598,7 +603,7 @@ fn render_nested_block(hit: &NestedBlockHeaderHit, nb: &NestedBlockSchema) -> St
             );
         }
         if !optional.is_empty() {
-            out.push_str("\n\n_Optional attrs:_ ");
+            out.push_str("\n\n**Optional attrs:** ");
             out.push_str(
                 &optional
                     .iter()
@@ -611,7 +616,7 @@ fn render_nested_block(hit: &NestedBlockHeaderHit, nb: &NestedBlockSchema) -> St
     if !nb.block.block_types.is_empty() {
         let mut nested: Vec<&String> = nb.block.block_types.keys().collect();
         nested.sort();
-        out.push_str("\n\n_Nested blocks:_ ");
+        out.push_str("\n\n**Nested blocks:** ");
         out.push_str(
             &nested
                 .iter()
