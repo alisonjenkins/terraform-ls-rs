@@ -32,6 +32,16 @@ use crate::backend::Backend;
 pub enum Kind {
     Resource,
     Data,
+    /// Language-level built-in block — `terraform`, `variable`,
+    /// `output`, `module`, `backend`, `cloud`, etc. `GetDocParams.name`
+    /// is a dot-joined path through the built-in tree:
+    ///   * `terraform`
+    ///   * `terraform.backend.s3`
+    ///   * `terraform.cloud.workspaces`
+    ///   * `variable`
+    ///   * `lifecycle.resource`
+    /// Resolved via `tfls_core::resolve_nested_schema`.
+    Builtin,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -197,6 +207,10 @@ pub async fn get_doc(
     let name = params.name;
     let kind = params.kind;
 
+    if kind == Kind::Builtin {
+        return get_doc_builtin(name);
+    }
+
     let (addr, provider, block) = match kind {
         Kind::Resource => match find_entry(&backend.state, Kind::Resource, &name) {
             Some(x) => x,
@@ -206,6 +220,7 @@ pub async fn get_doc(
             Some(x) => x,
             None => return Err(not_found(&name, kind)),
         },
+        Kind::Builtin => unreachable!("handled above"),
     };
 
     let markdown = render_full_doc(&name, kind, &provider, &block.block);
@@ -220,12 +235,74 @@ pub async fn get_doc(
     })
 }
 
+/// Resolve a dot-joined built-in path (e.g. `terraform.backend.s3`)
+/// against the built-in schema tree and render a full-doc markdown
+/// view. Reuses the same `## Required` / `## Optional` / `## Nested
+/// Blocks` shape as provider-schema docs, but sources every field
+/// from `tfls_core::builtin_blocks` instead of the live provider
+/// schema.
+fn get_doc_builtin(name: String) -> jsonrpc::Result<GetDocResult> {
+    // Split the path. Keywords are dot-separated; labels would go in
+    // brackets if we supported them, but none of the current
+    // label-driven blocks (`backend "s3"`, `provider_meta "aws"`)
+    // need labels here since `resolve_nested_schema`'s last step
+    // treats a bare keyword at a labelled slot as "give me the
+    // default / example schema for this block family".
+    let steps: Vec<tfls_core::BlockStep> = name
+        .split('.')
+        .filter(|s| !s.is_empty())
+        .map(|keyword| tfls_core::BlockStep {
+            keyword: keyword.to_string(),
+            label: None,
+        })
+        .collect();
+    if steps.is_empty() {
+        return Err(jsonrpc::Error::invalid_params(format!(
+            "empty built-in path: {name}"
+        )));
+    }
+
+    // For label-bearing blocks at the leaf (backend "s3" etc.), hand
+    // through to the label dispatcher directly so the returned schema
+    // reflects the specific backend.
+    let schema = if steps.len() >= 2 && steps[steps.len() - 2].keyword == "backend" {
+        tfls_core::builtin_blocks::backend_schema(&steps[steps.len() - 1].keyword)
+    } else {
+        tfls_core::resolve_nested_schema(&steps)
+    };
+
+    let Some(schema) = schema else {
+        return Err(jsonrpc::Error::invalid_params(format!(
+            "unknown built-in path: {name}"
+        )));
+    };
+
+    let markdown = render_full_builtin_doc(&name, &steps, &schema);
+    Ok(GetDocResult {
+        name,
+        kind: Kind::Builtin,
+        provider: String::new(),
+        markdown,
+        registry_url: None,
+    })
+}
+
 pub async fn get_snippet(
     backend: &Backend,
     params: GetSnippetParams,
 ) -> jsonrpc::Result<GetSnippetResult> {
     let name = params.name;
     let kind = params.kind;
+
+    // Snippets for built-in blocks would be a separate feature —
+    // `terraform { required_providers { … } }` scaffolding etc. For
+    // now reject to keep the wire shape explicit; the provider-
+    // schema path is unchanged.
+    if kind == Kind::Builtin {
+        return Err(jsonrpc::Error::invalid_params(
+            "get_snippet does not support Kind::Builtin yet".to_string(),
+        ));
+    }
 
     let addr = match find_entry(&backend.state, kind, &name) {
         Some((addr, _, _)) => addr,
@@ -235,6 +312,7 @@ pub async fn get_snippet(
     let kind_keyword = match kind {
         Kind::Resource => "resource",
         Kind::Data => "data",
+        Kind::Builtin => unreachable!("handled above"),
     };
     // `resource_scaffold_snippet` returns the tail after `<kind> "` —
     // starting with the type name and the closing quote. Prepend the
@@ -366,6 +444,8 @@ fn find_entry(
         let hit = match kind {
             Kind::Resource => ps.resource_schemas.get(name).cloned(),
             Kind::Data => ps.data_source_schemas.get(name).cloned(),
+            // Built-ins don't live in provider schemas.
+            Kind::Builtin => None,
         };
         if let Some(schema) = hit {
             return Some((addr.clone(), addr.r#type.clone(), schema));
@@ -378,6 +458,7 @@ fn not_found(name: &str, kind: Kind) -> jsonrpc::Error {
     let label = match kind {
         Kind::Resource => "resource",
         Kind::Data => "data source",
+        Kind::Builtin => "built-in block",
     };
     let mut err = jsonrpc::Error::invalid_params(format!(
         "no {} named `{}` in any loaded provider schema",
@@ -393,6 +474,9 @@ fn render_full_doc(name: &str, kind: Kind, _provider: &str, block: &BlockSchema)
     let kind_label = match kind {
         Kind::Resource => "Resource",
         Kind::Data => "Data Source",
+        // Built-ins are rendered by `render_full_builtin_doc` on a
+        // separate path; this function only sees provider schemas.
+        Kind::Builtin => "Built-in",
     };
     let mut out = String::new();
     out.push_str(&format!("# `{}`\n\n", name));
@@ -465,6 +549,201 @@ fn render_full_doc(name: &str, kind: Kind, _provider: &str, block: &BlockSchema)
     }
 
     out
+}
+
+/// Full-doc markdown renderer for built-in blocks (terraform /
+/// variable / output / backend "s3" / cloud.workspaces / …).
+/// Mirrors the shape of `render_full_doc` — heading, kind label,
+/// description, Required/Optional sections, Nested Blocks — but
+/// pulls every field from `BuiltinSchema` / `BuiltinAttr` /
+/// `BuiltinBlock` instead of the provider schema.
+fn render_full_builtin_doc(
+    name: &str,
+    steps: &[tfls_core::BlockStep],
+    schema: &tfls_core::builtin_blocks::BuiltinSchema,
+) -> String {
+    use tfls_core::builtin_blocks::BuiltinBlock;
+
+    let mut out = String::new();
+    out.push_str(&format!("# `{name}`\n\n"));
+    out.push_str("_Built-in block_\n\n");
+
+    // Lookup the parent's BuiltinBlock entry for this leaf (so we can
+    // show the one-line `detail` summary as the description). Only
+    // when the path goes at least one level beyond a root; top-level
+    // roots (`terraform`, `variable`, …) don't have a pre-written
+    // detail line, so we synthesise a brief description from the
+    // block keyword instead.
+    let parent_block: Option<BuiltinBlock> = if steps.len() >= 2 {
+        // Walk to the parent and look up the block entry by name.
+        let parent_steps = &steps[..steps.len() - 1];
+        let parent_schema = tfls_core::resolve_nested_schema(parent_steps);
+        let leaf_name = &steps[steps.len() - 1].keyword;
+        parent_schema.and_then(|ps| {
+            // Special-case backend: the step-wise resolver doesn't
+            // name `backend.s3` as a block on backend, because
+            // `backend` is label-dispatched. Synthesize a virtual
+            // entry.
+            if parent_steps.last().map(|s| s.keyword.as_str()) == Some("backend") {
+                None
+            } else {
+                ps.blocks.iter().find(|b| b.name == leaf_name).copied()
+            }
+        })
+    } else {
+        None
+    };
+
+    let parent_detail =
+        parent_block.and_then(|b| (!b.detail.is_empty()).then_some(b.detail));
+    if let Some(detail) = parent_detail {
+        out.push_str(detail);
+        out.push_str("\n\n");
+    } else if steps.len() == 1 {
+        let desc = match steps[0].keyword.as_str() {
+            "terraform" => "Top-level configuration block. \
+                Holds the required_version pin, required_providers map, \
+                optional backend / cloud / provider_meta sub-blocks, and \
+                language experiments.",
+            "variable" => "Declare a module input variable. \
+                Supports `type`, `default`, `description`, `sensitive`, \
+                `nullable`, and a `validation { }` sub-block.",
+            "output" => "Declare a module output. \
+                `value` is required; `description`, `sensitive`, \
+                `depends_on`, and `precondition {}` are optional.",
+            "module" => "Invoke a child module. \
+                `source` is required; `version` applies to registry modules \
+                only; `providers` maps child-module provider keys to the \
+                parent's.",
+            "lifecycle" => "Customise how Terraform manages resource lifecycle \
+                (create_before_destroy, prevent_destroy, ignore_changes, \
+                replace_triggered_by), plus precondition / postcondition \
+                assertions.",
+            _ => "",
+        };
+        if !desc.is_empty() {
+            out.push_str(desc);
+            out.push_str("\n\n");
+        }
+    }
+
+    // Required attrs.
+    let required: Vec<&tfls_core::builtin_blocks::BuiltinAttr> =
+        schema.attrs.iter().filter(|a| a.required).collect();
+    let optional: Vec<&tfls_core::builtin_blocks::BuiltinAttr> =
+        schema.attrs.iter().filter(|a| !a.required).collect();
+
+    if !required.is_empty() {
+        out.push_str("## Required\n\n");
+        for a in &required {
+            out.push_str(&format!("- `{}` ", a.name));
+            if !a.detail.is_empty() {
+                out.push_str("— ");
+                out.push_str(a.detail);
+            }
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    if !optional.is_empty() {
+        out.push_str("## Optional\n\n");
+        for a in &optional {
+            out.push_str(&format!("- `{}` ", a.name));
+            if !a.detail.is_empty() {
+                out.push_str("— ");
+                out.push_str(a.detail);
+            }
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+
+    if !schema.blocks.is_empty() {
+        out.push_str("## Nested Blocks\n\n");
+        // Sort for a deterministic view across runs.
+        let mut entries: Vec<&BuiltinBlock> = schema.blocks.iter().collect();
+        entries.sort_by_key(|b| b.name);
+        for b in entries {
+            render_builtin_nested_block_summary(&mut out, b);
+        }
+    }
+
+    out
+}
+
+/// One nested-block sub-section for `render_full_builtin_doc` —
+/// mirrors `render_nested_block_summary` for provider schemas but
+/// reads from the built-in structs.
+fn render_builtin_nested_block_summary(
+    out: &mut String,
+    block: &tfls_core::builtin_blocks::BuiltinBlock,
+) {
+    let schema = block.body_schema();
+    let has_attrs = schema.is_some_and(|s| !s.attrs.is_empty());
+    let has_sub = schema.is_some_and(|s| !s.blocks.is_empty());
+    let has_detail = !block.detail.is_empty();
+
+    if !has_detail && !has_attrs && !has_sub {
+        out.push_str(&format!("- `{}`\n\n", block.name));
+        return;
+    }
+
+    out.push_str(&format!("### `{}`", block.name));
+    // Cardinality-equivalent: label-bearing vs not. Built-ins don't
+    // carry nesting-mode/min/max — they're all singletons or
+    // label-dispatched.
+    if block.label_placeholder.is_some() {
+        out.push_str(&format!(
+            " — labelled (e.g. `{name} \"{label}\" {{ … }}`)",
+            name = block.name,
+            label = block.label_placeholder.unwrap_or(""),
+        ));
+    }
+    out.push_str("\n\n");
+
+    if has_detail {
+        out.push_str(block.detail);
+        out.push_str("\n\n");
+    }
+
+    if let Some(sch) = schema {
+        let required: Vec<&tfls_core::builtin_blocks::BuiltinAttr> =
+            sch.attrs.iter().filter(|a| a.required).collect();
+        let optional: Vec<&tfls_core::builtin_blocks::BuiltinAttr> =
+            sch.attrs.iter().filter(|a| !a.required).collect();
+        if !required.is_empty() {
+            out.push_str("- **Required:**\n");
+            for a in &required {
+                out.push_str(&format!("  - `{}`", a.name));
+                if !a.detail.is_empty() {
+                    out.push_str(" — ");
+                    out.push_str(a.detail);
+                }
+                out.push('\n');
+            }
+        }
+        if !optional.is_empty() {
+            out.push_str("- **Optional:**\n");
+            for a in &optional {
+                out.push_str(&format!("  - `{}`", a.name));
+                if !a.detail.is_empty() {
+                    out.push_str(" — ");
+                    out.push_str(a.detail);
+                }
+                out.push('\n');
+            }
+        }
+        if !sch.blocks.is_empty() {
+            let mut names: Vec<&'static str> =
+                sch.blocks.iter().map(|b| b.name).collect();
+            names.sort();
+            let joined: Vec<String> =
+                names.iter().map(|n| format!("`{n}`")).collect();
+            out.push_str(&format!("- **Sub-blocks:** {}\n", joined.join(", ")));
+        }
+    }
+
+    out.push('\n');
 }
 
 /// Render one nested-block entry as a sub-section under
@@ -614,6 +893,8 @@ fn registry_link(addr: &ProviderAddress, kind: Kind, type_name: &str) -> Option<
     let segment = match kind {
         Kind::Resource => "resources",
         Kind::Data => "data-sources",
+        // Built-ins don't have per-block registry pages.
+        Kind::Builtin => return None,
     };
     Some(format!(
         "https://registry.terraform.io/providers/{}/{}/latest/docs/{}/{}",
@@ -947,6 +1228,120 @@ mod tests {
             !md.contains("### `vestigial`"),
             "should not emit empty sub-heading; md: {md}"
         );
+    }
+
+    #[tokio::test]
+    async fn get_doc_for_terraform_root_returns_builtin_markdown() {
+        // Built-in root: `terraform` renders the top-level terraform
+        // block doc — required_version + experiments attrs, plus
+        // required_providers / backend / cloud / provider_meta as
+        // nested blocks.
+        let state = StateStore::new();
+        let backend = make_backend(state);
+        let result = get_doc(
+            &backend,
+            GetDocParams {
+                name: "terraform".to_string(),
+                kind: Kind::Builtin,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(result.markdown.contains("# `terraform`"), "{}", result.markdown);
+        assert!(
+            result.markdown.contains("_Built-in block_"),
+            "{}",
+            result.markdown
+        );
+        assert!(
+            result.markdown.contains("## Nested Blocks"),
+            "{}",
+            result.markdown
+        );
+        // Expect all four nested block names to be listed.
+        for name in ["required_providers", "backend", "cloud", "provider_meta"] {
+            assert!(
+                result.markdown.contains(name),
+                "expected nested block {name} in: {}",
+                result.markdown
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn get_doc_for_backend_s3_returns_full_builtin_markdown() {
+        let state = StateStore::new();
+        let backend = make_backend(state);
+        let result = get_doc(
+            &backend,
+            GetDocParams {
+                name: "terraform.backend.s3".to_string(),
+                kind: Kind::Builtin,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            result.markdown.contains("# `terraform.backend.s3`"),
+            "{}",
+            result.markdown
+        );
+        assert!(result.markdown.contains("## Required"), "{}", result.markdown);
+        assert!(result.markdown.contains("`bucket`"), "{}", result.markdown);
+        assert!(result.markdown.contains("`key`"), "{}", result.markdown);
+        assert!(result.markdown.contains("## Optional"), "{}", result.markdown);
+        // s3 has `region`, `profile`, `encrypt`, etc. as optionals.
+        assert!(
+            result.markdown.contains("`region`")
+                || result.markdown.contains("`encrypt`"),
+            "{}",
+            result.markdown
+        );
+        // registry_url should be None for built-ins (no registry page).
+        assert!(result.registry_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_doc_for_variable_block_returns_builtin_markdown() {
+        let state = StateStore::new();
+        let backend = make_backend(state);
+        let result = get_doc(
+            &backend,
+            GetDocParams {
+                name: "variable".to_string(),
+                kind: Kind::Builtin,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(result.markdown.contains("# `variable`"), "{}", result.markdown);
+        // variable has a `validation` nested block.
+        assert!(
+            result.markdown.contains("## Nested Blocks"),
+            "{}",
+            result.markdown
+        );
+        assert!(
+            result.markdown.contains("validation"),
+            "{}",
+            result.markdown
+        );
+    }
+
+    #[tokio::test]
+    async fn get_doc_for_unknown_builtin_path_returns_error() {
+        let state = StateStore::new();
+        let backend = make_backend(state);
+        let err = get_doc(
+            &backend,
+            GetDocParams {
+                name: "not.a.real.path".to_string(),
+                kind: Kind::Builtin,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:?}").contains("not.a.real.path"));
     }
 
     #[tokio::test]
