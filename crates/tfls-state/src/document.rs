@@ -5,8 +5,8 @@ use lsp_types::{TextDocumentContentChangeEvent, Url};
 use ropey::Rope;
 use tfls_core::SymbolTable;
 use tfls_parser::{
-    ParsedFile, Reference, extract_references, extract_symbols, extract_symbols_fallback,
-    lsp_position_to_byte_offset, parse_source_for_uri,
+    ParsedFile, Reference, extract_references, extract_references_fallback, extract_symbols,
+    extract_symbols_fallback, lsp_position_to_byte_offset, parse_source_for_uri,
 };
 
 use crate::error::StateError;
@@ -105,14 +105,19 @@ fn compute_analysis(
         }
         None => {
             // HCL parser bailed entirely — run the text-based
-            // fallback so `variable "x" {}` declarations around the
-            // broken one are still visible. Without this, a single
-            // bad type expression cascades into an "undefined
-            // variable" warning on every reference to every variable
-            // in the file, across the whole module.
+            // fallbacks so `variable "x" {}` declarations AND
+            // `var.X` / `local.X` / `module.X` references around
+            // the broken expression are still visible. Without
+            // these, a single typo cascades into
+            // "undefined variable" warnings on every reference in
+            // the file AND "declared but not used" warnings on
+            // every variable the file was consuming — because the
+            // refs disappear from the workspace index until the
+            // user fixes the parse error.
             let text = rope.to_string();
             let symbols = extract_symbols_fallback(&text, uri, rope);
-            (symbols, Vec::new())
+            let references = extract_references_fallback(&text, uri, rope);
+            (symbols, references)
         }
     }
 }

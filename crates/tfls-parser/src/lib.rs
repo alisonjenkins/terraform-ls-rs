@@ -4,6 +4,7 @@
 //! and byte offsets via `ropey`, and incremental parsing support.
 
 pub mod error;
+pub mod fallback_references;
 pub mod fallback_symbols;
 pub mod json;
 pub mod parse;
@@ -12,6 +13,7 @@ pub mod references;
 pub mod traversal;
 
 pub use error::ParseError;
+pub use fallback_references::extract_references_fallback;
 pub use fallback_symbols::extract_symbols_fallback;
 pub use json::parse_json_source;
 pub use parse::{ParsedFile, parse_source, parse_source_for_uri};

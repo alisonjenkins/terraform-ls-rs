@@ -235,6 +235,63 @@ fn scope_var_ref_inside_dynamic_content_resolves_against_caller_scope() {
 }
 
 #[test]
+fn scope_var_decl_unused_check_survives_peer_parse_error() {
+    // A single typo in `iam_roles.tf` (unclosed brace, for
+    // example) makes `hcl-edit` bail on that file's body.
+    // Without a fallback reference extractor, every reference
+    // inside that file disappears from `references_by_name`,
+    // and the "declared but not used" rule fires for every
+    // variable the broken file was using. Reproduce:
+    let vars = uri("file:///stack/variables.tf");
+    let refs = uri("file:///stack/iam_roles.tf");
+    let msgs = multi_file_diags(
+        &[
+            (&vars, "variable \"admin_users\" {}\n"),
+            (
+                &refs,
+                // Deliberate parse error further down (unclosed
+                // brace) — the reference earlier in the file
+                // should still be counted as a use.
+                "resource \"aws_iam_role\" \"r\" {\n  identifiers = var.admin_users\n}\n\nresource \"aws_other\" \"x\" {\n  broken = {\n",
+            ),
+        ],
+        &vars,
+    );
+    assert!(
+        msgs.iter().all(|m| !(m.contains("declared but not used")
+            && m.contains("admin_users"))),
+        "parse error in peer file must not hide references: {msgs:?}"
+    );
+}
+
+#[test]
+fn scope_var_decl_is_not_unused_when_ref_lives_in_peer_file() {
+    // Regression: `variable "admin_users"` in `variables.tf` was
+    // flagged "declared but not used" even though
+    // `iam_roles.tf` (same directory) referenced
+    // `var.admin_users` in multiple places. The unused-decl
+    // check must consult references across every peer file in
+    // the same module, not just the declaring document.
+    let vars = uri("file:///stack/variables.tf");
+    let refs = uri("file:///stack/iam_roles.tf");
+    let msgs = multi_file_diags(
+        &[
+            (&vars, "variable \"admin_users\" {}\n"),
+            (
+                &refs,
+                "resource \"aws_iam_role\" \"r\" {\n  identifiers = var.admin_users\n}\n",
+            ),
+        ],
+        &vars,
+    );
+    assert!(
+        msgs.iter().all(|m| !(m.contains("declared but not used")
+            && m.contains("admin_users"))),
+        "in-use var flagged as unused: {msgs:?}"
+    );
+}
+
+#[test]
 fn scope_var_ref_inside_locals_block_resolves() {
     // Case 7: references inside `locals { x = var.Y }` must
     // resolve to the module's own variable declarations.
