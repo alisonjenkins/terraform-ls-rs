@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tfls_core::ProviderAddress;
-use tfls_schema::{BlockSchema, ProviderSchema, Schema};
+use tfls_schema::{BlockSchema, NestedBlockSchema, NestingMode, ProviderSchema, Schema};
 use tfls_state::StateStore;
 use tower_lsp::jsonrpc;
 
@@ -456,15 +456,103 @@ fn render_full_doc(name: &str, kind: Kind, _provider: &str, block: &BlockSchema)
 
     if !block.block_types.is_empty() {
         out.push_str("## Nested Blocks\n\n");
-        let mut names: Vec<&String> = block.block_types.keys().collect();
-        names.sort();
-        for nested in names {
-            out.push_str(&format!("- `{}`\n", nested));
+        let mut entries: Vec<(&String, &NestedBlockSchema)> =
+            block.block_types.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        for (nested_name, nb) in entries {
+            render_nested_block_summary(&mut out, nested_name, nb);
         }
-        out.push('\n');
     }
 
     out
+}
+
+/// Render one nested-block entry as a sub-section under
+/// `## Nested Blocks`. Shows the block's nesting mode + cardinality,
+/// its description (when provided by the schema), and the names of
+/// its required / optional / read-only attributes plus any sub-
+/// blocks. Stops at one level — deeper structure is reachable via
+/// the per-block-header hover in `hover_attribute.rs`.
+///
+/// When the schema for a nested block is fully empty (no
+/// description, no attrs, no sub-blocks — rare, but possible for
+/// provider-side vestigial entries), fall back to a single
+/// bare-name bullet rather than emitting an empty sub-heading.
+fn render_nested_block_summary(out: &mut String, name: &str, nb: &NestedBlockSchema) {
+    let has_desc = nb
+        .block
+        .description
+        .as_deref()
+        .is_some_and(|d| !d.trim().is_empty());
+    let has_attrs = !nb.block.attributes.is_empty();
+    let has_sub = !nb.block.block_types.is_empty();
+
+    if !has_desc && !has_attrs && !has_sub {
+        out.push_str(&format!("- `{}`\n\n", name));
+        return;
+    }
+
+    out.push_str(&format!("### `{}`", name));
+
+    // Inline flags: nesting mode, min/max items, deprecation.
+    let mut flags: Vec<String> = Vec::new();
+    flags.push(nesting_mode_label(nb.nesting_mode).to_string());
+    if nb.min_items > 0 {
+        flags.push(format!("min {}", nb.min_items));
+    }
+    if nb.max_items > 0 {
+        flags.push(format!("max {}", nb.max_items));
+    }
+    if nb.block.deprecated {
+        flags.push("deprecated".to_string());
+    }
+    out.push_str(&format!(" _{}_\n\n", flags.join(", ")));
+
+    if has_desc {
+        out.push_str(nb.block.description.as_deref().unwrap().trim());
+        out.push_str("\n\n");
+    }
+
+    if has_attrs {
+        let (required, optional, computed) = partition_attributes(&nb.block);
+        if !required.is_empty() {
+            write_attr_name_line(out, "Required", &required);
+        }
+        if !optional.is_empty() {
+            write_attr_name_line(out, "Optional", &optional);
+        }
+        if !computed.is_empty() {
+            write_attr_name_line(out, "Read-Only", &computed);
+        }
+    }
+
+    if has_sub {
+        let mut sub_names: Vec<&String> = nb.block.block_types.keys().collect();
+        sub_names.sort();
+        let joined: Vec<String> = sub_names.iter().map(|n| format!("`{n}`")).collect();
+        out.push_str(&format!("- **Sub-blocks:** {}\n", joined.join(", ")));
+    }
+
+    out.push('\n');
+}
+
+fn nesting_mode_label(mode: NestingMode) -> &'static str {
+    match mode {
+        NestingMode::Single => "single",
+        NestingMode::List => "list",
+        NestingMode::Set => "set",
+        NestingMode::Map => "map",
+        NestingMode::Group => "group",
+    }
+}
+
+fn write_attr_name_line(
+    out: &mut String,
+    label: &str,
+    attrs: &[(&str, &tfls_schema::AttributeSchema)],
+) {
+    let joined: Vec<String> = attrs.iter().map(|(n, _)| format!("`{n}`")).collect();
+    out.push_str(&format!("- **{}:** {}\n", label, joined.join(", ")));
 }
 
 fn partition_attributes(
@@ -680,6 +768,152 @@ mod tests {
         assert!(result.markdown.contains("## Required"));
         assert!(result.markdown.contains("name"));
         assert!(result.markdown.contains("location"));
+    }
+
+    #[tokio::test]
+    async fn get_doc_nested_blocks_include_description_cardinality_and_attrs() {
+        // Regression: the "Nested Blocks" section previously emitted
+        // just a bare list of block names. Users had to close the
+        // doc, insert the nested block, then hover on the block
+        // header to learn what the block does or which attrs it
+        // takes. Now the full doc includes per-block description,
+        // nesting mode, cardinality, and attr summaries inline.
+        let state = StateStore::new();
+        let mut ps = ProviderSchema {
+            provider: Schema {
+                version: 1,
+                block: BlockSchema::default(),
+            },
+            resource_schemas: Default::default(),
+            data_source_schemas: Default::default(),
+        };
+        let mut nested_block = BlockSchema::default();
+        nested_block.description = Some(
+            "Customize details about the root block device.".to_string(),
+        );
+        nested_block.attributes.insert(
+            "volume_size".to_string(),
+            AttributeSchema { optional: true, ..Default::default() },
+        );
+        nested_block.attributes.insert(
+            "volume_type".to_string(),
+            AttributeSchema { required: true, ..Default::default() },
+        );
+        let mut resource_block = BlockSchema::default();
+        resource_block.description = Some("An EC2 instance.".to_string());
+        resource_block.attributes.insert(
+            "ami".to_string(),
+            AttributeSchema { required: true, ..Default::default() },
+        );
+        resource_block.block_types.insert(
+            "root_block_device".to_string(),
+            NestedBlockSchema {
+                nesting_mode: NestingMode::List,
+                block: nested_block,
+                min_items: 0,
+                max_items: 1,
+            },
+        );
+        ps.resource_schemas.insert(
+            "aws_instance".to_string(),
+            Schema { version: 1, block: resource_block },
+        );
+        let addr = ProviderAddress::hashicorp("aws");
+        state.schemas.insert(addr, Arc::new(ps));
+
+        let backend = make_backend(state);
+        let result = get_doc(
+            &backend,
+            GetDocParams {
+                name: "aws_instance".to_string(),
+                kind: Kind::Resource,
+            },
+        )
+        .await
+        .unwrap();
+        let md = &result.markdown;
+
+        assert!(md.contains("## Nested Blocks"), "md: {md}");
+        // Sub-heading per nested block.
+        assert!(md.contains("### `root_block_device`"), "md: {md}");
+        // Nesting mode + cardinality flag.
+        assert!(
+            md.contains("_list, max 1_"),
+            "expected cardinality flag; md: {md}"
+        );
+        // Description paragraph.
+        assert!(
+            md.contains("Customize details about the root block device."),
+            "expected description; md: {md}"
+        );
+        // Required + Optional attr summaries.
+        assert!(
+            md.contains("**Required:** `volume_type`"),
+            "expected required attrs line; md: {md}"
+        );
+        assert!(
+            md.contains("**Optional:** `volume_size`"),
+            "expected optional attrs line; md: {md}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_doc_empty_nested_block_falls_back_to_bare_bullet() {
+        // When a nested block has no description, no attrs, and no
+        // sub-blocks, an empty sub-section would look worse than a
+        // bare-name bullet. Guarded by the empty-fallback branch.
+        let state = StateStore::new();
+        let mut ps = ProviderSchema {
+            provider: Schema {
+                version: 1,
+                block: BlockSchema::default(),
+            },
+            resource_schemas: Default::default(),
+            data_source_schemas: Default::default(),
+        };
+        let mut outer = BlockSchema::default();
+        outer.attributes.insert(
+            "name".to_string(),
+            AttributeSchema { required: true, ..Default::default() },
+        );
+        outer.block_types.insert(
+            "vestigial".to_string(),
+            NestedBlockSchema {
+                nesting_mode: NestingMode::Single,
+                block: BlockSchema::default(),
+                min_items: 0,
+                max_items: 0,
+            },
+        );
+        ps.resource_schemas.insert(
+            "some_resource".to_string(),
+            Schema { version: 1, block: outer },
+        );
+        state
+            .schemas
+            .insert(ProviderAddress::hashicorp("some"), Arc::new(ps));
+
+        let backend = make_backend(state);
+        let md = get_doc(
+            &backend,
+            GetDocParams {
+                name: "some_resource".to_string(),
+                kind: Kind::Resource,
+            },
+        )
+        .await
+        .unwrap()
+        .markdown;
+
+        assert!(md.contains("## Nested Blocks"), "md: {md}");
+        assert!(
+            md.contains("- `vestigial`"),
+            "empty nested block should fall back to bare bullet; md: {md}"
+        );
+        assert!(
+            !md.contains("### `vestigial`"),
+            "should not emit empty sub-heading; md: {md}"
+        );
     }
 
     #[tokio::test]
