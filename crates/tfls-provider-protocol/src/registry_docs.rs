@@ -103,17 +103,88 @@ fn build_http_client() -> Result<reqwest::Client, ProtocolError> {
 }
 
 /// Resolve the on-disk cache directory for provider docs.
+///
+/// Cross-platform via the `dirs` crate:
+/// - Linux:   `$XDG_CACHE_HOME/terraform-ls-rs/provider-docs`
+///            (fallback `~/.cache/terraform-ls-rs/provider-docs`)
+/// - macOS:   `~/Library/Caches/terraform-ls-rs/provider-docs`
+/// - Windows: `%LOCALAPPDATA%\terraform-ls-rs\provider-docs`
+///
+/// Falls back to `std::env::temp_dir()` if the platform dir is
+/// unavailable (e.g. running under a minimal container without
+/// `HOME` set).
 fn cache_root() -> PathBuf {
-    if let Some(dir) = std::env::var_os("XDG_CACHE_HOME") {
-        return PathBuf::from(dir).join("terraform-ls-rs").join("provider-docs");
+    if let Some(base) = dirs::cache_dir() {
+        return base.join("terraform-ls-rs").join("provider-docs");
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home)
-            .join(".cache")
-            .join("terraform-ls-rs")
-            .join("provider-docs");
+    std::env::temp_dir()
+        .join("terraform-ls-rs")
+        .join("provider-docs")
+}
+
+/// Version tag for the parsed-descriptions cache. Bump when the
+/// on-disk format changes incompatibly so stale caches don't cause
+/// subtle miscompares or panics on deserialize.
+const PARSED_CACHE_VERSION: u32 = 1;
+
+/// Parsed-descriptions cache: the consolidated output of running
+/// enrichment for one (namespace/name/version) tuple, keyed in a
+/// way that lets subsequent runs skip both HTTP *and* markdown
+/// parsing — only a single JSON read + in-memory merge.
+#[derive(Debug, serde::Serialize, Deserialize)]
+struct ParsedDocsCache {
+    cache_version: u32,
+    namespace: String,
+    name: String,
+    version: String,
+    /// resource_type → (attribute_name → description)
+    resources: HashMap<String, HashMap<String, String>>,
+    /// data_source_type → (attribute_name → description)
+    data_sources: HashMap<String, HashMap<String, String>>,
+}
+
+fn parsed_cache_path(namespace: &str, name: &str, version: &str) -> PathBuf {
+    cache_root()
+        .join(sanitise(namespace))
+        .join(sanitise(name))
+        .join(sanitise(version))
+        .join("parsed-descriptions.json")
+}
+
+async fn read_parsed_cache(path: &Path) -> Option<ParsedDocsCache> {
+    let text = tokio::fs::read_to_string(path).await.ok()?;
+    let parsed: ParsedDocsCache = serde_json::from_str(&text).ok()?;
+    if parsed.cache_version != PARSED_CACHE_VERSION {
+        return None;
     }
-    PathBuf::from("/tmp/terraform-ls-rs/provider-docs")
+    Some(parsed)
+}
+
+async fn write_parsed_cache(path: &Path, entry: &ParsedDocsCache) {
+    let json = match serde_json::to_string(entry) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!(error = %e, "parsed cache serialize failed");
+            return;
+        }
+    };
+    if let Some(parent) = path.parent() {
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            tracing::debug!(error = %e, dir = %parent.display(), "parsed cache dir create failed");
+            return;
+        }
+    }
+    // Atomic-ish write: tmp file + rename so a kill mid-write doesn't
+    // leave a half-written cache that fails to deserialize later.
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = tokio::fs::write(&tmp, json).await {
+        tracing::debug!(error = %e, path = %tmp.display(), "parsed cache tmp write failed");
+        return;
+    }
+    if let Err(e) = tokio::fs::rename(&tmp, path).await {
+        tracing::debug!(error = %e, path = %path.display(), "parsed cache rename failed");
+        let _ = tokio::fs::remove_file(&tmp).await;
+    }
 }
 
 fn sanitise(component: &str) -> String {
@@ -384,6 +455,38 @@ pub async fn enrich_schemas_with_registry_docs(
 
     for pc in providers {
         let provider_start = std::time::Instant::now();
+
+        let Some(provider_schema) = schemas.provider_schemas.get_mut(&pc.address) else {
+            continue;
+        };
+
+        // Fast path: parsed-descriptions cache. Skips both HTTP and
+        // markdown-regex parsing (which is meaningful for big
+        // providers — aws_has 2k+ resources × regex-per-doc on the
+        // hot path otherwise).
+        let cache_path = parsed_cache_path(&pc.namespace, &pc.name, &pc.version);
+        if let Some(cached) = read_parsed_cache(&cache_path).await {
+            let mut provider_updated = 0usize;
+            for (type_name, descriptions) in &cached.resources {
+                if let Some(s) = provider_schema.resource_schemas.get_mut(type_name) {
+                    provider_updated += merge_descriptions_into_block(&mut s.block, descriptions);
+                }
+            }
+            for (type_name, descriptions) in &cached.data_sources {
+                if let Some(s) = provider_schema.data_source_schemas.get_mut(type_name) {
+                    provider_updated += merge_descriptions_into_block(&mut s.block, descriptions);
+                }
+            }
+            tracing::info!(
+                provider = %format!("{}/{}@{}", pc.namespace, pc.name, pc.version),
+                updated = provider_updated,
+                elapsed_ms = provider_start.elapsed().as_millis() as u64,
+                "registry enrichment complete (parsed cache hit)"
+            );
+            total_updated += provider_updated;
+            continue;
+        }
+
         let index = match fetch_index(&client, &pc.namespace, &pc.name, &pc.version).await {
             Ok(i) => i,
             Err(e) => {
@@ -394,10 +497,6 @@ pub async fn enrich_schemas_with_registry_docs(
                 );
                 continue;
             }
-        };
-
-        let Some(provider_schema) = schemas.provider_schemas.get_mut(&pc.address) else {
-            continue;
         };
 
         // Collect the set of (kind, type, doc_id) to fetch, restricted
@@ -459,6 +558,17 @@ pub async fn enrich_schemas_with_registry_docs(
         .await;
 
         let mut provider_updated = 0usize;
+        // Accumulate the parsed descriptions so we can write them to
+        // the parsed-cache after the loop — next run skips all of
+        // this.
+        let mut cache_entry = ParsedDocsCache {
+            cache_version: PARSED_CACHE_VERSION,
+            namespace: pc.namespace.clone(),
+            name: pc.name.clone(),
+            version: pc.version.clone(),
+            resources: HashMap::new(),
+            data_sources: HashMap::new(),
+        };
         for (kind, type_name, id, result) in fetches {
             let content = match result {
                 Ok(c) => c,
@@ -484,7 +594,23 @@ pub async fn enrich_schemas_with_registry_docs(
                 continue;
             };
             provider_updated += merge_descriptions_into_block(&mut schema.block, &descriptions);
+            match kind {
+                Kind::Resource => {
+                    cache_entry.resources.insert(type_name, descriptions);
+                }
+                Kind::DataSource => {
+                    cache_entry.data_sources.insert(type_name, descriptions);
+                }
+            }
         }
+
+        // Write the consolidated cache for next run. Fire-and-forget;
+        // write errors are logged at debug level and don't block the
+        // enrichment pass.
+        if !cache_entry.resources.is_empty() || !cache_entry.data_sources.is_empty() {
+            write_parsed_cache(&cache_path, &cache_entry).await;
+        }
+
         tracing::info!(
             provider = %format!("{}/{}@{}", pc.namespace, pc.name, pc.version),
             updated = provider_updated,

@@ -25,7 +25,7 @@ async fn main() {
         version: "3.8.1".into(),
     };
 
-    match tfls_provider_protocol::client::fetch_provider_schema(&bin).await {
+    match tfls_provider_protocol::client::fetch_provider_schema(&bin, None).await {
         Ok(s) => println!(
             "OK: {} resources, {} data sources",
             s.resource_schemas.len(),

@@ -31,7 +31,7 @@ pub(crate) mod proto_v5 {
     tonic::include_proto!("tfplugin5");
 }
 
-pub use discovery::{ProviderBinary, discover_providers};
+pub use discovery::{ProviderBinary, dedupe_providers_keep_highest, discover_providers};
 pub use handshake::{HandshakeInfo, PluginInstance, spawn_and_handshake};
 
 /// Error type for the protocol crate.
@@ -133,9 +133,31 @@ pub async fn fetch_schemas_from_plugins_raw(
     use futures::stream::{FuturesUnordered, StreamExt};
 
     let start = std::time::Instant::now();
-    let binaries = discover_providers(terraform_dir)?;
+    let raw_binaries = discover_providers(terraform_dir)?;
+    let discovered = raw_binaries.len();
+    // Keep only the highest version of each provider. Terraform's
+    // own lock resolver sometimes leaves multiple versions cached
+    // together; spawning the gRPC binary for every stale version
+    // wastes CPU/RAM (each spawn is ~100 MiB RSS) and the older
+    // schemas get overwritten anyway.
+    let binaries = dedupe_providers_keep_highest(raw_binaries);
     let total = binaries.len();
+    if discovered != total {
+        tracing::info!(
+            discovered,
+            unique_providers = total,
+            "plugin schema fetch: deduped older provider versions"
+        );
+    }
     tracing::info!(total_providers = total, "plugin schema fetch: begin");
+
+    // Generate a single ephemeral mTLS identity up-front and reuse
+    // it across every provider connection. RSA-2048 keygen is ~50
+    // ms; with one identity per provider that's ~700 ms of pure CPU
+    // on a 14-provider workspace that otherwise pegs the fetch
+    // time. One session cert works for every provider since each
+    // provider only pins the client cert it was handed at spawn.
+    let identity = std::sync::Arc::new(tls::ClientIdentity::generate()?);
 
     // Concurrency cap: 8 is the registry-fetch bound used elsewhere.
     // Each provider binary spawn is ~100 MiB RSS at peak, so this
@@ -147,10 +169,11 @@ pub async fn fetch_schemas_from_plugins_raw(
         .into_iter()
         .map(|bin| {
             let sem = std::sync::Arc::clone(&semaphore);
+            let identity = std::sync::Arc::clone(&identity);
             async move {
                 let _permit = sem.acquire_owned().await.ok()?;
                 let fetch_start = std::time::Instant::now();
-                let res = client::fetch_provider_schema(&bin).await;
+                let res = client::fetch_provider_schema(&bin, Some(&identity)).await;
                 let elapsed_ms = fetch_start.elapsed().as_millis();
                 Some((bin, res, elapsed_ms))
             }

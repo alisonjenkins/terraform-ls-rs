@@ -31,6 +31,42 @@ impl ProviderBinary {
     }
 }
 
+/// Reduce a list of discovered provider binaries to one per
+/// `(registry_host, namespace, name)` tuple, picking the highest
+/// version. Terraform's own lock resolver may leave multiple
+/// versions of the same provider cached under `.terraform/providers/`
+/// — e.g. `hashicorp/aws/{5.94.1, 6.0.0, 6.18.0}/` all co-exist when
+/// the lockfile was upgraded without pruning. We want to spawn the
+/// gRPC binary + install a schema exactly once per provider, so
+/// dedupe before fetch. Falls back to string-compare if a version
+/// string isn't valid semver.
+pub fn dedupe_providers_keep_highest(mut bins: Vec<ProviderBinary>) -> Vec<ProviderBinary> {
+    // Sort in reverse (newest first) so `.dedup_by` keeps the first
+    // occurrence of each (host, ns, name) triple — which will be the
+    // highest version.
+    bins.sort_by(|a, b| {
+        let ka = (&a.registry_host, &a.namespace, &a.name);
+        let kb = (&b.registry_host, &b.namespace, &b.name);
+        ka.cmp(&kb).then_with(|| version_cmp(&b.version, &a.version))
+    });
+    bins.dedup_by(|a, b| {
+        a.registry_host == b.registry_host
+            && a.namespace == b.namespace
+            && a.name == b.name
+    });
+    bins
+}
+
+fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    match (semver::Version::parse(a), semver::Version::parse(b)) {
+        (Ok(va), Ok(vb)) => va.cmp(&vb),
+        // One or both aren't semver — fall back to lexicographic.
+        // Not perfect for odd tags, but safer than panicking; real
+        // provider versions are ~always semver.
+        _ => a.cmp(b),
+    }
+}
+
 /// Walk `<terraform_dir>/providers/` (not recursive beyond the usual
 /// nested provider layout) and yield one binary per installed provider.
 /// Returns an empty list if the directory doesn't exist.
@@ -286,6 +322,65 @@ mod tests {
         assert_eq!(found[0].name, "b2");
 
         fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn dedupe_keeps_highest_semver_version() {
+        let mk = |ns: &str, name: &str, ver: &str| ProviderBinary {
+            binary: std::path::PathBuf::from("/dev/null"),
+            registry_host: "registry.opentofu.org".to_string(),
+            namespace: ns.to_string(),
+            name: name.to_string(),
+            version: ver.to_string(),
+        };
+        let input = vec![
+            mk("hashicorp", "aws", "5.94.1"),
+            mk("hashicorp", "aws", "6.18.0"),
+            mk("hashicorp", "aws", "6.0.0"),
+            mk("hashicorp", "random", "3.8.1"),
+            mk("cloudflare", "cloudflare", "5.18.0"),
+        ];
+        let out = dedupe_providers_keep_highest(input);
+        assert_eq!(out.len(), 3, "dedupes aws triple: {out:?}");
+        let aws = out
+            .iter()
+            .find(|b| b.name == "aws")
+            .expect("aws retained");
+        assert_eq!(aws.version, "6.18.0", "keeps highest: {aws:?}");
+    }
+
+    #[test]
+    fn dedupe_preserves_different_providers() {
+        let mk = |ns: &str, name: &str, ver: &str| ProviderBinary {
+            binary: std::path::PathBuf::from("/dev/null"),
+            registry_host: "registry.opentofu.org".to_string(),
+            namespace: ns.to_string(),
+            name: name.to_string(),
+            version: ver.to_string(),
+        };
+        let input = vec![
+            mk("hashicorp", "aws", "6.18.0"),
+            mk("hashicorp", "random", "3.8.1"),
+            mk("cloudflare", "cloudflare", "5.18.0"),
+        ];
+        let out = dedupe_providers_keep_highest(input);
+        assert_eq!(out.len(), 3, "no dedupe needed: {out:?}");
+    }
+
+    #[test]
+    fn dedupe_with_non_semver_falls_back_to_string_order() {
+        let mk = |ver: &str| ProviderBinary {
+            binary: std::path::PathBuf::from("/dev/null"),
+            registry_host: "registry.opentofu.org".to_string(),
+            namespace: "x".to_string(),
+            name: "y".to_string(),
+            version: ver.to_string(),
+        };
+        // "v2" and "v10" aren't valid semver; string order puts
+        // "v10" < "v2" lexicographically. Keep the string-highest.
+        let out = dedupe_providers_keep_highest(vec![mk("v2"), mk("v10")]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].version, "v2");
     }
 
     /// `awscc` must not be picked up when we were looking for `aws` —

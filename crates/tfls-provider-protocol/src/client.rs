@@ -22,12 +22,27 @@ use crate::{ProtocolError, proto_v5, translate, translate_v5};
 /// One-shot: launch the binary in `bin`, do the handshake, call the
 /// schema RPC (v5 `GetSchema` or v6 `GetProviderSchema` depending on
 /// which version the provider negotiated), translate, shut down.
+///
+/// `identity` is optional: when `None`, a fresh ephemeral mTLS
+/// identity is generated for this single call (current default,
+/// safe but costs ~50 ms of RSA-2048 keygen). When `Some`, the
+/// caller-supplied identity is reused — which is what
+/// [`crate::fetch_schemas_from_plugins_raw`] does to avoid
+/// generating N identities for N providers.
 pub async fn fetch_provider_schema(
     bin: &ProviderBinary,
+    identity: Option<&ClientIdentity>,
 ) -> Result<tfls_schema::ProviderSchema, ProtocolError> {
-    let identity = ClientIdentity::generate()?;
+    let generated;
+    let identity = match identity {
+        Some(id) => id,
+        None => {
+            generated = ClientIdentity::generate()?;
+            &generated
+        }
+    };
     let instance = spawn_and_handshake(&bin.binary, Some(&identity.cert_pem)).await?;
-    let channel = connect_channel(&instance, &identity).await?;
+    let channel = connect_channel(&instance, identity).await?;
 
     let result = match instance.info.app_protocol_version {
         6 => fetch_schema_v6(bin, channel).await,
@@ -125,13 +140,21 @@ async fn fetch_schema_v5(
 /// v5 providers don't export functions and return an empty result.
 pub async fn fetch_provider_functions(
     bin: &ProviderBinary,
+    identity: Option<&ClientIdentity>,
 ) -> Result<Vec<(String, tfls_schema::FunctionSignature)>, ProtocolError> {
-    let identity = ClientIdentity::generate()?;
+    let generated;
+    let identity = match identity {
+        Some(id) => id,
+        None => {
+            generated = ClientIdentity::generate()?;
+            &generated
+        }
+    };
     let instance = spawn_and_handshake(&bin.binary, Some(&identity.cert_pem)).await?;
     if instance.info.app_protocol_version != 6 {
         return Ok(Vec::new());
     }
-    let channel = connect_channel(&instance, &identity).await?;
+    let channel = connect_channel(&instance, identity).await?;
     let mut client = ProviderClientV6::new(channel);
 
     let resp = client

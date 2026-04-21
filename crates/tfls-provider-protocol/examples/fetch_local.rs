@@ -84,7 +84,7 @@ async fn main() {
     // the outer `WARN` message that the library logs.
     for bin in &binaries {
         println!("  - {}", bin.binary.display());
-        match tfls_provider_protocol::client::fetch_provider_schema(bin).await {
+        match tfls_provider_protocol::client::fetch_provider_schema(bin, None).await {
             Ok(s) => println!(
                 "    ok ({} resources, {} data sources)",
                 s.resource_schemas.len(),

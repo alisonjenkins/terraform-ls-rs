@@ -647,9 +647,26 @@ async fn fetch_and_install_schemas(
                 );
 
                 // Also fetch provider-defined functions from v6 providers.
+                // Dedupe by (ns, name) and reuse a single mTLS identity —
+                // same reasons as the schema fetch above.
                 if let Ok(binaries) = tfls_provider_protocol::discover_providers(&terraform_dir) {
+                    let binaries =
+                        tfls_provider_protocol::dedupe_providers_keep_highest(binaries);
+                    let func_identity = match tfls_provider_protocol::tls::ClientIdentity::generate() {
+                        Ok(id) => Some(std::sync::Arc::new(id)),
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "could not generate shared mTLS identity; each function fetch will regenerate"
+                            );
+                            None
+                        }
+                    };
                     for bin in &binaries {
-                        match tfls_provider_protocol::client::fetch_provider_functions(bin).await {
+                        match tfls_provider_protocol::client::fetch_provider_functions(
+                            bin,
+                            func_identity.as_deref(),
+                        ).await {
                             Ok(funcs) if !funcs.is_empty() => {
                                 let fcount = funcs.len();
                                 state.merge_functions(funcs);
