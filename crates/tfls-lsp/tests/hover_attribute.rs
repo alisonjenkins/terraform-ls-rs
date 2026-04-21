@@ -173,6 +173,48 @@ async fn hover_on_attribute_falls_back_when_attribute_not_in_schema() {
 // -------------------------------------------------------------------------
 
 #[tokio::test]
+async fn hover_on_top_level_meta_arg_shows_description() {
+    // Top-level meta-args (count/for_each/depends_on/provider) sit on
+    // resource/data bodies but aren't in the provider schema. Hover
+    // should surface the Terraform-language description, not
+    // "attribute is not in the schema for aws_instance".
+    let u = uri("file:///count.tf");
+    let src = "resource \"aws_instance\" \"web\" {\n  count = 3\n  ami = \"x\"\n}\n";
+    let b = backend_with(src, &u);
+    let md = hover_markdown(&b, &u, Position::new(1, 3))
+        .await
+        .expect("some hover");
+    assert!(
+        md.contains("**meta-argument** `count`"),
+        "expected meta-argument header; got: {md}"
+    );
+    assert!(
+        md.contains("Creates that many instances"),
+        "expected count description; got: {md}"
+    );
+    assert!(
+        !md.contains("not in the schema"),
+        "should NOT route to provider-schema-missing path; got: {md}"
+    );
+}
+
+#[tokio::test]
+async fn hover_on_for_each_shows_description() {
+    let u = uri("file:///for_each.tf");
+    let src = "resource \"aws_instance\" \"web\" {\n  for_each = toset([\"a\"])\n}\n";
+    let b = backend_with(src, &u);
+    let md = hover_markdown(&b, &u, Position::new(1, 3))
+        .await
+        .expect("some hover");
+    assert!(md.contains("**meta-argument** `for_each`"), "got: {md}");
+    assert!(
+        md.contains("Creates one instance of this resource per key")
+            || md.contains("set(string)"),
+        "expected for_each description; got: {md}"
+    );
+}
+
+#[tokio::test]
 async fn hover_on_lifecycle_create_before_destroy_does_not_blame_provider() {
     let u = uri("file:///c.tf");
     let src = "resource \"aws_instance\" \"web\" {\n  lifecycle {\n    create_before_destroy = true\n  }\n}\n";

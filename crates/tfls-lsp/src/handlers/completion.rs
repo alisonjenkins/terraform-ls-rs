@@ -1316,6 +1316,7 @@ fn meta_argument_items(_kind: BlockKind) -> Vec<CompletionItem> {
                 label: (*name).to_string(),
                 kind: Some(CompletionItemKind::PROPERTY),
                 detail: Some("meta-argument".to_string()),
+                documentation: meta_arg_documentation(name),
                 insert_text: Some(snippet),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..Default::default()
@@ -1338,12 +1339,38 @@ fn meta_block_items(kind: BlockKind) -> Vec<CompletionItem> {
                 label: (*name).to_string(),
                 kind: Some(CompletionItemKind::STRUCT),
                 detail: Some("meta-block".to_string()),
+                documentation: meta_block_documentation(name),
                 insert_text: Some(snippet),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..Default::default()
             }
         })
         .collect()
+}
+
+/// Wrap the canonical meta-arg description in an LSP
+/// `Documentation` payload, returning `None` when the description
+/// lookup misses so the client doesn't show an empty popup.
+fn meta_arg_documentation(name: &str) -> Option<Documentation> {
+    let text = tfls_core::meta_attr_description(name);
+    if text.is_empty() {
+        return None;
+    }
+    Some(Documentation::MarkupContent(MarkupContent {
+        kind: MarkupKind::Markdown,
+        value: text.to_string(),
+    }))
+}
+
+fn meta_block_documentation(name: &str) -> Option<Documentation> {
+    let text = tfls_core::meta_block_description(name);
+    if text.is_empty() {
+        return None;
+    }
+    Some(Documentation::MarkupContent(MarkupContent {
+        kind: MarkupKind::Markdown,
+        value: text.to_string(),
+    }))
 }
 
 /// Return the `InsertTextFormat::SNIPPET` body to assign to a

@@ -43,8 +43,15 @@ pub fn attribute_hover(
             // aren't in provider schemas — they're Terraform/OpenTofu language
             // constructs. Route those to a dedicated renderer so we don't
             // falsely claim "attribute is not in the schema for aws_foo".
+            // Also handle top-level meta-args (count / for_each /
+            // depends_on / provider) that sit directly on a resource/data
+            // body — they aren't in the provider schema either.
             let markdown = if is_meta_block_path(&hit.nested_path) {
                 render_meta_attribute(&hit, uri)
+            } else if hit.nested_path.is_empty()
+                && tfls_core::is_meta_attr(&hit.attr_name)
+            {
+                render_top_level_meta_arg(&hit)
             } else {
                 match resolve_attribute_schema(state, &hit) {
                     AttributeLookup::Found(schema) => render_attribute(&hit, &schema),
@@ -138,25 +145,32 @@ fn render_lifecycle_attribute(hit: &AttributeHit, uri: &Url, path: &str) -> Stri
         // to the resource list for tolerance.
         RootBlockKind::Provider => LIFECYCLE_RESOURCE_BLOCK.attrs,
     };
-    // Deeper meta paths (e.g. `lifecycle.precondition.condition`):
-    // the valid keys there are `condition` / `error_message`, described
-    // in `VALIDATION_BLOCK`. For simplicity just name the path and a
-    // brief description when we recognise it.
-    let detail = if hit.nested_path.len() == 1 {
-        schema_attrs
-            .iter()
-            .find(|a| a.name == hit.attr_name)
-            .map(|a| a.detail.to_string())
+    // Prefer the richer language-reference description from tfls_core
+    // (multi-line markdown); fall back to the shorter `BuiltinAttr.detail`
+    // if we don't have one for this name.
+    let kind_for_lookup = match hit.root_kind {
+        RootBlockKind::DataSource => tfls_core::BlockKind::Data,
+        _ => tfls_core::BlockKind::Resource,
+    };
+    let detail: Option<String> = if hit.nested_path.len() == 1 {
+        let rich = tfls_core::lifecycle_attr_description(kind_for_lookup, &hit.attr_name);
+        if !rich.is_empty() {
+            Some(rich.to_string())
+        } else {
+            schema_attrs
+                .iter()
+                .find(|a| a.name == hit.attr_name)
+                .map(|a| a.detail.to_string())
+        }
     } else if matches!(
         hit.nested_path.get(1).map(|s| s.as_str()),
         Some("precondition") | Some("postcondition")
     ) {
-        match hit.attr_name.as_str() {
-            "condition" => Some("Boolean expression — must evaluate to true.".to_string()),
-            "error_message" => {
-                Some("Message shown when the condition fails.".to_string())
-            }
-            _ => None,
+        let rich = tfls_core::condition_attr_description(&hit.attr_name);
+        if !rich.is_empty() {
+            Some(rich.to_string())
+        } else {
+            None
         }
     } else {
         None
@@ -193,6 +207,29 @@ or use `count = var.create ? 1 : 0` / `for_each` for Terraform compatibility. \
 fn is_opentofu_file(uri: &Url) -> bool {
     let path = uri.path();
     path.ends_with(".tofu") || path.ends_with(".tofu.json")
+}
+
+/// Render hover for a top-level meta-argument
+/// (`count`/`for_each`/`provider`/`depends_on`) sitting directly on
+/// a `resource`/`data` body — none of these appear in the provider
+/// schema, so the normal attribute-hover path would falsely report
+/// "not in the schema". Pulled from
+/// `tfls_core::meta_attr_description` which is also used to
+/// populate the completion documentation popup, so the two surfaces
+/// stay consistent.
+fn render_top_level_meta_arg(hit: &AttributeHit) -> String {
+    let kind_label = match hit.root_kind {
+        RootBlockKind::Resource => "resource",
+        RootBlockKind::DataSource => "data source",
+        RootBlockKind::Provider => "provider",
+    };
+    let body = tfls_core::meta_attr_description(&hit.attr_name);
+    format!(
+        "**meta-argument** `{attr}` on {kind} `{root}`\n\n{body}",
+        attr = hit.attr_name,
+        kind = kind_label,
+        root = hit.root_type,
+    )
 }
 
 enum AttributeLookup {

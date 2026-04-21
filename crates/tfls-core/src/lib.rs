@@ -16,8 +16,10 @@ pub use completion::{
 };
 pub use error::CoreError;
 pub use meta_arguments::{
-    BlockKind, CONDITION_ATTRS, META_ATTRS, is_meta_attr, is_singleton_meta_block,
-    lifecycle_attrs, lifecycle_blocks, meta_blocks,
+    BlockKind, CONDITION_ATTRS, META_ATTRS, condition_attr_description, is_meta_attr,
+    is_singleton_meta_block, lifecycle_attr_description, lifecycle_attrs,
+    lifecycle_block_description, lifecycle_blocks, meta_attr_description,
+    meta_block_description, meta_blocks,
 };
 pub use types::{
     ModuleId, ProviderAddress, ResourceAddress, Symbol, SymbolKind, SymbolLocation, SymbolTable,
