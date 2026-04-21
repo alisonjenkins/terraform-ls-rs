@@ -687,3 +687,100 @@ pub const DATA_ROOT_SCHEMA: BuiltinSchema = BuiltinSchema {
         schema_fn: Some(lifecycle_data_schema),
     }],
 };
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod content_tests {
+    //! Walk every statically-declared built-in schema and assert that
+    //! every `BuiltinBlock` and `BuiltinAttr` exposes a non-empty
+    //! `detail` string. Guards against someone adding a new entry
+    //! without filling in docs — hover / completion show `detail`
+    //! verbatim and an empty string presents as no documentation at
+    //! all.
+
+    use super::*;
+
+    fn assert_schema_detail_non_empty(path: &str, schema: &BuiltinSchema) {
+        for attr in schema.attrs {
+            assert!(
+                !attr.detail.is_empty(),
+                "attr `{}` on {path} has empty detail",
+                attr.name
+            );
+        }
+        for block in schema.blocks {
+            assert!(
+                !block.detail.is_empty(),
+                "block `{}` on {path} has empty detail",
+                block.name
+            );
+            if let Some(sub) = block.body_schema() {
+                let sub_path = format!("{path}.{}", block.name);
+                assert_schema_detail_non_empty(&sub_path, &sub);
+            }
+        }
+    }
+
+    #[test]
+    fn every_builtin_block_and_attr_has_a_detail() {
+        assert_schema_detail_non_empty("terraform", &TERRAFORM_BLOCK);
+        assert_schema_detail_non_empty("variable", &VARIABLE_BLOCK);
+        assert_schema_detail_non_empty("output", &OUTPUT_BLOCK);
+        assert_schema_detail_non_empty("module", &MODULE_BLOCK);
+        assert_schema_detail_non_empty(
+            "lifecycle_resource",
+            &LIFECYCLE_RESOURCE_BLOCK,
+        );
+        assert_schema_detail_non_empty(
+            "lifecycle_data",
+            &LIFECYCLE_DATA_BLOCK,
+        );
+        assert_schema_detail_non_empty("validation", &VALIDATION_BLOCK);
+        assert_schema_detail_non_empty("workspaces", &WORKSPACES_BLOCK);
+        assert_schema_detail_non_empty("cloud", &CLOUD_BLOCK);
+        assert_schema_detail_non_empty("assume_role", &ASSUME_ROLE_BLOCK);
+        assert_schema_detail_non_empty("s3_endpoints", &S3_ENDPOINTS_BLOCK);
+        assert_schema_detail_non_empty("exec", &EXEC_BLOCK);
+        assert_schema_detail_non_empty(
+            "resource_root",
+            &RESOURCE_ROOT_SCHEMA,
+        );
+        assert_schema_detail_non_empty("data_root", &DATA_ROOT_SCHEMA);
+        for label in [
+            "local", "s3", "gcs", "azurerm", "http", "consul", "remote",
+            "kubernetes", "pg",
+        ] {
+            let schema =
+                backend_schema(label).expect("backend schema for {label}");
+            assert_schema_detail_non_empty(
+                &format!("backend.{label}"),
+                &schema,
+            );
+        }
+    }
+
+    #[test]
+    fn provider_and_module_meta_attrs_have_details() {
+        for a in MODULE_BLOCK_META_ATTRS {
+            assert!(
+                !a.detail.is_empty(),
+                "MODULE_BLOCK_META_ATTRS: `{}` has empty detail",
+                a.name
+            );
+        }
+        for a in PROVIDER_BLOCK_META_ATTRS {
+            assert!(
+                !a.detail.is_empty(),
+                "PROVIDER_BLOCK_META_ATTRS: `{}` has empty detail",
+                a.name
+            );
+        }
+        for a in REQUIRED_PROVIDER_ENTRY_ATTRS {
+            assert!(
+                !a.detail.is_empty(),
+                "REQUIRED_PROVIDER_ENTRY_ATTRS: `{}` has empty detail",
+                a.name
+            );
+        }
+    }
+}

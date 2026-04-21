@@ -281,6 +281,100 @@ async fn hover_on_lifecycle_enabled_in_tofu_file_is_silent_about_portability() {
 }
 
 #[tokio::test]
+async fn hover_on_terraform_backend_keyword_shows_builtin_docs() {
+    // Cursor on `backend` inside `terraform { backend "s3" {} }`
+    // should render the built-in backend docs (description + attr
+    // summary), not fall through to the generic block-label hover.
+    let u = uri("file:///backend.tf");
+    let src = "terraform {\n  backend \"s3\" {}\n}\n";
+    let b = backend_with(src, &u);
+    // Cursor on the `b` of `backend` (line 1, col 2).
+    let md = hover_markdown(&b, &u, Position::new(1, 4))
+        .await
+        .expect("some hover");
+    assert!(
+        md.contains("**block** `backend`"),
+        "expected backend block header; got: {md}"
+    );
+    assert!(
+        md.contains("on terraform block"),
+        "expected terraform root annotation; got: {md}"
+    );
+    // s3 is the default label placeholder — schema attrs should show.
+    assert!(
+        md.contains("Remote state backend"),
+        "expected backend detail; got: {md}"
+    );
+}
+
+#[tokio::test]
+async fn hover_on_required_providers_keyword_shows_builtin_docs() {
+    let u = uri("file:///required_providers.tf");
+    let src = "terraform {\n  required_providers {}\n}\n";
+    let b = backend_with(src, &u);
+    let md = hover_markdown(&b, &u, Position::new(1, 4))
+        .await
+        .expect("some hover");
+    assert!(
+        md.contains("**block** `required_providers`"),
+        "expected required_providers block header; got: {md}"
+    );
+    assert!(
+        md.contains("on terraform block"),
+        "expected terraform annotation; got: {md}"
+    );
+}
+
+#[tokio::test]
+async fn hover_on_cloud_workspaces_nested_block_shows_docs() {
+    // Two-level descent: cursor on `workspaces` inside `terraform {
+    // cloud { workspaces {} } }`.
+    let u = uri("file:///cloud_ws.tf");
+    let src = "terraform {\n  cloud {\n    workspaces {}\n  }\n}\n";
+    let b = backend_with(src, &u);
+    let md = hover_markdown(&b, &u, Position::new(2, 6))
+        .await
+        .expect("some hover");
+    assert!(
+        md.contains("**block** `workspaces`"),
+        "expected workspaces block header; got: {md}"
+    );
+    assert!(
+        md.contains("inside `terraform.cloud`"),
+        "expected parent-path annotation; got: {md}"
+    );
+    // Workspaces schema attrs should show (name / prefix / tags).
+    assert!(
+        md.contains("`name`") || md.contains("`prefix`") || md.contains("`tags`"),
+        "expected workspaces attrs; got: {md}"
+    );
+}
+
+#[tokio::test]
+async fn hover_on_terraform_required_version_attr_shows_builtin_docs() {
+    // Attribute hover inside `terraform { required_version = … }` —
+    // the built-in attr hover path.
+    let u = uri("file:///rv.tf");
+    let src = "terraform {\n  required_version = \">= 1.6\"\n}\n";
+    let b = backend_with(src, &u);
+    let md = hover_markdown(&b, &u, Position::new(1, 4))
+        .await
+        .expect("some hover");
+    assert!(
+        md.contains("**attribute** `required_version`"),
+        "expected attr header; got: {md}"
+    );
+    assert!(
+        md.contains("in `terraform`"),
+        "expected terraform path; got: {md}"
+    );
+    assert!(
+        !md.contains("not in the schema"),
+        "should NOT complain about missing provider schema; got: {md}"
+    );
+}
+
+#[tokio::test]
 async fn hover_on_nested_block_header_returns_block_docs_not_resource_label() {
     // Cursor on a nested block's identifier (e.g. the `r` of
     // `root_block_device`) should surface that block's schema
