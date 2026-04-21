@@ -516,13 +516,13 @@ fn render_nested_block_summary(out: &mut String, name: &str, nb: &NestedBlockSch
     if has_attrs {
         let (required, optional, computed) = partition_attributes(&nb.block);
         if !required.is_empty() {
-            write_attr_name_line(out, "Required", &required);
+            write_nested_attr_section(out, "Required", &required);
         }
         if !optional.is_empty() {
-            write_attr_name_line(out, "Optional", &optional);
+            write_nested_attr_section(out, "Optional", &optional);
         }
         if !computed.is_empty() {
-            write_attr_name_line(out, "Read-Only", &computed);
+            write_nested_attr_section(out, "Read-Only", &computed);
         }
     }
 
@@ -546,13 +546,31 @@ fn nesting_mode_label(mode: NestingMode) -> &'static str {
     }
 }
 
-fn write_attr_name_line(
+/// Emit a per-attribute sub-list under a Required / Optional /
+/// Read-Only heading for a nested block. Matches the attribute
+/// descriptions the parent doc already shows under `## Required`
+/// etc — users shouldn't have to dig deeper than this hover to
+/// know what each nested-block attr does.
+///
+/// Indented with two spaces so markdown renderers treat the attr
+/// bullets as children of the section label bullet.
+fn write_nested_attr_section(
     out: &mut String,
     label: &str,
     attrs: &[(&str, &tfls_schema::AttributeSchema)],
 ) {
-    let joined: Vec<String> = attrs.iter().map(|(n, _)| format!("`{n}`")).collect();
-    out.push_str(&format!("- **{}:** {}\n", label, joined.join(", ")));
+    out.push_str(&format!("- **{}:**\n", label));
+    for (name, attr) in attrs {
+        out.push_str(&format!("  - `{}`", name));
+        if let Some(desc) = &attr.description {
+            let d = desc.trim();
+            if !d.is_empty() {
+                out.push_str(" — ");
+                out.push_str(d);
+            }
+        }
+        out.push('\n');
+    }
 }
 
 fn partition_attributes(
@@ -793,11 +811,19 @@ mod tests {
         );
         nested_block.attributes.insert(
             "volume_size".to_string(),
-            AttributeSchema { optional: true, ..Default::default() },
+            AttributeSchema {
+                optional: true,
+                description: Some("Size of the volume in GiB.".to_string()),
+                ..Default::default()
+            },
         );
         nested_block.attributes.insert(
             "volume_type".to_string(),
-            AttributeSchema { required: true, ..Default::default() },
+            AttributeSchema {
+                required: true,
+                description: Some("gp2, gp3, io1 or similar.".to_string()),
+                ..Default::default()
+            },
         );
         let mut resource_block = BlockSchema::default();
         resource_block.description = Some("An EC2 instance.".to_string());
@@ -846,14 +872,16 @@ mod tests {
             md.contains("Customize details about the root block device."),
             "expected description; md: {md}"
         );
-        // Required + Optional attr summaries.
+        // Required + Optional sub-lists with per-attr descriptions.
+        assert!(md.contains("- **Required:**\n"), "md: {md}");
         assert!(
-            md.contains("**Required:** `volume_type`"),
-            "expected required attrs line; md: {md}"
+            md.contains("  - `volume_type` — gp2, gp3, io1 or similar."),
+            "expected required attr with description; md: {md}"
         );
+        assert!(md.contains("- **Optional:**\n"), "md: {md}");
         assert!(
-            md.contains("**Optional:** `volume_size`"),
-            "expected optional attrs line; md: {md}"
+            md.contains("  - `volume_size` — Size of the volume in GiB."),
+            "expected optional attr with description; md: {md}"
         );
     }
 
