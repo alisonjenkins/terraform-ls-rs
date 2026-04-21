@@ -104,18 +104,33 @@ pub async fn completion(
         CompletionContext::ResourceBody { resource_type } => {
             let body = doc.parsed.body.as_ref();
             let filter = compute_body_filter(body, offset);
-            let nested_path = body
-                .map(|b| nested_block_path(b, offset))
-                .unwrap_or_default();
-            resource_body_items(backend, &resource_type, /*data=*/ false, &filter, &nested_path)
+            // A cursor directly on a `dynamic "<label>" { … }` body
+            // (NOT inside its `content { }` child) should offer the
+            // three dynamic meta-args + a `content` scaffold, not
+            // the target block's attrs — those belong inside
+            // `content`. Detect by asking for the innermost enclosing
+            // block; if it's literally `dynamic`, route to the
+            // dedicated menu.
+            if cursor_on_dynamic_body(body, offset) {
+                dynamic_body_items(&filter)
+            } else {
+                let nested_path = body
+                    .map(|b| nested_block_path(b, offset))
+                    .unwrap_or_default();
+                resource_body_items(backend, &resource_type, /*data=*/ false, &filter, &nested_path)
+            }
         }
         CompletionContext::DataSourceBody { resource_type } => {
             let body = doc.parsed.body.as_ref();
             let filter = compute_body_filter(body, offset);
-            let nested_path = body
-                .map(|b| nested_block_path(b, offset))
-                .unwrap_or_default();
-            resource_body_items(backend, &resource_type, /*data=*/ true, &filter, &nested_path)
+            if cursor_on_dynamic_body(body, offset) {
+                dynamic_body_items(&filter)
+            } else {
+                let nested_path = body
+                    .map(|b| nested_block_path(b, offset))
+                    .unwrap_or_default();
+                resource_body_items(backend, &resource_type, /*data=*/ true, &filter, &nested_path)
+            }
         }
         CompletionContext::VariableRef => {
             module_symbol_items(backend, &uri, SymbolField::Variables, CompletionItemKind::VARIABLE)
@@ -1223,6 +1238,16 @@ fn compute_body_filter(body_opt: Option<&Body>, offset: usize) -> BodyFilter {
     out
 }
 
+/// True when the cursor sits directly in the body of a
+/// `dynamic "<label>" { … }` block — outside its `content { }`
+/// child. Completion at this position should offer only the
+/// dynamic meta-args and the `content` scaffold, not the target
+/// nested block's attrs (which belong inside `content`).
+fn cursor_on_dynamic_body(body: Option<&Body>, offset: usize) -> bool {
+    body.and_then(|b| innermost_block_at(b, offset))
+        .is_some_and(|b| b.ident.as_str() == "dynamic")
+}
+
 fn innermost_block_at(body: &Body, offset: usize) -> Option<&Block> {
     for structure in body.iter() {
         let Some(block) = structure.as_block() else {
@@ -1388,15 +1413,76 @@ fn meta_argument_items(_kind: BlockKind) -> Vec<CompletionItem> {
         .collect()
 }
 
+/// Items for a cursor sitting directly in the body of a
+/// `dynamic "<label>" { … }` block — not inside `content { }`.
+/// The dynamic body accepts only the three meta-args
+/// (`for_each` required, `iterator` / `labels` optional) and a
+/// single `content { }` sub-block. Already-present items are
+/// filtered out so repeat suggestions don't clutter the menu.
+fn dynamic_body_items(filter: &BodyFilter) -> Vec<CompletionItem> {
+    let meta = [
+        ("for_each", "meta-argument — required", "for_each = ${1}"),
+        ("iterator", "meta-argument — rename `each`", "iterator = \"${1}\""),
+        ("labels", "meta-argument — labels list", "labels = [${1}]"),
+    ];
+    let mut items: Vec<CompletionItem> = meta
+        .iter()
+        .filter(|(name, _, _)| !filter.present_attrs.contains(*name))
+        .map(|(name, detail, snippet)| CompletionItem {
+            label: (*name).to_string(),
+            kind: Some(CompletionItemKind::PROPERTY),
+            detail: Some((*detail).to_string()),
+            documentation: dynamic_meta_attr_documentation(name),
+            insert_text: Some((*snippet).to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        })
+        .collect();
+
+    if !filter.present_blocks.contains("content") {
+        items.push(CompletionItem {
+            label: "content".to_string(),
+            kind: Some(CompletionItemKind::STRUCT),
+            detail: Some("meta-block — body template".to_string()),
+            documentation: Some(Documentation::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: tfls_core::content_meta_block_description().to_string(),
+            })),
+            insert_text: Some("content {\n  $0\n}".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        });
+    }
+
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    items
+}
+
+fn dynamic_meta_attr_documentation(name: &str) -> Option<Documentation> {
+    let text = tfls_core::dynamic_meta_attr_description(name);
+    if text.is_empty() {
+        return None;
+    }
+    Some(Documentation::MarkupContent(MarkupContent {
+        kind: MarkupKind::Markdown,
+        value: text.to_string(),
+    }))
+}
+
 fn meta_block_items(kind: BlockKind) -> Vec<CompletionItem> {
     meta_blocks(kind)
         .iter()
         .map(|name| {
-            // `provisioner` takes a type label; others are plain blocks.
-            let snippet = if *name == "provisioner" {
-                "provisioner \"${1:local-exec}\" {\n  $0\n}".to_string()
-            } else {
-                format!("{name} {{\n  $0\n}}")
+            // `provisioner` and `dynamic` take labels; others are plain.
+            let snippet = match *name {
+                "provisioner" => "provisioner \"${1:local-exec}\" {\n  $0\n}".to_string(),
+                "dynamic" => {
+                    // dynamic "<label>" { for_each = …; content { … } }
+                    // — three tabstops: target-block label, for_each
+                    // expression, and the content body.
+                    "dynamic \"${1:block_name}\" {\n  for_each = ${2}\n\n  content {\n    $0\n  }\n}".to_string()
+                }
+                _ => format!("{name} {{\n  $0\n}}"),
             };
             CompletionItem {
                 label: (*name).to_string(),

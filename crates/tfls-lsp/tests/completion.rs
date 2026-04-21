@@ -505,6 +505,135 @@ async fn resource_body_inside_doubly_nested_block_suggests_innermost_attrs() {
 }
 
 #[tokio::test]
+async fn completion_on_dynamic_body_offers_meta_args_and_content_scaffold() {
+    // Cursor on a blank line directly inside
+    // `dynamic "ebs_block_device" { | }` — NOT inside `content` —
+    // must offer the dynamic construct's three meta-args + a
+    // `content { }` block scaffold. The target block's own attrs
+    // (`device_name`) belong inside `content`, not here.
+    let u = uri("file:///dyn_body.tf");
+    let src = "resource \"aws_instance\" \"x\" {\n  dynamic \"ebs_block_device\" {\n    \n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    install_aws_schema(&backend);
+
+    // Line 2, col 4 → indented blank line inside the dynamic body.
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 4)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(
+        ls.contains(&"for_each".to_string()),
+        "dynamic body must offer `for_each`; got: {ls:?}"
+    );
+    assert!(
+        ls.contains(&"iterator".to_string()),
+        "dynamic body must offer `iterator`; got: {ls:?}"
+    );
+    assert!(
+        ls.contains(&"labels".to_string()),
+        "dynamic body must offer `labels`; got: {ls:?}"
+    );
+    assert!(
+        ls.contains(&"content".to_string()),
+        "dynamic body must offer `content {{}}` scaffold; got: {ls:?}"
+    );
+    assert!(
+        !ls.contains(&"device_name".to_string()),
+        "target block attrs must NOT leak onto the dynamic body; got: {ls:?}"
+    );
+    assert!(
+        !ls.contains(&"ami".to_string()),
+        "outer resource attrs must NOT leak onto the dynamic body; got: {ls:?}"
+    );
+}
+
+#[tokio::test]
+async fn dynamic_body_filters_already_present_items() {
+    // When `for_each` and `content { }` are already present in the
+    // dynamic body, the completion menu must skip them — otherwise
+    // repeat suggestions clutter the list. `iterator` and `labels`
+    // (still absent) should remain.
+    let u = uri("file:///dyn_body_filter.tf");
+    let src = "resource \"aws_instance\" \"x\" {\n  dynamic \"ebs_block_device\" {\n    for_each = []\n    \n    content { device_name = \"x\" }\n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    install_aws_schema(&backend);
+
+    // Line 3, col 4 → blank line between for_each and content.
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(3, 4)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(
+        !ls.contains(&"for_each".to_string()),
+        "for_each already present; must be suppressed; got: {ls:?}"
+    );
+    assert!(
+        !ls.contains(&"content".to_string()),
+        "content already present; must be suppressed; got: {ls:?}"
+    );
+    assert!(
+        ls.contains(&"iterator".to_string()),
+        "iterator still absent; must be offered; got: {ls:?}"
+    );
+    assert!(
+        ls.contains(&"labels".to_string()),
+        "labels still absent; must be offered; got: {ls:?}"
+    );
+}
+
+#[tokio::test]
+async fn resource_body_offers_dynamic_meta_block() {
+    // Dynamic is a language-level meta-block — the resource body
+    // completion should suggest it alongside lifecycle /
+    // provisioner / connection, with a snippet that scaffolds the
+    // full `dynamic "<label>" { for_each = …; content { … } }`
+    // shape.
+    let u = uri("file:///dyn_scaffold.tf");
+    let src = "resource \"aws_instance\" \"x\" {\n  \n}\n";
+    let backend = fresh_backend(src, &u);
+    install_aws_schema(&backend);
+
+    // Line 1, col 2 → blank line inside the resource body.
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(1, 2)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+
+    let items: Vec<CompletionItem> = match resp {
+        CompletionResponse::Array(a) => a,
+        CompletionResponse::List(l) => l.items,
+    };
+    let item = items
+        .iter()
+        .find(|i| i.label == "dynamic")
+        .expect("dynamic meta-block suggestion present");
+    let text = item.insert_text.as_deref().expect("insert_text set");
+    assert!(
+        text.starts_with("dynamic \""),
+        "snippet must open with `dynamic \"…\"`; got {text:?}"
+    );
+    assert!(
+        text.contains("for_each = "),
+        "snippet must include for_each; got {text:?}"
+    );
+    assert!(
+        text.contains("content {"),
+        "snippet must include content block; got {text:?}"
+    );
+}
+
+#[tokio::test]
 async fn completion_inside_dynamic_content_resolves_target_block_schema() {
     // `dynamic "ebs_block_device" { content { … } }` is a meta-construct
     // that at plan-time generates one `ebs_block_device { … }` per
