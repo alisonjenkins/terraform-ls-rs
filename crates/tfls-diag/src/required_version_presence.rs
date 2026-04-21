@@ -126,4 +126,39 @@ mod tests {
         let d = diags(r#"variable "x" { type = string }"#, false);
         assert!(d.is_empty(), "got: {d:?}");
     }
+
+    #[test]
+    fn emits_once_with_backend_nested_block() {
+        // Pinning the exact user-facing shape that produced the
+        // "required_version is required" duplicate in the
+        // screenshot: a terraform block with a nested backend
+        // sub-block. The rule must fire exactly once — not once
+        // for the terraform header and again for the backend
+        // body. Uses the idiomatic multi-line layout; the
+        // single-line variant is rejected by hcl-edit so we
+        // don't test that path.
+        let d = diags(
+            "terraform {\n  backend \"s3\" {}\n}\n",
+            false,
+        );
+        assert_eq!(d.len(), 1, "nested backend must not double-fire: {d:?}");
+    }
+
+    #[test]
+    fn emits_once_with_backend_and_required_providers() {
+        // The full real-world shape: terraform block with both a
+        // backend AND a required_providers sub-block (no
+        // required_version attribute). Still exactly one
+        // "required_version is required" diagnostic — no
+        // double-fire for multiple nested blocks.
+        let d = diags(
+            "terraform {\n  backend \"s3\" {}\n  required_providers {\n    aws = {\n      source = \"hashicorp/aws\"\n    }\n  }\n}\n",
+            false,
+        );
+        assert_eq!(
+            d.len(),
+            1,
+            "multiple nested blocks must not double-fire: {d:?}"
+        );
+    }
 }

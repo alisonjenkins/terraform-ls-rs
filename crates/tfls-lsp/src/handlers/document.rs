@@ -32,11 +32,76 @@ pub async fn did_open(backend: &Backend, params: DidOpenTextDocumentParams) {
     // Claude Code while editing an unrelated repo) and its sibling
     // definitions need to be in the store before diagnostics run.
     crate::indexer::ensure_module_indexed(&backend.state, &backend.jobs, &uri);
-    publish_current_diagnostics(backend, &uri, None).await;
+
+    // The buffer is now open. Hand off the diagnostic channel to
+    // either (a) a one-time empty publish that clears whatever the
+    // bulk workspace scan may have pushed to this URI before it
+    // became an open buffer — followed by pull diagnostics taking
+    // over — or (b) a normal push for clients that don't advertise
+    // pull. `did_open_publish_action` is the single source of truth
+    // for that choice; see its docs for the duplicate-diagnostic
+    // invariant it pins.
+    match did_open_publish_action(&backend.state) {
+        DidOpenPublish::ClearPushNamespaceThenPull => {
+            // Empty `publishDiagnostics` resets the push namespace.
+            // Subsequent pulls populate the (separate) pull
+            // namespace; nvim's display is pull-only for this URI.
+            backend
+                .client
+                .publish_diagnostics(uri.clone(), Vec::new(), None)
+                .await;
+        }
+        DidOpenPublish::PublishReal => {
+            publish_current_diagnostics(backend, &uri, None).await;
+        }
+    }
+
     // Kick off background version-cache prefetch so inlay-hint
     // freshness annotations (and the semantic no-match diagnostic)
     // light up without the user having to trigger completion first.
     crate::handlers::version_prefetch::spawn(backend, uri, None);
+}
+
+/// What the server should publish to the client on `did_open`.
+/// Factored out of the async handler so the no-duplicate invariant
+/// below is unit-testable without mocking the LSP client.
+///
+/// Critical invariant: under pull-diagnostics mode the server must
+/// reset the push namespace to empty BEFORE pull takes over.
+/// Background scans (`indexer::scan_files_parallel`) publish
+/// diagnostics for every indexed file, which is correct for files
+/// the user never opens (workspace-wide views consume the push
+/// namespace). But once the user DOES open a file, nvim displays
+/// the union of push + pull as two separate diagnostic lists —
+/// the pre-open push entries become stale or duplicated.
+/// `ClearPushNamespaceThenPull` emits one empty publish that
+/// resets the namespace; after that nvim shows pull-only for the
+/// buffer's lifetime.
+///
+/// `PublishReal` is the push-only path for clients that never
+/// advertised pull — we still need to tell them about diagnostics
+/// somehow, and there's no double-namespace concern to mitigate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DidOpenPublish {
+    /// Client advertised pull. Clear the push namespace with one
+    /// empty `publishDiagnostics`; subsequent pulls populate the
+    /// pull namespace. Total lifetime push count for this URI
+    /// under pull mode: exactly 1 (the empty clear).
+    ClearPushNamespaceThenPull,
+    /// Client didn't advertise pull. Compute + push real
+    /// diagnostics the normal way.
+    PublishReal,
+}
+
+pub(crate) fn did_open_publish_action(state: &StateStore) -> DidOpenPublish {
+    if state
+        .client_supports_pull_diagnostics
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        DidOpenPublish::ClearPushNamespaceThenPull
+    } else {
+        DidOpenPublish::PublishReal
+    }
 }
 
 pub async fn did_change(backend: &Backend, params: DidChangeTextDocumentParams) {
@@ -88,8 +153,10 @@ pub async fn did_close(backend: &Backend, params: DidCloseTextDocumentParams) {
     let uri = params.text_document.uri;
     backend.state.mark_closed(&uri);
     backend.state.remove_document(&uri);
-    // Always clear on close; the empty-publish is a no-op from the
-    // client's perspective even under pull-only mode.
+    // Always clear on close — symmetric with `did_open`'s
+    // pull-mode clear. Ensures the push namespace is empty when
+    // the buffer stops being an active editor target, so the next
+    // `did_open` starts from a known-clean state.
     backend
         .client
         .publish_diagnostics(uri, Vec::new(), None)
@@ -733,3 +800,67 @@ fn extract_provider_local(expr: &hcl_edit::expr::Expression) -> Option<String> {
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod did_open_publish_tests {
+    //! Invariant tests for the `did_open` publish-action
+    //! decision.
+    //!
+    //! **The invariant:** under pull-diagnostics mode the first
+    //! publish for a freshly-opened buffer MUST be an empty set,
+    //! not a real diagnostic payload. Background workspace scans
+    //! push real diagnostics to files BEFORE they're open — those
+    //! entries live in nvim's push namespace. Once the buffer is
+    //! open, pull takes over and populates a SEPARATE pull
+    //! namespace; nvim's display is the union of the two. Unless
+    //! we clear the push namespace on did_open, stale or
+    //! duplicate diagnostics show up for every edit session.
+    //!
+    //! These tests pin `did_open_publish_action`'s output so a
+    //! future commit can't silently revert the clear to a real
+    //! publish (the bug we've regressed into multiple times).
+
+    use super::{DidOpenPublish, did_open_publish_action};
+    use tfls_state::StateStore;
+
+    #[test]
+    fn clear_push_namespace_when_client_supports_pull() {
+        let store = StateStore::new();
+        store.set_client_supports_pull_diagnostics(true);
+        assert_eq!(
+            did_open_publish_action(&store),
+            DidOpenPublish::ClearPushNamespaceThenPull
+        );
+    }
+
+    #[test]
+    fn publish_real_when_client_is_push_only() {
+        let store = StateStore::new();
+        // Pull not advertised; default is false.
+        assert_eq!(
+            did_open_publish_action(&store),
+            DidOpenPublish::PublishReal
+        );
+    }
+
+    #[test]
+    fn action_enum_has_no_push_real_under_pull_variant() {
+        // Meta-invariant — parallel to the `RefreshDecision`
+        // enum's equivalent test. The two legitimate actions on
+        // did_open are "clear then pull" and "publish real", no
+        // others. Adding a third — e.g. "publish real then also
+        // refresh" — would reintroduce the duplicate-diagnostic
+        // regression. Match exhaustively so a future commit
+        // can't add a variant without a source-level change.
+        let variants = [
+            DidOpenPublish::ClearPushNamespaceThenPull,
+            DidOpenPublish::PublishReal,
+        ];
+        for v in variants {
+            match v {
+                DidOpenPublish::ClearPushNamespaceThenPull
+                | DidOpenPublish::PublishReal => {}
+            }
+        }
+    }
+}
