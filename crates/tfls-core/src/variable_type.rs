@@ -4,13 +4,14 @@
 use std::collections::BTreeMap;
 
 use hcl_edit::expr::Expression;
+use serde::{Deserialize, Serialize};
 
 /// A Terraform variable type — the shape declared via `type = …` in a
 /// `variable` block. Only `Object` carries drill-in information for
 /// completion, but the other variants exist so we can faithfully
 /// represent any legal type expression (useful for future hover/diag
 /// features).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VariableType {
     Any,
     Primitive(Primitive),
@@ -21,7 +22,7 @@ pub enum VariableType {
     Object(BTreeMap<String, VariableType>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Primitive {
     String,
     Number,

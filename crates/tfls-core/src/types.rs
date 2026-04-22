@@ -67,7 +67,7 @@ impl std::fmt::Display for ProviderAddress {
 }
 
 /// A resource address like `aws_instance.web` or `data.aws_ami.ubuntu`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ResourceAddress {
     pub resource_type: String,
     pub name: String,
@@ -89,7 +89,7 @@ impl std::fmt::Display for ResourceAddress {
 }
 
 /// The kind of a symbol in a Terraform module.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SymbolKind {
     Variable,
     Local,
@@ -102,7 +102,7 @@ pub enum SymbolKind {
 }
 
 /// Location of a symbol, usable as a map key (Range doesn't implement Hash).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SymbolLocation {
     pub uri: lsp_types::Url,
     pub start_line: u32,
@@ -149,7 +149,7 @@ impl SymbolLocation {
 /// navigation) — `name_range` is the narrower range of just the label
 /// or attribute key, used for semantic-token highlighting so that
 /// colours align with the actual identifier rather than the keyword.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Symbol {
     pub name: String,
     pub kind: SymbolKind,
@@ -160,7 +160,7 @@ pub struct Symbol {
 }
 
 /// Per-module symbol table.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct SymbolTable {
     pub variables: HashMap<String, Symbol>,
     pub locals: HashMap<String, Symbol>,

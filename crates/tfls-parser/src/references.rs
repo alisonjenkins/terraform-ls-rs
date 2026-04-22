@@ -7,12 +7,13 @@ use hcl_edit::repr::Span;
 use hcl_edit::structure::{Block, Body};
 use lsp_types::{Range, Url};
 use ropey::Rope;
+use serde::{Deserialize, Serialize};
 use tfls_core::SymbolLocation;
 
 use crate::position::hcl_span_to_lsp_range;
 
 /// What a reference points to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReferenceKind {
     /// `var.<name>`
     Variable { name: String },
@@ -27,7 +28,7 @@ pub enum ReferenceKind {
 }
 
 /// A reference and the location where it appeared.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Reference {
     pub kind: ReferenceKind,
     pub location: SymbolLocation,

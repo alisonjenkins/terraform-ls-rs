@@ -444,6 +444,27 @@ async fn bulk_workspace_scan(
     // with no prior progress would leave Fidget silent for the
     // (potentially multi-second) duration of the walk on large
     // repos.
+    // Try the persistent index cache first. If a cache exists
+    // for this workspace AND its entries still match the files
+    // on disk, the bulk scan below finds those files already in
+    // `state.documents` and skips parsing them entirely. Pure
+    // savings for workspace re-opens: a 500-file workspace
+    // drops from seconds of parse work to a stat-every-file
+    // pass.
+    let hydrate_start = std::time::Instant::now();
+    let hydrated = if let Some(cache) = tfls_state::IndexCache::load(root) {
+        let n = cache.hydrate_into_store(state);
+        tracing::info!(
+            root = %root.display(),
+            entries = n,
+            elapsed_ms = hydrate_start.elapsed().as_millis() as u64,
+            "index cache: hydrated"
+        );
+        n
+    } else {
+        0
+    };
+
     let discover_progress = match client {
         Some(c) => crate::progress::ProgressReporter::begin(c, "Discovering Terraform files").await,
         None => None,
@@ -502,6 +523,26 @@ async fn bulk_workspace_scan(
     // open buffers don't sit on false-positives from the earlier
     // `did_open` pass that only saw the buffer itself.
     maybe_refresh_diagnostics(state, client).await;
+
+    // Save the post-scan store back to the persistent index
+    // cache so the NEXT server start on this workspace can
+    // skip the parse phase for unchanged files. This
+    // deliberately happens AFTER the scan completes so the
+    // cache reflects the freshly-parsed state, not whatever
+    // was hydrated at the start (which may have been stale
+    // for files the user edited outside the editor).
+    let save_start = std::time::Instant::now();
+    let cache = tfls_state::IndexCache::capture(state, root);
+    let entry_count = cache.entries.len();
+    let root_owned = root.to_path_buf();
+    let _ = tokio::task::spawn_blocking(move || cache.save(&root_owned)).await;
+    tracing::info!(
+        root = %root.display(),
+        hydrated_on_load = hydrated,
+        entries_saved = entry_count,
+        elapsed_ms = save_start.elapsed().as_millis() as u64,
+        "index cache: saved"
+    );
     Ok(())
 }
 

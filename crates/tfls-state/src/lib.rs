@@ -7,6 +7,7 @@
 pub mod config;
 pub mod document;
 pub mod error;
+pub mod index_cache;
 pub mod jobs;
 pub mod lookup;
 pub mod store;
@@ -14,6 +15,7 @@ pub mod store;
 pub use config::{Config, ConfigCell};
 pub use document::DocumentState;
 pub use error::StateError;
+pub use index_cache::IndexCache;
 pub use jobs::{Job, JobQueue, Priority};
 pub use lookup::reference_at_position;
 pub use store::{DirScanState, StateStore, SymbolKey, reference_key};

@@ -41,6 +41,39 @@ impl DocumentState {
         }
     }
 
+    /// Build a document from cached symbols + references (no
+    /// parsed AST). Used by [`crate::index_cache::IndexCache`] on
+    /// workspace re-open to restore cross-file index state without
+    /// paying the parse cost again. `parsed.body` is `None`, so
+    /// body-dependent diagnostic rules will skip this document
+    /// until the user opens it (at which point `did_open` calls
+    /// the full [`Self::new`] constructor and everything comes
+    /// online).
+    pub fn hydrated_from_cache(
+        uri: Url,
+        text: &str,
+        symbols: SymbolTable,
+        references: Vec<Reference>,
+    ) -> Self {
+        let rope = Rope::from_str(text);
+        // Synthesise a `ParsedFile` with no body — we
+        // deliberately skipped the parse. `compute_diagnostics`
+        // guards on `parsed.body.is_some()` for every
+        // body-dependent rule.
+        let parsed = ParsedFile {
+            body: None,
+            errors: Vec::new(),
+        };
+        Self {
+            uri,
+            rope,
+            version: 0,
+            parsed,
+            symbols,
+            references,
+        }
+    }
+
     pub fn apply_change(
         &mut self,
         change: TextDocumentContentChangeEvent,
