@@ -31,7 +31,24 @@ impl ModuleSnapshot {
     /// `state.documents`. `module_dir` filters which documents
     /// contribute — only docs whose parent directory matches are
     /// considered part of the module.
-    pub fn build(state: &StateStore, module_dir: Option<&Path>) -> Self {
+    ///
+    /// `referenced_dirs` is an OPTIONAL precomputed set of
+    /// directories that some module block in the workspace
+    /// resolves its `source = "./…"` to. When present, `is_root`
+    /// is derived via an O(1) set lookup (`!referenced.contains(
+    /// dir)`) instead of re-walking every indexed document and
+    /// canonicalising every module source path for every
+    /// snapshot. Bulk scans should precompute it once via
+    /// [`referenced_dirs_in_workspace`] and pass it to every
+    /// `build` call — drops the module-root determination from
+    /// O(M · N · canonicalize) to O(M). `None` falls back to the
+    /// per-snapshot walk, which is fine for single-file callers
+    /// that only build one snapshot.
+    pub fn build(
+        state: &StateStore,
+        module_dir: Option<&Path>,
+        referenced_dirs: Option<&HashSet<PathBuf>>,
+    ) -> Self {
         let mut has_required_version = false;
         let mut providers_with_version: HashSet<String> = HashSet::new();
         let mut used_provider_locals: HashSet<String> = HashSet::new();
@@ -139,7 +156,17 @@ impl ModuleSnapshot {
             .and_then(|s| Url::parse(s).ok());
 
         let present_files = compute_present_files(module_dir);
-        let is_root = compute_is_root(state, module_dir);
+        let is_root = match referenced_dirs {
+            // Fast path: the caller has already indexed every
+            // module source across the workspace. `is_root` is a
+            // plain set membership check — no filesystem syscall,
+            // no per-document body walk.
+            Some(set) => is_root_via_set(module_dir, set),
+            // Slow fallback for callers that build a one-off
+            // snapshot (single-file diagnostic paths). Walks the
+            // store and canonicalises each local-path source.
+            None => compute_is_root(state, module_dir),
+        };
 
         Self {
             module_dir: module_dir.map(Path::to_path_buf),
@@ -224,6 +251,82 @@ fn compute_present_files(module_dir: Option<&Path>) -> HashSet<String> {
                 .filter(|s| s.ends_with(".tf") || s.ends_with(".tf.json"))
         })
         .collect()
+}
+
+/// Walk every indexed document in `state` once and collect the
+/// set of directories that some `module { source = "./…" }`
+/// block resolves to. The result powers [`ModuleSnapshot::build`]'s
+/// fast-path `is_root` determination: a module is "root" iff its
+/// directory is NOT in this set.
+///
+/// Canonicalises each local-path source once — not once per
+/// target module. For a workspace with K total module blocks
+/// across all files, this is K canonicalize calls, regardless
+/// of how many target directories we'll eventually build
+/// snapshots for. Previously the same K syscalls happened
+/// *per target module*, yielding O(M · K) filesystem work during
+/// the bulk scan's compute phase.
+pub fn referenced_dirs_in_workspace(state: &StateStore) -> HashSet<PathBuf> {
+    let mut out = HashSet::new();
+    for doc in state.documents.iter() {
+        let Some(body) = doc.parsed.body.as_ref() else {
+            continue;
+        };
+        let caller_dir = crate::handlers::util::parent_dir(doc.key());
+        for structure in body.iter() {
+            let Some(block) = structure.as_block() else {
+                continue;
+            };
+            if block.ident.as_str() != "module" {
+                continue;
+            }
+            for attr in block.body.iter().filter_map(|s| s.as_attribute()) {
+                if attr.key.as_str() != "source" {
+                    continue;
+                }
+                let Expression::String(s) = &attr.value else {
+                    continue;
+                };
+                let source = s.value().as_str();
+                if !(source.starts_with("./")
+                    || source.starts_with("../")
+                    || source.starts_with('/'))
+                {
+                    continue;
+                }
+                let Some(dir) = caller_dir.as_deref() else {
+                    continue;
+                };
+                let resolved = dir.join(source);
+                if let Ok(canon) = std::fs::canonicalize(&resolved) {
+                    out.insert(canon);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Fast-path `is_root` for a module whose directory is being
+/// checked against a precomputed set of referenced directories.
+/// Returns `true` iff `module_dir` is NOT the target of some
+/// workspace module call.
+fn is_root_via_set(module_dir: Option<&Path>, referenced: &HashSet<PathBuf>) -> bool {
+    let Some(dir) = module_dir else {
+        return true;
+    };
+    // Membership check needs the same canonical form the
+    // precompute wrote. Canonicalise once per call — fine here,
+    // the hot path (inside `build`) calls us once per module
+    // snapshot, not per document.
+    match std::fs::canonicalize(dir) {
+        Ok(canon) => !referenced.contains(&canon),
+        // Can't canonicalise → treat as root. Nonexistent /
+        // permission-denied dirs are never "consumed by a module
+        // call" so the generous default matches
+        // `compute_is_root`'s behaviour on the slow path.
+        Err(_) => true,
+    }
 }
 
 fn compute_is_root(state: &StateStore, module_dir: Option<&Path>) -> bool {
@@ -333,5 +436,145 @@ impl tfls_diag::ModuleGraphLookup for CachedModuleLookup<'_> {
 
     fn providers_with_version_set(&self) -> HashSet<String> {
         self.snapshot.providers_with_version.clone()
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    //! Unit tests for the fast-path `is_root` determination.
+    //!
+    //! The invariant the tests pin: the precomputed
+    //! `referenced_dirs` set plus `ModuleSnapshot::build`'s
+    //! fast path produce the SAME `is_root` answer the slow
+    //! `compute_is_root` would have produced. Regressing on
+    //! that would silently suppress `unused_declarations`
+    //! diagnostics (marking root modules as non-root) or spam
+    //! them on child modules (marking children as root) —
+    //! neither observable via an integration smoke.
+    //!
+    //! Tests use real filesystems via `tempfile::tempdir`
+    //! because `canonicalize` hits the filesystem — mocking
+    //! would drift from reality.
+    use super::*;
+    use std::fs;
+    use tfls_state::{DocumentState, StateStore};
+
+    fn make_store_with(files: &[(PathBuf, &str)]) -> StateStore {
+        let store = StateStore::new();
+        for (path, src) in files {
+            fs::write(path, src).unwrap();
+            let uri = Url::from_file_path(path).unwrap();
+            store.upsert_document(DocumentState::new(uri, src, 1));
+        }
+        store
+    }
+
+    #[test]
+    fn referenced_dirs_collects_local_path_module_sources() {
+        // Root module references `./modules/net` — precompute
+        // must return `{canonical(./modules/net)}`.
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let child = root.join("modules").join("net");
+        fs::create_dir_all(&child).unwrap();
+        let store = make_store_with(&[(
+            root.join("main.tf"),
+            "module \"net\" { source = \"./modules/net\" }\n",
+        )]);
+
+        let referenced = referenced_dirs_in_workspace(&store);
+        assert!(
+            referenced.contains(&child),
+            "precompute missed `./modules/net`: {referenced:?}"
+        );
+    }
+
+    #[test]
+    fn referenced_dirs_skips_registry_sources() {
+        // Registry / git / HTTP sources don't resolve to local
+        // workspace dirs and must NOT be added to the set —
+        // they'd never match a `module_dir` anyway and including
+        // them would waste allocations.
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let store = make_store_with(&[(
+            root.join("main.tf"),
+            "module \"vpc\" { source = \"terraform-aws-modules/vpc/aws\" }\n",
+        )]);
+
+        let referenced = referenced_dirs_in_workspace(&store);
+        assert!(
+            referenced.is_empty(),
+            "registry source leaked into referenced set: {referenced:?}"
+        );
+    }
+
+    #[test]
+    fn fast_path_is_root_matches_slow_path() {
+        // Pin the equivalence between the fast precomputed path
+        // and the slow O(N) fallback. If these ever diverge,
+        // `unused_declarations` will silently fire/suppress the
+        // wrong set of diagnostics.
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let child = root.join("modules").join("net");
+        fs::create_dir_all(&child).unwrap();
+        let store = make_store_with(&[
+            (
+                root.join("main.tf"),
+                "module \"net\" { source = \"./modules/net\" }\n",
+            ),
+            (
+                child.join("variables.tf"),
+                "variable \"cidr\" {}\n",
+            ),
+        ]);
+
+        let referenced = referenced_dirs_in_workspace(&store);
+
+        // Root module (no incoming module references).
+        let snap_root_fast = ModuleSnapshot::build(&store, Some(&root), Some(&referenced));
+        let snap_root_slow = ModuleSnapshot::build(&store, Some(&root), None);
+        assert!(snap_root_fast.is_root);
+        assert_eq!(snap_root_fast.is_root, snap_root_slow.is_root);
+
+        // Child module (referenced by root's `module` block).
+        let snap_child_fast = ModuleSnapshot::build(&store, Some(&child), Some(&referenced));
+        let snap_child_slow = ModuleSnapshot::build(&store, Some(&child), None);
+        assert!(!snap_child_fast.is_root);
+        assert_eq!(snap_child_fast.is_root, snap_child_slow.is_root);
+    }
+
+    #[test]
+    fn fast_path_treats_missing_dir_as_root() {
+        // `is_root_via_set` can't canonicalise a nonexistent
+        // dir — fall back to `true` (generous default, matching
+        // `compute_is_root`'s behaviour on errors). Without this
+        // the server would misreport live modules as
+        // non-root during filesystem flakes.
+        let store = StateStore::new();
+        let referenced: HashSet<PathBuf> = HashSet::new();
+        let missing = std::env::temp_dir().join("tfls-module-snapshot-does-not-exist");
+        let _ = fs::remove_dir_all(&missing);
+
+        let snap = ModuleSnapshot::build(&store, Some(&missing), Some(&referenced));
+        assert!(snap.is_root);
+    }
+
+    #[test]
+    fn fast_path_none_referenced_dirs_uses_slow_fallback() {
+        // `None` signals "no precompute, do it yourself" — used
+        // by the single-file diagnostic path that doesn't batch.
+        // Result must match the slow path.
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let store = make_store_with(&[(
+            root.join("main.tf"),
+            "variable \"x\" {}\n",
+        )]);
+
+        let snap = ModuleSnapshot::build(&store, Some(&root), None);
+        assert!(snap.is_root, "standalone module must be root");
     }
 }

@@ -730,11 +730,22 @@ async fn scan_files_parallel(
         by_module.entry(dir).or_default().push(uri);
     }
 
+    // Precompute the workspace-wide "referenced-by-some-module-call"
+    // directory set ONCE. Every `ModuleSnapshot::build` call below
+    // uses it for an O(1) `is_root` determination instead of the
+    // O(N) per-snapshot walk + canonicalize round-trips that
+    // previously dominated the compute phase (the 66%-frozen
+    // Fidget progress the user reported).
+    let referenced_dirs =
+        crate::handlers::module_snapshot::referenced_dirs_in_workspace(state);
+
+    let total_modules = by_module.len();
     let mut published = 0usize;
-    for (dir, uris_in_module) in by_module {
+    for (idx, (dir, uris_in_module)) in by_module.into_iter().enumerate() {
         let snapshot = crate::handlers::module_snapshot::ModuleSnapshot::build(
             state,
             dir.as_deref(),
+            Some(&referenced_dirs),
         );
         let snapshot_ref = &snapshot;
         let results: Vec<(lsp_types::Url, i32, Vec<lsp_types::Diagnostic>)> =
@@ -779,6 +790,25 @@ async fn scan_files_parallel(
             })
             .collect();
         while pending.next().await.is_some() {}
+
+        // Per-module progress report so the user sees continuous
+        // movement in Fidget instead of a frozen 66% for the
+        // duration of the whole compute+publish phase. Percent
+        // interpolates between 66 (phase start) and 99 (leaving
+        // one point for the `end` signal).
+        if let Some(p) = progress.as_ref() {
+            let done = idx + 1;
+            let pct = if total_modules > 0 {
+                66 + ((done * 33) / total_modules) as u32
+            } else {
+                99
+            };
+            p.report(
+                Some(format!("computing diagnostics ({done}/{total_modules} modules)")),
+                Some(pct),
+            )
+            .await;
+        }
     }
 
     tracing::info!(
