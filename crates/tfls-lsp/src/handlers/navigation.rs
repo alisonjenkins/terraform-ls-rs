@@ -351,14 +351,44 @@ pub async fn references(
         return Ok(None);
     };
 
+    // Mirror the scope filter `goto_definition` uses (see commit
+    // `584590e`): Terraform's module boundary is a single
+    // directory, so a variable named `region` declared in
+    // `/stackA/` and another in `/stackB/modules/net/` are
+    // NOT the same symbol — they share a `SymbolKey` in the
+    // workspace-wide index but live in different scopes.
+    // Filter definitions + references by the reference URI's
+    // parent directory.
+    let reference_dir = parent_dir(&uri);
     let mut out: Vec<Location> = Vec::new();
     if params.context.include_declaration {
         if let Some(entry) = backend.state.definitions_by_name.get(&key) {
-            out.extend(entry.iter().map(|l| l.to_lsp_location()));
+            match reference_dir.as_deref() {
+                Some(dir) => out.extend(
+                    entry
+                        .iter()
+                        .filter(|loc| location_in_dir(loc, dir))
+                        .map(|l| l.to_lsp_location()),
+                ),
+                // Pathological URI (no parseable parent). Be
+                // lenient and return every match so the user
+                // isn't stuck on an unnavigable file — same
+                // fallback used by `is_defined_in_module` and
+                // `goto_definition`.
+                None => out.extend(entry.iter().map(|l| l.to_lsp_location())),
+            }
         }
     }
     if let Some(entry) = backend.state.references_by_name.get(&key) {
-        out.extend(entry.iter().map(|l| l.to_lsp_location()));
+        match reference_dir.as_deref() {
+            Some(dir) => out.extend(
+                entry
+                    .iter()
+                    .filter(|loc| location_in_dir(loc, dir))
+                    .map(|l| l.to_lsp_location()),
+            ),
+            None => out.extend(entry.iter().map(|l| l.to_lsp_location())),
+        }
     }
 
     if out.is_empty() { Ok(None) } else { Ok(Some(out)) }

@@ -9,9 +9,9 @@ use tfls_schema::ProviderSchemas;
 use tfls_state::DocumentState;
 use tower_lsp::LspService;
 use tower_lsp::lsp_types::{
-    GotoDefinitionParams, GotoDefinitionResponse, HoverParams, PartialResultParams, Position,
-    ReferenceContext, ReferenceParams, TextDocumentIdentifier, TextDocumentPositionParams, Url,
-    WorkDoneProgressParams,
+    GotoDefinitionParams, GotoDefinitionResponse, HoverParams, Location, PartialResultParams,
+    Position, ReferenceContext, ReferenceParams, TextDocumentIdentifier,
+    TextDocumentPositionParams, Url, WorkDoneProgressParams,
 };
 
 fn uri(path: &str) -> Url {
@@ -96,6 +96,135 @@ output "b" { value = var.region }
     let locations = result.expect("locations present");
     // 1 declaration + 2 references.
     assert_eq!(locations.len(), 3);
+}
+
+/// Helper for multi-doc references-handler tests. Mirrors the
+/// pattern used by the goto-def scope regressions lower in the
+/// file but stays local to the references block so the test
+/// shapes stay adjacent to the behaviour they're pinning.
+async fn references_at(
+    backend: &Backend,
+    uri: &Url,
+    pos: Position,
+) -> Vec<Location> {
+    let result = tfls_lsp::handlers::navigation::references(
+        backend,
+        ReferenceParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position: pos,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context: ReferenceContext {
+                include_declaration: true,
+            },
+        },
+    )
+    .await
+    .expect("ok");
+    result.unwrap_or_default()
+}
+
+fn empty_backend() -> Backend {
+    let (service, _socket) = LspService::new(Backend::new);
+    let inner = service.inner();
+    Backend::with_shared_state(
+        inner.client.clone(),
+        inner.state.clone(),
+        inner.jobs.clone(),
+    )
+}
+
+fn upsert(b: &Backend, u: &Url, src: &str) {
+    b.state.upsert_document(DocumentState::new(u.clone(), src, 1));
+}
+
+#[tokio::test]
+async fn references_scopes_variable_to_reference_module_not_child_module() {
+    // Mirror of `goto_def_scopes_variable_to_reference_module_not_child_module`:
+    // a stack root and one of its child modules both declare
+    // `variable "region" {}` and both reference it. A
+    // find-references on the root's declaration must return only
+    // the root's reference sites, not the child module's —
+    // Terraform module scope is per-directory.
+    let b = empty_backend();
+    let root_vars = uri("file:///stack/variables.tf");
+    let root_main = uri("file:///stack/main.tf");
+    let child_vars = uri("file:///stack/modules/k3s/variables.tf");
+    let child_main = uri("file:///stack/modules/k3s/main.tf");
+
+    upsert(&b, &root_vars, "variable \"region\" {}\n");
+    upsert(
+        &b,
+        &root_main,
+        "output \"r\" { value = var.region }\n",
+    );
+    upsert(&b, &child_vars, "variable \"region\" {}\n");
+    upsert(
+        &b,
+        &child_main,
+        "output \"r\" { value = var.region }\n",
+    );
+
+    // Cursor on the root's `variable "region"` declaration.
+    let locs = references_at(&b, &root_vars, Position::new(0, 10)).await;
+    assert!(
+        locs.iter()
+            .all(|l| !l.uri.as_str().contains("/modules/k3s/")),
+        "child-module references leaked into root scope: {locs:?}"
+    );
+    // Root's own declaration + one reference in root_main.
+    assert_eq!(
+        locs.len(),
+        2,
+        "expected root decl + one root ref, got {locs:?}"
+    );
+}
+
+#[tokio::test]
+async fn references_does_not_leak_across_unrelated_stacks() {
+    let b = empty_backend();
+    let a_vars = uri("file:///stackA/variables.tf");
+    let a_main = uri("file:///stackA/main.tf");
+    let b_vars = uri("file:///stackB/variables.tf");
+    let b_main = uri("file:///stackB/main.tf");
+
+    upsert(&b, &a_vars, "variable \"region\" {}\n");
+    upsert(&b, &a_main, "output \"r\" { value = var.region }\n");
+    upsert(&b, &b_vars, "variable \"region\" {}\n");
+    upsert(&b, &b_main, "output \"r\" { value = var.region }\n");
+
+    // Cursor on stackA's `variable "region"` — references must
+    // stay in stackA.
+    let locs = references_at(&b, &a_vars, Position::new(0, 10)).await;
+    assert!(
+        locs.iter()
+            .all(|l| l.uri.as_str().contains("/stackA/")),
+        "stackB references leaked into stackA: {locs:?}"
+    );
+}
+
+#[tokio::test]
+async fn references_still_includes_peer_file_in_same_module() {
+    // Guard rail: the scope filter must not over-tighten to
+    // "same file". Peer `.tf` files in the same directory ARE
+    // the same Terraform module.
+    let b = empty_backend();
+    let vars = uri("file:///stack/variables.tf");
+    let a = uri("file:///stack/a.tf");
+    let c = uri("file:///stack/c.tf");
+
+    upsert(&b, &vars, "variable \"region\" {}\n");
+    upsert(&b, &a, "output \"x\" { value = var.region }\n");
+    upsert(&b, &c, "output \"y\" { value = var.region }\n");
+
+    let locs = references_at(&b, &vars, Position::new(0, 10)).await;
+    assert_eq!(
+        locs.len(),
+        3,
+        "expected decl + 2 peer-file refs, got {locs:?}"
+    );
 }
 
 #[tokio::test]
