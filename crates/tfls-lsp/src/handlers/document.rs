@@ -27,11 +27,35 @@ pub async fn did_open(backend: &Backend, params: DidOpenTextDocumentParams) {
         params.text_document.version,
     );
     backend.state.upsert_document(doc);
-    // Make sure the enclosing module directory has been indexed — the
-    // file may be outside the original workspace root (e.g. opened by
-    // Claude Code while editing an unrelated repo) and its sibling
-    // definitions need to be in the store before diagnostics run.
-    crate::indexer::ensure_module_indexed(&backend.state, &backend.jobs, &uri);
+
+    let action = did_open_publish_action(&backend.state);
+    let need_diags = matches!(action, DidOpenPublish::PublishReal);
+
+    // Move the heavy sync work off the tokio handler thread so
+    // the runtime stays responsive to other requests (completion,
+    // hover, other buffers' diagnostic pulls) while we index
+    // peer files + compute this buffer's diagnostics. On a
+    // module with 20 peer files, this otherwise pins a tokio
+    // worker for 100ms-1s.
+    let state = std::sync::Arc::clone(&backend.state);
+    let jobs = std::sync::Arc::clone(&backend.jobs);
+    let uri_c = uri.clone();
+    let diagnostics = tokio::task::spawn_blocking(move || {
+        // Make sure the enclosing module directory has been
+        // indexed — the file may be outside the original
+        // workspace root (e.g. opened by Claude Code while
+        // editing an unrelated repo) and its sibling
+        // definitions need to be in the store before
+        // diagnostics run.
+        crate::indexer::ensure_module_indexed(&state, &jobs, &uri_c);
+        if need_diags {
+            compute_diagnostics(&state, &uri_c)
+        } else {
+            Vec::new()
+        }
+    })
+    .await
+    .unwrap_or_default();
 
     // The buffer is now open. Hand off the diagnostic channel to
     // either (a) a one-time empty publish that clears whatever the
@@ -41,7 +65,7 @@ pub async fn did_open(backend: &Backend, params: DidOpenTextDocumentParams) {
     // pull. `did_open_publish_action` is the single source of truth
     // for that choice; see its docs for the duplicate-diagnostic
     // invariant it pins.
-    match did_open_publish_action(&backend.state) {
+    match action {
         DidOpenPublish::ClearPushNamespaceThenPull => {
             // Empty `publishDiagnostics` resets the push namespace.
             // Subsequent pulls populate the (separate) pull
@@ -52,7 +76,10 @@ pub async fn did_open(backend: &Backend, params: DidOpenTextDocumentParams) {
                 .await;
         }
         DidOpenPublish::PublishReal => {
-            publish_current_diagnostics(backend, &uri, None).await;
+            backend
+                .client
+                .publish_diagnostics(uri.clone(), diagnostics, None)
+                .await;
         }
     }
 
@@ -135,13 +162,27 @@ pub async fn did_change(backend: &Backend, params: DidChangeTextDocumentParams) 
         return;
     }
 
-    backend.state.reparse_document(&uri);
+    // Reparse + diagnostic compute are both CPU-heavy; hand
+    // them to a blocking thread so the tokio runtime stays
+    // responsive to concurrent requests on other buffers.
+    let state = std::sync::Arc::clone(&backend.state);
+    let uri_c = uri.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        state.reparse_document(&uri_c);
+    })
+    .await;
     publish_current_diagnostics(backend, &uri, Some(version)).await;
 }
 
 pub async fn did_save(backend: &Backend, params: DidSaveTextDocumentParams) {
     let uri = params.text_document.uri;
-    backend.state.reparse_document(&uri);
+    // Same as did_change — off to a blocking thread.
+    let state = std::sync::Arc::clone(&backend.state);
+    let uri_c = uri.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        state.reparse_document(&uri_c);
+    })
+    .await;
     publish_current_diagnostics(backend, &uri, None).await;
     // Re-prefetch in case the user added a new provider / module /
     // updated the Terraform required_version. Fresh caches are a no-op
@@ -173,7 +214,14 @@ async fn publish_current_diagnostics(backend: &Backend, uri: &Url, version: Opti
     if backend.state.should_skip_push_diagnostics(uri) {
         return;
     }
-    let diagnostics = compute_diagnostics(&backend.state, uri);
+    // Compute on a blocking thread so the tokio worker stays
+    // free for other handlers; `compute_diagnostics` can burn
+    // hundreds of ms on a large file + module graph.
+    let state = std::sync::Arc::clone(&backend.state);
+    let uri_c = uri.clone();
+    let diagnostics = tokio::task::spawn_blocking(move || compute_diagnostics(&state, &uri_c))
+        .await
+        .unwrap_or_default();
     backend
         .client
         .publish_diagnostics(uri.clone(), diagnostics, version)

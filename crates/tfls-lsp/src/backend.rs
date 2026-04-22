@@ -229,7 +229,18 @@ impl LanguageServer for Backend {
         params: DocumentDiagnosticParams,
     ) -> jsonrpc::Result<DocumentDiagnosticReportResult> {
         let uri = params.text_document.uri;
-        let diagnostics = handlers::document::compute_diagnostics(&self.state, &uri);
+        // `compute_diagnostics` is synchronous CPU work that can
+        // burn hundreds of ms on a large file + module graph —
+        // off to a blocking thread so this handler doesn't tie
+        // up a tokio worker while the client is pulling for many
+        // buffers in parallel.
+        let state = std::sync::Arc::clone(&self.state);
+        let uri_c = uri.clone();
+        let diagnostics = tokio::task::spawn_blocking(move || {
+            handlers::document::compute_diagnostics(&state, &uri_c)
+        })
+        .await
+        .unwrap_or_default();
         Ok(DocumentDiagnosticReportResult::Report(
             DocumentDiagnosticReport::Full(RelatedFullDocumentDiagnosticReport {
                 related_documents: None,
@@ -253,20 +264,34 @@ impl LanguageServer for Backend {
             .iter()
             .map(|entry| (entry.key().clone(), entry.version))
             .collect();
-        let items: Vec<WorkspaceDocumentDiagnosticReport> = uris
-            .into_iter()
-            .map(|(uri, version)| {
-                let diagnostics = handlers::document::compute_diagnostics(&self.state, &uri);
-                WorkspaceDocumentDiagnosticReport::Full(WorkspaceFullDocumentDiagnosticReport {
-                    uri,
-                    version: Some(version as i64),
-                    full_document_diagnostic_report: FullDocumentDiagnosticReport {
-                        result_id: None,
-                        items: diagnostics,
-                    },
-                })
+        // Per-doc compute runs on a blocking thread — this
+        // handler is the worst offender for handler-thread
+        // CPU use; on a large workspace it iterates every
+        // doc and synchronously computes a module-graph-
+        // aware diagnostic set for each. The parallelism
+        // here is intra-call (rayon inside the blocking
+        // pool) rather than across handlers.
+        let state = std::sync::Arc::clone(&self.state);
+        let items: Vec<WorkspaceDocumentDiagnosticReport> =
+            tokio::task::spawn_blocking(move || {
+                uris.into_iter()
+                    .map(|(uri, version)| {
+                        let diagnostics = handlers::document::compute_diagnostics(&state, &uri);
+                        WorkspaceDocumentDiagnosticReport::Full(
+                            WorkspaceFullDocumentDiagnosticReport {
+                                uri,
+                                version: Some(version as i64),
+                                full_document_diagnostic_report: FullDocumentDiagnosticReport {
+                                    result_id: None,
+                                    items: diagnostics,
+                                },
+                            },
+                        )
+                    })
+                    .collect()
             })
-            .collect();
+            .await
+            .unwrap_or_default();
         Ok(WorkspaceDiagnosticReportResult::Report(
             WorkspaceDiagnosticReport { items },
         ))

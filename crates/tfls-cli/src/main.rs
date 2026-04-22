@@ -16,6 +16,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
 
+    // Cap rayon's global pool so the bulk workspace scan can't
+    // saturate every CPU core and starve the tokio runtime's
+    // LSP handlers. See `tfls_lsp::configure_rayon_pool` for
+    // the policy.
+    tfls_lsp::configure_rayon_pool();
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
