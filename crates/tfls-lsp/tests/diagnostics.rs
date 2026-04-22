@@ -428,19 +428,32 @@ fn definitions_in_unrelated_workspace_dir_do_not_satisfy_references() {
 fn parses_tf_json_file_via_document_lifecycle() {
     // Open a `.tf.json` document and confirm the equivalent HCL-level
     // diagnostics fire. Specifically: a `variable` declared without a
-    // `type` should trigger `terraform_typed_variables`.
+    // `type` should trigger `terraform_typed_variables` — but ONLY
+    // when the variable is actually referenced; otherwise the
+    // unused-declarations rule takes precedence (suppressing the
+    // type warning, because fixing the type on a soon-to-be-deleted
+    // variable is wasted work).
     let b = backend();
-    let u = uri("file:///proj/input.tf.json");
+    let vars = uri("file:///proj/input.tf.json");
+    let use_site = uri("file:///proj/main.tf");
     insert(
         &b,
-        &u,
+        &vars,
         r#"{
             "variable": {
                 "region": {}
             }
         }"#,
     );
-    let msgs = messages(&b, &u);
+    // Reference the variable so `unused_declarations` stays silent
+    // and the type warning surfaces as intended for this test.
+    insert(
+        &b,
+        &use_site,
+        r#"output "r" { value = var.region }
+"#,
+    );
+    let msgs = messages(&b, &vars);
     assert!(
         msgs.iter().any(|m| m.contains("`region`") && m.contains("no type")),
         "expected `region` missing-type warning via tf.json; got {msgs:?}"

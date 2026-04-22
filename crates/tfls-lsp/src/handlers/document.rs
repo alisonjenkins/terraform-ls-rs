@@ -237,7 +237,17 @@ pub fn compute_diagnostics_with_lookup(
         out.extend(tfls_diag::variable_default_type_diagnostics(
             body, &doc.rope,
         ));
-        out.extend(tfls_diag::typed_variables_diagnostics(body, &doc.rope));
+        // Pass the module-graph lookup so typed-variables can
+        // suppress its warning on variables that are ALSO
+        // unused — fixing the type on a soon-to-be-deleted
+        // variable wastes the user's time. Lookup is only
+        // consulted on root modules, matching
+        // `unused_declarations`'s own gating.
+        out.extend(tfls_diag::typed_variables_diagnostics(
+            body,
+            &doc.rope,
+            Some(graph),
+        ));
         out.extend(tfls_diag::module_version_presence_diagnostics(body, &doc.rope));
         out.extend(tfls_diag::module_pinned_source_diagnostics(body, &doc.rope));
         out.extend(tfls_diag::module_shallow_clone_diagnostics(body, &doc.rope));
