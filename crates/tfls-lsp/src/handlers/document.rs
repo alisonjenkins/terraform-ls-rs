@@ -184,6 +184,17 @@ pub async fn did_save(backend: &Backend, params: DidSaveTextDocumentParams) {
     })
     .await;
     publish_current_diagnostics(backend, &uri, None).await;
+    // Re-check the `.terraform/providers/` tree — if the user ran
+    // `tofu init` / `terraform init` since we last fetched (adding
+    // or upgrading a provider), the mtime will have bumped and
+    // `refresh_schemas_if_providers_changed` enqueues a fresh
+    // FetchSchemas so search / hover / completion pick up the
+    // newly-installed provider.
+    crate::indexer::refresh_schemas_if_providers_changed(
+        &backend.state,
+        &backend.jobs,
+        &uri,
+    );
     // Re-prefetch in case the user added a new provider / module /
     // updated the Terraform required_version. Fresh caches are a no-op
     // inside the fetch functions so this is cheap when unchanged.

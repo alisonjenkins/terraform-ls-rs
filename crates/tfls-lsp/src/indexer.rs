@@ -91,14 +91,7 @@ pub fn ensure_module_indexed(state: &StateStore, queue: &JobQueue, file_uri: &ls
     // often not the same directory as the opened file (sub-modules
     // inherit their parent's initialisation).
     if let Some(init_root) = find_terraform_init_root(&dir_buf) {
-        if state.fetched_schema_dirs.insert(init_root.clone()) {
-            queue.enqueue(
-                Job::FetchSchemas {
-                    working_dir: init_root,
-                },
-                Priority::Normal,
-            );
-        }
+        maybe_enqueue_schema_fetch(state, queue, &init_root);
     }
 
     // Synchronous peer-index pull. Read + parse + upsert every
@@ -651,6 +644,74 @@ fn find_terraform_init_root(start: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Walk upward from `file_uri`'s directory looking for the
+/// nearest `.terraform/providers/` root, and enqueue a schema
+/// fetch when the providers directory's mtime differs from the
+/// mtime recorded on the last fetch. Used by both `did_open`
+/// (via [`ensure_module_indexed`]) and `did_save` to catch the
+/// common sequence: user adds a new provider to `.tf` → runs
+/// `tofu init` / `terraform init` in a shell → expects the
+/// LSP to see the new provider. Without the mtime-gated
+/// re-fetch, `fetched_schema_dirs` would permanently suppress
+/// subsequent fetches for the same init root and the new
+/// provider's schema would never load.
+pub fn refresh_schemas_if_providers_changed(
+    state: &StateStore,
+    queue: &JobQueue,
+    file_uri: &lsp_types::Url,
+) {
+    let Ok(path) = file_uri.to_file_path() else {
+        return;
+    };
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    let Some(init_root) = find_terraform_init_root(dir) else {
+        return;
+    };
+    maybe_enqueue_schema_fetch(state, queue, &init_root);
+}
+
+fn maybe_enqueue_schema_fetch(state: &StateStore, queue: &JobQueue, init_root: &Path) {
+    // Use the mtime of `.terraform/providers/` as a change
+    // signal. `tofu init` / `terraform init` install provider
+    // binaries into subdirectories of this path; on every
+    // standard filesystem, creating / updating a child bumps
+    // the parent directory's mtime. Gate the enqueue on "this
+    // mtime differs from the one we stored at the last
+    // fetch". First sight (no entry) always fetches. If the
+    // stat fails we fall back to the old one-shot behaviour
+    // via the present-but-unchanged check.
+    let providers_dir = init_root.join(".terraform").join("providers");
+    let Some(current_mtime) = std::fs::metadata(&providers_dir)
+        .ok()
+        .and_then(|m| m.modified().ok())
+    else {
+        // Can't stat — treat as "nothing changed" so we don't
+        // spam fetches on flaky filesystems.
+        return;
+    };
+    let prev = state
+        .fetched_schema_dirs
+        .get(init_root)
+        .map(|e| *e.value());
+    if prev == Some(current_mtime) {
+        return;
+    }
+    // Record the new mtime BEFORE enqueueing so a rapid second
+    // did_open on the same root doesn't stack duplicate
+    // fetches — the job runs asynchronously.
+    state
+        .fetched_schema_dirs
+        .insert(init_root.to_path_buf(), current_mtime);
+    queue.enqueue(
+        Job::FetchSchemas {
+            working_dir: init_root.to_path_buf(),
+        },
+        Priority::Normal,
+    );
+}
+
 async fn scan_dir_into_state(
     state: &StateStore,
     queue: &JobQueue,
@@ -1192,6 +1253,72 @@ mod tests {
             decide_refresh(&store, true),
             RefreshDecision::SendRefresh
         );
+    }
+
+    #[test]
+    fn schema_refetch_fires_when_providers_mtime_changes() {
+        // User scenario: LSP server is already running with
+        // some providers loaded. User adds a new provider to
+        // their `.tf` and runs `tofu init`, which creates a
+        // new subdirectory under `.terraform/providers/` —
+        // bumping the parent directory's mtime. The next
+        // did_open / did_save MUST re-enqueue a FetchSchemas
+        // job so the new provider's schema loads. Without
+        // this, `state.schemas` stays permanently stuck on
+        // the pre-`tofu init` set.
+        use super::{find_terraform_init_root, maybe_enqueue_schema_fetch};
+        use std::fs;
+        use tfls_state::{JobQueue, StateStore};
+
+        let tree = tmp_dir("schema-mtime-refetch");
+        fs::create_dir_all(tree.join(".terraform").join("providers")).unwrap();
+        let init_root = find_terraform_init_root(&tree).expect("init root present");
+
+        let state = StateStore::new();
+        let queue = JobQueue::new();
+
+        // First check: no prior entry → enqueue.
+        maybe_enqueue_schema_fetch(&state, &queue, &init_root);
+        assert_eq!(
+            queue.len(),
+            1,
+            "first sight must enqueue a FetchSchemas job"
+        );
+        // Drain so the next check starts clean.
+        while queue.try_next().is_some() {}
+
+        // Second check without any filesystem change: the
+        // stored mtime equals the current mtime → skip.
+        maybe_enqueue_schema_fetch(&state, &queue, &init_root);
+        assert_eq!(
+            queue.len(),
+            0,
+            "no-change must NOT re-enqueue"
+        );
+
+        // Simulate `tofu init` installing a new provider by
+        // creating a subdirectory under `.terraform/providers/`.
+        // That bumps the parent dir's mtime.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        fs::create_dir_all(
+            init_root
+                .join(".terraform")
+                .join("providers")
+                .join("registry.terraform.io")
+                .join("hashicorp")
+                .join("http"),
+        )
+        .unwrap();
+
+        // Third check: mtime differs → enqueue.
+        maybe_enqueue_schema_fetch(&state, &queue, &init_root);
+        assert_eq!(
+            queue.len(),
+            1,
+            "providers-dir mtime bump must re-enqueue"
+        );
+
+        let _ = fs::remove_dir_all(&tree);
     }
 
     #[test]

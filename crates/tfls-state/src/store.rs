@@ -86,9 +86,14 @@ pub struct StateStore {
     pub dir_scans: dashmap::DashMap<std::path::PathBuf, DirScanState>,
 
     /// Terraform init-root directories (containing a `.terraform/providers/`
-    /// subtree) we have already enqueued a schema fetch for. Dedupes the
-    /// cross-module FetchSchemas enqueues triggered from did_open.
-    pub fetched_schema_dirs: dashmap::DashSet<std::path::PathBuf>,
+    /// subtree) we have fetched schemas from, keyed on the mtime of
+    /// `.terraform/providers/` at fetch time. If the current mtime
+    /// differs (the user ran `tofu init` after a provider change),
+    /// the next check re-enqueues a fetch. Without this, a user who
+    /// added a new provider mid-session would never see its schema
+    /// load for the rest of the server's lifetime.
+    pub fetched_schema_dirs:
+        dashmap::DashMap<std::path::PathBuf, std::time::SystemTime>,
 
     /// Set to `true` during `initialize` when the client advertises
     /// support for pull-based diagnostics
