@@ -235,6 +235,68 @@ fn scope_var_ref_inside_dynamic_content_resolves_against_caller_scope() {
 }
 
 #[test]
+fn malformed_version_diagnostic_clears_after_simulated_edit() {
+    // Regression for the reported "LSP is stuck on a stale
+    // `malformed version `c`` warning after I corrected the
+    // version" symptom. Simulate the edit flow:
+    //
+    //   1. User opens with an in-progress bad version: `"c"`.
+    //   2. User corrects to `">= 3.5.0"` — we reparse via
+    //      `reparse_document` (the same call
+    //      `did_change` makes after applying the rope edit).
+    //   3. `compute_diagnostics` must report no malformed-
+    //      version error.
+    //
+    // The test exercises the exact state path the did_change
+    // handler goes through (rope edit → reparse → compute),
+    // so any regression that leaves stale AST data / stale
+    // derived symbols would surface here.
+    use ropey::Rope;
+    use tower_lsp::lsp_types::{Position, Range, TextDocumentContentChangeEvent};
+
+    let b = backend();
+    let u = uri("file:///versions.tf");
+    let before = "terraform {\n  required_providers {\n    http = {\n      source = \"hashicorp/http\"\n      version = \"c\"\n    }\n  }\n}\n";
+    insert(&b, &u, before);
+
+    // Sanity: the malformed diag DOES fire on the initial state.
+    let initial = messages(&b, &u);
+    assert!(
+        initial.iter().any(|m| m.contains("malformed") && m.contains("`c`")),
+        "baseline: expected malformed `c` diag on initial state, got {initial:?}"
+    );
+
+    // Simulate the did_change rope edit: replace the lone `c`
+    // with `>= 3.5.0`. Compute positions from the `before`
+    // text so we target the actual `c` character.
+    let c_byte = before.find("\"c\"").unwrap() + 1;
+    let rope_before = Rope::from_str(before);
+    let line = rope_before.byte_to_line(c_byte);
+    let line_start = rope_before.line_to_byte(line);
+    let col = (c_byte - line_start) as u32;
+    {
+        let mut doc = b.state.documents.get_mut(&u).unwrap();
+        doc.apply_change(TextDocumentContentChangeEvent {
+            range: Some(Range::new(
+                Position::new(line as u32, col),
+                Position::new(line as u32, col + 1),
+            )),
+            range_length: None,
+            text: ">= 3.5.0".to_string(),
+        })
+        .unwrap();
+    }
+    b.state.reparse_document(&u);
+
+    // After the edit, the diagnostic must clear.
+    let after = messages(&b, &u);
+    assert!(
+        after.iter().all(|m| !m.contains("malformed")),
+        "corrected version left a stale malformed diag: {after:?}"
+    );
+}
+
+#[test]
 fn scope_var_decl_unused_check_survives_peer_parse_error() {
     // A single typo in `iam_roles.tf` (unclosed brace, for
     // example) makes `hcl-edit` bail on that file's body.

@@ -594,7 +594,7 @@ fn decide_refresh(
 /// store. Thin async wrapper around [`decide_refresh`] — the
 /// decision logic lives there so tests can verify the
 /// no-duplicate-push invariant without mocking the client.
-async fn maybe_refresh_diagnostics(
+pub(crate) async fn maybe_refresh_diagnostics(
     state: &StateStore,
     client: Option<&tower_lsp::Client>,
 ) {

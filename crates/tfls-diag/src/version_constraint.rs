@@ -461,4 +461,31 @@ mod tests {
             "got {diags:?}"
         );
     }
+
+    #[test]
+    fn diagnostic_clears_after_malformed_version_is_corrected() {
+        // Regression: user types `c` into a `version = "…"`, the
+        // malformed-version diagnostic fires, then they correct
+        // the version to a valid constraint. The next parse +
+        // diagnostic pass must see NO error — the diagnostic is
+        // derived fresh from the body, so once the body is valid
+        // the error disappears.
+        let malformed = "terraform {\n  required_providers {\n    http = {\n      source = \"hashicorp/http\"\n      version = \"c\"\n    }\n  }\n}\n";
+        let (body, rope) = parse_body(malformed);
+        let diags = constraint_diagnostics(&body, &rope, &EmptyCache);
+        assert!(
+            diags.iter().any(|d| d.message.contains("malformed")
+                && d.message.contains("`c`")),
+            "expected malformed `c` diag on first pass: {diags:?}"
+        );
+
+        // Corrected version.
+        let fixed = "terraform {\n  required_providers {\n    http = {\n      source = \"hashicorp/http\"\n      version = \">= 3.5.0\"\n    }\n  }\n}\n";
+        let (body, rope) = parse_body(fixed);
+        let diags = constraint_diagnostics(&body, &rope, &EmptyCache);
+        assert!(
+            diags.iter().all(|d| !d.message.contains("malformed")),
+            "corrected version must clear the malformed diag: {diags:?}"
+        );
+    }
 }

@@ -120,6 +120,15 @@ async fn prefetch_and_refresh(
     // client that doesn't support the capability just won't refresh
     // until the next user action.
     let _ = client.inlay_hint_refresh().await;
+
+    // Also refresh diagnostics so the semantic no-match warning
+    // (fired by `constraint_diagnostics` when the version constraint
+    // resolves to zero published versions in the cache) re-evaluates
+    // against the freshly-fetched version list. Without this, the
+    // warning would only appear on the next user-triggered edit,
+    // leaving the file apparently clean even when the constraint
+    // is actually unsatisfiable.
+    crate::indexer::maybe_refresh_diagnostics(&state, Some(&client)).await;
 }
 
 fn collect_targets(body: &Body) -> HashSet<Target> {
