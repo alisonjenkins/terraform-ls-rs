@@ -1,6 +1,7 @@
 //! `tower-lsp` backend for terraform-ls-rs.
 
 pub mod backend;
+pub mod blocking;
 pub mod capabilities;
 pub mod error;
 pub mod handlers;

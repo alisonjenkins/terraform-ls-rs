@@ -27,13 +27,34 @@ const CLI_TIMEOUT_SECS: u64 = 15;
 /// cache first, then CLI, then the bundled snapshot.
 ///
 /// Never fails: the bundled snapshot is the infallible last resort.
+/// `tokio::task::block_in_place` panics on a current-thread
+/// runtime (what `#[tokio::test]` uses by default). Fall back
+/// to a direct call there — tests have no reactor to starve —
+/// while keeping the real off-reactor behaviour in production
+/// (multi-threaded runtime).
+fn blocking<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    match Handle::try_current().map(|h| h.runtime_flavor()) {
+        Ok(RuntimeFlavor::MultiThread) => tokio::task::block_in_place(f),
+        _ => f(),
+    }
+}
+
 pub async fn load_functions(binary: &Path) -> FunctionsSchema {
-    // 1. Disk cache.
-    if let Some(key) = cache_key(binary) {
-        if let Some(schema) = read_disk_cache(&key) {
-            tracing::debug!(binary = %binary.display(), "functions loaded from disk cache");
-            return schema;
-        }
+    // 1. Disk cache. `cache_key` canonicalises + stats the
+    // binary (can be >100ms on network-mounted / remote FS);
+    // `read_disk_cache` does a sync `fs::read` + JSON decode.
+    // Both off the reactor so the fetch-functions job doesn't
+    // starve concurrent handlers.
+    if let Some(schema) = blocking(|| {
+        let key = cache_key(binary)?;
+        read_disk_cache(&key)
+    }) {
+        tracing::debug!(binary = %binary.display(), "functions loaded from disk cache");
+        return schema;
     }
 
     // 2. CLI.
@@ -44,11 +65,15 @@ pub async fn load_functions(binary: &Path) -> FunctionsSchema {
     .await
     {
         Ok(schema) => {
-            if let Some(key) = cache_key(binary) {
-                if let Err(e) = write_disk_cache(&key, &schema) {
-                    tracing::warn!(error = %e, "failed to write functions cache");
+            // Cache write = `create_dir_all` + JSON encode +
+            // `fs::write`; run on the blocking pool.
+            blocking(|| {
+                if let Some(key) = cache_key(binary) {
+                    if let Err(e) = write_disk_cache(&key, &schema) {
+                        tracing::warn!(error = %e, "failed to write functions cache");
+                    }
                 }
-            }
+            });
             tracing::info!(binary = %binary.display(), "functions fetched via CLI");
             return schema;
         }

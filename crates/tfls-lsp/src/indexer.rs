@@ -445,24 +445,36 @@ async fn bulk_workspace_scan(
     // drops from seconds of parse work to a stat-every-file
     // pass.
     let hydrate_start = std::time::Instant::now();
-    let hydrated = if let Some(cache) = tfls_state::IndexCache::load(root) {
-        let n = cache.hydrate_into_store(state);
-        tracing::info!(
-            root = %root.display(),
-            entries = n,
-            elapsed_ms = hydrate_start.elapsed().as_millis() as u64,
-            "index cache: hydrated"
-        );
-        n
-    } else {
-        0
-    };
+    // Cache load = sync `fs::read` + `serde_json::from_slice` over a
+    // potentially megabyte-scale blob, and `hydrate_into_store`
+    // then stats every cached file to validate mtime. All pure
+    // blocking work — off the reactor.
+    let hydrated = crate::blocking::run(|| {
+        if let Some(cache) = tfls_state::IndexCache::load(root) {
+            let n = cache.hydrate_into_store(state);
+            tracing::info!(
+                root = %root.display(),
+                entries = n,
+                elapsed_ms = hydrate_start.elapsed().as_millis() as u64,
+                "index cache: hydrated"
+            );
+            n
+        } else {
+            0
+        }
+    });
 
     let discover_progress = match client {
         Some(c) => crate::progress::ProgressReporter::begin(c, "Discovering Terraform files").await,
         None => None,
     };
-    let files = match discover_terraform_files(root) {
+    // Workspace-wide `WalkBuilder` traversal. On a cold page
+    // cache this walks thousands of directory entries and can
+    // take seconds. Off the reactor thread — without this, the
+    // "Discovering Terraform files" progress span sits frozen
+    // and concurrent hovers / completions stall until the walk
+    // returns.
+    let files = match crate::blocking::run(|| discover_terraform_files(root)) {
         Ok(f) => f,
         Err(e) => {
             tracing::warn!(error = %e, root = %root.display(), "bulk scan: discovery failed");
@@ -718,7 +730,10 @@ async fn scan_dir_into_state(
     client: Option<&tower_lsp::Client>,
     dir: &Path,
 ) -> Result<(), IndexerError> {
-    match discover_terraform_files_in_dir(dir) {
+    // Single-directory `read_dir` — small but on the hot
+    // `did_open` peer-indexing path, so wrap to keep the reactor
+    // responsive when the user opens files on slow disks.
+    match crate::blocking::run(|| discover_terraform_files_in_dir(dir)) {
         Ok(files) => {
             tracing::info!(count = files.len(), dir = %dir.display(), "module scan");
             scan_files_parallel(state, client, files).await;
@@ -853,7 +868,7 @@ async fn scan_files_parallel(
     // hundreds on large stacks — so defer to a blocking thread to
     // keep the runtime reactor responsive.
     let state_for_precompute = state;
-    let referenced_dirs = tokio::task::block_in_place(|| {
+    let referenced_dirs = crate::blocking::run(|| {
         crate::handlers::module_snapshot::referenced_dirs_in_workspace(state_for_precompute)
     });
 
@@ -891,7 +906,7 @@ async fn scan_files_parallel(
         );
         let snapshot_ref = &snapshot;
         let results: Vec<(lsp_types::Url, i32, Vec<lsp_types::Diagnostic>)> =
-            tokio::task::block_in_place(|| {
+            crate::blocking::run(|| {
                 uris_in_module
                     .par_iter()
                     .filter_map(|uri| {
