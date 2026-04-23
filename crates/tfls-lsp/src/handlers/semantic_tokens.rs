@@ -6,6 +6,7 @@ use lsp_types::{
     SemanticToken, SemanticTokenType, SemanticTokens, SemanticTokensParams,
     SemanticTokensResult, SemanticTokensRangeParams, SemanticTokensRangeResult,
 };
+use tfls_core::{Symbol, SymbolKind as DomainKind, SymbolVisitor};
 use tfls_parser::ReferenceKind;
 use tfls_state::DocumentState;
 use tower_lsp::jsonrpc;
@@ -71,24 +72,23 @@ fn encode_tokens(doc: &DocumentState) -> Vec<SemanticToken> {
     // locals/outputs, NAMESPACE for modules. Token ranges come from the
     // symbol's `name_range` — the actual label or attribute key position
     // in source — not from the whole-block location.
-    for sym in doc.symbols.variables.values() {
-        push_label_token(&mut raw, sym.name_range, VARIABLE);
+    struct TokenPush<'a>(&'a mut Vec<RawToken>);
+    impl<'a> SymbolVisitor for TokenPush<'a> {
+        fn visit(&mut self, sym: &Symbol) {
+            // Providers don't get a label token today — kind
+            // mapping skips them (matches pre-refactor
+            // behaviour where the providers map was simply
+            // not iterated).
+            let type_id = match sym.kind {
+                DomainKind::Variable | DomainKind::Local | DomainKind::Output => VARIABLE,
+                DomainKind::Resource | DomainKind::DataSource => TYPE,
+                DomainKind::Module => NAMESPACE,
+                DomainKind::Provider | DomainKind::TerraformBlock => return,
+            };
+            push_label_token(self.0, sym.name_range, type_id);
+        }
     }
-    for sym in doc.symbols.locals.values() {
-        push_label_token(&mut raw, sym.name_range, VARIABLE);
-    }
-    for sym in doc.symbols.outputs.values() {
-        push_label_token(&mut raw, sym.name_range, VARIABLE);
-    }
-    for sym in doc.symbols.resources.values() {
-        push_label_token(&mut raw, sym.name_range, TYPE);
-    }
-    for sym in doc.symbols.data_sources.values() {
-        push_label_token(&mut raw, sym.name_range, TYPE);
-    }
-    for sym in doc.symbols.modules.values() {
-        push_label_token(&mut raw, sym.name_range, NAMESPACE);
-    }
+    doc.symbols.for_each_symbol(&mut TokenPush(&mut raw));
 
     // References get highlighted by their prefix kind.
     for r in &doc.references {

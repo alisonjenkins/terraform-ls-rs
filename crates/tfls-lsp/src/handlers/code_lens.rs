@@ -2,7 +2,7 @@
 //! reference count, clickable to invoke `textDocument/references`.
 
 use lsp_types::{CodeLens, CodeLensParams, Command};
-use tfls_core::{Symbol, SymbolKind};
+use tfls_core::{ResourceAddress, Symbol, SymbolKind, SymbolVisitor};
 use tfls_state::{DocumentState, StateStore, SymbolKey};
 use tower_lsp::jsonrpc;
 
@@ -23,33 +23,32 @@ pub async fn code_lens(
 }
 
 fn collect(doc: &DocumentState, state: &StateStore, out: &mut Vec<CodeLens>) {
-    for sym in doc.symbols.variables.values() {
-        push_lens(sym, SymbolKey::new(SymbolKind::Variable, &sym.name), state, out);
+    let mut v = LensCollector { state, out };
+    doc.symbols.for_each_symbol(&mut v);
+}
+
+struct LensCollector<'a> {
+    state: &'a StateStore,
+    out: &'a mut Vec<CodeLens>,
+}
+
+impl<'a> SymbolVisitor for LensCollector<'a> {
+    fn visit(&mut self, sym: &Symbol) {
+        // Providers have no reference-count lens today — skip
+        // them rather than emitting "0 references" clutter.
+        let key = match sym.kind {
+            SymbolKind::Variable
+            | SymbolKind::Local
+            | SymbolKind::Output
+            | SymbolKind::Module => SymbolKey::new(sym.kind, &sym.name),
+            _ => return,
+        };
+        push_lens(sym, key, self.state, self.out);
     }
-    for sym in doc.symbols.locals.values() {
-        push_lens(sym, SymbolKey::new(SymbolKind::Local, &sym.name), state, out);
-    }
-    for sym in doc.symbols.outputs.values() {
-        push_lens(sym, SymbolKey::new(SymbolKind::Output, &sym.name), state, out);
-    }
-    for sym in doc.symbols.modules.values() {
-        push_lens(sym, SymbolKey::new(SymbolKind::Module, &sym.name), state, out);
-    }
-    for (addr, sym) in &doc.symbols.resources {
-        push_lens(
-            sym,
-            SymbolKey::resource(SymbolKind::Resource, &addr.resource_type, &addr.name),
-            state,
-            out,
-        );
-    }
-    for (addr, sym) in &doc.symbols.data_sources {
-        push_lens(
-            sym,
-            SymbolKey::resource(SymbolKind::DataSource, &addr.resource_type, &addr.name),
-            state,
-            out,
-        );
+
+    fn visit_resource(&mut self, addr: &ResourceAddress, sym: &Symbol) {
+        let key = SymbolKey::resource(sym.kind, &addr.resource_type, &addr.name);
+        push_lens(sym, key, self.state, self.out);
     }
 }
 

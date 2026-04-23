@@ -5,7 +5,7 @@ use lsp_types::{
     DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, SymbolInformation, SymbolKind,
     WorkspaceSymbolParams,
 };
-use tfls_core::{Symbol, SymbolKind as DomainKind};
+use tfls_core::{ResourceAddress, Symbol, SymbolKind as DomainKind, SymbolVisitor};
 use tfls_state::DocumentState;
 use tower_lsp::jsonrpc;
 
@@ -29,28 +29,18 @@ pub async fn document_symbol(
 }
 
 fn collect_document_symbols(doc: &DocumentState) -> Vec<DocumentSymbol> {
-    let mut out = Vec::new();
-    for sym in doc.symbols.variables.values() {
-        out.push(to_document_symbol(sym));
+    struct Collector(Vec<DocumentSymbol>);
+    impl SymbolVisitor for Collector {
+        fn visit(&mut self, sym: &Symbol) {
+            self.0.push(to_document_symbol(sym));
+        }
+        // Default `visit_resource` falls through to `visit` —
+        // document_symbol doesn't need the address, just the
+        // symbol itself.
     }
-    for sym in doc.symbols.locals.values() {
-        out.push(to_document_symbol(sym));
-    }
-    for sym in doc.symbols.outputs.values() {
-        out.push(to_document_symbol(sym));
-    }
-    for sym in doc.symbols.resources.values() {
-        out.push(to_document_symbol(sym));
-    }
-    for sym in doc.symbols.data_sources.values() {
-        out.push(to_document_symbol(sym));
-    }
-    for sym in doc.symbols.modules.values() {
-        out.push(to_document_symbol(sym));
-    }
-    for sym in doc.symbols.providers.values() {
-        out.push(to_document_symbol(sym));
-    }
+    let mut c = Collector(Vec::new());
+    doc.symbols.for_each_symbol(&mut c);
+    let mut out = c.0;
     out.sort_by(|a, b| {
         (a.range.start.line, a.range.start.character)
             .cmp(&(b.range.start.line, b.range.start.character))
@@ -97,46 +87,39 @@ pub async fn workspace_symbol(
 
     // Walk each document's per-file symbols; they own richer metadata
     // than the global index (which only knows locations).
+    struct Matcher<'a> {
+        query: &'a str,
+        out: &'a mut Vec<SymbolInformation>,
+    }
+    impl<'a> SymbolVisitor for Matcher<'a> {
+        fn visit(&mut self, sym: &Symbol) {
+            if matches_query(&sym.name, self.query) {
+                self.out.push(to_symbol_information(sym));
+            }
+        }
+        fn visit_resource(&mut self, addr: &ResourceAddress, sym: &Symbol) {
+            // Resource search matches on either the bare name
+            // or the full `type.name` identity so a query like
+            // `aws_instance.web` resolves.
+            let full = format!("{addr}");
+            if matches_query(&sym.name, self.query) || matches_query(&full, self.query) {
+                self.out.push(to_symbol_information(sym));
+            }
+        }
+    }
     for doc_entry in backend.state.documents.iter() {
         let doc = doc_entry.value();
-        collect_matching(&doc.symbols.variables, &query, &mut results);
-        collect_matching(&doc.symbols.locals, &query, &mut results);
-        collect_matching(&doc.symbols.outputs, &query, &mut results);
-        collect_matching_resource(&doc.symbols.resources, &query, &mut results);
-        collect_matching_resource(&doc.symbols.data_sources, &query, &mut results);
-        collect_matching(&doc.symbols.modules, &query, &mut results);
-        collect_matching(&doc.symbols.providers, &query, &mut results);
+        let mut m = Matcher {
+            query: &query,
+            out: &mut results,
+        };
+        doc.symbols.for_each_symbol(&mut m);
     }
 
     if results.is_empty() {
         Ok(None)
     } else {
         Ok(Some(results))
-    }
-}
-
-fn collect_matching<K>(
-    map: &std::collections::HashMap<K, Symbol>,
-    query: &str,
-    out: &mut Vec<SymbolInformation>,
-) {
-    for sym in map.values() {
-        if matches_query(&sym.name, query) {
-            out.push(to_symbol_information(sym));
-        }
-    }
-}
-
-fn collect_matching_resource(
-    map: &std::collections::HashMap<tfls_core::ResourceAddress, Symbol>,
-    query: &str,
-    out: &mut Vec<SymbolInformation>,
-) {
-    for (addr, sym) in map {
-        let full = format!("{addr}");
-        if matches_query(&sym.name, query) || matches_query(&full, query) {
-            out.push(to_symbol_information(sym));
-        }
     }
 }
 

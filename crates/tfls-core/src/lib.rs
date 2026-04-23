@@ -24,6 +24,7 @@ pub use meta_arguments::{
 };
 pub use types::{
     ModuleId, ProviderAddress, ResourceAddress, Symbol, SymbolKind, SymbolLocation, SymbolTable,
+    SymbolVisitor,
 };
 pub use variable_type::{
     Primitive, VariableType, explain_mismatch, merge_shapes, parse_type_expr, parse_value_shape,

@@ -213,6 +213,61 @@ impl SymbolTable {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Walk every `Symbol` in the table, dispatching to
+    /// [`SymbolVisitor::visit`] for name-keyed kinds
+    /// (`variables`, `locals`, `outputs`, `modules`,
+    /// `providers`) and to [`SymbolVisitor::visit_resource`]
+    /// for address-keyed kinds (`resources`, `data_sources`).
+    ///
+    /// Previously every handler that needed to enumerate
+    /// declarations (outline view, code lens reference counts,
+    /// semantic-token highlighting, workspace symbol search)
+    /// open-coded the same seven loops. This factors the
+    /// repetition out and keeps the kind ↔ collection mapping
+    /// in one place.
+    pub fn for_each_symbol<V: SymbolVisitor>(&self, v: &mut V) {
+        for sym in self.variables.values() {
+            v.visit(sym);
+        }
+        for sym in self.locals.values() {
+            v.visit(sym);
+        }
+        for sym in self.outputs.values() {
+            v.visit(sym);
+        }
+        for sym in self.modules.values() {
+            v.visit(sym);
+        }
+        for sym in self.providers.values() {
+            v.visit(sym);
+        }
+        for (addr, sym) in &self.resources {
+            v.visit_resource(addr, sym);
+        }
+        for (addr, sym) in &self.data_sources {
+            v.visit_resource(addr, sym);
+        }
+    }
+}
+
+/// Callback shape for iterating every declaration in a
+/// [`SymbolTable`]. Named-keyed kinds come through [`visit`];
+/// resource / data-source kinds come through [`visit_resource`]
+/// so the caller still sees the [`ResourceAddress`] when it
+/// needs the full `type.name` identity.
+///
+/// [`visit`]: SymbolVisitor::visit
+/// [`visit_resource`]: SymbolVisitor::visit_resource
+pub trait SymbolVisitor {
+    fn visit(&mut self, sym: &Symbol);
+    /// Default: drop the address and fall through to [`visit`].
+    /// Handlers that need the `ResourceAddress` (code-lens
+    /// reference counts, workspace-symbol display strings)
+    /// override this.
+    fn visit_resource(&mut self, _addr: &ResourceAddress, sym: &Symbol) {
+        self.visit(sym);
+    }
 }
 
 #[cfg(test)]
