@@ -172,6 +172,12 @@ pub async fn did_change(backend: &Backend, params: DidChangeTextDocumentParams) 
     })
     .await;
     publish_current_diagnostics(backend, &uri, Some(version)).await;
+    // Changes to THIS file can invalidate diagnostics in OTHER
+    // open buffers in the same module (e.g. adding a reference
+    // here clears an "unused" warning on the declaration in a
+    // peer file). Nudge the client to re-pull — cheap call and
+    // no-op on clients that don't advertise refresh support.
+    crate::indexer::maybe_refresh_diagnostics(&backend.state, Some(&backend.client)).await;
 }
 
 pub async fn did_save(backend: &Backend, params: DidSaveTextDocumentParams) {
@@ -184,6 +190,9 @@ pub async fn did_save(backend: &Backend, params: DidSaveTextDocumentParams) {
     })
     .await;
     publish_current_diagnostics(backend, &uri, None).await;
+    // See did_change: peer buffers may need to re-pull now that
+    // this file's references have been re-indexed.
+    crate::indexer::maybe_refresh_diagnostics(&backend.state, Some(&backend.client)).await;
     // Re-check the `.terraform/providers/` tree — if the user ran
     // `tofu init` / `terraform init` since we last fetched (adding
     // or upgrading a provider), the mtime will have bumped and

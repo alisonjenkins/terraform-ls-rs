@@ -235,6 +235,31 @@ fn scope_var_ref_inside_dynamic_content_resolves_against_caller_scope() {
 }
 
 #[test]
+fn unused_data_source_cleared_when_reference_in_peer_file() {
+    // Regression: a `data "http" "test" {}` in one file referenced
+    // by `data.http.test.response_body` in a peer `output` file
+    // must not be flagged as unused — the cross-file reference
+    // resolution has to walk peer files' references too.
+    let b = backend();
+    let data_file = uri("file:///stack/data.tf");
+    let out_file = uri("file:///stack/outputs.tf");
+
+    insert(&b, &data_file, "data \"http\" \"test\" {\n  url = \"https://myip.dk\"\n}\n");
+    insert(
+        &b,
+        &out_file,
+        "output \"my_ip\" { value = data.http.test.response_body }\n",
+    );
+
+    let msgs = messages(&b, &data_file);
+    assert!(
+        msgs.iter()
+            .all(|m| !(m.contains("declared but not used") && m.contains("http.test"))),
+        "in-use data source flagged unused: {msgs:?}"
+    );
+}
+
+#[test]
 fn malformed_version_diagnostic_clears_after_simulated_edit() {
     // Regression for the reported "LSP is stuck on a stale
     // `malformed version `c`` warning after I corrected the
