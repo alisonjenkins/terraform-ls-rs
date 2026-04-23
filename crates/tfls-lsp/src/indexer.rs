@@ -832,18 +832,58 @@ async fn scan_files_parallel(
         by_module.entry(dir).or_default().push(uri);
     }
 
+    // Intermediate progress — so the user sees movement while the
+    // blocking `referenced_dirs_in_workspace` precompute runs. On a
+    // cold filesystem cache the canonicalize syscalls below can
+    // take seconds, and without this tick the 66% "computing
+    // diagnostics" label would sit frozen until the first module
+    // finishes publishing.
+    if let Some(p) = progress.as_ref() {
+        p.report(Some("building module graph".to_string()), Some(67))
+            .await;
+    }
+
     // Precompute the workspace-wide "referenced-by-some-module-call"
     // directory set ONCE. Every `ModuleSnapshot::build` call below
     // uses it for an O(1) `is_root` determination instead of the
     // O(N) per-snapshot walk + canonicalize round-trips that
     // previously dominated the compute phase (the 66%-frozen
-    // Fidget progress the user reported).
-    let referenced_dirs =
-        crate::handlers::module_snapshot::referenced_dirs_in_workspace(state);
+    // Fidget progress the user reported). The walk does one
+    // `canonicalize` syscall per local module source — potentially
+    // hundreds on large stacks — so defer to a blocking thread to
+    // keep the runtime reactor responsive.
+    let state_for_precompute = state;
+    let referenced_dirs = tokio::task::block_in_place(|| {
+        crate::handlers::module_snapshot::referenced_dirs_in_workspace(state_for_precompute)
+    });
 
     let total_modules = by_module.len();
     let mut published = 0usize;
     for (idx, (dir, uris_in_module)) in by_module.into_iter().enumerate() {
+        // Per-module progress report — emitted BEFORE the compute
+        // step so the user sees "N/M" tick up as each module starts,
+        // not when it finishes. This matters when an individual
+        // module's publish drain stalls on a slow client: the old
+        // after-drain placement could leave the label frozen for
+        // seconds at a time while the user waits for the client to
+        // read from the stdout pipe. Percent interpolates between
+        // 66 (phase start) and 99 (leaving one point for `end`).
+        if let Some(p) = progress.as_ref() {
+            let started = idx + 1;
+            let pct = if total_modules > 0 {
+                66 + ((started * 33) / total_modules) as u32
+            } else {
+                99
+            };
+            p.report(
+                Some(format!(
+                    "computing diagnostics ({started}/{total_modules} modules)"
+                )),
+                Some(pct),
+            )
+            .await;
+        }
+
         let snapshot = crate::handlers::module_snapshot::ModuleSnapshot::build(
             state,
             dir.as_deref(),
@@ -892,25 +932,6 @@ async fn scan_files_parallel(
             })
             .collect();
         while pending.next().await.is_some() {}
-
-        // Per-module progress report so the user sees continuous
-        // movement in Fidget instead of a frozen 66% for the
-        // duration of the whole compute+publish phase. Percent
-        // interpolates between 66 (phase start) and 99 (leaving
-        // one point for the `end` signal).
-        if let Some(p) = progress.as_ref() {
-            let done = idx + 1;
-            let pct = if total_modules > 0 {
-                66 + ((done * 33) / total_modules) as u32
-            } else {
-                99
-            };
-            p.report(
-                Some(format!("computing diagnostics ({done}/{total_modules} modules)")),
-                Some(pct),
-            )
-            .await;
-        }
     }
 
     tracing::info!(
