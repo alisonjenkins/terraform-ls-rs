@@ -154,16 +154,19 @@ impl StateStore {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// True when the server should *skip* push-based
-    /// `publishDiagnostics` for `uri` and rely on the client
-    /// pulling via `textDocument/diagnostic` instead. Applies
-    /// only to URIs currently open in the client — unopened
-    /// workspace files are still pushed so workspace-wide views
-    /// (`:Trouble workspace_diagnostics`) populate.
-    pub fn should_skip_push_diagnostics(&self, uri: &Url) -> bool {
-        self.client_supports_pull_diagnostics
-            .load(std::sync::atomic::Ordering::Relaxed)
-            && self.open_docs.contains(uri)
+    /// Always returns `false`: the server pushes diagnostics for
+    /// every URI, including open buffers. Used to short-circuit pull
+    /// mode back when we advertised `diagnosticProvider`. We dropped
+    /// that capability (see `crates/tfls-lsp/src/capabilities.rs` —
+    /// nvim's dual-namespace render bug), so the previous "skip
+    /// push for open buffers under pull-mode clients" logic would
+    /// leave open buffers with NO diagnostics at all (server
+    /// suppressed push, client never pulls because the capability
+    /// isn't advertised). Kept as a function so call sites stay
+    /// stable; remove the predicate at every call site once we're
+    /// confident the push-only model is stable.
+    pub fn should_skip_push_diagnostics(&self, _uri: &Url) -> bool {
+        false
     }
 
     /// Mark a URI as open in the client.
@@ -716,56 +719,30 @@ mod tests {
         assert!(!store.is_scan_completed(&d));
     }
 
-    // --- should_skip_push_diagnostics invariants --------------------
+    // --- should_skip_push_diagnostics invariant --------------------
     //
-    // These pin the contract the indexer relies on to avoid
-    // duplicate diagnostics (push + pull showing the same entry
-    // twice in nvim's two separate namespaces). The rule:
-    //
-    //   push is skipped ⇔ pull is advertised AND the URI is open
-    //
-    // Every change to `should_skip_push_diagnostics` must keep
-    // the four cases below passing.
+    // After dropping `diagnosticProvider` from server capabilities,
+    // pull diagnostics never fire on the wire. Push has to cover
+    // every URI, including open buffers — otherwise open buffers
+    // get NO diagnostics at all (server suppresses push, client
+    // never pulls). The function is now a constant `false`; this
+    // test pins it so re-introducing the skip without restoring
+    // pull mode fails loudly.
 
     #[test]
-    fn skip_push_when_pull_advertised_and_buffer_open() {
+    fn never_skip_push_in_push_only_mode() {
         let store = StateStore::new();
         let u = uri("file:///a.tf");
-        store.set_client_supports_pull_diagnostics(true);
-        store.mark_open(u.clone());
-        assert!(
-            store.should_skip_push_diagnostics(&u),
-            "open + pull must skip push (otherwise it duplicates \
-             against the pull namespace)"
-        );
-    }
-
-    #[test]
-    fn do_not_skip_push_for_closed_buffer_even_under_pull() {
-        // Workspace-wide views (`:Trouble workspace_diagnostics`)
-        // need pushes for files the user hasn't opened, because
-        // pull only targets open buffers.
-        let store = StateStore::new();
-        let u = uri("file:///a.tf");
-        store.set_client_supports_pull_diagnostics(true);
-        // Don't mark open.
+        // All four pre-fix permutations must now return false.
         assert!(!store.should_skip_push_diagnostics(&u));
-    }
 
-    #[test]
-    fn do_not_skip_push_for_open_buffer_without_pull() {
-        // Push-only clients need push for their open buffers too.
-        let store = StateStore::new();
-        let u = uri("file:///a.tf");
         store.mark_open(u.clone());
-        // Pull not advertised.
         assert!(!store.should_skip_push_diagnostics(&u));
-    }
 
-    #[test]
-    fn do_not_skip_push_for_closed_push_only_client() {
-        let store = StateStore::new();
-        let u = uri("file:///a.tf");
+        store.set_client_supports_pull_diagnostics(true);
+        assert!(!store.should_skip_push_diagnostics(&u));
+
+        store.mark_closed(&u);
         assert!(!store.should_skip_push_diagnostics(&u));
     }
 }
