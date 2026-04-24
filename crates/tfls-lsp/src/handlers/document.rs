@@ -174,22 +174,19 @@ pub async fn did_change(backend: &Backend, params: DidChangeTextDocumentParams) 
     .await;
     publish_current_diagnostics(backend, &uri, Some(version)).await;
     // Changes to THIS file can invalidate diagnostics in OTHER
-    // open buffers in the same module (e.g. adding a reference
-    // here clears an "unused" warning on the declaration in a
-    // peer file). Nudge the client to re-pull — cheap call and
-    // no-op on clients that don't advertise refresh support.
-    crate::indexer::maybe_refresh_diagnostics(&backend.state, Some(&backend.client)).await;
-    // Also push fresh diagnostics directly to every open peer
-    // buffer in the same module directory. The
-    // `workspace/diagnostic/refresh` above is the spec-correct
-    // invalidation signal, but nvim (0.11+) doesn't reliably
-    // re-pull for non-visible buffers after receiving a refresh
-    // — the user sees stale "undefined variable" on `main.tf`
-    // even after adding the declaration in `variable.tf`, with
-    // the staleness only clearing on the next did_change in
-    // `main.tf` itself. Pushing directly clears the namespace
-    // immediately; clients that subsequently re-pull overwrite
-    // the push with the same data, so no display churn.
+    // open buffers in the same module. Push fresh diagnostics
+    // directly to each such open peer; this is the reliable
+    // signal across nvim versions.
+    //
+    // We deliberately do NOT also send
+    // `workspace/diagnostic/refresh` here: in nvim 0.11+ the
+    // refresh handler invalidates the pull-diagnostic namespace
+    // for every buffer it tracks, which can race our subsequent
+    // push (the push lands on an "abandoned" namespace and the
+    // display stays stale). Relying on the push alone keeps the
+    // update path single-source — every observed staleness bug
+    // has been a refresh-then-push race, never a
+    // push-didn't-land.
     publish_peer_diagnostics(backend, &uri).await;
 }
 
@@ -204,9 +201,9 @@ pub async fn did_save(backend: &Backend, params: DidSaveTextDocumentParams) {
     })
     .await;
     publish_current_diagnostics(backend, &uri, None).await;
-    // See did_change: peer buffers may need to re-pull now that
-    // this file's references have been re-indexed.
-    crate::indexer::maybe_refresh_diagnostics(&backend.state, Some(&backend.client)).await;
+    // See did_change: push peer-buffer diagnostics directly
+    // instead of relying on workspace/diagnostic/refresh, which
+    // races our own push inside nvim 0.11+.
     publish_peer_diagnostics(backend, &uri).await;
     // Re-check the `.terraform/providers/` tree — if the user ran
     // `tofu init` / `terraform init` since we last fetched (adding
