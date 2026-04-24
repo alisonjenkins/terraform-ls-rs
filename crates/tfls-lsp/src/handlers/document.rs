@@ -264,7 +264,7 @@ async fn publish_peer_diagnostics(backend: &Backend, changed_uri: &Url) {
         return;
     };
 
-    let peers: Vec<(Url, i32)> = backend
+    let peers: Vec<Url> = backend
         .state
         .documents
         .iter()
@@ -280,7 +280,7 @@ async fn publish_peer_diagnostics(backend: &Backend, changed_uri: &Url) {
             if parent != module_dir {
                 return None;
             }
-            Some((uri.clone(), entry.version))
+            Some(uri.clone())
         })
         .collect();
 
@@ -297,29 +297,31 @@ async fn publish_peer_diagnostics(backend: &Backend, changed_uri: &Url) {
 
     let state = std::sync::Arc::clone(&backend.state);
     let peers_for_compute = peers.clone();
-    let results: Vec<(Url, i32, Vec<Diagnostic>)> = tokio::task::spawn_blocking(move || {
+    let results: Vec<(Url, Vec<Diagnostic>)> = tokio::task::spawn_blocking(move || {
         peers_for_compute
             .into_iter()
-            .map(|(uri, version)| {
+            .map(|uri| {
                 let diagnostics = compute_diagnostics(&state, &uri);
-                (uri, version, diagnostics)
+                (uri, diagnostics)
             })
             .collect()
     })
     .await
     .unwrap_or_default();
 
-    for (uri, version, diagnostics) in results {
+    for (uri, diagnostics) in results {
         tracing::info!(
             uri = %uri,
-            version,
             n = diagnostics.len(),
-            "publish_peer_diagnostics: push"
+            "publish_peer_diagnostics: push (version=None — unconditional apply)"
         );
-        backend
-            .client
-            .publish_diagnostics(uri, diagnostics, Some(version))
-            .await;
+        // Send without a version so the client treats the publish as
+        // unconditional. Some clients (nvim 0.11 in particular) drop
+        // a publish whose version equals the one they already have
+        // for the buffer — the stored version on this peer doc is
+        // the last edit WE saw, not the one the client has, so
+        // sending it is worse than useless.
+        backend.client.publish_diagnostics(uri, diagnostics, None).await;
     }
 }
 
