@@ -115,6 +115,85 @@ pub fn is_terraform_file(path: &Path) -> bool {
         || name.ends_with(".tofutest.hcl")
 }
 
+/// Does this path look like a Terraform variable-values file?
+///
+/// Covers `terraform.tfvars`, `terraform.tfvars.json`, `*.auto.tfvars`,
+/// `*.auto.tfvars.json`, and any `*.tfvars` / `*.tfvars.json` Terraform
+/// would accept via `-var-file`. We index these for type-inference
+/// only — the values they assign let us infer the shape of variables
+/// that lack a `default`. They do NOT participate in regular
+/// diagnostics: a tfvars file is not a module file.
+pub fn is_tfvars_file(path: &Path) -> bool {
+    let name = match path.file_name().and_then(|s| s.to_str()) {
+        Some(n) => n,
+        None => return false,
+    };
+    name.ends_with(".tfvars") || name.ends_with(".tfvars.json")
+}
+
+/// Non-recursive: list every `*.tfvars` / `*.tfvars.json` in `dir`.
+pub fn discover_tfvars_files_in_dir(dir: &Path) -> Result<Vec<PathBuf>, WalkerError> {
+    let entries = std::fs::read_dir(dir).map_err(|source| WalkerError::DirectoryRead {
+        path: dir.display().to_string(),
+        source,
+    })?;
+    let mut out = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|source| WalkerError::DirectoryRead {
+            path: dir.display().to_string(),
+            source,
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|source| WalkerError::DirectoryRead {
+            path: path.display().to_string(),
+            source,
+        })?;
+        if file_type.is_file() && is_tfvars_file(&path) {
+            out.push(path);
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// Recursive: every `*.tfvars` / `*.tfvars.json` under `root`. Honours
+/// the same `is_ignored_dir` pruning as the regular walker.
+pub fn discover_tfvars_files(root: &Path) -> Result<Vec<PathBuf>, WalkerError> {
+    let mut out = Vec::new();
+    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = std::fs::read_dir(&dir).map_err(|source| WalkerError::DirectoryRead {
+            path: dir.display().to_string(),
+            source,
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|source| WalkerError::DirectoryRead {
+                path: dir.display().to_string(),
+                source,
+            })?;
+            let path = entry.path();
+            let file_type = entry.file_type().map_err(|source| WalkerError::DirectoryRead {
+                path: path.display().to_string(),
+                source,
+            })?;
+            if file_type.is_dir() {
+                let name_is_ignored = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(is_ignored_dir)
+                    .unwrap_or(false);
+                if !name_is_ignored {
+                    stack.push(path);
+                }
+            } else if file_type.is_file() && is_tfvars_file(&path) {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {

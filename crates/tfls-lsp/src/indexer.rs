@@ -518,8 +518,14 @@ async fn bulk_workspace_scan(
     // The bulk scan has parsed every discoverable `.tf` in every
     // dir. Upgrade each to `Completed` so correctness-sensitive
     // callers (e.g. diagnostic passes that depend on cross-file
-    // symbols being present) can gate on it.
+    // symbols being present) can gate on it. While we're walking
+    // the dirs, also recompute the assigned-variable-types map for
+    // each — every tfvars file + every module-call attribute now
+    // contributes to the map, which the type-inference code action
+    // reads to suggest `type = …` for variables that have no
+    // `default`.
     for dir in dirs {
+        rebuild_assigned_variable_types_for_dir(state, &dir);
         state.mark_scan_completed(dir);
     }
 
@@ -749,6 +755,7 @@ async fn scan_dir_into_state(
             // now; per-dir scans index silently.
             scan_files_parallel(state, client, files, /* with_progress */ false).await;
             state.mark_scan_completed(dir.to_path_buf());
+            rebuild_assigned_variable_types_for_dir(state, dir);
             enqueue_child_module_scans(state, queue, dir);
             // Cross-file symbols just changed — any open buffer in
             // this directory (or referencing this directory via a
@@ -971,6 +978,127 @@ async fn scan_files_parallel(
     );
     if let Some(p) = progress {
         p.end(Some(format!("indexed {published} files"))).await;
+    }
+}
+
+/// Recompute `state.assigned_variable_types` for `dir` and for every
+/// child module dir that any `.tf` in `dir` references via a
+/// `module "X" { source = "./Y" … }` block. Two sources contribute:
+///
+/// 1. **Tfvars in `dir`** (`*.tfvars`, `*.auto.tfvars`,
+///    `*.tfvars.json`). Each top-level `name = value` assignment
+///    becomes an entry under `state.assigned_variable_types[dir][name]`
+///    with the inferred shape.
+/// 2. **Module-call attributes from `.tf` files in `dir`**. For each
+///    `module "X" { src = "./Y", attr = expr }`, resolve `Y` to the
+///    child directory and add `attr → infer(expr)` under
+///    `state.assigned_variable_types[child_dir][attr]`. Multiple
+///    callers / multiple env-specific tfvars accumulate into the
+///    inner `Vec`; the consumer (the type-inference code action)
+///    equality-merges across them.
+///
+/// Wholesale replacement: every call rebuilds the entries for all
+/// affected target dirs from a current snapshot, so a removed
+/// caller or deleted tfvars file doesn't leave a stale type
+/// hanging around.
+fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
+    use std::collections::HashMap;
+    use tfls_core::variable_type::{VariableType, parse_value_shape};
+
+    // Skip meta-attributes that aren't user-declared module inputs.
+    fn is_meta_attr(name: &str) -> bool {
+        matches!(
+            name,
+            "source" | "version" | "providers" | "count" | "for_each" | "depends_on"
+        )
+    }
+
+    // Collect target_dir → (var_name → list of types) so we can
+    // replace each affected dir's entry atomically at the end.
+    let mut staged: HashMap<PathBuf, HashMap<String, Vec<VariableType>>> = HashMap::new();
+
+    // 1. Tfvars in `dir` → assignments target `dir` itself.
+    if let Ok(tfvars) = tfls_walker::discover_tfvars_files_in_dir(dir) {
+        let mut for_dir: HashMap<String, Vec<VariableType>> = HashMap::new();
+        for path in tfvars {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            for (name, ty) in tfls_parser::parse_tfvars(&text) {
+                for_dir.entry(name).or_default().push(ty);
+            }
+        }
+        if !for_dir.is_empty() {
+            staged.insert(dir.to_path_buf(), for_dir);
+        }
+    }
+
+    // 2. Module calls authored in `.tf` files in `dir`. Each
+    //    contributes assignments to its CHILD module's directory.
+    for entry in state.documents.iter() {
+        let Ok(doc_path) = entry.key().to_file_path() else {
+            continue;
+        };
+        if doc_path.parent() != Some(dir) {
+            continue;
+        }
+        let Some(body) = entry.value().parsed.body.as_ref() else {
+            continue;
+        };
+        for structure in body.iter() {
+            let Some(block) = structure.as_block() else {
+                continue;
+            };
+            if block.ident.as_str() != "module" {
+                continue;
+            }
+            let Some(label) = block.labels.first().map(|l| match l {
+                hcl_edit::structure::BlockLabel::String(s) => s.value().to_string(),
+                hcl_edit::structure::BlockLabel::Ident(i) => i.as_str().to_string(),
+            }) else {
+                continue;
+            };
+            let Some(source) = entry.value().symbols.module_sources.get(&label).cloned()
+            else {
+                continue;
+            };
+            let Some(child_dir) =
+                crate::handlers::util::resolve_module_source(dir, &label, &source)
+            else {
+                continue;
+            };
+            // Walk each attribute of the module block; infer the
+            // type of its RHS; stage under the child dir.
+            let bucket = staged.entry(child_dir).or_default();
+            for body_struct in block.body.iter() {
+                let Some(attr) = body_struct.as_attribute() else {
+                    continue;
+                };
+                let attr_name = attr.key.as_str();
+                if is_meta_attr(attr_name) {
+                    continue;
+                }
+                let ty = parse_value_shape(&attr.value);
+                if matches!(&ty, VariableType::Any) {
+                    continue;
+                }
+                if let VariableType::Tuple(items) = &ty {
+                    if items.is_empty() {
+                        continue;
+                    }
+                }
+                if let VariableType::Object(fields) = &ty {
+                    if fields.is_empty() {
+                        continue;
+                    }
+                }
+                bucket.entry(attr_name.to_string()).or_default().push(ty);
+            }
+        }
+    }
+
+    for (target_dir, assignments) in staged {
+        state.replace_assigned_variable_types(target_dir, assignments);
     }
 }
 

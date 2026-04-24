@@ -10,6 +10,7 @@ pub mod json;
 pub mod parse;
 pub mod position;
 pub mod references;
+pub mod tfvars;
 pub mod traversal;
 
 pub use error::ParseError;
@@ -21,4 +22,5 @@ pub use position::{
     byte_offset_to_lsp_position, hcl_span_to_lsp_range, lsp_position_to_byte_offset,
 };
 pub use references::{Reference, ReferenceKind, extract_references};
+pub use tfvars::parse_tfvars;
 pub use traversal::extract_symbols;

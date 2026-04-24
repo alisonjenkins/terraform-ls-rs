@@ -122,6 +122,25 @@ pub struct StateStore {
     /// pull this" (open) from "client will only see this via push"
     /// (unopened workspace files surfaced by bulk scan).
     pub open_docs: dashmap::DashSet<Url>,
+
+    /// Per-target-module-dir cache of variable types inferred from
+    /// values flowing INTO the module:
+    ///
+    /// - tfvars assignments (`*.tfvars`, `*.auto.tfvars`,
+    ///   `*.tfvars.json`) in the same directory as the variable
+    ///   declarations (root-module case).
+    /// - `module "X" { var_name = expr }` attributes from caller
+    ///   files in any peer module that has `source = "./X"` or a
+    ///   lockfile-resolvable equivalent (child-module case).
+    ///
+    /// Keyed by the directory containing the variable
+    /// declarations (the *target* of the assignment). The inner
+    /// `Vec` keeps every observed type so the consumer (e.g. the
+    /// type-inference code action) can equality-merge across
+    /// multiple call sites / env-specific tfvars files. Values
+    /// that resolve to `Any` are filtered out at insertion time.
+    pub assigned_variable_types:
+        dashmap::DashMap<std::path::PathBuf, std::collections::HashMap<String, Vec<tfls_core::variable_type::VariableType>>>,
 }
 
 impl StateStore {
@@ -177,6 +196,44 @@ impl StateStore {
     /// Unmark a URI on `didClose`.
     pub fn mark_closed(&self, uri: &Url) {
         self.open_docs.remove(uri);
+    }
+
+    /// Replace the assigned-variable-types entries for `target_dir`
+    /// with `assignments` (keyed by variable name → every observed
+    /// type for that variable). Wholesale replace rather than merge:
+    /// the indexer recomputes from a current snapshot of every
+    /// caller / tfvars file each run, so stale entries from a
+    /// removed call site shouldn't linger.
+    pub fn replace_assigned_variable_types(
+        &self,
+        target_dir: std::path::PathBuf,
+        assignments: std::collections::HashMap<String, Vec<tfls_core::variable_type::VariableType>>,
+    ) {
+        if assignments.is_empty() {
+            self.assigned_variable_types.remove(&target_dir);
+            return;
+        }
+        self.assigned_variable_types.insert(target_dir, assignments);
+    }
+
+    /// Look up the merged inferred type for variable `name` declared
+    /// in `target_dir`. Returns `Some(ty)` only when every observed
+    /// assignment yields the same `VariableType` — disagreement
+    /// means we don't know the canonical type, so the caller (e.g.
+    /// the type-inference code action) skips its suggestion.
+    pub fn merged_assigned_type(
+        &self,
+        target_dir: &std::path::Path,
+        name: &str,
+    ) -> Option<tfls_core::variable_type::VariableType> {
+        let entry = self.assigned_variable_types.get(target_dir)?;
+        let observations = entry.get(name)?;
+        let first = observations.first()?.clone();
+        if observations.iter().all(|t| t == &first) {
+            Some(first)
+        } else {
+            None
+        }
     }
 
     /// Is this URI currently open in any client buffer? Used by

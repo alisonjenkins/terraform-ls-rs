@@ -41,9 +41,14 @@ pub async fn code_action(
                 actions.push(CodeActionOrCommand::CodeAction(action));
             }
         } else if is_missing_variable_type(diag) {
-            if let Some(action) =
-                make_insert_variable_type_action(&uri, diag, body, &doc.rope, &doc.symbols)
-            {
+            if let Some(action) = make_insert_variable_type_action(
+                &uri,
+                diag,
+                body,
+                &doc.rope,
+                &doc.symbols,
+                &backend.state,
+            ) {
                 actions.push(CodeActionOrCommand::CodeAction(action));
             }
         }
@@ -81,10 +86,10 @@ fn make_insert_required_action(
     let attr_schema = schema.block.attributes.get(&attr_name)?;
 
     let placeholder = placeholder_for(attr_schema);
-    let insert_pos = insertion_position(block, rope)?;
+    let (insert_pos, prefix) = insertion_position(block, rope)?;
     let indent = "  "; // two-space indent matching our formatter
 
-    let new_text = format!("{indent}{attr_name} = {placeholder}\n");
+    let new_text = format!("{prefix}{indent}{attr_name} = {placeholder}\n");
     let edit = TextEdit {
         range: Range {
             start: insert_pos,
@@ -149,20 +154,37 @@ fn label_str(label: &BlockLabel) -> Option<&str> {
     }
 }
 
-/// Insert new attributes at the top of the block body — just after the
-/// opening `{`. We find the offset of the `{`, advance past it, past
-/// its trailing newline if present, and return that as an LSP
-/// position.
-fn insertion_position(block: &Block, rope: &Rope) -> Option<Position> {
-    let body_span = block.body.span()?;
-    // body_span.start is the byte offset immediately after `{`.
-    // Advance past a following newline so the inserted line lives on
-    // its own row.
-    let text = rope.slice(rope.byte_to_char(body_span.start)..rope.len_chars()).to_string();
-    let offset_in_body = text.find('\n').map_or(0, |i| i + 1);
-    let insert_byte = body_span.start + offset_in_body;
+/// Insert new attributes at the top of the block body. Returns the
+/// position to insert at + the prefix to prepend before the
+/// caller's `key = value\n` line. When the block body already has
+/// content (`{\n  …\n}`), we insert right after the opening
+/// `{`'s newline and prepend nothing. When the body is empty
+/// (`{}` or `{ }`), hcl-edit reports no body span; we drop the
+/// insert immediately after the `{` and prepend a leading `\n` so
+/// the closing brace ends up on its own line.
+fn insertion_position(block: &Block, rope: &Rope) -> Option<(Position, &'static str)> {
+    if let Some(body_span) = block.body.span() {
+        // Non-empty body — body_span.start is the byte right after
+        // `{`. Advance past the immediate newline so the inserted
+        // line is placed below the brace.
+        let text = rope
+            .slice(rope.byte_to_char(body_span.start)..rope.len_chars())
+            .to_string();
+        let offset = text.find('\n').map_or(0, |i| i + 1);
+        let insert_byte = body_span.start + offset;
+        let pos = tfls_parser::byte_offset_to_lsp_position(rope, insert_byte).ok()?;
+        return Some((pos, ""));
+    }
 
-    tfls_parser::byte_offset_to_lsp_position(rope, insert_byte).ok()
+    // Empty body. Locate the `{` from the block's overall span.
+    let block_span = block.span()?;
+    let block_text = rope
+        .slice(rope.byte_to_char(block_span.start)..rope.byte_to_char(block_span.end))
+        .to_string();
+    let brace_off = block_text.find('{')?;
+    let insert_byte = block_span.start + brace_off + 1;
+    let pos = tfls_parser::byte_offset_to_lsp_position(rope, insert_byte).ok()?;
+    Some((pos, "\n"))
 }
 
 /// Match the `terraform_typed_variables` warning so we can offer a
@@ -179,6 +201,7 @@ fn make_insert_variable_type_action(
     body: &Body,
     rope: &Rope,
     symbols: &tfls_core::SymbolTable,
+    state: &tfls_state::StateStore,
 ) -> Option<CodeAction> {
     let var_name = missing_attr_name(&diag.message)?.to_string();
     let block = find_variable_block(body, &var_name)?;
@@ -190,15 +213,32 @@ fn make_insert_variable_type_action(
         return None;
     }
 
-    let inferred = symbols.variable_defaults.get(&var_name)?;
-    if !is_actionable_inference(inferred) {
-        return None;
-    }
-
+    // Three sources, in priority order:
+    //   1. The variable's own `default = …` literal.
+    //   2. Values assigned via `*.tfvars` files in the same directory.
+    //   3. Attributes on `module "X" { var_name = expr }` callers.
+    //
+    // (2) and (3) merge into the same per-dir map (`state.assigned_variable_types`),
+    // and `merged_assigned_type` returns `Some(ty)` only when every
+    // observed assignment yields the same shape — disagreement means
+    // we don't know the canonical type, so we skip rather than guess.
+    let inferred_from_default = symbols
+        .variable_defaults
+        .get(&var_name)
+        .filter(|t| is_actionable_inference(t))
+        .cloned();
+    let inferred = inferred_from_default.or_else(|| {
+        let module_dir = crate::handlers::util::parent_dir(uri)?;
+        let merged = state.merged_assigned_type(&module_dir, &var_name)?;
+        if !is_actionable_inference(&merged) {
+            return None;
+        }
+        Some(merged)
+    })?;
     let rendered = inferred.to_string();
-    let insert_pos = insertion_position(block, rope)?;
+    let (insert_pos, prefix) = insertion_position(block, rope)?;
     let indent = "  ";
-    let new_text = format!("{indent}type = {rendered}\n");
+    let new_text = format!("{prefix}{indent}type = {rendered}\n");
 
     let edit = TextEdit {
         range: Range {
@@ -210,8 +250,18 @@ fn make_insert_variable_type_action(
     let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
     changes.insert(uri.clone(), vec![edit]);
 
+    let title_source = if symbols
+        .variable_defaults
+        .get(&var_name)
+        .is_some_and(is_actionable_inference)
+    {
+        "default"
+    } else {
+        "tfvars / module callers"
+    };
+
     Some(CodeAction {
-        title: format!("Set variable type to `{rendered}` from default"),
+        title: format!("Set variable type to `{rendered}` from {title_source}"),
         kind: Some(CodeActionKind::QUICKFIX),
         diagnostics: Some(vec![diag.clone()]),
         edit: Some(WorkspaceEdit {
@@ -267,6 +317,7 @@ fn is_actionable_inference(ty: &tfls_core::variable_type::VariableType) -> bool 
         _ => true,
     }
 }
+
 
 fn placeholder_for(attr: &tfls_schema::AttributeSchema) -> &'static str {
     // Quick heuristic based on the primitive type name.

@@ -399,6 +399,114 @@ async fn code_action_no_action_for_empty_array_default() {
 }
 
 #[tokio::test]
+async fn code_action_falls_back_to_assigned_types_when_no_default() {
+    // Variable has NO `default` and NO `type`. The store carries an
+    // assignment from a tfvars file (or a module caller — same map)
+    // for this dir → use the merged inferred type.
+    let u = uri("file:///mod/main.tf");
+    let src = concat!(
+        "variable \"region\" {}\n",
+        "output \"r\" { value = var.region }\n",
+    );
+    let backend = fresh_backend(src, &u);
+
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use tfls_core::variable_type::{Primitive, VariableType};
+    let mut for_dir: HashMap<String, Vec<VariableType>> = HashMap::new();
+    for_dir.insert(
+        "region".to_string(),
+        vec![VariableType::Primitive(Primitive::String)],
+    );
+    backend
+        .state
+        .replace_assigned_variable_types(PathBuf::from("/mod"), for_dir);
+
+    let actions = code_actions_for(&backend, &u, "variable has no type").await;
+    let new_text = first_inserted_text(&actions, &u);
+    assert!(
+        new_text.contains("type = string"),
+        "got: {new_text:?}"
+    );
+    let action = match &actions[0] {
+        CodeActionOrCommand::CodeAction(a) => a,
+        _ => panic!(),
+    };
+    assert!(
+        action.title.contains("tfvars / module callers"),
+        "title should attribute the source: {:?}",
+        action.title
+    );
+}
+
+#[tokio::test]
+async fn code_action_skips_when_assigned_types_disagree() {
+    // Two callers / tfvars files give DIFFERENT types for the same
+    // variable → no canonical answer → no action.
+    let u = uri("file:///mod/main.tf");
+    let src = concat!(
+        "variable \"thing\" {}\n",
+        "output \"t\" { value = var.thing }\n",
+    );
+    let backend = fresh_backend(src, &u);
+
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use tfls_core::variable_type::{Primitive, VariableType};
+    let mut for_dir: HashMap<String, Vec<VariableType>> = HashMap::new();
+    for_dir.insert(
+        "thing".to_string(),
+        vec![
+            VariableType::Primitive(Primitive::String),
+            VariableType::Primitive(Primitive::Number),
+        ],
+    );
+    backend
+        .state
+        .replace_assigned_variable_types(PathBuf::from("/mod"), for_dir);
+
+    let actions = code_actions_for(&backend, &u, "variable has no type").await;
+    assert!(
+        actions.is_empty(),
+        "disagreement must skip the action; got {actions:?}"
+    );
+}
+
+#[tokio::test]
+async fn code_action_default_takes_priority_over_assigned_types() {
+    // When both sources disagree, the variable's own `default` wins
+    // (the author explicitly wrote it; assignments are external
+    // observations).
+    let u = uri("file:///mod/main.tf");
+    let src = concat!(
+        "variable \"region\" {\n",
+        "  default = \"us-east-1\"\n",
+        "}\n",
+        "output \"r\" { value = var.region }\n",
+    );
+    let backend = fresh_backend(src, &u);
+
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use tfls_core::variable_type::{Primitive, VariableType};
+    let mut for_dir: HashMap<String, Vec<VariableType>> = HashMap::new();
+    for_dir.insert(
+        "region".to_string(),
+        vec![VariableType::Primitive(Primitive::Number)],
+    );
+    backend
+        .state
+        .replace_assigned_variable_types(PathBuf::from("/mod"), for_dir);
+
+    let actions = code_actions_for(&backend, &u, "variable has no type").await;
+    let new_text = first_inserted_text(&actions, &u);
+    assert!(
+        new_text.contains("type = string"),
+        "default should win over assigned-types disagreement; got: {new_text:?}"
+    );
+}
+
+#[tokio::test]
 async fn code_action_skips_when_block_already_has_type() {
     // Defensive: if a stale diagnostic for an already-typed
     // variable somehow reaches the action handler, no edit fires.
