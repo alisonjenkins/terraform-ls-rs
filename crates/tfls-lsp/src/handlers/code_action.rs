@@ -40,6 +40,12 @@ pub async fn code_action(
             {
                 actions.push(CodeActionOrCommand::CodeAction(action));
             }
+        } else if is_missing_variable_type(diag) {
+            if let Some(action) =
+                make_insert_variable_type_action(&uri, diag, body, &doc.rope, &doc.symbols)
+            {
+                actions.push(CodeActionOrCommand::CodeAction(action));
+            }
         }
     }
 
@@ -157,6 +163,109 @@ fn insertion_position(block: &Block, rope: &Rope) -> Option<Position> {
     let insert_byte = body_span.start + offset_in_body;
 
     tfls_parser::byte_offset_to_lsp_position(rope, insert_byte).ok()
+}
+
+/// Match the `terraform_typed_variables` warning so we can offer a
+/// quick-fix that inserts the inferred `type = …` attribute.
+fn is_missing_variable_type(diag: &Diagnostic) -> bool {
+    diag.severity == Some(DiagnosticSeverity::WARNING)
+        && diag.source.as_deref() == Some("terraform-ls-rs")
+        && diag.message.contains("variable has no type")
+}
+
+fn make_insert_variable_type_action(
+    uri: &Url,
+    diag: &Diagnostic,
+    body: &Body,
+    rope: &Rope,
+    symbols: &tfls_core::SymbolTable,
+) -> Option<CodeAction> {
+    let var_name = missing_attr_name(&diag.message)?.to_string();
+    let block = find_variable_block(body, &var_name)?;
+
+    // Bail out if the block already has a `type` attribute — covers
+    // the stale-diagnostic case where the user fixed the warning by
+    // hand but the client still has it cached.
+    if block_has_attribute(block, "type") {
+        return None;
+    }
+
+    let inferred = symbols.variable_defaults.get(&var_name)?;
+    if !is_actionable_inference(inferred) {
+        return None;
+    }
+
+    let rendered = inferred.to_string();
+    let insert_pos = insertion_position(block, rope)?;
+    let indent = "  ";
+    let new_text = format!("{indent}type = {rendered}\n");
+
+    let edit = TextEdit {
+        range: Range {
+            start: insert_pos,
+            end: insert_pos,
+        },
+        new_text,
+    };
+    let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    changes.insert(uri.clone(), vec![edit]);
+
+    Some(CodeAction {
+        title: format!("Set variable type to `{rendered}` from default"),
+        kind: Some(CodeActionKind::QUICKFIX),
+        diagnostics: Some(vec![diag.clone()]),
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        // Object/tuple shapes can be coarse — leave the action
+        // available but not preferred so other plugins can win.
+        is_preferred: Some(matches!(
+            inferred,
+            tfls_core::variable_type::VariableType::Primitive(_)
+        )),
+        ..Default::default()
+    })
+}
+
+fn find_variable_block<'b>(body: &'b Body, name: &str) -> Option<&'b Block> {
+    for structure in body.iter() {
+        let block = structure.as_block()?;
+        if block.ident.as_str() != "variable" {
+            continue;
+        }
+        let label = block.labels.first().and_then(label_str)?;
+        if label == name {
+            return Some(block);
+        }
+    }
+    None
+}
+
+fn block_has_attribute(block: &Block, name: &str) -> bool {
+    block.body.iter().any(|s| {
+        s.as_attribute()
+            .is_some_and(|a| a.key.as_str() == name)
+    })
+}
+
+/// Decide whether a `VariableType` is concrete enough to
+/// confidently splice into the source.
+///
+/// Skip:
+/// - `Any` — already filtered out by the symbol-table builder
+///   (`tfls-parser/src/traversal.rs`), but defensive.
+/// - Empty `Tuple([])` — `default = []`. Could be list/set of any
+///   primitive; a wrong guess wastes the user's time.
+/// - Empty `Object({})` — `default = {}`. Same problem.
+fn is_actionable_inference(ty: &tfls_core::variable_type::VariableType) -> bool {
+    use tfls_core::variable_type::VariableType;
+    match ty {
+        VariableType::Any => false,
+        VariableType::Tuple(items) if items.is_empty() => false,
+        VariableType::Object(fields) if fields.is_empty() => false,
+        _ => true,
+    }
 }
 
 fn placeholder_for(attr: &tfls_schema::AttributeSchema) -> &'static str {

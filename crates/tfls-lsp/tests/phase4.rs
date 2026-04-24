@@ -219,3 +219,227 @@ async fn code_action_inserts_missing_required_attribute() {
         edits[0].new_text
     );
 }
+
+// --- Code action: insert inferred `type = …` from default ----------
+//
+// Variables that have a `default` set but no `type` trigger
+// `terraform_typed_variables`. The default value implies a type via
+// `parse_value_shape` (already in tfls-core); the code action just
+// renders the inferred shape and splices it as `type = …` into the
+// block body.
+
+async fn code_actions_for(
+    backend: &Backend,
+    u: &Url,
+    diag_msg_filter: &str,
+) -> Vec<CodeActionOrCommand> {
+    let diags = compute_diagnostics(&backend.state, u);
+    let diag = diags
+        .iter()
+        .find(|d| d.message.contains(diag_msg_filter))
+        .cloned()
+        .unwrap_or_else(|| panic!("no diagnostic matching {diag_msg_filter:?}; got {diags:?}"));
+    tfls_lsp::handlers::code_action::code_action(
+        backend,
+        CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: u.clone() },
+            range: diag.range,
+            context: CodeActionContext {
+                diagnostics: vec![diag],
+                only: None,
+                trigger_kind: None,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        },
+    )
+    .await
+    .expect("ok")
+    .unwrap_or_default()
+}
+
+fn first_inserted_text(actions: &[CodeActionOrCommand], u: &Url) -> String {
+    let action = match actions.first().expect("at least one action") {
+        CodeActionOrCommand::CodeAction(a) => a,
+        other => panic!("expected CodeAction, got {other:?}"),
+    };
+    let edit = action.edit.as_ref().expect("edit");
+    let changes = edit.changes.as_ref().expect("changes");
+    let edits = changes.get(u).expect("edits for this uri");
+    edits[0].new_text.clone()
+}
+
+#[tokio::test]
+async fn code_action_inserts_inferred_string_type() {
+    // The typed-variables diagnostic suppresses on unused-looking
+    // root-module variables, so each test pairs the variable with a
+    // reference to force the diag to fire.
+    let u = uri("file:///vars.tf");
+    let src = concat!(
+        "variable \"region\" {\n",
+        "  default = \"us-east-1\"\n",
+        "}\n",
+        "output \"r\" { value = var.region }\n",
+    );
+    let backend = fresh_backend(src, &u);
+
+    let actions = code_actions_for(&backend, &u, "variable has no type").await;
+    let new_text = first_inserted_text(&actions, &u);
+    assert!(
+        new_text.contains("type = string"),
+        "got: {new_text:?}"
+    );
+}
+
+#[tokio::test]
+async fn code_action_inserts_inferred_number_type() {
+    let u = uri("file:///vars.tf");
+    let src = concat!(
+        "variable \"count\" {\n",
+        "  default = 3\n",
+        "}\n",
+        "output \"c\" { value = var.count }\n",
+    );
+    let backend = fresh_backend(src, &u);
+
+    let actions = code_actions_for(&backend, &u, "variable has no type").await;
+    let new_text = first_inserted_text(&actions, &u);
+    assert!(
+        new_text.contains("type = number"),
+        "got: {new_text:?}"
+    );
+}
+
+#[tokio::test]
+async fn code_action_inserts_inferred_bool_type() {
+    let u = uri("file:///vars.tf");
+    let src = concat!(
+        "variable \"enabled\" {\n",
+        "  default = true\n",
+        "}\n",
+        "output \"e\" { value = var.enabled }\n",
+    );
+    let backend = fresh_backend(src, &u);
+
+    let actions = code_actions_for(&backend, &u, "variable has no type").await;
+    let new_text = first_inserted_text(&actions, &u);
+    assert!(
+        new_text.contains("type = bool"),
+        "got: {new_text:?}"
+    );
+}
+
+#[tokio::test]
+async fn code_action_inserts_inferred_object_type_with_nested_keys() {
+    let u = uri("file:///vars.tf");
+    let src = concat!(
+        "variable \"server\" {\n",
+        "  default = {\n",
+        "    name = \"web\"\n",
+        "    port = 8080\n",
+        "    enabled = true\n",
+        "  }\n",
+        "}\n",
+        "output \"s\" { value = var.server }\n",
+    );
+    let backend = fresh_backend(src, &u);
+
+    let actions = code_actions_for(&backend, &u, "variable has no type").await;
+    let new_text = first_inserted_text(&actions, &u);
+    // Object inference renders alphabetically (BTreeMap).
+    assert!(
+        new_text.contains("type = object({"),
+        "got: {new_text:?}"
+    );
+    assert!(new_text.contains("name = string"), "got: {new_text:?}");
+    assert!(new_text.contains("port = number"), "got: {new_text:?}");
+    assert!(new_text.contains("enabled = bool"), "got: {new_text:?}");
+}
+
+#[tokio::test]
+async fn code_action_no_action_when_default_resolves_to_any() {
+    // Reference defaults can't be statically typed.
+    let u = uri("file:///vars.tf");
+    let src = concat!(
+        "variable \"x\" {\n",
+        "  default = var.y\n",
+        "}\n",
+        "variable \"y\" {\n",
+        "  type = string\n",
+        "}\n",
+        "output \"x\" { value = var.x }\n",
+    );
+    let backend = fresh_backend(src, &u);
+
+    let actions = code_actions_for(&backend, &u, "variable has no type").await;
+    assert!(
+        actions.is_empty(),
+        "must not offer action for unresolvable default; got {actions:?}"
+    );
+}
+
+#[tokio::test]
+async fn code_action_no_action_for_empty_array_default() {
+    // `default = []` is too ambiguous (could be list/set of any
+    // primitive). Refuse rather than guess.
+    let u = uri("file:///vars.tf");
+    let src = concat!(
+        "variable \"items\" {\n",
+        "  default = []\n",
+        "}\n",
+        "output \"i\" { value = var.items }\n",
+    );
+    let backend = fresh_backend(src, &u);
+
+    let actions = code_actions_for(&backend, &u, "variable has no type").await;
+    assert!(
+        actions.is_empty(),
+        "empty array is too ambiguous; got {actions:?}"
+    );
+}
+
+#[tokio::test]
+async fn code_action_skips_when_block_already_has_type() {
+    // Defensive: if a stale diagnostic for an already-typed
+    // variable somehow reaches the action handler, no edit fires.
+    let u = uri("file:///vars.tf");
+    let src = "variable \"region\" {\n  type    = string\n  default = \"us-east-1\"\n}\n";
+    let backend = fresh_backend(src, &u);
+
+    // Synthesise a `variable has no type` diagnostic for `region` —
+    // the diagnostic rule won't actually emit one here, but a stale
+    // pull cache could. The handler must refuse.
+    use tower_lsp::lsp_types::Diagnostic;
+    let diag = Diagnostic {
+        range: Range {
+            start: Position::new(0, 0),
+            end: Position::new(0, 8),
+        },
+        severity: Some(DiagnosticSeverity::WARNING),
+        source: Some("terraform-ls-rs".to_string()),
+        message: "`region` variable has no type".to_string(),
+        ..Default::default()
+    };
+
+    let actions = tfls_lsp::handlers::code_action::code_action(
+        &backend,
+        CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: u.clone() },
+            range: diag.range,
+            context: CodeActionContext {
+                diagnostics: vec![diag],
+                only: None,
+                trigger_kind: None,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        },
+    )
+    .await
+    .expect("ok")
+    .unwrap_or_default();
+    assert!(
+        actions.is_empty(),
+        "must not offer action when block already has type; got {actions:?}"
+    );
+}
