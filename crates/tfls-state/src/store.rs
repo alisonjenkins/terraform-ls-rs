@@ -176,6 +176,13 @@ impl StateStore {
         self.open_docs.remove(uri);
     }
 
+    /// Is this URI currently open in any client buffer? Used by
+    /// cross-file diagnostic refresh to push fresh state only to
+    /// buffers the user can actually see.
+    pub fn is_open(&self, uri: &Url) -> bool {
+        self.open_docs.contains(uri)
+    }
+
     /// Record that a scan has been enqueued for `dir`. Returns
     /// `true` if this is the first time the dir is being tracked —
     /// caller should enqueue the scan job. Returns `false` if the

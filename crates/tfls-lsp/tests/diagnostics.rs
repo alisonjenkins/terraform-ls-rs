@@ -322,6 +322,70 @@ fn malformed_version_diagnostic_clears_after_simulated_edit() {
 }
 
 #[test]
+fn undefined_variable_clears_when_declaration_added_to_peer_file() {
+    // User reported: `modules/api_gateway_resource/main.tf` uses
+    // `var.rest_api_id` which is undefined. They then add
+    // `variable "rest_api_id" {}` to a peer file (`variable.tf`)
+    // and save — but `main.tf` keeps showing the stale
+    // "undefined variable" warning.
+    //
+    // Pins the server-side contract: after simulating the
+    // `did_change` that adds the declaration (rope edit → reparse
+    // on `variable.tf`), `compute_diagnostics` on `main.tf` MUST
+    // stop reporting the reference as undefined. If this passes
+    // in CI but the user still sees stale diagnostics in-editor,
+    // the bug is on the client-side refresh path (push/pull
+    // namespace mismatch, nvim pull cache) — not the store.
+    use tower_lsp::lsp_types::TextDocumentContentChangeEvent;
+
+    let b = backend();
+    let main_u = uri("file:///mod/api_gateway_resource/main.tf");
+    let vars_u = uri("file:///mod/api_gateway_resource/variable.tf");
+
+    // main.tf uses var.rest_api_id; variable.tf is initially empty
+    // (the user hasn't added the declaration yet).
+    insert(
+        &b,
+        &main_u,
+        "resource \"aws_api_gateway_integration\" \"x\" {\n  rest_api_id = var.rest_api_id\n}\n",
+    );
+    insert(&b, &vars_u, "");
+
+    // Baseline — must report the undefined var.
+    let initial = messages(&b, &main_u);
+    assert!(
+        initial
+            .iter()
+            .any(|m| m.contains("undefined variable") && m.contains("rest_api_id")),
+        "baseline: expected undefined var, got {initial:?}"
+    );
+
+    // Simulate the fix: user types `variable "rest_api_id" {}` at
+    // the top of variable.tf. Full-document replacement — mirrors
+    // what nvim often sends on a first-keystroke did_change when
+    // the buffer was empty.
+    {
+        let mut doc = b.state.documents.get_mut(&vars_u).unwrap();
+        doc.apply_change(TextDocumentContentChangeEvent {
+            range: None,
+            range_length: None,
+            text: "variable \"rest_api_id\" {}\n".to_string(),
+        })
+        .unwrap();
+    }
+    b.state.reparse_document(&vars_u);
+
+    // After the peer-file fix, the undefined-var warning on main.tf
+    // must clear.
+    let after = messages(&b, &main_u);
+    assert!(
+        after.iter().all(|m| !(m.contains("undefined variable")
+            && m.contains("rest_api_id"))),
+        "stale undefined-var persisted after declaration added: {after:?}"
+    );
+}
+
+#[test]
 fn scope_var_decl_unused_check_survives_peer_parse_error() {
     // A single typo in `iam_roles.tf` (unclosed brace, for
     // example) makes `hcl-edit` bail on that file's body.

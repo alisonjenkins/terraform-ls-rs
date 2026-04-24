@@ -178,6 +178,18 @@ pub async fn did_change(backend: &Backend, params: DidChangeTextDocumentParams) 
     // peer file). Nudge the client to re-pull — cheap call and
     // no-op on clients that don't advertise refresh support.
     crate::indexer::maybe_refresh_diagnostics(&backend.state, Some(&backend.client)).await;
+    // Also push fresh diagnostics directly to every open peer
+    // buffer in the same module directory. The
+    // `workspace/diagnostic/refresh` above is the spec-correct
+    // invalidation signal, but nvim (0.11+) doesn't reliably
+    // re-pull for non-visible buffers after receiving a refresh
+    // — the user sees stale "undefined variable" on `main.tf`
+    // even after adding the declaration in `variable.tf`, with
+    // the staleness only clearing on the next did_change in
+    // `main.tf` itself. Pushing directly clears the namespace
+    // immediately; clients that subsequently re-pull overwrite
+    // the push with the same data, so no display churn.
+    publish_peer_diagnostics(backend, &uri).await;
 }
 
 pub async fn did_save(backend: &Backend, params: DidSaveTextDocumentParams) {
@@ -193,6 +205,7 @@ pub async fn did_save(backend: &Backend, params: DidSaveTextDocumentParams) {
     // See did_change: peer buffers may need to re-pull now that
     // this file's references have been re-indexed.
     crate::indexer::maybe_refresh_diagnostics(&backend.state, Some(&backend.client)).await;
+    publish_peer_diagnostics(backend, &uri).await;
     // Re-check the `.terraform/providers/` tree — if the user ran
     // `tofu init` / `terraform init` since we last fetched (adding
     // or upgrading a provider), the mtime will have bumped and
@@ -222,6 +235,77 @@ pub async fn did_close(backend: &Backend, params: DidCloseTextDocumentParams) {
         .client
         .publish_diagnostics(uri, Vec::new(), None)
         .await;
+}
+
+/// Push fresh diagnostics to every OPEN peer buffer in the same
+/// module directory as `changed_uri`.
+///
+/// Used after `did_change` / `did_save` to clear cross-file
+/// invalidations (typically "undefined variable" / "declared but
+/// not used") that go stale when a declaration in one `.tf` is
+/// added / removed while a reference lives in a peer. The spec-
+/// correct `workspace/diagnostic/refresh` signal is already sent
+/// in `did_change` / `did_save`, but real-world clients (nvim
+/// 0.11+ in particular) don't always re-pull for buffers that
+/// aren't currently visible, so the display stays stale until the
+/// next edit in the affected buffer. A direct push clears the
+/// namespace immediately; a later re-pull (if the client does
+/// honour the refresh) overwrites with identical data.
+///
+/// Bypasses `should_skip_push_diagnostics` on purpose: the goal
+/// here is exactly the cross-file refresh that the skip rule
+/// otherwise defers to pull-mode. Only peer buffers (not
+/// `changed_uri` itself — `publish_current_diagnostics` covers
+/// that) get the push.
+async fn publish_peer_diagnostics(backend: &Backend, changed_uri: &Url) {
+    let Some(module_dir) = crate::handlers::util::parent_dir(changed_uri) else {
+        return;
+    };
+
+    let peers: Vec<(Url, i32)> = backend
+        .state
+        .documents
+        .iter()
+        .filter_map(|entry| {
+            let uri = entry.key();
+            if uri == changed_uri {
+                return None;
+            }
+            if !backend.state.is_open(uri) {
+                return None;
+            }
+            let parent = crate::handlers::util::parent_dir(uri)?;
+            if parent != module_dir {
+                return None;
+            }
+            Some((uri.clone(), entry.version))
+        })
+        .collect();
+
+    if peers.is_empty() {
+        return;
+    }
+
+    let state = std::sync::Arc::clone(&backend.state);
+    let peers_for_compute = peers.clone();
+    let results: Vec<(Url, i32, Vec<Diagnostic>)> = tokio::task::spawn_blocking(move || {
+        peers_for_compute
+            .into_iter()
+            .map(|(uri, version)| {
+                let diagnostics = compute_diagnostics(&state, &uri);
+                (uri, version, diagnostics)
+            })
+            .collect()
+    })
+    .await
+    .unwrap_or_default();
+
+    for (uri, version, diagnostics) in results {
+        backend
+            .client
+            .publish_diagnostics(uri, diagnostics, Some(version))
+            .await;
+    }
 }
 
 async fn publish_current_diagnostics(backend: &Backend, uri: &Url, version: Option<i32>) {
