@@ -165,7 +165,9 @@ pub struct SymbolTable {
     pub variables: HashMap<String, Symbol>,
     pub locals: HashMap<String, Symbol>,
     pub outputs: HashMap<String, Symbol>,
+    #[serde(with = "resource_address_map")]
     pub resources: HashMap<ResourceAddress, Symbol>,
+    #[serde(with = "resource_address_map")]
     pub data_sources: HashMap<ResourceAddress, Symbol>,
     pub modules: HashMap<String, Symbol>,
     pub providers: HashMap<String, Symbol>,
@@ -187,8 +189,10 @@ pub struct SymbolTable {
     /// typically an [`Object`] whose keys are the for_each keys.
     ///
     /// [`Object`]: crate::variable_type::VariableType::Object
+    #[serde(with = "resource_address_map")]
     pub for_each_shapes: HashMap<ResourceAddress, crate::variable_type::VariableType>,
     /// Same as [`SymbolTable::for_each_shapes`] for `data` blocks.
+    #[serde(with = "resource_address_map")]
     pub data_source_for_each_shapes: HashMap<ResourceAddress, crate::variable_type::VariableType>,
     /// Same as [`SymbolTable::for_each_shapes`] for `module` blocks.
     pub module_for_each_shapes: HashMap<String, crate::variable_type::VariableType>,
@@ -270,6 +274,44 @@ pub trait SymbolVisitor {
     }
 }
 
+/// Serde adapter for `HashMap<ResourceAddress, V>`.
+///
+/// `ResourceAddress` is a struct (`{ resource_type, name }`), which
+/// `serde_json` can't use as a JSON object key — JSON requires
+/// strings. Round-trip through a sequence of 2-tuples instead so
+/// the on-disk index cache can serialise these maps at all. Before
+/// this adapter `cargo build` + `cargo run` were fine but every
+/// cache save failed with `key must be a string`, silently stranding
+/// cold starts on the slow re-parse path.
+mod resource_address_map {
+    use super::ResourceAddress;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::HashMap;
+
+    pub fn serialize<S, V>(
+        map: &HashMap<ResourceAddress, V>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        V: Serialize,
+    {
+        let entries: Vec<(&ResourceAddress, &V)> = map.iter().collect();
+        entries.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D, V>(
+        deserializer: D,
+    ) -> Result<HashMap<ResourceAddress, V>, D::Error>
+    where
+        D: Deserializer<'de>,
+        V: Deserialize<'de>,
+    {
+        let entries: Vec<(ResourceAddress, V)> = Vec::deserialize(deserializer)?;
+        Ok(entries.into_iter().collect())
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -315,5 +357,45 @@ mod tests {
         let table = SymbolTable::new();
         assert!(table.is_empty());
         assert_eq!(table.len(), 0);
+    }
+
+    #[test]
+    fn symbol_table_roundtrips_through_serde_json_with_resource_address_keys() {
+        // Regression: `HashMap<ResourceAddress, _>` can't be
+        // serialised as a JSON object — serde_json rejects
+        // non-string keys. Before the `resource_address_map`
+        // adapter, the index-cache save path warned every time
+        // it tried to persist a real workspace with any resource
+        // or data block ("key must be a string").
+        use lsp_types::{Position, Range};
+
+        let mut table = SymbolTable::new();
+        let addr = ResourceAddress::new("aws_instance", "web");
+        let uri = tower_lsp::lsp_types::Url::parse("file:///x.tf").expect("url");
+        let loc = SymbolLocation::new(
+            uri,
+            Range {
+                start: Position::new(0, 0),
+                end: Position::new(0, 1),
+            },
+        );
+        table.resources.insert(
+            addr.clone(),
+            Symbol {
+                kind: SymbolKind::Resource,
+                name: "web".to_string(),
+                location: loc,
+                name_range: Range {
+                    start: Position::new(0, 0),
+                    end: Position::new(0, 1),
+                },
+                detail: None,
+                doc: None,
+            },
+        );
+
+        let json = serde_json::to_string(&table).expect("serialise");
+        let round: SymbolTable = serde_json::from_str(&json).expect("deserialise");
+        assert!(round.resources.contains_key(&addr));
     }
 }

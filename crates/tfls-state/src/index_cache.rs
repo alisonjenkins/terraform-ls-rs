@@ -39,7 +39,12 @@ use crate::store::StateStore;
 
 /// Bump when the cache entry shape changes incompatibly. Old
 /// caches then get discarded silently on the next open.
-const CACHE_FORMAT_VERSION: u32 = 1;
+/// v2 changed the wire shape of `SymbolTable.resources` +
+/// `data_sources` + `for_each_shapes` + `data_source_for_each_shapes`
+/// from a JSON object (broken: `ResourceAddress` is a struct, not a
+/// string, so serde_json rejected it) to a JSON array of 2-tuples.
+/// v1 caches are discarded silently on load.
+const CACHE_FORMAT_VERSION: u32 = 2;
 
 /// Header of the on-disk cache file. Kept separate from
 /// `IndexCache` so a quick version check can avoid deserialising

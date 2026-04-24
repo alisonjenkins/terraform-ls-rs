@@ -14,3 +14,7 @@ thiserror.workspace = true
 lsp-types.workspace = true
 serde.workspace = true
 hcl-edit.workspace = true
+
+[dev-dependencies]
+serde_json = "1"
+tower-lsp.workspace = true
