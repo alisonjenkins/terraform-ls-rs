@@ -2,13 +2,12 @@
 
 use tower_lsp::lsp_types::{
     CodeActionKind, CodeActionOptions, CodeActionProviderCapability, CodeLensOptions,
-    CompletionOptions, DeclarationCapability, DiagnosticOptions, DiagnosticServerCapabilities,
-    DocumentLinkOptions, DocumentOnTypeFormattingOptions, ExecuteCommandOptions,
-    FoldingRangeProviderCapability, HoverProviderCapability, OneOf, RenameOptions,
-    SelectionRangeProviderCapability, SemanticTokensFullOptions, SemanticTokensLegend,
-    SemanticTokensOptions, SemanticTokensServerCapabilities, ServerCapabilities,
-    SignatureHelpOptions, TextDocumentSyncCapability, TextDocumentSyncKind,
-    WorkDoneProgressOptions,
+    CompletionOptions, DeclarationCapability, DocumentLinkOptions,
+    DocumentOnTypeFormattingOptions, ExecuteCommandOptions, FoldingRangeProviderCapability,
+    HoverProviderCapability, OneOf, RenameOptions, SelectionRangeProviderCapability,
+    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
+    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelpOptions,
+    TextDocumentSyncCapability, TextDocumentSyncKind, WorkDoneProgressOptions,
 };
 
 use crate::handlers::semantic_tokens::SEMANTIC_TOKEN_TYPES;
@@ -78,18 +77,27 @@ pub fn server_capabilities() -> ServerCapabilities {
                 .collect(),
             work_done_progress_options: WorkDoneProgressOptions::default(),
         }),
-        diagnostic_provider: Some(DiagnosticServerCapabilities::Options(DiagnosticOptions {
-            identifier: Some("terraform-ls-rs".to_string()),
-            // Our rules read sibling files in the same module
-            // (undefined-ref resolution, unused-declarations,
-            // required_version / required_providers aggregation,
-            // unused_required_providers, standard_module_structure).
-            // Editing one file legitimately changes diagnostics in
-            // its siblings, so we opt into inter-file dependencies.
-            inter_file_dependencies: true,
-            workspace_diagnostics: true,
-            work_done_progress_options: WorkDoneProgressOptions::default(),
-        })),
+        // Pull diagnostics deliberately NOT advertised. Neovim 0.11+
+        // (and other clients that follow LSP 3.17 to the letter) put
+        // push-mode `publishDiagnostics` and pull-mode
+        // `textDocument/diagnostic` into separate
+        // `vim.diagnostic` namespaces and render the union of both —
+        // see `runtime/lua/vim/lsp/diagnostic.lua` lines 188-230 in
+        // the upstream nvim source. The auto-pull autocmd that
+        // `_enable` (line 436) installs only fires for the buffer
+        // where the edit happened, so a pull populates `main.tf`'s
+        // pull namespace once on didOpen and then never refreshes
+        // when a peer file is edited. Our cross-file pushes update
+        // the push namespace correctly but the stale pull entries
+        // survive in the union — the user-visible "fix didn't take"
+        // bug.
+        //
+        // Switching to push-only routes every diagnostic through one
+        // namespace. The bulk-scan + `publish_peer_diagnostics`
+        // pipeline already covers every workspace file, so workspace
+        // views (Trouble's `workspace_diagnostics` etc.) keep
+        // populating from the same push stream.
+        diagnostic_provider: None,
         experimental: Some(serde_json::json!({
             "terraform-ls": {
                 "searchDocs": { "version": 1 },
