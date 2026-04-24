@@ -134,6 +134,7 @@ pub(crate) fn did_open_publish_action(state: &StateStore) -> DidOpenPublish {
 pub async fn did_change(backend: &Backend, params: DidChangeTextDocumentParams) {
     let uri = params.text_document.uri.clone();
     let version = params.text_document.version;
+    tracing::info!(uri = %uri, version, "did_change");
 
     let apply_err = {
         let mut entry = match backend.state.documents.get_mut(&uri) {
@@ -194,6 +195,7 @@ pub async fn did_change(backend: &Backend, params: DidChangeTextDocumentParams) 
 
 pub async fn did_save(backend: &Backend, params: DidSaveTextDocumentParams) {
     let uri = params.text_document.uri;
+    tracing::info!(uri = %uri, "did_save");
     // Same as did_change — off to a blocking thread.
     let state = std::sync::Arc::clone(&backend.state);
     let uri_c = uri.clone();
@@ -282,6 +284,13 @@ async fn publish_peer_diagnostics(backend: &Backend, changed_uri: &Url) {
         })
         .collect();
 
+    tracing::info!(
+        changed = %changed_uri,
+        module_dir = %module_dir.display(),
+        peer_count = peers.len(),
+        "publish_peer_diagnostics: selected peers"
+    );
+
     if peers.is_empty() {
         return;
     }
@@ -301,6 +310,12 @@ async fn publish_peer_diagnostics(backend: &Backend, changed_uri: &Url) {
     .unwrap_or_default();
 
     for (uri, version, diagnostics) in results {
+        tracing::info!(
+            uri = %uri,
+            version,
+            n = diagnostics.len(),
+            "publish_peer_diagnostics: push"
+        );
         backend
             .client
             .publish_diagnostics(uri, diagnostics, Some(version))
