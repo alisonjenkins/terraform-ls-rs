@@ -212,9 +212,20 @@ impl Drop for ProgressReporter {
         // channel is already closed (shutdown race) we silently
         // accept the stranded token, which is still better than
         // the hang.
-        let _ = self.tx.send(DrainMsg::End {
+        let result = self.tx.send(DrainMsg::End {
             message: Some("cancelled".to_string()),
         });
+        // Trace-level so ops can correlate a stuck Fidget widget
+        // against a dropped-without-end reporter — the usual cause
+        // being a panic upstream that unwound past the `end()`
+        // call site.
+        if result.is_err() {
+            tracing::warn!(
+                "progress: drain channel closed before End — Fidget may show the token as permanently in-progress"
+            );
+        } else {
+            tracing::debug!("progress: Drop enqueued terminating End (reporter dropped without explicit end())");
+        }
     }
 }
 
