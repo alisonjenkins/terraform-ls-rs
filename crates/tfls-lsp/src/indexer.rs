@@ -513,7 +513,7 @@ async fn bulk_workspace_scan(
 
     // Hand off to the parallel scan — it opens its own "Indexing
     // Terraform workspace" progress span with per-phase detail.
-    scan_files_parallel(state, client, files).await;
+    scan_files_parallel(state, client, files, /* with_progress */ true).await;
 
     // The bulk scan has parsed every discoverable `.tf` in every
     // dir. Upgrade each to `Completed` so correctness-sensitive
@@ -737,7 +737,17 @@ async fn scan_dir_into_state(
     match crate::blocking::run(|| discover_terraform_files_in_dir(dir)) {
         Ok(files) => {
             tracing::info!(count = files.len(), dir = %dir.display(), "module scan");
-            scan_files_parallel(state, client, files).await;
+            // Per-directory scans are typically sub-ms and fire in
+            // rapid bursts (one per child-module, plus each
+            // did_open). Surfacing a fresh `Indexing Terraform
+            // workspace` progress token for every one floods the
+            // client's Fidget widget with begin/end churn: Nvim
+            // observers see the label stuck at 99% of the last
+            // one to arrive even though every token has been
+            // properly ended on the server. Only the bulk scan
+            // (which actually takes visible time) reports progress
+            // now; per-dir scans index silently.
+            scan_files_parallel(state, client, files, /* with_progress */ false).await;
             state.mark_scan_completed(dir.to_path_buf());
             enqueue_child_module_scans(state, queue, dir);
             // Cross-file symbols just changed — any open buffer in
@@ -759,17 +769,22 @@ async fn scan_files_parallel(
     state: &StateStore,
     client: Option<&tower_lsp::Client>,
     files: Vec<PathBuf>,
+    with_progress: bool,
 ) {
     use rayon::prelude::*;
 
     let file_count = files.len();
     let total_start = std::time::Instant::now();
-    // Begin a progress token if we have a client attached. Silent
-    // if the client declines the workDoneProgress/create request
-    // (older clients).
-    let progress = match client {
-        Some(c) => crate::progress::ProgressReporter::begin(c, "Indexing Terraform workspace").await,
-        None => None,
+    // Begin a progress token only when the caller opts in. The
+    // bulk workspace scan uses it for the long-running initial
+    // indexing; per-directory scans stay silent to avoid flooding
+    // the progress widget with rapid begin/end churn (dozens of
+    // child-module scans complete in single-digit ms each).
+    let progress = match (client, with_progress) {
+        (Some(c), true) => {
+            crate::progress::ProgressReporter::begin(c, "Indexing Terraform workspace").await
+        }
+        _ => None,
     };
 
     let parse_start = std::time::Instant::now();
