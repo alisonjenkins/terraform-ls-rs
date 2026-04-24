@@ -496,39 +496,22 @@ fn builtin_body_items(
     schema: tfls_core::builtin_blocks::BuiltinSchema,
     filter: &BodyFilter,
 ) -> Vec<CompletionItem> {
-    // Identify the variable / output schemas by unique attribute
-    // names: only the variable block has `nullable`, and only the
-    // output block has `depends_on` as a built-in attribute. Pointer
-    // equality on the const slice doesn't reliably deduplicate across
-    // codegen units, so value-based identification is used instead.
-    let schema_is_variable = schema.attrs.iter().any(|a| a.name == "nullable");
-    let schema_is_output = schema.attrs.iter().any(|a| a.name == "depends_on");
-
     let mut items: Vec<CompletionItem> = schema
         .attrs
         .iter()
         .filter(|a| !filter.present_attrs.contains(a.name))
         .map(|a| {
-            let insert_text = if schema_is_variable && a.name == "type" {
-                let mut s = String::from("type = ${1:string}");
-                let mut tab = 2;
-                if !filter.present_attrs.contains("default") {
-                    s.push_str(&format!("\ndefault = ${{{tab}}}"));
-                    tab += 1;
-                }
-                if !filter.present_attrs.contains("description") {
-                    s.push_str(&format!("\ndescription = \"${{{tab}}}\""));
-                }
-                s
-            } else if schema_is_output && a.name == "value" {
-                let mut s = String::from("value = ${1}");
-                if !filter.present_attrs.contains("description") {
-                    s.push_str("\ndescription = \"${2}\"");
-                }
-                s
-            } else {
-                format!("{name} = ${{1}}", name = a.name)
-            };
+            // One attribute per completion item. Previously this
+            // branch auto-appended companion attrs for
+            // `variable.type` (→ `default` + `description`) and
+            // `output.value` (→ `description`), but that meant
+            // picking `type` in an already-written block dumped
+            // duplicate `default` / `description` lines into the
+            // user's source. The top-level scaffold snippets
+            // (`variable "x" { … }`, `output "x" { … }`) still
+            // pre-fill the common attrs; the per-attr body items
+            // do exactly what the label says.
+            let insert_text = format!("{name} = ${{1}}", name = a.name);
             CompletionItem {
                 label: a.name.to_string(),
                 kind: Some(if a.required {

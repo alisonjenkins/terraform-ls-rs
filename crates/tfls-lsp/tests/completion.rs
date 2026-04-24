@@ -2652,9 +2652,12 @@ async fn top_level_output_scaffold_orders_attrs_alphabetically_and_no_trailing_b
 }
 
 #[tokio::test]
-async fn variable_body_type_bundles_default_and_description() {
+async fn variable_body_type_inserts_only_type() {
+    // Regression: picking `type` inside an existing variable block
+    // used to auto-append `default` and `description` lines, even
+    // when the user just wanted `type = string`. The per-attribute
+    // completion now inserts exactly what its label promises.
     let u = uri("file:///v.tf");
-    // Empty body — the `type` completion should append default + description.
     let src = "variable \"x\" {\n  \n}\n";
     let backend = fresh_backend(src, &u);
     let resp = tfls_lsp::handlers::completion::completion(
@@ -2667,68 +2670,17 @@ async fn variable_body_type_bundles_default_and_description() {
     let insert = find_item(resp, "type")
         .insert_text
         .expect("type has insert_text");
-    assert!(
-        insert.starts_with("type = ${1:string}"),
-        "type snippet should start with `type = ${{1:string}}`; got {insert:?}"
-    );
-    assert!(
-        insert.contains("\ndefault = "),
-        "type snippet should append default; got {insert:?}"
-    );
-    assert!(
-        insert.contains("\ndescription = \""),
-        "type snippet should append description; got {insert:?}"
-    );
-}
-
-#[tokio::test]
-async fn variable_body_type_skips_default_when_already_present() {
-    let u = uri("file:///v.tf");
-    let src = "variable \"x\" {\n  default = 1\n  \n}\n";
-    let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 2)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
-    let insert = find_item(resp, "type")
-        .insert_text
-        .expect("type has insert_text");
-    assert!(
-        !insert.contains("default = "),
-        "type snippet must not duplicate default when present; got {insert:?}"
-    );
-    assert!(
-        insert.contains("description = \""),
-        "type snippet should still bundle description; got {insert:?}"
-    );
-}
-
-#[tokio::test]
-async fn variable_body_type_plain_when_all_companions_present() {
-    let u = uri("file:///v.tf");
-    let src = "variable \"x\" {\n  default = 1\n  description = \"y\"\n  \n}\n";
-    let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(3, 2)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
-    let insert = find_item(resp, "type")
-        .insert_text
-        .expect("type has insert_text");
     assert_eq!(
-        insert, "type = ${1:string}",
-        "type snippet should be plain when default + description already present"
+        insert, "type = ${1}",
+        "type completion must insert only `type`; got {insert:?}"
     );
 }
 
 #[tokio::test]
-async fn output_body_value_bundles_description() {
+async fn output_body_value_inserts_only_value() {
+    // Same regression as `variable.type`: `output.value` used to
+    // auto-append a `description` line. It now inserts only
+    // `value = …`.
     let u = uri("file:///o.tf");
     let src = "output \"x\" {\n  \n}\n";
     let backend = fresh_backend(src, &u);
@@ -2742,33 +2694,8 @@ async fn output_body_value_bundles_description() {
     let insert = find_item(resp, "value")
         .insert_text
         .expect("value has insert_text");
-    assert!(
-        insert.starts_with("value = ${1}"),
-        "value snippet should start with `value = ${{1}}`; got {insert:?}"
-    );
-    assert!(
-        insert.contains("\ndescription = \""),
-        "value snippet should append description; got {insert:?}"
-    );
-}
-
-#[tokio::test]
-async fn output_body_value_plain_when_description_present() {
-    let u = uri("file:///o.tf");
-    let src = "output \"x\" {\n  description = \"y\"\n  \n}\n";
-    let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 2)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
-    let insert = find_item(resp, "value")
-        .insert_text
-        .expect("value has insert_text");
     assert_eq!(
         insert, "value = ${1}",
-        "value snippet should be plain when description already present"
+        "value completion must insert only `value`; got {insert:?}"
     );
 }
