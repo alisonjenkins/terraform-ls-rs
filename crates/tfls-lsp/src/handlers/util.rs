@@ -28,7 +28,7 @@ pub(crate) fn parent_dir(uri: &Url) -> Option<PathBuf> {
 ///   containing directory and returned.
 ///
 /// Returns `None` when no matching directory exists on disk.
-pub(crate) fn resolve_module_source(
+pub fn resolve_module_source(
     parent_dir: &Path,
     module_label: &str,
     source: &str,
@@ -94,6 +94,38 @@ pub(crate) fn location_in_dir(loc: &SymbolLocation, dir: &Path) -> bool {
 /// recursively via `enqueue_child_module_scans`, so by the time a
 /// user triggers goto-definition the tables are ready. We do not
 /// trigger on-demand parsing here.
+/// Find the `source` value for `module "<module_label>" {}` declared
+/// in any `.tf` file whose parent directory matches `module_dir`.
+///
+/// `module_sources` is populated per-file at parse time, so a
+/// reference like `module.foo.bar` in `a.tf` can't find the source of
+/// `module "foo"` declared in peer `b.tf` by consulting the
+/// referencing document alone. Real Terraform stacks almost always
+/// split module calls out into their own file (`k3s_cluster.tf`) and
+/// reference them from many peers (`cloudflare.tf`, `route53.tf`, …),
+/// so the intra-document lookup misses the common case.
+///
+/// Iterating the directory's peer documents recovers the mapping at
+/// O(files-in-dir) — bounded by module size, not workspace size.
+pub fn module_source_in_dir(
+    state: &StateStore,
+    module_dir: &Path,
+    module_label: &str,
+) -> Option<String> {
+    for entry in state.documents.iter() {
+        let Ok(doc_path) = entry.key().to_file_path() else {
+            continue;
+        };
+        if doc_path.parent() != Some(module_dir) {
+            continue;
+        }
+        if let Some(source) = entry.value().symbols.module_sources.get(module_label) {
+            return Some(source.clone());
+        }
+    }
+    None
+}
+
 pub(crate) fn lookup_child_module_symbol(
     state: &StateStore,
     child_dir: &Path,

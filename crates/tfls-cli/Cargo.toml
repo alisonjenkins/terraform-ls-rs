@@ -17,6 +17,10 @@ path = "src/main.rs"
 name = "tfls-diag-dump"
 path = "src/bin/diag_dump.rs"
 
+[[bin]]
+name = "tfls-nav-probe"
+path = "src/bin/nav_probe.rs"
+
 [dependencies]
 tfls-lsp.workspace = true
 tfls-state.workspace = true
