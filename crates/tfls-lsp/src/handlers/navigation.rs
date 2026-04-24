@@ -15,7 +15,8 @@ use tower_lsp::jsonrpc;
 use crate::backend::Backend;
 use crate::handlers::cursor::{find_symbol_at_cursor, key_at_cursor};
 use crate::handlers::util::{
-    location_in_dir, lookup_child_module_symbol, parent_dir, resolve_module_source,
+    location_in_dir, lookup_child_module_symbol, module_source_in_dir, parent_dir,
+    resolve_module_source,
 };
 use crate::handlers::{hover_attribute, hover_function, hover_module_input};
 
@@ -169,8 +170,17 @@ fn module_output_goto_at(
     let offset = lsp_position_to_byte_offset(&doc.rope, pos).ok()?;
 
     let (module_label, output_name) = find_module_output_segment_at(body, offset)?;
-    let source = doc.symbols.module_sources.get(&module_label)?.clone();
     let parent = parent_dir(uri)?;
+    // The `module "X" { source = … }` block is typically in a peer
+    // file (`k3s_cluster.tf`) while the `module.X.out` reference
+    // lives in another (`cloudflare.tf`). Check the current doc
+    // first (cheap), then fall back to peer docs in the same dir.
+    let source = doc
+        .symbols
+        .module_sources
+        .get(&module_label)
+        .cloned()
+        .or_else(|| module_source_in_dir(state, &parent, &module_label))?;
     let child = resolve_module_source(&parent, &module_label, &source)?;
 
     lookup_child_module_symbol(state, &child, SymbolKind::Output, &output_name)

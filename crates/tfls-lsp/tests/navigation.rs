@@ -598,6 +598,54 @@ async fn goto_def_on_module_label_still_jumps_to_module_block() {
 }
 
 #[tokio::test]
+async fn goto_def_on_module_output_seg_resolves_when_module_call_in_peer_file() {
+    // Real-world layout: `k3s_cluster.tf` holds
+    //   module "net" { source = "./child" }
+    // and `cloudflare.tf` holds
+    //   output "x" { value = module.net.subnet_id }
+    // Goto-def on `subnet_id` inside cloudflare.tf must descend into
+    // ./child/outputs.tf even though the referencing file's own
+    // `module_sources` table is empty — the module call lives in a
+    // peer document.
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let child_dir = root.join("child");
+    std::fs::create_dir(&child_dir).unwrap();
+
+    let (service, _socket) = LspService::new(Backend::new);
+    let inner = service.inner();
+    let backend = Backend::with_shared_state(
+        inner.client.clone(),
+        inner.state.clone(),
+        inner.jobs.clone(),
+    );
+
+    let child_u = upsert_file(
+        &backend,
+        &child_dir.join("outputs.tf"),
+        "output \"subnet_id\" { value = \"\" }\n",
+    );
+    upsert_file(
+        &backend,
+        &root.join("k3s_cluster.tf"),
+        "module \"net\" {\n  source = \"./child\"\n}\n",
+    );
+    let ref_u = upsert_file(
+        &backend,
+        &root.join("cloudflare.tf"),
+        "output \"x\" { value = module.net.subnet_id }\n",
+    );
+
+    // Line 0, col 32 → `s` of `subnet_id` in
+    // `output "x" { value = module.net.subnet_id }`.
+    let loc = single_location(goto_def_at(&backend, &ref_u, Position::new(0, 32)).await);
+    assert_eq!(
+        loc.uri, child_u,
+        "should descend into child outputs.tf even when the module call is in a peer",
+    );
+}
+
+#[tokio::test]
 async fn goto_def_on_unknown_module_input_returns_none() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
