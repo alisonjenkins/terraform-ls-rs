@@ -168,17 +168,15 @@ pub fn parse_value_shape(expr: &Expression) -> VariableType {
             }
             match call.name.name.as_str() {
                 "toset" | "tolist" => {
-                    if let Some(first) = call.args.iter().next() {
-                        if let Expression::Array(arr) = first {
-                            let mut keys: BTreeMap<String, VariableType> = BTreeMap::new();
-                            for item in arr.iter() {
-                                if let Expression::String(s) = item {
-                                    keys.insert(s.value().to_string(), VariableType::Any);
-                                }
+                    if let Some(Expression::Array(arr)) = call.args.iter().next() {
+                        let mut keys: BTreeMap<String, VariableType> = BTreeMap::new();
+                        for item in arr.iter() {
+                            if let Expression::String(s) = item {
+                                keys.insert(s.value().to_string(), VariableType::Any);
                             }
-                            if !keys.is_empty() {
-                                return VariableType::Object(keys);
-                            }
+                        }
+                        if !keys.is_empty() {
+                            return VariableType::Object(keys);
                         }
                     }
                     VariableType::Any
@@ -360,6 +358,7 @@ pub fn merge_shapes(a: VariableType, b: VariableType) -> VariableType {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use hcl_edit::structure::{Attribute, Body};

@@ -354,8 +354,9 @@ async fn dispatch_job(
                         std::sync::Arc::new(move |addr: &str, done: usize, total: usize| {
                             let addr_short = addr.rsplit('/').next().unwrap_or(addr).to_string();
                             let msg = format!("{done}/{total} — {addr_short}");
-                            let pct =
-                                if total > 0 { Some((done * 100 / total) as u32) } else { None };
+                            let pct = (done * 100)
+                                .checked_div(total)
+                                .map(|p| p as u32);
                             sender.send_detached(Some(msg), pct);
                         });
                     cb
@@ -885,11 +886,9 @@ async fn scan_files_parallel(
         // 66 (phase start) and 99 (leaving one point for `end`).
         if let Some(p) = progress.as_ref() {
             let started = idx + 1;
-            let pct = if total_modules > 0 {
-                66 + ((started * 33) / total_modules) as u32
-            } else {
-                99
-            };
+            let pct = (started * 33)
+                .checked_div(total_modules)
+                .map_or(99, |p| 66 + p as u32);
             p.report(
                 Some(format!(
                     "computing diagnostics ({started}/{total_modules} modules)"
@@ -919,7 +918,7 @@ async fn scan_files_parallel(
                             };
                         let current_file = uri
                             .path_segments()
-                            .and_then(|it| it.last())
+                            .and_then(|mut it| it.next_back())
                             .unwrap_or("")
                             .to_string();
                         let diagnostics =

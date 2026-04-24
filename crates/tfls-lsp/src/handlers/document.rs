@@ -265,7 +265,7 @@ pub fn compute_diagnostics(state: &StateStore, uri: &Url) -> Vec<Diagnostic> {
     };
     let current_file = uri
         .path_segments()
-        .and_then(|it| it.last())
+        .and_then(|mut it| it.next_back())
         .unwrap_or("")
         .to_string();
     compute_diagnostics_with_lookup(state, uri, &graph, &current_file)

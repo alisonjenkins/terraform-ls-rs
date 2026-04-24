@@ -522,7 +522,7 @@ pub fn merge_with_provenance(tf: Vec<String>, tofu: Vec<String>) -> Vec<VersionI
             });
         }
     }
-    out.sort_by(|a, b| semver_key(&b.version).cmp(&semver_key(&a.version)));
+    out.sort_by_key(|v| std::cmp::Reverse(semver_key(&v.version)));
     out
 }
 

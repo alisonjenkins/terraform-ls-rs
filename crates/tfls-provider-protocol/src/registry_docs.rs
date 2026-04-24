@@ -105,9 +105,9 @@ fn build_http_client() -> Result<reqwest::Client, ProtocolError> {
 /// Resolve the on-disk cache directory for provider docs.
 ///
 /// Cross-platform via the `dirs` crate:
-/// - Linux:   `$XDG_CACHE_HOME/terraform-ls-rs/provider-docs`
-///            (fallback `~/.cache/terraform-ls-rs/provider-docs`)
-/// - macOS:   `~/Library/Caches/terraform-ls-rs/provider-docs`
+/// - Linux: `$XDG_CACHE_HOME/terraform-ls-rs/provider-docs`
+///   (fallback `~/.cache/terraform-ls-rs/provider-docs`)
+/// - macOS: `~/Library/Caches/terraform-ls-rs/provider-docs`
 /// - Windows: `%LOCALAPPDATA%\terraform-ls-rs\provider-docs`
 ///
 /// Falls back to `std::env::temp_dir()` if the platform dir is

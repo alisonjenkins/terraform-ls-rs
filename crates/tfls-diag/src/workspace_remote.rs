@@ -82,7 +82,7 @@ fn is_terraform_workspace(expr: &Expression) -> bool {
         return false;
     }
     // First operator must be `.workspace`.
-    let first_op = t.operators.iter().next();
+    let first_op = t.operators.first();
     let Some(op) = first_op else { return false };
     if let hcl_edit::expr::TraversalOperator::GetAttr(name) = op.value() {
         return name.value().as_str() == "workspace";

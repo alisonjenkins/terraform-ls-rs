@@ -449,22 +449,20 @@ fn type_expression_context(before: &str) -> Option<CompletionContext> {
             b'}' => brace -= 1,
             b'[' => bracket += 1,
             b']' => bracket -= 1,
-            b'=' => {
-                if paren == 0 && brace == 0 && bracket == 0 {
+            b'='
+                if paren == 0 && brace == 0 && bracket == 0 => {
                     last_eq_at_depth_zero = Some(i);
                 }
-            }
             // In HCL, a newline at depth 0 terminates an attribute
             // assignment. Without this, once the user writes
             // `type = object({...})` and moves to the next line, the
             // old `=` would still be "active" and the cursor would
             // falsely classify as a type-expression position instead
             // of a body-attribute position.
-            b'\n' => {
-                if paren == 0 && brace == 0 && bracket == 0 {
+            b'\n'
+                if paren == 0 && brace == 0 && bracket == 0 => {
                     last_eq_at_depth_zero = None;
                 }
-            }
             _ => {}
         }
         i += 1;
@@ -1138,10 +1136,7 @@ fn classify_block_header(header_source: &str) -> Option<CompletionContext> {
         // the terraform-block schema via `nested_block_path`.
         _ => {}
     }
-    let (keyword, rest) = match line.split_once(char::is_whitespace) {
-        Some(v) => v,
-        None => return None,
-    };
+    let (keyword, rest) = line.split_once(char::is_whitespace)?;
     let first_label = first_quoted_string(rest);
     match (keyword, first_label) {
         ("resource", Some(type_name)) => Some(CompletionContext::ResourceBody {

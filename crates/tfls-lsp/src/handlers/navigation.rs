@@ -256,7 +256,7 @@ fn module_output_hit(
             TraversalOperator::GetAttr(ident) => ident.span(),
             _ => None,
         })
-        .last()
+        .next_back()
         .map(|s| s.end)
         .unwrap_or(out_span.end);
 

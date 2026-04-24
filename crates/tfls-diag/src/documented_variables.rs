@@ -29,11 +29,11 @@ pub fn documented_variables_diagnostics(body: &Body, rope: &Rope) -> Vec<Diagnos
         let name = block
             .labels
             .first()
-            .and_then(|l| match l {
+            .map(|l| match l {
                 hcl_edit::structure::BlockLabel::String(s) => {
-                    Some(s.value().as_str().to_string())
+                    s.value().as_str().to_string()
                 }
-                hcl_edit::structure::BlockLabel::Ident(i) => Some(i.as_str().to_string()),
+                hcl_edit::structure::BlockLabel::Ident(i) => i.as_str().to_string(),
             })
             .unwrap_or_else(|| "?".to_string());
         let span = block.ident.span().unwrap_or(0..0);

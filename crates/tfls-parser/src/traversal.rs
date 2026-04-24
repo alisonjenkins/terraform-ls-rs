@@ -251,6 +251,7 @@ fn find_attr_expr<'a>(block: &'a Block, key: &str) -> Option<&'a hcl_edit::expr:
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_symbol(
     name: &str,
     kind: SymbolKind,
@@ -450,7 +451,7 @@ resource "aws_instance" "api" { ami = "ami-123" }
     #[test]
     fn skips_module_source_when_non_string() {
         let table = extract(r#"module "x" { source = var.path }"#);
-        assert!(table.module_sources.get("x").is_none());
+        assert!(!table.module_sources.contains_key("x"));
     }
 
     #[test]

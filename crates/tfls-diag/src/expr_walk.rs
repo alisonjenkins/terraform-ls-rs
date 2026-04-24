@@ -60,9 +60,8 @@ where
         }
         Expression::Object(obj) => {
             for (_key, value) in obj.iter() {
-                match value {
-                    ObjectValue { .. } => visit_expr(value.expr(), visit),
-                }
+                let ObjectValue { .. } = value;
+                visit_expr(value.expr(), visit);
             }
         }
         Expression::StringTemplate(tpl) => visit_template(tpl, visit),

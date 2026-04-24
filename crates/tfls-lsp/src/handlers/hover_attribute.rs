@@ -837,9 +837,7 @@ fn scan_dynamic_block(
     if let Some(label) = block.labels.first() {
         if let Some(label_span) = label.span() {
             if span_contains(Some(label_span.clone()), offset) {
-                let Some(lbl) = target_label.clone() else {
-                    return None;
-                };
+                let lbl = target_label.clone()?;
                 return Some(Hit::BlockLabel(BlockLabelHit {
                     root_kind,
                     root_type: root_type.to_string(),
@@ -856,9 +854,7 @@ fn scan_dynamic_block(
     // block's schema for free (reusing the normal attribute-hover
     // path). Attrs and `content` on the *dynamic* body itself are
     // handled by `scan_dynamic_body` directly.
-    let Some(target_label) = target_label else {
-        return None;
-    };
+    let target_label = target_label?;
     path.push(target_label.clone());
     let hit = scan_dynamic_body(&block.body, offset, path, &target_label, root_kind, root_type);
     path.pop();

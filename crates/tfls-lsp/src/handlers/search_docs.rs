@@ -35,11 +35,12 @@ pub enum Kind {
     /// Language-level built-in block — `terraform`, `variable`,
     /// `output`, `module`, `backend`, `cloud`, etc. `GetDocParams.name`
     /// is a dot-joined path through the built-in tree:
-    ///   * `terraform`
-    ///   * `terraform.backend.s3`
-    ///   * `terraform.cloud.workspaces`
-    ///   * `variable`
-    ///   * `lifecycle.resource`
+    /// * `terraform`
+    /// * `terraform.backend.s3`
+    /// * `terraform.cloud.workspaces`
+    /// * `variable`
+    /// * `lifecycle.resource`
+    ///
     /// Resolved via `tfls_core::resolve_nested_schema`.
     Builtin,
 }
@@ -135,18 +136,14 @@ pub async fn search_docs(
 ) -> jsonrpc::Result<SearchDocsResult> {
     let query = params.query.trim().to_ascii_lowercase();
     let terms: Vec<&str> = query.split_whitespace().collect();
-    let limit = params
-        .limit
-        .unwrap_or(DEFAULT_LIMIT)
-        .min(MAX_LIMIT)
-        .max(1);
+    let limit = params.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let want_resource = match &params.kinds {
         None => true,
-        Some(ks) => ks.iter().any(|k| *k == Kind::Resource),
+        Some(ks) => ks.contains(&Kind::Resource),
     };
     let want_data = match &params.kinds {
         None => true,
-        Some(ks) => ks.iter().any(|k| *k == Kind::Data),
+        Some(ks) => ks.contains(&Kind::Data),
     };
     let provider_filter: Option<Vec<String>> = params
         .providers
@@ -792,8 +789,8 @@ fn render_nested_block_summary(out: &mut String, name: &str, nb: &NestedBlockSch
     }
     out.push_str(&format!(" — {}\n\n", flags.join(", ")));
 
-    if has_desc {
-        out.push_str(nb.block.description.as_deref().unwrap().trim());
+    if let Some(desc) = nb.block.description.as_deref().filter(|_| has_desc) {
+        out.push_str(desc.trim());
         out.push_str("\n\n");
     }
 
@@ -857,13 +854,11 @@ fn write_nested_attr_section(
     }
 }
 
+type AttrList<'a> = Vec<(&'a str, &'a tfls_schema::AttributeSchema)>;
+
 fn partition_attributes(
     block: &BlockSchema,
-) -> (
-    Vec<(&str, &tfls_schema::AttributeSchema)>,
-    Vec<(&str, &tfls_schema::AttributeSchema)>,
-    Vec<(&str, &tfls_schema::AttributeSchema)>,
-) {
+) -> (AttrList<'_>, AttrList<'_>, AttrList<'_>) {
     let mut required: Vec<(&str, &tfls_schema::AttributeSchema)> = Vec::new();
     let mut optional: Vec<(&str, &tfls_schema::AttributeSchema)> = Vec::new();
     let mut computed: Vec<(&str, &tfls_schema::AttributeSchema)> = Vec::new();
@@ -911,8 +906,10 @@ mod tests {
     use tfls_schema::{AttributeSchema, BlockSchema, ProviderSchema, Schema};
 
     fn make_schema(description: &str, attrs: &[(&str, bool)]) -> Schema {
-        let mut block = BlockSchema::default();
-        block.description = Some(description.to_string());
+        let mut block = BlockSchema {
+            description: Some(description.to_string()),
+            ..Default::default()
+        };
         for (name, required) in attrs {
             let attr = AttributeSchema {
                 required: *required,
@@ -1091,10 +1088,10 @@ mod tests {
             resource_schemas: Default::default(),
             data_source_schemas: Default::default(),
         };
-        let mut nested_block = BlockSchema::default();
-        nested_block.description = Some(
-            "Customize details about the root block device.".to_string(),
-        );
+        let mut nested_block = BlockSchema {
+            description: Some("Customize details about the root block device.".to_string()),
+            ..Default::default()
+        };
         nested_block.attributes.insert(
             "volume_size".to_string(),
             AttributeSchema {
@@ -1111,8 +1108,10 @@ mod tests {
                 ..Default::default()
             },
         );
-        let mut resource_block = BlockSchema::default();
-        resource_block.description = Some("An EC2 instance.".to_string());
+        let mut resource_block = BlockSchema {
+            description: Some("An EC2 instance.".to_string()),
+            ..Default::default()
+        };
         resource_block.attributes.insert(
             "ami".to_string(),
             AttributeSchema { required: true, ..Default::default() },

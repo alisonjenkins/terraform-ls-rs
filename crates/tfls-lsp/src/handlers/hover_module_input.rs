@@ -102,8 +102,8 @@ pub(crate) fn attribute_key_at(
     None
 }
 
-fn child_variable<'a>(
-    state: &'a StateStore,
+fn child_variable(
+    state: &StateStore,
     child_dir: &std::path::Path,
     attr_name: &str,
 ) -> Option<(

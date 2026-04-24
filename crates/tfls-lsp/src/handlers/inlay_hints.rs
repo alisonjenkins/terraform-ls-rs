@@ -555,8 +555,8 @@ fn read_module_cache(
     if out.is_empty() { None } else { Some(out) }
 }
 
-fn sort_versions_desc(entries: &mut Vec<(String, Option<String>)>) {
-    entries.sort_by(|a, b| semver_tuple(&b.0).cmp(&semver_tuple(&a.0)));
+fn sort_versions_desc(entries: &mut [(String, Option<String>)]) {
+    entries.sort_by_key(|e| std::cmp::Reverse(semver_tuple(&e.0)));
 }
 
 /// Minimal semver key for inlay-hint sorting only. Not shared with

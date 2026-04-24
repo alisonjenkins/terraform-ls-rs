@@ -116,7 +116,7 @@ pub fn discover_providers(terraform_dir: &Path) -> Result<Vec<ProviderBinary>, P
                     if !arch_path.is_dir() {
                         continue;
                     }
-                    let Some(binary) = find_provider_binary(&arch_path, &name) else {
+                    let Some(binary) = find_provider_binary(&arch_path, name) else {
                         continue;
                     };
                     out.push(ProviderBinary {
