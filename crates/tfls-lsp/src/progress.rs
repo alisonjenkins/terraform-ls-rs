@@ -64,6 +64,8 @@ enum DrainMsg {
 }
 
 pub struct ProgressReporter {
+    title: String,
+    token_label: String,
     tx: UnboundedSender<DrainMsg>,
     drain_handle: Option<JoinHandle<()>>,
     ended: bool,
@@ -77,7 +79,9 @@ impl ProgressReporter {
     /// don't report progress" rather than an error.
     pub async fn begin(client: &Client, title: impl Into<String>) -> Option<Self> {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let token = ProgressToken::String(format!("tfls-{n}"));
+        let token_label = format!("tfls-{n}");
+        let token = ProgressToken::String(token_label.clone());
+        let title = title.into();
         if client
             .send_request::<WorkDoneProgressCreate>(WorkDoneProgressCreateParams {
                 token: token.clone(),
@@ -87,12 +91,17 @@ impl ProgressReporter {
         {
             return None;
         }
+        tracing::info!(
+            token = %token_label,
+            title = %title,
+            "progress: begin"
+        );
         client
             .send_notification::<Progress>(ProgressParams {
                 token: token.clone(),
                 value: ProgressParamsValue::WorkDone(WorkDoneProgress::Begin(
                     WorkDoneProgressBegin {
-                        title: title.into(),
+                        title: title.clone(),
                         cancellable: Some(false),
                         message: None,
                         percentage: None,
@@ -146,6 +155,8 @@ impl ProgressReporter {
         });
 
         Some(Self {
+            title,
+            token_label,
             tx,
             drain_handle: Some(drain_handle),
             ended: false,
@@ -187,6 +198,12 @@ impl ProgressReporter {
             return;
         }
         self.ended = true;
+        tracing::info!(
+            token = %self.token_label,
+            title = %self.title,
+            message = ?message,
+            "progress: end (enqueued)"
+        );
         let _ = self.tx.send(DrainMsg::End { message });
         // Dropping tx lets the drain task's `recv()` return None
         // after processing End, unblocking the join below.
@@ -197,6 +214,11 @@ impl ProgressReporter {
         if let Some(handle) = self.drain_handle.take() {
             let _ = handle.await;
         }
+        tracing::info!(
+            token = %self.token_label,
+            title = %self.title,
+            "progress: end drained (client write complete)"
+        );
     }
 }
 
@@ -215,16 +237,18 @@ impl Drop for ProgressReporter {
         let result = self.tx.send(DrainMsg::End {
             message: Some("cancelled".to_string()),
         });
-        // Trace-level so ops can correlate a stuck Fidget widget
-        // against a dropped-without-end reporter — the usual cause
-        // being a panic upstream that unwound past the `end()`
-        // call site.
         if result.is_err() {
             tracing::warn!(
+                token = %self.token_label,
+                title = %self.title,
                 "progress: drain channel closed before End — Fidget may show the token as permanently in-progress"
             );
         } else {
-            tracing::debug!("progress: Drop enqueued terminating End (reporter dropped without explicit end())");
+            tracing::warn!(
+                token = %self.token_label,
+                title = %self.title,
+                "progress: reporter dropped without explicit end() — terminating End enqueued via Drop"
+            );
         }
     }
 }
