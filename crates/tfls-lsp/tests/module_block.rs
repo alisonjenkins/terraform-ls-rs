@@ -428,3 +428,144 @@ async fn hover_on_unknown_module_input_returns_none() {
         }
     }
 }
+
+#[tokio::test]
+async fn hover_on_module_output_reference_renders_description() {
+    // `module.web.endpoint` — hover on `endpoint` should pull the
+    // `description` from the child module's `output "endpoint" { }`.
+    let tree = make_tmp_tree("hover-output-ref");
+    let child_outputs = tree.join("mod").join("outputs.tf");
+    let child_vars = tree.join("mod").join("variables.tf");
+
+    let backend = fresh_backend();
+    let _ = insert_doc(
+        &backend,
+        &child_outputs,
+        "output \"endpoint\" {\n  value = \"\"\n  description = \"HTTPS endpoint the service listens on.\"\n}\n",
+    );
+    let _ = insert_doc(&backend, &child_vars, "variable \"region\" {}\n");
+
+    // The module call lives in a peer file — the reference is in
+    // another. This mirrors real stacks where `modules.tf` holds the
+    // call and consumers live elsewhere.
+    let _ = insert_doc(
+        &backend,
+        &tree.join("modules.tf"),
+        "module \"web\" {\n  source = \"./mod\"\n}\n",
+    );
+    let ref_uri = insert_doc(
+        &backend,
+        &tree.join("outputs.tf"),
+        "output \"api\" { value = module.web.endpoint }\n",
+    );
+
+    let resp = tfls_lsp::handlers::navigation::hover(
+        &backend,
+        // Cursor on `d` in `endpoint` (col 35).
+        make_hover_params(&ref_uri, Position::new(0, 35)),
+    )
+    .await
+    .expect("ok")
+    .expect("some hover");
+    let tower_lsp::lsp_types::HoverContents::Markup(content) = resp.contents else {
+        panic!("expected markup hover");
+    };
+    assert!(
+        content.value.contains("module.web.endpoint"),
+        "got: {}",
+        content.value
+    );
+    assert!(
+        content.value.contains("HTTPS endpoint"),
+        "got: {}",
+        content.value
+    );
+}
+
+#[tokio::test]
+async fn hover_on_module_block_header_label_renders_overview() {
+    // Cursor on `"web"` in `module "web" {}` — render an overview
+    // listing inputs + outputs.
+    let tree = make_tmp_tree("hover-overview-block");
+    let backend = fresh_backend();
+    insert_doc(
+        &backend,
+        &tree.join("mod").join("variables.tf"),
+        "variable \"region\" {\n  type = string\n  description = \"AWS region\"\n}\nvariable \"count\" {\n  type = number\n  default = 1\n  description = \"How many nodes.\"\n}\n",
+    );
+    insert_doc(
+        &backend,
+        &tree.join("mod").join("outputs.tf"),
+        "output \"endpoint\" {\n  value = \"\"\n  description = \"Public URL.\"\n}\n",
+    );
+    let main_uri = insert_doc(
+        &backend,
+        &tree.join("main.tf"),
+        "module \"web\" {\n  source = \"./mod\"\n}\n",
+    );
+
+    let resp = tfls_lsp::handlers::navigation::hover(
+        &backend,
+        // Cursor on `w` in the label `"web"` (line 0, col 9).
+        make_hover_params(&main_uri, Position::new(0, 9)),
+    )
+    .await
+    .expect("ok")
+    .expect("some hover");
+    let tower_lsp::lsp_types::HoverContents::Markup(content) = resp.contents else {
+        panic!("expected markup hover");
+    };
+    // Overview must list inputs + outputs with types and descriptions.
+    assert!(content.value.contains("module.web"), "label in: {}", content.value);
+    assert!(content.value.contains("#### Inputs"), "header in: {}", content.value);
+    assert!(content.value.contains("#### Outputs"), "header in: {}", content.value);
+    assert!(content.value.contains("region"), "region input: {}", content.value);
+    assert!(content.value.contains("AWS region"), "region desc: {}", content.value);
+    assert!(content.value.contains("required"), "required tag: {}", content.value);
+    assert!(content.value.contains("endpoint"), "output: {}", content.value);
+    assert!(content.value.contains("Public URL"), "output desc: {}", content.value);
+}
+
+#[tokio::test]
+async fn hover_on_module_reference_label_renders_overview() {
+    // Cursor on `web` in `module.web.endpoint` — same overview as
+    // the block-header case, sourced from the peer file's `module
+    // "web" {}` call.
+    let tree = make_tmp_tree("hover-overview-ref");
+    let backend = fresh_backend();
+    insert_doc(
+        &backend,
+        &tree.join("mod").join("variables.tf"),
+        "variable \"region\" { type = string }\n",
+    );
+    insert_doc(
+        &backend,
+        &tree.join("mod").join("outputs.tf"),
+        "output \"endpoint\" { value = \"\" }\n",
+    );
+    insert_doc(
+        &backend,
+        &tree.join("modules.tf"),
+        "module \"web\" {\n  source = \"./mod\"\n}\n",
+    );
+    let ref_uri = insert_doc(
+        &backend,
+        &tree.join("outputs.tf"),
+        "output \"api\" { value = module.web.endpoint }\n",
+    );
+
+    let resp = tfls_lsp::handlers::navigation::hover(
+        &backend,
+        // Cursor on the `web` label — col 30 (inside `web`).
+        make_hover_params(&ref_uri, Position::new(0, 30)),
+    )
+    .await
+    .expect("ok")
+    .expect("some hover");
+    let tower_lsp::lsp_types::HoverContents::Markup(content) = resp.contents else {
+        panic!("expected markup hover");
+    };
+    assert!(content.value.contains("module.web"), "got: {}", content.value);
+    assert!(content.value.contains("region"), "inputs listed: {}", content.value);
+    assert!(content.value.contains("endpoint"), "outputs listed: {}", content.value);
+}

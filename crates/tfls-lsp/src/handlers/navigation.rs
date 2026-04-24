@@ -425,6 +425,27 @@ pub async fn hover(backend: &Backend, params: HoverParams) -> jsonrpc::Result<Op
         return Ok(Some(hover));
     }
 
+    // Cursor on the OUTPUT segment of `module.X.OUTPUT` — surface the
+    // child module's `output` description. The goto-def handler already
+    // resolves that shape; we mirror it for hover so navigating and
+    // hovering agree on where the cursor "is".
+    if let Some(hover) =
+        hover_module_input::module_output_ref_hover(&backend.state, &doc, &uri, pos)
+    {
+        return Ok(Some(hover));
+    }
+
+    // Cursor on a module NAME — either the `"X"` label on a
+    // `module "X" {}` block or the `X` segment in a `module.X…`
+    // reference. Render a module-overview card with every input +
+    // output listed, so the reader can see the child's interface
+    // without opening the module's source.
+    if let Some(hover) =
+        hover_module_input::module_overview_hover(&backend.state, &doc, &uri, pos)
+    {
+        return Ok(Some(hover));
+    }
+
     // Function calls come before symbol hover: function names share their
     // span with nothing in the symbol tables, but the enclosing output /
     // resource would otherwise "win" and produce a useless hover.
