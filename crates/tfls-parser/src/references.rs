@@ -5,6 +5,7 @@
 use hcl_edit::expr::{Expression, Traversal, TraversalOperator};
 use hcl_edit::repr::Span;
 use hcl_edit::structure::{Block, Body};
+use hcl_edit::template::{Directive, Element, Template};
 use lsp_types::{Range, Url};
 use ropey::Rope;
 use serde::{Deserialize, Serialize};
@@ -97,9 +98,46 @@ fn visit_expression(expr: &Expression, uri: &Url, rope: &Rope, out: &mut Vec<Ref
         }
         Expression::ForExpr(f) => {
             visit_expression(&f.intro.collection_expr, uri, rope, out);
+            if let Some(k) = f.key_expr.as_ref() {
+                visit_expression(k, uri, rope, out);
+            }
             visit_expression(&f.value_expr, uri, rope, out);
+            if let Some(c) = f.cond.as_ref() {
+                visit_expression(&c.expr, uri, rope, out);
+            }
         }
+        Expression::StringTemplate(t) => visit_template_elements(t.iter(), uri, rope, out),
+        Expression::HeredocTemplate(h) => visit_template(&h.template, uri, rope, out),
         _ => {}
+    }
+}
+
+fn visit_template(template: &Template, uri: &Url, rope: &Rope, out: &mut Vec<Reference>) {
+    visit_template_elements(template.iter(), uri, rope, out);
+}
+
+fn visit_template_elements<'a, I>(elements: I, uri: &Url, rope: &Rope, out: &mut Vec<Reference>)
+where
+    I: IntoIterator<Item = &'a Element>,
+{
+    for element in elements {
+        match element {
+            Element::Literal(_) => {}
+            Element::Interpolation(i) => visit_expression(&i.expr, uri, rope, out),
+            Element::Directive(d) => match d.as_ref() {
+                Directive::If(i) => {
+                    visit_expression(&i.if_expr.cond_expr, uri, rope, out);
+                    visit_template(&i.if_expr.template, uri, rope, out);
+                    if let Some(else_part) = i.else_expr.as_ref() {
+                        visit_template(&else_part.template, uri, rope, out);
+                    }
+                }
+                Directive::For(f) => {
+                    visit_expression(&f.for_expr.collection_expr, uri, rope, out);
+                    visit_template(&f.for_expr.template, uri, rope, out);
+                }
+            },
+        }
     }
 }
 
@@ -240,5 +278,87 @@ mod tests {
         assert!(!refs
             .iter()
             .any(|r| matches!(&r.kind, ReferenceKind::Variable { .. })));
+    }
+
+    #[test]
+    fn finds_reference_inside_string_interpolation() {
+        // `"${var.region}"` is a StringTemplate containing an
+        // Interpolation whose expression is `var.region`. The
+        // old visit_expression bailed on the StringTemplate arm
+        // and lost every reference inside — causing every var
+        // used only in interpolated strings to be falsely
+        // flagged "declared but not used".
+        let refs = refs(r#"output "x" { value = "hi ${var.region}" }"#);
+        assert!(
+            refs.iter().any(|r| matches!(
+                &r.kind,
+                ReferenceKind::Variable { name } if name == "region"
+            )),
+            "expected var.region from string interpolation; got {refs:?}"
+        );
+    }
+
+    #[test]
+    fn finds_reference_inside_heredoc_interpolation() {
+        let src = "output \"x\" {\n  value = <<-EOT\n    hi ${var.greeting}\n  EOT\n}\n";
+        let refs = refs(src);
+        assert!(
+            refs.iter().any(|r| matches!(
+                &r.kind,
+                ReferenceKind::Variable { name } if name == "greeting"
+            )),
+            "expected var.greeting from heredoc; got {refs:?}"
+        );
+    }
+
+    #[test]
+    fn finds_reference_inside_template_if_directive() {
+        // Template `%{ if ... }%{ endif }` — condition + body
+        // must both be scanned.
+        let src = r#"output "x" { value = "%{ if var.enabled }${var.payload}%{ endif }" }"#;
+        let refs = refs(src);
+        assert!(
+            refs.iter().any(|r| matches!(
+                &r.kind,
+                ReferenceKind::Variable { name } if name == "enabled"
+            )),
+            "expected var.enabled from if-cond: {refs:?}"
+        );
+        assert!(
+            refs.iter().any(|r| matches!(
+                &r.kind,
+                ReferenceKind::Variable { name } if name == "payload"
+            )),
+            "expected var.payload from if-body: {refs:?}"
+        );
+    }
+
+    #[test]
+    fn finds_reference_inside_for_expr_key_and_cond() {
+        // `{ for k, v in local.m : k => var.suffix if var.want }`
+        // — all three of key_expr, value_expr, cond were ignored.
+        let src = r#"output "x" { value = { for k, v in local.m : k => var.suffix if var.want } }"#;
+        let refs = refs(src);
+        assert!(
+            refs.iter().any(|r| matches!(
+                &r.kind,
+                ReferenceKind::Local { name } if name == "m"
+            )),
+            "expected local.m: {refs:?}"
+        );
+        assert!(
+            refs.iter().any(|r| matches!(
+                &r.kind,
+                ReferenceKind::Variable { name } if name == "suffix"
+            )),
+            "expected var.suffix (value_expr): {refs:?}"
+        );
+        assert!(
+            refs.iter().any(|r| matches!(
+                &r.kind,
+                ReferenceKind::Variable { name } if name == "want"
+            )),
+            "expected var.want (cond): {refs:?}"
+        );
     }
 }
