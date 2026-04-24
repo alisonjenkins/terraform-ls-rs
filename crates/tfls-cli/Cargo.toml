@@ -13,8 +13,17 @@ workspace = true
 name = "tfls"
 path = "src/main.rs"
 
+[[bin]]
+name = "tfls-diag-dump"
+path = "src/bin/diag_dump.rs"
+
 [dependencies]
 tfls-lsp.workspace = true
+tfls-state.workspace = true
+tfls-walker.workspace = true
+tfls-schema.workspace = true
+tfls-provider-protocol.workspace = true
+lsp-types.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tower-lsp.workspace = true
