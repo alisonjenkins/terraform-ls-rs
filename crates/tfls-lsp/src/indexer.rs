@@ -1003,7 +1003,7 @@ async fn scan_files_parallel(
 /// hanging around.
 fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
     use std::collections::HashMap;
-    use tfls_core::variable_type::{VariableType, parse_value_shape};
+    use tfls_core::variable_type::{VariableType, parse_value_shape_with_schema};
 
     // Skip meta-attributes that aren't user-declared module inputs.
     fn is_meta_attr(name: &str) -> bool {
@@ -1078,7 +1078,7 @@ fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
                 if is_meta_attr(attr_name) {
                     continue;
                 }
-                let ty = parse_value_shape(&attr.value);
+                let ty = parse_value_shape_with_schema(&attr.value, state);
                 if matches!(&ty, VariableType::Any) {
                     continue;
                 }

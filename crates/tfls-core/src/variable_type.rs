@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use hcl_edit::expr::Expression;
+use hcl_edit::expr::{Expression, Traversal, TraversalOperator};
 use serde::{Deserialize, Serialize};
 
 /// A Terraform variable type — the shape declared via `type = …` in a
@@ -143,7 +143,46 @@ pub(crate) fn object_key_as_ident(key: &hcl_edit::expr::ObjectKey) -> Option<Str
 /// what we can statically deduce about its shape — in particular, what
 /// keys appear at each level so bracket/dot completion can enumerate
 /// them. Unknown expressions degrade to [`VariableType::Any`].
+/// Optional schema oracle used by [`parse_value_shape_with_schema`]
+/// to resolve resource / data-source attribute traversals against
+/// real provider schemas. Implemented by `tfls-state::StateStore` so
+/// the inference path picks up the loaded schemas at runtime; the
+/// schema-free [`parse_value_shape`] is kept for callers (tests,
+/// `tfls-diag` validation rules) that don't need the lookup.
+pub trait SchemaLookup {
+    /// `<resource_type>.<name>.<attr>` → resolved type. `None` when
+    /// the resource type isn't loaded or the attribute doesn't
+    /// exist on the schema.
+    fn resource_attr(&self, resource_type: &str, attr: &str) -> Option<VariableType>;
+    /// Same as `resource_attr` but for `data.<type>.<name>.<attr>`.
+    fn data_source_attr(&self, type_name: &str, attr: &str) -> Option<VariableType>;
+}
+
+/// Schema-free convenience wrapper. Equivalent to calling
+/// [`parse_value_shape_with_schema`] with a no-op lookup that always
+/// returns `None`.
 pub fn parse_value_shape(expr: &Expression) -> VariableType {
+    parse_value_shape_with_schema(expr, &NoSchemaLookup)
+}
+
+struct NoSchemaLookup;
+impl SchemaLookup for NoSchemaLookup {
+    fn resource_attr(&self, _: &str, _: &str) -> Option<VariableType> {
+        None
+    }
+    fn data_source_attr(&self, _: &str, _: &str) -> Option<VariableType> {
+        None
+    }
+}
+
+/// Schema-aware version: a `Traversal` that names a resource or data
+/// source attribute resolves to its provider-schema type, and a
+/// for-expression iterating a known resource/data source resolves
+/// its body's attribute access through the same lookup.
+pub fn parse_value_shape_with_schema(
+    expr: &Expression,
+    schema: &dyn SchemaLookup,
+) -> VariableType {
     match expr {
         Expression::Object(obj) => {
             let mut fields = BTreeMap::new();
@@ -151,12 +190,15 @@ pub fn parse_value_shape(expr: &Expression) -> VariableType {
                 let Some(name) = object_key_as_ident(key) else {
                     continue;
                 };
-                fields.insert(name, parse_value_shape(value.expr()));
+                fields.insert(name, parse_value_shape_with_schema(value.expr(), schema));
             }
             VariableType::Object(fields)
         }
         Expression::Array(arr) => {
-            let items: Vec<VariableType> = arr.iter().map(parse_value_shape).collect();
+            let items: Vec<VariableType> = arr
+                .iter()
+                .map(|e| parse_value_shape_with_schema(e, schema))
+                .collect();
             VariableType::Tuple(items)
         }
         Expression::String(_) => VariableType::Primitive(Primitive::String),
@@ -185,7 +227,7 @@ pub fn parse_value_shape(expr: &Expression) -> VariableType {
                     .args
                     .iter()
                     .next()
-                    .map(parse_value_shape)
+                    .map(|e| parse_value_shape_with_schema(e, schema))
                     .unwrap_or(VariableType::Any),
                 // Users sometimes write `object({ … })` in a value
                 // position by mistake (confusing it with the type
@@ -199,7 +241,10 @@ pub fn parse_value_shape(expr: &Expression) -> VariableType {
                             let Some(name) = object_key_as_ident(key) else {
                                 continue;
                             };
-                            fields.insert(name, parse_value_shape(value.expr()));
+                            fields.insert(
+                                name,
+                                parse_value_shape_with_schema(value.expr(), schema),
+                            );
                         }
                         return VariableType::Object(fields);
                     }
@@ -209,12 +254,135 @@ pub fn parse_value_shape(expr: &Expression) -> VariableType {
             }
         }
         Expression::Conditional(c) => merge_shapes(
-            parse_value_shape(&c.true_expr),
-            parse_value_shape(&c.false_expr),
+            parse_value_shape_with_schema(&c.true_expr, schema),
+            parse_value_shape_with_schema(&c.false_expr, schema),
         ),
-        Expression::Parenthesis(inner) => parse_value_shape(inner.inner()),
+        Expression::Parenthesis(inner) => parse_value_shape_with_schema(inner.inner(), schema),
+        Expression::Traversal(tv) => {
+            // `aws_subnet.foo.id` / `data.aws_subnet.foo.id` →
+            // schema lookup. Anything else (var.x, local.x,
+            // module.x) collapses to `Any` — runtime values we
+            // can't statically classify.
+            traversal_attr_type(tv, schema).unwrap_or(VariableType::Any)
+        }
+        Expression::ForExpr(f) => {
+            // `[for x in <resource>.<name> : x.<attr>]` resolves
+            // through the schema oracle when both the collection
+            // is a known resource/data source and the body
+            // accesses one of its attributes via the iterator
+            // binding. Otherwise we keep the previous best-effort
+            // behaviour and fall back to `list(any)` / `map(any)`,
+            // which still renders as valid HCL the user can refine.
+            let iter_var = f.intro.value_var.as_str();
+            let elem_via_schema = for_expr_body_via_schema(
+                &f.intro.collection_expr,
+                iter_var,
+                &f.value_expr,
+                schema,
+            );
+            let elem = elem_via_schema
+                .unwrap_or_else(|| parse_value_shape_with_schema(&f.value_expr, schema));
+            if f.key_expr.is_some() {
+                VariableType::Map(Box::new(elem))
+            } else {
+                VariableType::List(Box::new(elem))
+            }
+        }
         _ => VariableType::Any,
     }
+}
+
+/// Resolve `<resource_type>.<name>.<attr>` /
+/// `data.<resource_type>.<name>.<attr>` traversals against the
+/// schema oracle. Returns `None` for any other shape (var.x,
+/// local.x, module.x, count, …).
+fn traversal_attr_type(tv: &Traversal, schema: &dyn SchemaLookup) -> Option<VariableType> {
+    let base = match &tv.expr {
+        Expression::Variable(v) => v.as_str().to_string(),
+        _ => return None,
+    };
+    // Collect leading `.ident` operators only; stop at index/splat.
+    let mut idents: Vec<&str> = Vec::new();
+    for op in &tv.operators {
+        match op.value() {
+            TraversalOperator::GetAttr(i) => idents.push(i.as_str()),
+            _ => break,
+        }
+    }
+    if base == "data" {
+        // data.<type>.<name>.<attr…> — attr is idents[2].
+        let resource_type = *idents.first()?;
+        let _name = idents.get(1)?;
+        let attr = *idents.get(2)?;
+        return schema.data_source_attr(resource_type, attr);
+    }
+    if !is_resource_type(&base) {
+        return None;
+    }
+    // <type>.<name>.<attr…> — attr is idents[1].
+    let _name = idents.first()?;
+    let attr = *idents.get(1)?;
+    schema.resource_attr(&base, attr)
+}
+
+/// Recognise `[for v in <resource>.<name> : v.<attr>]` (or the
+/// data-source equivalent) and resolve `<attr>`'s type from the
+/// schema. Returns `None` when the shape doesn't match — the
+/// caller falls back to plain inference (likely `Any`).
+fn for_expr_body_via_schema(
+    collection_expr: &Expression,
+    iter_var: &str,
+    body: &Expression,
+    schema: &dyn SchemaLookup,
+) -> Option<VariableType> {
+    let body_tv = match body {
+        Expression::Traversal(tv) => tv,
+        _ => return None,
+    };
+    let body_base = match &body_tv.expr {
+        Expression::Variable(v) => v.as_str().to_string(),
+        _ => return None,
+    };
+    if body_base != iter_var {
+        return None;
+    }
+    let body_attr = body_tv
+        .operators
+        .first()
+        .and_then(|op| match op.value() {
+            TraversalOperator::GetAttr(i) => Some(i.as_str()),
+            _ => None,
+        })?;
+
+    let coll_tv = match collection_expr {
+        Expression::Traversal(tv) => tv,
+        _ => return None,
+    };
+    let coll_base = match &coll_tv.expr {
+        Expression::Variable(v) => v.as_str().to_string(),
+        _ => return None,
+    };
+    let mut coll_idents: Vec<&str> = Vec::new();
+    for op in &coll_tv.operators {
+        match op.value() {
+            TraversalOperator::GetAttr(i) => coll_idents.push(i.as_str()),
+            _ => break,
+        }
+    }
+    if coll_base == "data" {
+        let resource_type = *coll_idents.first()?;
+        let _name = coll_idents.get(1)?;
+        return schema.data_source_attr(resource_type, body_attr);
+    }
+    if !is_resource_type(&coll_base) {
+        return None;
+    }
+    let _name = coll_idents.first()?;
+    schema.resource_attr(&coll_base, body_attr)
+}
+
+fn is_resource_type(s: &str) -> bool {
+    s.contains('_')
 }
 
 /// Check whether a value whose inferred shape is `actual` satisfies
@@ -728,5 +896,129 @@ mod tests {
         let rendered = format!("{ty}");
         // BTreeMap sorts keys alphabetically: "inner" < "name".
         assert_eq!(rendered, "object({ inner = object({ x = bool }), name = string })");
+    }
+
+    // --- For-expression inference ---------------------------------
+    //
+    // `[for x in coll : x.id]` produces a list whose element type
+    // tracks the body expression. When the body resolves to `Any`
+    // (a traversal of a runtime collection — usual case for module
+    // call sites), we still surface `list(any)` so the
+    // type-inference quick-fix has something concrete to suggest.
+
+    #[test]
+    fn list_for_expr_with_traversal_body_is_list_any() {
+        let ty = shape_from_src("value = [for s in aws_subnet.foo : s.id]");
+        assert_eq!(ty, VariableType::List(Box::new(VariableType::Any)));
+    }
+
+    #[test]
+    fn list_for_expr_with_string_body_is_list_string() {
+        let ty = shape_from_src("value = [for k in [\"a\", \"b\"] : \"prefix-\"]");
+        // Body is a string literal — element type is string.
+        assert_eq!(
+            ty,
+            VariableType::List(Box::new(VariableType::Primitive(Primitive::String)))
+        );
+    }
+
+    #[test]
+    fn map_for_expr_is_map_with_value_type() {
+        let ty = shape_from_src("value = {for k, v in {} : k => 1}");
+        assert_eq!(
+            ty,
+            VariableType::Map(Box::new(VariableType::Primitive(Primitive::Number)))
+        );
+    }
+
+    #[test]
+    fn list_for_expr_renders_as_list_any() {
+        let ty = shape_from_src("value = [for s in x : s.id]");
+        assert_eq!(format!("{ty}"), "list(any)");
+    }
+
+    /// In-process fake `SchemaLookup` that returns canned types for
+    /// `aws_subnet`'s `id` and `cidr_block` attributes — enough to
+    /// pin the schema-aware inference path without dragging in
+    /// `tfls-state` from a tfls-core test.
+    struct FakeSchema;
+    impl SchemaLookup for FakeSchema {
+        fn resource_attr(&self, resource_type: &str, attr: &str) -> Option<VariableType> {
+            match (resource_type, attr) {
+                ("aws_subnet", "id") => Some(VariableType::Primitive(Primitive::String)),
+                ("aws_subnet", "cidr_block") => Some(VariableType::Primitive(Primitive::String)),
+                _ => None,
+            }
+        }
+        fn data_source_attr(&self, type_name: &str, attr: &str) -> Option<VariableType> {
+            match (type_name, attr) {
+                ("aws_ami", "id") => Some(VariableType::Primitive(Primitive::String)),
+                _ => None,
+            }
+        }
+    }
+
+    fn shape_with_schema(src: &str, schema: &dyn SchemaLookup) -> VariableType {
+        use hcl_edit::structure::{Attribute, Body};
+        let body: Body = src.parse().expect("parses");
+        for structure in body.iter() {
+            let Some(attr): Option<&Attribute> = structure.as_attribute() else {
+                continue;
+            };
+            if attr.key.as_str() == "value" {
+                return parse_value_shape_with_schema(&attr.value, schema);
+            }
+        }
+        panic!("no `value = …` attribute in source: {src:?}")
+    }
+
+    #[test]
+    fn schema_aware_traversal_resolves_resource_attribute_to_string() {
+        // `aws_subnet.foo.id` → `string` per provider schema.
+        let ty = shape_with_schema("value = aws_subnet.foo.id", &FakeSchema);
+        assert_eq!(ty, VariableType::Primitive(Primitive::String));
+    }
+
+    #[test]
+    fn schema_aware_traversal_resolves_data_source_attribute() {
+        let ty = shape_with_schema("value = data.aws_ami.ubuntu.id", &FakeSchema);
+        assert_eq!(ty, VariableType::Primitive(Primitive::String));
+    }
+
+    #[test]
+    fn schema_aware_for_expr_over_resource_yields_list_of_attribute_type() {
+        // `[for s in aws_subnet.foo : s.id]` → `list(string)` once
+        // the schema knows `aws_subnet.id` is `string`.
+        let ty = shape_with_schema(
+            "value = [for s in aws_subnet.foo : s.id]",
+            &FakeSchema,
+        );
+        assert_eq!(
+            ty,
+            VariableType::List(Box::new(VariableType::Primitive(Primitive::String)))
+        );
+    }
+
+    #[test]
+    fn schema_aware_for_expr_falls_back_to_any_for_unknown_resource() {
+        // No schema entry for `unknown_thing` — element type stays
+        // `any`, but we still produce `list(any)` rather than `any`.
+        let ty = shape_with_schema(
+            "value = [for s in unknown_thing.foo : s.id]",
+            &FakeSchema,
+        );
+        assert_eq!(ty, VariableType::List(Box::new(VariableType::Any)));
+    }
+
+    #[test]
+    fn schema_aware_map_for_expr_over_data_source() {
+        let ty = shape_with_schema(
+            "value = {for k, v in aws_subnet.foo : v.id => v.cidr_block}",
+            &FakeSchema,
+        );
+        assert_eq!(
+            ty,
+            VariableType::Map(Box::new(VariableType::Primitive(Primitive::String)))
+        );
     }
 }

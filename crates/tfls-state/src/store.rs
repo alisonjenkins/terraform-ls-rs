@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use lsp_types::Url;
+use tfls_core::variable_type::{Primitive, SchemaLookup, VariableType};
 use tfls_core::{ProviderAddress, SymbolKind, SymbolLocation};
 use tfls_parser::ReferenceKind;
 use tfls_schema::{
@@ -588,6 +589,78 @@ pub fn reference_key(kind: &ReferenceKind) -> SymbolKey {
             resource_type,
             name,
         } => SymbolKey::resource(SymbolKind::DataSource, resource_type, name),
+    }
+}
+
+impl SchemaLookup for StateStore {
+    fn resource_attr(&self, resource_type: &str, attr: &str) -> Option<VariableType> {
+        let schema = self.resource_schema(resource_type)?;
+        let attr_schema = schema.block.attributes.get(attr)?;
+        let raw = attr_schema.r#type.as_ref()?;
+        Some(schema_type_to_variable_type(raw))
+    }
+
+    fn data_source_attr(&self, type_name: &str, attr: &str) -> Option<VariableType> {
+        let schema = self.data_source_schema(type_name)?;
+        let attr_schema = schema.block.attributes.get(attr)?;
+        let raw = attr_schema.r#type.as_ref()?;
+        Some(schema_type_to_variable_type(raw))
+    }
+}
+
+/// Convert Terraform's JSON-encoded type representation (sonic_rs
+/// `Value`) into a [`VariableType`]. Supported shapes:
+///
+/// - Primitive name string: `"string"` / `"number"` / `"bool"` /
+///   `"dynamic"` (→ `Any`).
+/// - 2-element array: `["list", T]`, `["set", T]`, `["map", T]`.
+/// - 2-element array: `["object", { name: T, … }]`.
+/// - 2-element array: `["tuple", [T, T, …]]`.
+/// - Anything else → `Any` (the safe fallback that lets downstream
+///   inference keep moving).
+pub fn schema_type_to_variable_type(value: &sonic_rs::Value) -> VariableType {
+    use sonic_rs::{JsonContainerTrait, JsonValueTrait};
+    if let Some(s) = value.as_str() {
+        return match s {
+            "string" => VariableType::Primitive(Primitive::String),
+            "number" => VariableType::Primitive(Primitive::Number),
+            "bool" => VariableType::Primitive(Primitive::Bool),
+            _ => VariableType::Any,
+        };
+    }
+    let Some(arr) = value.as_array() else {
+        return VariableType::Any;
+    };
+    let head = arr.first().and_then(|v| v.as_str());
+    let tail = arr.get(1);
+    match (head, tail) {
+        (Some("list"), Some(t)) => VariableType::List(Box::new(schema_type_to_variable_type(t))),
+        (Some("set"), Some(t)) => VariableType::Set(Box::new(schema_type_to_variable_type(t))),
+        (Some("map"), Some(t)) => VariableType::Map(Box::new(schema_type_to_variable_type(t))),
+        (Some("tuple"), Some(t)) => {
+            if let Some(items) = t.as_array() {
+                VariableType::Tuple(
+                    items
+                        .iter()
+                        .map(schema_type_to_variable_type)
+                        .collect(),
+                )
+            } else {
+                VariableType::Any
+            }
+        }
+        (Some("object"), Some(t)) => {
+            if let Some(obj) = t.as_object() {
+                let mut fields = std::collections::BTreeMap::new();
+                for (k, v) in obj.iter() {
+                    fields.insert(k.to_string(), schema_type_to_variable_type(v));
+                }
+                VariableType::Object(fields)
+            } else {
+                VariableType::Any
+            }
+        }
+        _ => VariableType::Any,
     }
 }
 
