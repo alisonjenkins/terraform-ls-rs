@@ -1018,7 +1018,6 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
 
 fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
     use std::collections::HashMap;
-    #[allow(unused_imports)]
     use tfls_core::variable_type::{VariableType, parse_value_shape_with_schema};
 
     // Skip meta-attributes that aren't user-declared module inputs.
@@ -1085,10 +1084,12 @@ fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
     // 2. Module calls authored in `.tf` files in `dir`. Each
     //    contributes assignments to its CHILD module's directory.
     //
-    // BISECT step B: schema-aware module-call section short-circuited.
-    // If diagnostics still work with this disabled, schema walk is
-    // the culprit. If they still break, tfvars walk above is.
-    if false {
+    // Each per-attribute `parse_value_shape_with_schema` runs inside
+    // `catch_unwind` for the same reason as section 1: we don't want
+    // a single weird expression killing the indexer worker. Stack
+    // overflow from deep schema recursion would still abort the
+    // process — that's a separate fix (iterative walker) we'll do
+    // only if it surfaces.
     for entry in state.documents.iter() {
         let Ok(doc_path) = entry.key().to_file_path() else {
             continue;
@@ -1132,7 +1133,22 @@ fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
                 if is_meta_attr(attr_name) {
                     continue;
                 }
-                let ty = parse_value_shape_with_schema(&attr.value, state);
+                let inferred = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    parse_value_shape_with_schema(&attr.value, state)
+                }));
+                let ty = match inferred {
+                    Ok(t) => t,
+                    Err(payload) => {
+                        let msg = panic_payload_message(payload.as_ref());
+                        tracing::error!(
+                            doc = %doc_path.display(),
+                            attr = attr_name,
+                            message = %msg,
+                            "parse_value_shape_with_schema: panic — module-call attr skipped",
+                        );
+                        continue;
+                    }
+                };
                 if matches!(&ty, VariableType::Any) {
                     continue;
                 }
@@ -1150,7 +1166,6 @@ fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
             }
         }
     }
-    } // end BISECT step B `if false` block
 
     for (target_dir, assignments) in staged {
         state.replace_assigned_variable_types(target_dir, assignments);
