@@ -1003,8 +1003,20 @@ async fn scan_files_parallel(
 /// affected target dirs from a current snapshot, so a removed
 /// caller or deleted tfvars file doesn't leave a stale type
 /// hanging around.
+/// Best-effort extraction of a panic payload's message. `Box<Any>`
+/// commonly carries either `&'static str` or `String`; everything
+/// else degrades to `<non-string panic payload>`.
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        return (*s).to_string();
+    }
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return s.clone();
+    }
+    "<non-string panic payload>".to_string()
+}
+
 fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
-    #[allow(unused_imports)]
     use std::collections::HashMap;
     #[allow(unused_imports)]
     use tfls_core::variable_type::{VariableType, parse_value_shape_with_schema};
@@ -1019,38 +1031,55 @@ fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
 
     // Collect target_dir → (var_name → list of types) so we can
     // replace each affected dir's entry atomically at the end.
-    #[allow(unused_mut)]
     let mut staged: HashMap<PathBuf, HashMap<String, Vec<VariableType>>> = HashMap::new();
 
     // 1. Tfvars in `dir` → assignments target `dir` itself.
     //
-    // BISECT step D: keep read_to_string, still skip parse_tfvars.
-    // If diagnostics still return → parse_tfvars is the culprit.
-    // If diagnostics break → read_to_string is the culprit
-    // (sync I/O blocking tokio worker, or a giant file).
+    // Step D bisect proved `parse_tfvars` (hcl-edit body parse) on
+    // user's tfvars input is the regression's root cause. Wrap each
+    // call in `catch_unwind` so a single bad file doesn't kill the
+    // worker (which would silence subsequent did_open / refresh
+    // publishes via a propagated panic). Per-file tracing captures
+    // the offending path in the journal.
     if let Ok(tfvars) = tfls_walker::discover_tfvars_files_in_dir(dir) {
-        let count = tfvars.len();
-        let mut total_bytes = 0usize;
-        for path in &tfvars {
-            match std::fs::read_to_string(path) {
-                Ok(text) => {
-                    total_bytes += text.len();
-                }
-                Err(e) => {
-                    tracing::warn!(
+        let mut for_dir: HashMap<String, Vec<VariableType>> = HashMap::new();
+        for path in tfvars {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            tracing::debug!(
+                path = %path.display(),
+                bytes = text.len(),
+                "parse_tfvars: start",
+            );
+            let parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                tfls_parser::parse_tfvars(&text)
+            }));
+            match parsed {
+                Ok(map) => {
+                    tracing::debug!(
                         path = %path.display(),
-                        error = %e,
-                        "tfvars read failed (step D)",
+                        entries = map.len(),
+                        "parse_tfvars: done",
+                    );
+                    for (name, ty) in map {
+                        for_dir.entry(name).or_default().push(ty);
+                    }
+                }
+                Err(payload) => {
+                    let msg = panic_payload_message(payload.as_ref());
+                    tracing::error!(
+                        path = %path.display(),
+                        bytes = text.len(),
+                        message = %msg,
+                        "parse_tfvars: panic — file skipped to avoid worker crash",
                     );
                 }
             }
         }
-        tracing::info!(
-            dir = %dir.display(),
-            count,
-            total_bytes,
-            "rebuild_assigned_variable_types: read tfvars (parse skipped)",
-        );
+        if !for_dir.is_empty() {
+            staged.insert(dir.to_path_buf(), for_dir);
+        }
     }
 
     // 2. Module calls authored in `.tf` files in `dir`. Each
