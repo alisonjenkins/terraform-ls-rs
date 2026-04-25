@@ -715,3 +715,94 @@ async fn code_action_unwraps_interpolation_with_inner_braces() {
     let new_text = first_inserted_text(&actions, &u);
     assert_eq!(new_text, "tomap({a=1})", "got: {new_text:?}");
 }
+
+#[tokio::test]
+async fn code_action_declares_undefined_variables() {
+    // Three `var.X` references; only one is declared. The
+    // source-level action should append `variable "missing_a" {}`
+    // and `variable "missing_b" {}` at end-of-file.
+    let u = uri("file:///mod/main.tf");
+    let src = "variable \"declared\" { default = \"x\" }\n\
+               output \"a\" { value = var.declared }\n\
+               output \"b\" { value = var.missing_a }\n\
+               output \"c\" { value = var.missing_b }\n\
+               output \"d\" { value = var.missing_a }\n";
+    let backend = fresh_backend(src, &u);
+
+    let resp = tfls_lsp::handlers::code_action::code_action(
+        &backend,
+        CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: u.clone() },
+            range: Range {
+                start: Position::new(0, 0),
+                end: Position::new(0, 0),
+            },
+            context: CodeActionContext {
+                diagnostics: vec![],
+                only: None,
+                trigger_kind: None,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        },
+    )
+    .await
+    .expect("ok")
+    .expect("response");
+    let action = resp
+        .iter()
+        .find_map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca)
+                if ca.title.starts_with("Declare 2 undefined variables") =>
+            {
+                Some(ca)
+            }
+            _ => None,
+        })
+        .expect("declare-undefined action present");
+    let edits = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .and_then(|c| c.get(&u))
+        .expect("edits");
+    assert_eq!(edits.len(), 1, "single end-of-file insertion");
+    let txt = &edits[0].new_text;
+    assert!(txt.contains("variable \"missing_a\" {}"), "got {txt:?}");
+    assert!(txt.contains("variable \"missing_b\" {}"), "got {txt:?}");
+    // Already-declared variable should NOT be re-emitted.
+    assert!(!txt.contains("variable \"declared\""), "got {txt:?}");
+}
+
+#[tokio::test]
+async fn code_action_declare_undefined_skips_when_all_resolved() {
+    let u = uri("file:///mod/main.tf");
+    let src = "variable \"a\" { default = \"x\" }\n\
+               output \"o\" { value = var.a }\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::code_action::code_action(
+        &backend,
+        CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: u.clone() },
+            range: Range {
+                start: Position::new(0, 0),
+                end: Position::new(0, 0),
+            },
+            context: CodeActionContext {
+                diagnostics: vec![],
+                only: None,
+                trigger_kind: None,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        },
+    )
+    .await
+    .expect("ok");
+    let actions = resp.unwrap_or_default();
+    let any_declare = actions.iter().any(|a| match a {
+        CodeActionOrCommand::CodeAction(ca) => ca.title.starts_with("Declare"),
+        _ => false,
+    });
+    assert!(!any_declare, "no declare action when all vars resolved");
+}

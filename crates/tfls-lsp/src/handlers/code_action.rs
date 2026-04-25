@@ -71,6 +71,19 @@ pub async fn code_action(
         actions.push(CodeActionOrCommand::CodeAction(action));
     }
 
+    // "Generate variable declarations for undefined `var.X` references"
+    // — walk the doc's references; for any `var.<name>` whose target
+    // isn't declared in this module's symbol table, append a stub
+    // `variable "<name>" {}` block at the end of the current file.
+    if let Some(action) = make_declare_undefined_variables_action(
+        &uri,
+        &doc.rope,
+        &doc.symbols,
+        &doc.references,
+    ) {
+        actions.push(CodeActionOrCommand::CodeAction(action));
+    }
+
     if actions.is_empty() { Ok(None) } else { Ok(Some(actions)) }
 }
 
@@ -284,6 +297,90 @@ fn make_unwrap_interpolation_action(
             ..Default::default()
         }),
         is_preferred: Some(true),
+        ..Default::default()
+    })
+}
+
+/// Source-level action: walk every `var.<name>` reference in this
+/// document and, for any `<name>` not declared as a `variable
+/// "<name>"` block in the local module's symbol table, append a
+/// stub `variable "<name>" {}` at end-of-file. Bulk version of
+/// what a user would do by hand when an undefined-variable warning
+/// fires; saves the per-block round-trip.
+///
+/// Only fires when at least one undeclared `var.X` reference exists
+/// — otherwise no menu entry.
+fn make_declare_undefined_variables_action(
+    uri: &Url,
+    rope: &Rope,
+    symbols: &tfls_core::SymbolTable,
+    references: &[tfls_parser::Reference],
+) -> Option<CodeAction> {
+    use std::collections::BTreeSet;
+    use tfls_parser::ReferenceKind;
+
+    let mut undeclared: BTreeSet<String> = BTreeSet::new();
+    for r in references {
+        if let ReferenceKind::Variable { name } = &r.kind {
+            if !symbols.variables.contains_key(name) {
+                undeclared.insert(name.clone());
+            }
+        }
+    }
+    if undeclared.is_empty() {
+        return None;
+    }
+
+    let mut new_text = String::new();
+    let total_bytes = rope.len_bytes();
+    let last_char = if total_bytes == 0 {
+        None
+    } else {
+        rope.byte_slice(total_bytes - 1..total_bytes)
+            .to_string()
+            .chars()
+            .next()
+    };
+    if last_char != Some('\n') && total_bytes > 0 {
+        new_text.push('\n');
+    }
+    new_text.push('\n');
+    for name in &undeclared {
+        new_text.push_str(&format!("variable \"{name}\" {{}}\n"));
+    }
+
+    let end_pos = tfls_parser::byte_offset_to_lsp_position(rope, total_bytes).ok()?;
+    let edit = TextEdit {
+        range: Range {
+            start: end_pos,
+            end: end_pos,
+        },
+        new_text,
+    };
+    let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    changes.insert(uri.clone(), vec![edit]);
+
+    let count = undeclared.len();
+    let names_preview: Vec<&str> = undeclared.iter().take(3).map(String::as_str).collect();
+    let more_suffix = if count > 3 {
+        format!(", … and {} more", count - 3)
+    } else {
+        String::new()
+    };
+    Some(CodeAction {
+        title: format!(
+            "Declare {count} undefined variable{plural}: {names}{more}",
+            plural = if count == 1 { "" } else { "s" },
+            names = names_preview.join(", "),
+            more = more_suffix,
+        ),
+        kind: Some(CodeActionKind::SOURCE),
+        diagnostics: None,
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        is_preferred: None,
         ..Default::default()
     })
 }
