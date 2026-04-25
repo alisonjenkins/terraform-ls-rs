@@ -1378,16 +1378,15 @@ pub fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
                 if matches!(&ty, VariableType::Any) {
                     continue;
                 }
-                if let VariableType::Tuple(items) = &ty {
-                    if items.is_empty() {
-                        continue;
-                    }
-                }
-                if let VariableType::Object(fields) = &ty {
-                    if fields.is_empty() {
-                        continue;
-                    }
-                }
+                // Empty `Tuple([])` / `Object({})` were previously
+                // dropped here as "too ambiguous." That hides the
+                // signal entirely from the inference map, so the
+                // declared `list(any)` / `map(any)` case can never
+                // satisfy the assignment check downstream. Stage
+                // them — the code-action's `is_actionable_inference`
+                // still filters empties before suggesting a literal,
+                // but other consumers (assignment-vs-declared
+                // diagnostics) get to see the data.
                 bucket.entry(attr_name.to_string()).or_default().push(ty);
             }
         }
