@@ -218,10 +218,16 @@ impl StateStore {
     }
 
     /// Look up the merged inferred type for variable `name` declared
-    /// in `target_dir`. Returns `Some(ty)` only when every observed
-    /// assignment yields the same `VariableType` — disagreement
-    /// means we don't know the canonical type, so the caller (e.g.
-    /// the type-inference code action) skips its suggestion.
+    /// in `target_dir`. Reduces every observed assignment via
+    /// [`tfls_core::variable_type::merge_types`] so callers passing
+    /// same-shape but different-length tuples (or objects with
+    /// some fields `Any` from un-resolved chains) still produce a
+    /// canonical inferred shape — e.g. `Tuple([string × 6])` and
+    /// `Tuple([string × 7])` reduce to `List(string)`.
+    ///
+    /// Returns `None` only when:
+    /// - the dir has no assignments for `name`; OR
+    /// - every observation already collapsed to `Any` (no signal).
     pub fn merged_assigned_type(
         &self,
         target_dir: &std::path::Path,
@@ -229,11 +235,11 @@ impl StateStore {
     ) -> Option<tfls_core::variable_type::VariableType> {
         let entry = self.assigned_variable_types.get(target_dir)?;
         let observations = entry.get(name)?;
-        let first = observations.first()?.clone();
-        if observations.iter().all(|t| t == &first) {
-            Some(first)
-        } else {
+        let merged = tfls_core::variable_type::merge_observations(observations)?;
+        if matches!(&merged, tfls_core::variable_type::VariableType::Any) {
             None
+        } else {
+            Some(merged)
         }
     }
 

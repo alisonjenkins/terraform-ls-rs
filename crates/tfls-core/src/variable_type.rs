@@ -619,6 +619,97 @@ fn is_resource_type(s: &str) -> bool {
     s.contains('_')
 }
 
+/// Pairwise merge of two inferred shapes. Useful for combining
+/// observations across multiple module callers / tfvars files
+/// where element-level shape matches but list lengths differ or
+/// individual fields are sometimes `Any` (a value the caller's
+/// chain couldn't fully resolve).
+///
+/// Semantics:
+/// - `Any` reconciles with everything → returns the other side.
+/// - Equal types → unchanged.
+/// - Two `List(T)`/`Set(T)` of compatible inner → `List` of merged
+///   inner.
+/// - Two `Tuple` of equal length → `Tuple` of pairwise-merged
+///   elements.
+/// - Tuples of different length OR mixed `Tuple`/`List` → `List` of
+///   the merged element type across all positions.
+/// - Two `Object`s → `Object` with the union of keys (per-key
+///   merge; missing keys collapse to `Any`).
+/// - Anything else mismatched → `Any`.
+pub fn merge_types(a: &VariableType, b: &VariableType) -> VariableType {
+    if a == b {
+        return a.clone();
+    }
+    if matches!(a, VariableType::Any) {
+        return b.clone();
+    }
+    if matches!(b, VariableType::Any) {
+        return a.clone();
+    }
+    match (a, b) {
+        (VariableType::List(x), VariableType::List(y))
+        | (VariableType::Set(x), VariableType::Set(y))
+        | (VariableType::Map(x), VariableType::Map(y)) => {
+            // Pick the same outer constructor as `a`'s.
+            let inner = merge_types(x, y);
+            match a {
+                VariableType::List(_) => VariableType::List(Box::new(inner)),
+                VariableType::Set(_) => VariableType::Set(Box::new(inner)),
+                VariableType::Map(_) => VariableType::Map(Box::new(inner)),
+                _ => unreachable!(),
+            }
+        }
+        (VariableType::Tuple(xs), VariableType::Tuple(ys)) => {
+            if xs.len() == ys.len() {
+                VariableType::Tuple(
+                    xs.iter().zip(ys).map(|(x, y)| merge_types(x, y)).collect(),
+                )
+            } else {
+                let all: Vec<&VariableType> = xs.iter().chain(ys.iter()).collect();
+                let mut acc = all[0].clone();
+                for t in &all[1..] {
+                    acc = merge_types(&acc, t);
+                }
+                VariableType::List(Box::new(acc))
+            }
+        }
+        (VariableType::List(x), VariableType::Tuple(ys))
+        | (VariableType::Tuple(ys), VariableType::List(x))
+        | (VariableType::Set(x), VariableType::Tuple(ys))
+        | (VariableType::Tuple(ys), VariableType::Set(x)) => {
+            let mut acc = (**x).clone();
+            for y in ys {
+                acc = merge_types(&acc, y);
+            }
+            VariableType::List(Box::new(acc))
+        }
+        (VariableType::Object(xs), VariableType::Object(ys)) => {
+            let mut merged: BTreeMap<String, VariableType> = BTreeMap::new();
+            for k in xs.keys().chain(ys.keys()).collect::<std::collections::BTreeSet<_>>() {
+                let merged_val = match (xs.get(k), ys.get(k)) {
+                    (Some(vx), Some(vy)) => merge_types(vx, vy),
+                    (Some(vx), None) | (None, Some(vx)) => merge_types(vx, &VariableType::Any),
+                    (None, None) => VariableType::Any,
+                };
+                merged.insert(k.clone(), merged_val);
+            }
+            VariableType::Object(merged)
+        }
+        _ => VariableType::Any,
+    }
+}
+
+/// Reduce a list of observations into a single representative
+/// shape via [`merge_types`]. Used by callers that aggregate
+/// multiple tfvars / module-call observations and want a single
+/// inferred type — the empty `[]` case yields `None`.
+pub fn merge_observations(obs: &[VariableType]) -> Option<VariableType> {
+    let mut iter = obs.iter();
+    let first = iter.next()?.clone();
+    Some(iter.fold(first, |acc, t| merge_types(&acc, t)))
+}
+
 /// Walk a chain of `.field` accessors against an inferred value
 /// shape, descending one level per ident. `Object` lookups return
 /// the named field; `Map(T)`/`List(T)`/`Set(T)` return their
