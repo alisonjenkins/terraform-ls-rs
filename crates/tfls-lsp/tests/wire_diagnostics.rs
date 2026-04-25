@@ -253,3 +253,127 @@ async fn server_does_not_advertise_pull_diagnostics() {
     drop(service);
     let _ = tokio::time::timeout(Duration::from_secs(1), drainer).await;
 }
+
+/// User-reported scenario: root module declares `variable "envtype" {}`
+/// (no type, no default); env-split tfvars in `params/{nonprod,prod}/`
+/// each assign `envtype = "..."`. After `didOpen`, a `codeAction`
+/// request at the variable's diagnostic range must return the
+/// `Set variable type to \`string\`` quick-fix.
+///
+/// This reproduces the wire behaviour the user couldn't get out of
+/// nvim. A passing test means the server is correct end-to-end —
+/// any "no action shown in editor" is then client-side.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_action_envtype_inference_via_wire() {
+    use std::fs;
+
+    let workspace = std::env::temp_dir().join(format!(
+        "tfls-wire-envtype-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let _ = fs::remove_dir_all(&workspace);
+    fs::create_dir_all(workspace.join("params/nonprod")).unwrap();
+    fs::create_dir_all(workspace.join("params/prod")).unwrap();
+
+    let main_tf = workspace.join("variables.tf");
+    let main_text = "variable \"envtype\" {}\noutput \"e\" { value = var.envtype }\n";
+    fs::write(&main_tf, main_text).unwrap();
+    fs::write(
+        workspace.join("params/nonprod/params.tfvars"),
+        "envtype = \"nonprod\"\n",
+    )
+    .unwrap();
+    fs::write(
+        workspace.join("params/prod/params.tfvars"),
+        "envtype = \"prod\"\n",
+    )
+    .unwrap();
+
+    let workspace_uri = lsp_types::Url::from_file_path(&workspace).unwrap().to_string();
+    let main_uri = lsp_types::Url::from_file_path(&main_tf).unwrap().to_string();
+
+    let (mut service, _captured, drainer) = make_capturing_service();
+
+    let _ = call(
+        &mut service,
+        Request::build("initialize")
+            .id(1)
+            .params(json!({
+                "processId": null,
+                "rootUri": workspace_uri,
+                "capabilities": {}
+            }))
+            .finish(),
+    )
+    .await;
+    notify(
+        &mut service,
+        Request::build("initialized").params(json!({})).finish(),
+    )
+    .await;
+
+    notify(
+        &mut service,
+        Request::build("textDocument/didOpen")
+            .params(json!({
+                "textDocument": {
+                    "uri": main_uri,
+                    "languageId": "terraform",
+                    "version": 1,
+                    "text": main_text,
+                }
+            }))
+            .finish(),
+    )
+    .await;
+
+    // ScanDirectory + rebuild fire on the worker; give them a
+    // beat to populate `assigned_variable_types`.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let resp = call(
+        &mut service,
+        Request::build("textDocument/codeAction")
+            .id(2)
+            .params(json!({
+                "textDocument": { "uri": main_uri },
+                "range": {
+                    "start": { "line": 0, "character": 0 },
+                    "end": { "line": 0, "character": 22 }
+                },
+                "context": {
+                    "diagnostics": [{
+                        "range": {
+                            "start": { "line": 0, "character": 9 },
+                            "end": { "line": 0, "character": 17 }
+                        },
+                        "severity": 2,
+                        "source": "terraform-ls-rs",
+                        "message": "`envtype` variable has no type"
+                    }]
+                }
+            }))
+            .finish(),
+    )
+    .await;
+
+    let actions = resp["result"].as_array().cloned().unwrap_or_default();
+    assert!(
+        !actions.is_empty(),
+        "expected the `Set variable type` quick-fix; got {resp}",
+    );
+    let title = actions[0]["title"].as_str().unwrap_or("");
+    assert!(
+        title.contains("Set variable type to `string`")
+            && title.contains("tfvars / module callers"),
+        "unexpected action title: {title}",
+    );
+
+    drop(service);
+    let _ = tokio::time::timeout(Duration::from_secs(1), drainer).await;
+    fs::remove_dir_all(&workspace).ok();
+}
