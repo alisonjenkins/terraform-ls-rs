@@ -170,6 +170,12 @@ pub trait SchemaLookup {
     fn module_output(&self, _module: &str, _output: &str) -> Option<VariableType> {
         None
     }
+    /// Type of `each.value` when resolving an expression inside a
+    /// `for_each = …` block. Default `None` for callers outside
+    /// for_each scope.
+    fn each_value(&self) -> Option<VariableType> {
+        None
+    }
 }
 
 /// Schema-free convenience wrapper. Equivalent to calling
@@ -472,28 +478,52 @@ fn traversal_attr_type(tv: &Traversal, schema: &dyn SchemaLookup) -> Option<Vari
         Expression::Variable(v) => v.as_str().to_string(),
         _ => return None,
     };
-    // Collect leading `.ident` operators only; stop at index/splat.
+    // Collect `.ident` operators, skipping `[…]` indexes / splats —
+    // a `for_each` / `count` instance access (`module.X[k].out`,
+    // `aws_subnet.foo[0].id`) is invariant in the type we care about,
+    // so an Index in the middle of the chain shouldn't truncate the
+    // attribute path.
     let mut idents: Vec<&str> = Vec::new();
     for op in &tv.operators {
         match op.value() {
             TraversalOperator::GetAttr(i) => idents.push(i.as_str()),
-            _ => break,
+            TraversalOperator::Index(_)
+            | TraversalOperator::LegacyIndex(_)
+            | TraversalOperator::AttrSplat(_)
+            | TraversalOperator::FullSplat(_) => continue,
         }
     }
     if base == "var" {
         // `var.<name>` → look up the caller's declared variable type.
         let name = *idents.first()?;
-        return schema.variable_type(name);
+        let ty = schema.variable_type(name)?;
+        return Some(drill_into_object(ty, &idents[1..]));
     }
     if base == "local" {
         let name = *idents.first()?;
-        return schema.local_shape(name);
+        let ty = schema.local_shape(name)?;
+        return Some(drill_into_object(ty, &idents[1..]));
     }
     if base == "module" {
         // `module.<name>.<output>` → child module's output type.
         let mod_name = *idents.first()?;
         let output = *idents.get(1)?;
-        return schema.module_output(mod_name, output);
+        let ty = schema.module_output(mod_name, output)?;
+        return Some(drill_into_object(ty, &idents[2..]));
+    }
+    if base == "each" {
+        // `each.key` is always string in `for_each` scope.
+        // `each.value[.<field>...]` resolves through the for_each
+        // collection's element type.
+        let what = *idents.first()?;
+        if what == "key" {
+            return Some(VariableType::Primitive(Primitive::String));
+        }
+        if what == "value" {
+            let ty = schema.each_value()?;
+            return Some(drill_into_object(ty, &idents[1..]));
+        }
+        return None;
     }
     if base == "data" {
         // data.<type>.<name>.<attr…> — attr is idents[2].
@@ -569,6 +599,28 @@ fn for_expr_body_via_schema(
 
 fn is_resource_type(s: &str) -> bool {
     s.contains('_')
+}
+
+/// Walk a chain of `.field` accessors against an inferred value
+/// shape, descending one level per ident. `Object` lookups return
+/// the named field; `Map(T)`/`List(T)`/`Set(T)` return their
+/// element type for the next step. Anything else collapses to
+/// `Any`. Empty `path` returns the input unchanged — used as the
+/// no-op for traversals that already resolved to their target.
+pub(crate) fn drill_into_object(mut ty: VariableType, path: &[&str]) -> VariableType {
+    for ident in path {
+        ty = match ty {
+            VariableType::Object(fields) => fields
+                .get(*ident)
+                .cloned()
+                .unwrap_or(VariableType::Any),
+            VariableType::Map(inner) | VariableType::List(inner) | VariableType::Set(inner) => {
+                *inner
+            }
+            _ => VariableType::Any,
+        };
+    }
+    ty
 }
 
 /// Check whether a value whose inferred shape is `actual` satisfies
