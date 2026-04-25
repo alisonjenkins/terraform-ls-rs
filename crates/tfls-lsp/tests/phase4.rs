@@ -624,3 +624,71 @@ async fn end_to_end_envtype_inference_via_subdir_tfvars() {
 
     fs::remove_dir_all(&workspace).ok();
 }
+
+#[tokio::test]
+async fn code_action_fix_all_inserts_types_for_every_untyped_variable() {
+    // Three untyped variables in one file. Two have defaults that
+    // imply a concrete type; one has nothing. The fix-all action
+    // should produce a single workspace edit that types both
+    // resolvable variables and skips the unresolvable one.
+    let u = uri("file:///mod/main.tf");
+    let src = concat!(
+        "variable \"region\" {\n",
+        "  default = \"us-east-1\"\n",
+        "}\n",
+        "variable \"port\" {\n",
+        "  default = 8080\n",
+        "}\n",
+        "variable \"unknown\" {}\n",
+        "output \"r\" { value = var.region }\n",
+        "output \"p\" { value = var.port }\n",
+        "output \"u\" { value = var.unknown }\n",
+    );
+    let backend = fresh_backend(src, &u);
+
+    // Trigger code_action with NO context diagnostics — the fix-all
+    // action is a source-level action that surfaces independently.
+    let resp = tfls_lsp::handlers::code_action::code_action(
+        &backend,
+        CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: u.clone() },
+            range: Range {
+                start: Position::new(0, 0),
+                end: Position::new(0, 0),
+            },
+            context: CodeActionContext {
+                diagnostics: vec![],
+                only: None,
+                trigger_kind: None,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        },
+    )
+    .await
+    .expect("ok")
+    .expect("some response");
+
+    let fix_all = resp
+        .iter()
+        .find_map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca)
+                if ca.title.starts_with("Set variable types: infer") =>
+            {
+                Some(ca)
+            }
+            _ => None,
+        })
+        .expect("fix-all action present");
+
+    let edits = fix_all
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .and_then(|c| c.get(&u))
+        .expect("edits for this uri");
+    assert_eq!(edits.len(), 2, "should fix exactly 2 of 3 variables");
+    let combined: String = edits.iter().map(|e| e.new_text.as_str()).collect();
+    assert!(combined.contains("type = string"));
+    assert!(combined.contains("type = number"));
+}

@@ -54,6 +54,17 @@ pub async fn code_action(
         }
     }
 
+    // "Fix all" — single action that adds `type = …` to every
+    // untyped variable in the file with inferable type. Surfaced
+    // independently of `params.context.diagnostics` so the user
+    // can invoke it from a generic source-action menu without
+    // having to position the cursor on a specific diagnostic.
+    if let Some(action) =
+        make_fix_all_variable_types_action(&uri, body, &doc.rope, &doc.symbols, &backend.state)
+    {
+        actions.push(CodeActionOrCommand::CodeAction(action));
+    }
+
     if actions.is_empty() { Ok(None) } else { Ok(Some(actions)) }
 }
 
@@ -298,6 +309,90 @@ fn make_insert_variable_type_action(
             inferred,
             tfls_core::variable_type::VariableType::Primitive(_)
         )),
+        ..Default::default()
+    })
+}
+
+/// Walk every `variable` block in the file. For each one missing a
+/// `type` attribute that has a concrete inferable shape (default
+/// literal, tfvars assignment, or module-caller value), produce a
+/// single combined `CodeAction` whose `WorkspaceEdit` inserts
+/// `type = …` into all of them at once.
+///
+/// Returns `None` when the file has no fixable variables — the
+/// handler then skips this action so the menu doesn't show a
+/// no-op entry.
+fn make_fix_all_variable_types_action(
+    uri: &Url,
+    body: &Body,
+    rope: &Rope,
+    symbols: &tfls_core::SymbolTable,
+    state: &tfls_state::StateStore,
+) -> Option<CodeAction> {
+    let module_dir = crate::handlers::util::parent_dir(uri);
+    let mut edits: Vec<TextEdit> = Vec::new();
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else { continue };
+        if block.ident.as_str() != "variable" {
+            continue;
+        }
+        if block_has_attribute(block, "type") {
+            continue;
+        }
+        let Some(name) = block.labels.first().and_then(label_str) else {
+            continue;
+        };
+        // Same priority order as the per-diagnostic action:
+        // 1. variable's own `default = …`
+        // 2. merged tfvars / module-caller assignments
+        let inferred_from_default = symbols
+            .variable_defaults
+            .get(name)
+            .filter(|t| is_actionable_inference(t))
+            .cloned();
+        let inferred = inferred_from_default.or_else(|| {
+            let dir = module_dir.as_deref()?;
+            let merged = state.merged_assigned_type(dir, name)?;
+            if !is_actionable_inference(&merged) {
+                return None;
+            }
+            Some(merged)
+        });
+        let Some(ty) = inferred else { continue };
+
+        let Some((insert_pos, prefix)) = insertion_position(block, rope) else {
+            continue;
+        };
+        let new_text = format!("{prefix}  type = {ty}\n");
+        edits.push(TextEdit {
+            range: Range {
+                start: insert_pos,
+                end: insert_pos,
+            },
+            new_text,
+        });
+    }
+    if edits.is_empty() {
+        return None;
+    }
+    let count = edits.len();
+    let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    changes.insert(uri.clone(), edits);
+    Some(CodeAction {
+        title: format!(
+            "Set variable types: infer `type = …` for {count} untyped variable{plural}",
+            plural = if count == 1 { "" } else { "s" },
+        ),
+        // `source.fixAll` lets clients trigger this from a
+        // generic "fix all" / "source action" menu without
+        // requiring a specific diagnostic at the cursor.
+        kind: Some(CodeActionKind::SOURCE_FIX_ALL),
+        diagnostics: None,
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        is_preferred: None,
         ..Default::default()
     })
 }
