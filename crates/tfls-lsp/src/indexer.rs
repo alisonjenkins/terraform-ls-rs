@@ -1171,7 +1171,40 @@ impl tfls_core::variable_type::SchemaLookup for CallerScopedLookup<'_> {
         &self,
         name: &str,
     ) -> Option<tfls_core::variable_type::VariableType> {
-        self.with_caller_dir_symbols(|sym| sym.local_shapes.get(name).cloned())
+        // Recompute the local's shape AT QUERY TIME against the
+        // current schema lookup. The cached `local_shapes` on the
+        // SymbolTable was populated at parse time via the
+        // schema-free `parse_value_shape`, so any `aws_X.attr`
+        // inside the local's value collapsed to `Any`. Walking the
+        // body fresh — with `self` as the SchemaLookup — picks up
+        // resource/data attribute resolution + recursive var/local
+        // chains.
+        for entry in self.state.documents.iter() {
+            let Ok(p) = entry.key().to_file_path() else { continue };
+            if p.parent() != Some(self.caller_dir) {
+                continue;
+            }
+            let Some(body) = entry.value().parsed.body.as_ref() else { continue };
+            for s in body.iter() {
+                let Some(block) = s.as_block() else { continue };
+                if block.ident.as_str() != "locals" {
+                    continue;
+                }
+                for sub in block.body.iter() {
+                    let Some(attr) = sub.as_attribute() else { continue };
+                    if attr.key.as_str() != name {
+                        continue;
+                    }
+                    return Some(
+                        tfls_core::variable_type::parse_value_shape_with_schema(
+                            &attr.value,
+                            self,
+                        ),
+                    );
+                }
+            }
+        }
+        None
     }
     fn each_value(&self) -> Option<tfls_core::variable_type::VariableType> {
         self.each_value.clone()

@@ -363,22 +363,38 @@ pub fn parse_value_shape_with_schema(
                     }
                 }
                 "lookup" => {
-                    // `lookup(map, key, default?)` returns the map's
-                    // value type. Pull from first arg if it's a map.
-                    // If the map's value type isn't homogeneous (or
-                    // the first arg isn't a map at all — e.g.
-                    // `each.value` from a heterogeneous for_each),
-                    // fall back to the third arg's type. Common
-                    // pattern in user code:
+                    // `lookup(map, key, default?)` returns the value
+                    // type at `key` within `map`. Resolution order:
                     //
-                    //     auth_lambda_edge_arn = lookup(
-                    //         each.value, "auth_lambda_edge_arn", null)
-                    //     spa_mode = lookup(each.value, "spa_mode", false)
-                    //
-                    // The third arg pins the expected type when
-                    // the dict is heterogeneous.
-                    if let Some(first) = call.args.iter().next() {
-                        match parse_value_shape_with_schema(first, schema) {
+                    //  1. If `key` is a literal string AND `map`
+                    //     resolves to an `Object({…})` that has that
+                    //     key, return the field's type. Covers the
+                    //     `lookup(each.value, "auth_lambda_edge_arn",
+                    //     null)` pattern — `each.value` is the
+                    //     merged shape of `for_each`'s collection,
+                    //     and we already know which fields it has.
+                    //  2. Otherwise, if `map` is homogeneous
+                    //     (`Map(T)` or all-equal `Object` values),
+                    //     return that common element type.
+                    //  3. Otherwise, fall back to the third arg's
+                    //     concrete type when present.
+                    //  4. `Any` if all of the above fail.
+                    let mut args_iter = call.args.iter();
+                    let map_arg = args_iter.next();
+                    let key_arg = args_iter.next();
+                    let default_arg = args_iter.next();
+
+                    if let Some(map_expr) = map_arg {
+                        let map_ty = parse_value_shape_with_schema(map_expr, schema);
+                        if let Some(Expression::String(key_str)) = key_arg {
+                            let key = key_str.value().as_str();
+                            if let VariableType::Object(fields) = &map_ty {
+                                if let Some(t) = fields.get(key) {
+                                    return t.clone();
+                                }
+                            }
+                        }
+                        match map_ty {
                             VariableType::Map(inner) => return *inner,
                             VariableType::Object(fields) => {
                                 let mut iter = fields.values();
@@ -392,7 +408,7 @@ pub fn parse_value_shape_with_schema(
                             _ => {}
                         }
                     }
-                    if let Some(default) = call.args.iter().nth(2) {
+                    if let Some(default) = default_arg {
                         let t = parse_value_shape_with_schema(default, schema);
                         if !matches!(&t, VariableType::Any) {
                             return t;
