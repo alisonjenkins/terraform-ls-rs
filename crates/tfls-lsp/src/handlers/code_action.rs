@@ -204,12 +204,24 @@ fn make_insert_variable_type_action(
     state: &tfls_state::StateStore,
 ) -> Option<CodeAction> {
     let var_name = missing_attr_name(&diag.message)?.to_string();
-    let block = find_variable_block(body, &var_name)?;
+    let Some(block) = find_variable_block(body, &var_name) else {
+        tracing::info!(
+            uri = %uri,
+            var = %var_name,
+            "code-action infer-type: variable block not found",
+        );
+        return None;
+    };
 
     // Bail out if the block already has a `type` attribute — covers
     // the stale-diagnostic case where the user fixed the warning by
     // hand but the client still has it cached.
     if block_has_attribute(block, "type") {
+        tracing::info!(
+            uri = %uri,
+            var = %var_name,
+            "code-action infer-type: block already has type, skipping",
+        );
         return None;
     }
 
@@ -227,6 +239,18 @@ fn make_insert_variable_type_action(
         .get(&var_name)
         .filter(|t| is_actionable_inference(t))
         .cloned();
+    let module_dir_dbg = crate::handlers::util::parent_dir(uri);
+    let merged_dbg = module_dir_dbg
+        .as_deref()
+        .and_then(|d| state.merged_assigned_type(d, &var_name));
+    tracing::info!(
+        uri = %uri,
+        var = %var_name,
+        module_dir = ?module_dir_dbg,
+        from_default = ?inferred_from_default,
+        from_merged = ?merged_dbg,
+        "code-action infer-type: lookup",
+    );
     let inferred = inferred_from_default.or_else(|| {
         let module_dir = crate::handlers::util::parent_dir(uri)?;
         let merged = state.merged_assigned_type(&module_dir, &var_name)?;
