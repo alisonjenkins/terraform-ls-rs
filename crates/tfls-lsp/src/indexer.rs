@@ -1004,6 +1004,7 @@ async fn scan_files_parallel(
 /// caller or deleted tfvars file doesn't leave a stale type
 /// hanging around.
 fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
+    #[allow(unused_imports)]
     use std::collections::HashMap;
     #[allow(unused_imports)]
     use tfls_core::variable_type::{VariableType, parse_value_shape_with_schema};
@@ -1018,22 +1019,20 @@ fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
 
     // Collect target_dir → (var_name → list of types) so we can
     // replace each affected dir's entry atomically at the end.
+    #[allow(unused_mut)]
     let mut staged: HashMap<PathBuf, HashMap<String, Vec<VariableType>>> = HashMap::new();
 
     // 1. Tfvars in `dir` → assignments target `dir` itself.
+    //
+    // BISECT step C: keep discovery, skip read_to_string + parse_tfvars.
+    // If diagnostics return → file read or parse is the culprit.
+    // If diagnostics still gone → discovery is the culprit.
     if let Ok(tfvars) = tfls_walker::discover_tfvars_files_in_dir(dir) {
-        let mut for_dir: HashMap<String, Vec<VariableType>> = HashMap::new();
-        for path in tfvars {
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            for (name, ty) in tfls_parser::parse_tfvars(&text) {
-                for_dir.entry(name).or_default().push(ty);
-            }
-        }
-        if !for_dir.is_empty() {
-            staged.insert(dir.to_path_buf(), for_dir);
-        }
+        tracing::info!(
+            dir = %dir.display(),
+            count = tfvars.len(),
+            "rebuild_assigned_variable_types: discovered tfvars (read+parse skipped)",
+        );
     }
 
     // 2. Module calls authored in `.tf` files in `dir`. Each
