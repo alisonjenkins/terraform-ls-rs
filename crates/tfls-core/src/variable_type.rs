@@ -365,6 +365,18 @@ pub fn parse_value_shape_with_schema(
                 "lookup" => {
                     // `lookup(map, key, default?)` returns the map's
                     // value type. Pull from first arg if it's a map.
+                    // If the map's value type isn't homogeneous (or
+                    // the first arg isn't a map at all — e.g.
+                    // `each.value` from a heterogeneous for_each),
+                    // fall back to the third arg's type. Common
+                    // pattern in user code:
+                    //
+                    //     auth_lambda_edge_arn = lookup(
+                    //         each.value, "auth_lambda_edge_arn", null)
+                    //     spa_mode = lookup(each.value, "spa_mode", false)
+                    //
+                    // The third arg pins the expected type when
+                    // the dict is heterogeneous.
                     if let Some(first) = call.args.iter().next() {
                         match parse_value_shape_with_schema(first, schema) {
                             VariableType::Map(inner) => return *inner,
@@ -378,6 +390,12 @@ pub fn parse_value_shape_with_schema(
                                 }
                             }
                             _ => {}
+                        }
+                    }
+                    if let Some(default) = call.args.iter().nth(2) {
+                        let t = parse_value_shape_with_schema(default, schema);
+                        if !matches!(&t, VariableType::Any) {
+                            return t;
                         }
                     }
                     VariableType::Any
