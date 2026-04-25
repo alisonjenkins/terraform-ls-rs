@@ -51,6 +51,12 @@ pub async fn code_action(
             ) {
                 actions.push(CodeActionOrCommand::CodeAction(action));
             }
+        } else if is_deprecated_interpolation(diag) {
+            if let Some(action) =
+                make_unwrap_interpolation_action(&uri, diag, &doc.rope)
+            {
+                actions.push(CodeActionOrCommand::CodeAction(action));
+            }
         }
     }
 
@@ -204,6 +210,82 @@ fn is_missing_variable_type(diag: &Diagnostic) -> bool {
     diag.severity == Some(DiagnosticSeverity::WARNING)
         && diag.source.as_deref() == Some("terraform-ls-rs")
         && diag.message.contains("variable has no type")
+}
+
+/// Match the `terraform_deprecated_interpolation` warning so we
+/// can offer a rewrite that drops the `"${…}"` wrapper.
+fn is_deprecated_interpolation(diag: &Diagnostic) -> bool {
+    diag.severity == Some(DiagnosticSeverity::WARNING)
+        && diag.source.as_deref() == Some("terraform-ls-rs")
+        && diag
+            .message
+            .contains("interpolation-only expressions are deprecated")
+}
+
+/// Quick-fix for `terraform_deprecated_interpolation`. Replaces
+/// the entire `"${EXPR}"` slice with just `EXPR`. The diagnostic
+/// range covers the whole string template, so we slice the rope
+/// at that range, strip the leading `"${` (with optional
+/// whitespace) and the trailing `}"`, and emit a `TextEdit` whose
+/// `new_text` is the inner expression text.
+fn make_unwrap_interpolation_action(
+    uri: &Url,
+    diag: &Diagnostic,
+    rope: &Rope,
+) -> Option<CodeAction> {
+    let start = tfls_parser::lsp_position_to_byte_offset(rope, diag.range.start).ok()?;
+    let end = tfls_parser::lsp_position_to_byte_offset(rope, diag.range.end).ok()?;
+    if end <= start {
+        return None;
+    }
+    let slice: String = rope.byte_slice(start..end).to_string();
+    let trimmed = slice.trim();
+    let dollar_brace = trimmed.find("${")?;
+    let inner_start = dollar_brace + "${".len();
+    // Templates can't nest `${…}` without literal text between, but
+    // the inner expression CAN contain `}` (e.g. an object literal
+    // `{a=1}`), so we balance braces forward from the opening.
+    let bytes = trimmed.as_bytes();
+    let mut depth = 1i32;
+    let mut i = inner_start;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if depth != 0 {
+        return None;
+    }
+    let inner = trimmed[inner_start..i].trim();
+    if inner.is_empty() {
+        return None;
+    }
+
+    let edit = TextEdit {
+        range: diag.range,
+        new_text: inner.to_string(),
+    };
+    let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    changes.insert(uri.clone(), vec![edit]);
+    Some(CodeAction {
+        title: format!("Unwrap interpolation: `{inner}`"),
+        kind: Some(CodeActionKind::QUICKFIX),
+        diagnostics: Some(vec![diag.clone()]),
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        is_preferred: Some(true),
+        ..Default::default()
+    })
 }
 
 fn make_insert_variable_type_action(

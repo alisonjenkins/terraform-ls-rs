@@ -692,3 +692,26 @@ async fn code_action_fix_all_inserts_types_for_every_untyped_variable() {
     assert!(combined.contains("type = string"));
     assert!(combined.contains("type = number"));
 }
+
+#[tokio::test]
+async fn code_action_unwraps_deprecated_interpolation() {
+    let u = uri("file:///mod/main.tf");
+    let src = "variable \"region\" { default = \"x\" }\n\
+               output \"r\" { value = \"${var.region}\" }\n";
+    let backend = fresh_backend(src, &u);
+    let actions = code_actions_for(&backend, &u, "interpolation-only").await;
+    let new_text = first_inserted_text(&actions, &u);
+    assert_eq!(new_text, "var.region", "got: {new_text:?}");
+}
+
+#[tokio::test]
+async fn code_action_unwraps_interpolation_with_inner_braces() {
+    // Object literal inside `${…}` shouldn't confuse the brace
+    // balancer.
+    let u = uri("file:///mod/main.tf");
+    let src = "output \"r\" { value = \"${tomap({a=1})}\" }\n";
+    let backend = fresh_backend(src, &u);
+    let actions = code_actions_for(&backend, &u, "interpolation-only").await;
+    let new_text = first_inserted_text(&actions, &u);
+    assert_eq!(new_text, "tomap({a=1})", "got: {new_text:?}");
+}
