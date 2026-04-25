@@ -487,76 +487,118 @@ pub fn parse_value_shape_with_schema(
     }
 }
 
-/// Resolve `<resource_type>.<name>.<attr>` /
-/// `data.<resource_type>.<name>.<attr>` traversals against the
-/// schema oracle. Also handles `var.<name>` and `local.<name>` via
-/// the optional caller-scope methods on [`SchemaLookup`].
+/// Resolve a `Traversal` to a `VariableType`. Two-phase:
+///
+/// 1. **Header resolution.** Consume the leading 1–3 `.ident`
+///    operators that identify what the traversal is rooted at —
+///    `var.<n>` (1 ident), `local.<n>` (1), `module.<n>.<o>` (2),
+///    `each.<key|value>` (1), `data.<type>.<name>.<attr>` (3),
+///    `<resource_type>.<name>.<attr>` (2). Look up the resulting
+///    type via the appropriate [`SchemaLookup`] method.
+///
+/// 2. **Post-header drill.** Walk every remaining operator
+///    chronologically and refine the type:
+///    - `.field` on `Object({…})` → the named field's type.
+///    - `[…]` on `List(T)` / `Set(T)` / `Map(T)` → `T`.
+///    - `[…]` on `Tuple([…])` → first element (we don't track
+///      index values; we'd need a constant-folder for exact
+///      element selection).
+///    - Index / splat operators between header GetAttrs (an
+///      instance access for `for_each` / `count` like
+///      `module.X[k].out` or `aws_subnet.foo[0].id`) are
+///      type-invariant and skipped.
 fn traversal_attr_type(tv: &Traversal, schema: &dyn SchemaLookup) -> Option<VariableType> {
     let base = match &tv.expr {
         Expression::Variable(v) => v.as_str().to_string(),
         _ => return None,
     };
-    // Collect `.ident` operators, skipping `[…]` indexes / splats —
-    // a `for_each` / `count` instance access (`module.X[k].out`,
-    // `aws_subnet.foo[0].id`) is invariant in the type we care about,
-    // so an Index in the middle of the chain shouldn't truncate the
-    // attribute path.
     let mut idents: Vec<&str> = Vec::new();
     for op in &tv.operators {
-        match op.value() {
-            TraversalOperator::GetAttr(i) => idents.push(i.as_str()),
-            TraversalOperator::Index(_)
-            | TraversalOperator::LegacyIndex(_)
-            | TraversalOperator::AttrSplat(_)
-            | TraversalOperator::FullSplat(_) => continue,
+        if let TraversalOperator::GetAttr(i) = op.value() {
+            idents.push(i.as_str());
         }
     }
-    if base == "var" {
-        // `var.<name>` → look up the caller's declared variable type.
+
+    // Determine the header type and how many leading GetAttrs were
+    // consumed by the SchemaLookup dispatch.
+    let (ty, header_get_attrs) = if base == "var" {
         let name = *idents.first()?;
-        let ty = schema.variable_type(name)?;
-        return Some(drill_into_object(ty, &idents[1..]));
-    }
-    if base == "local" {
+        (schema.variable_type(name)?, 1)
+    } else if base == "local" {
         let name = *idents.first()?;
-        let ty = schema.local_shape(name)?;
-        return Some(drill_into_object(ty, &idents[1..]));
-    }
-    if base == "module" {
-        // `module.<name>.<output>` → child module's output type.
-        let mod_name = *idents.first()?;
-        let output = *idents.get(1)?;
-        let ty = schema.module_output(mod_name, output)?;
-        return Some(drill_into_object(ty, &idents[2..]));
-    }
-    if base == "each" {
-        // `each.key` is always string in `for_each` scope.
-        // `each.value[.<field>...]` resolves through the for_each
-        // collection's element type.
+        (schema.local_shape(name)?, 1)
+    } else if base == "module" {
+        let m = *idents.first()?;
+        let o = *idents.get(1)?;
+        (schema.module_output(m, o)?, 2)
+    } else if base == "each" {
         let what = *idents.first()?;
         if what == "key" {
             return Some(VariableType::Primitive(Primitive::String));
         }
         if what == "value" {
-            let ty = schema.each_value()?;
-            return Some(drill_into_object(ty, &idents[1..]));
+            (schema.each_value()?, 1)
+        } else {
+            return None;
         }
-        return None;
-    }
-    if base == "data" {
-        // data.<type>.<name>.<attr…> — attr is idents[2].
-        let resource_type = *idents.first()?;
+    } else if base == "data" {
+        let rt = *idents.first()?;
         let _name = idents.get(1)?;
         let attr = *idents.get(2)?;
-        return schema.data_source_attr(resource_type, attr);
-    }
-    if !is_resource_type(&base) {
+        (schema.data_source_attr(rt, attr)?, 3)
+    } else if is_resource_type(&base) {
+        let _name = idents.first()?;
+        let attr = *idents.get(1)?;
+        (schema.resource_attr(&base, attr)?, 2)
+    } else {
         return None;
+    };
+
+    // Walk ops chronologically; drill into `ty` for each operator
+    // past the header.
+    let mut consumed = 0usize;
+    let mut current = ty;
+    for op in &tv.operators {
+        match op.value() {
+            TraversalOperator::GetAttr(i) => {
+                if consumed < header_get_attrs {
+                    consumed += 1;
+                    continue;
+                }
+                current = match current {
+                    VariableType::Object(fields) => {
+                        fields.get(i.as_str()).cloned().unwrap_or(VariableType::Any)
+                    }
+                    VariableType::Map(inner) | VariableType::List(inner) | VariableType::Set(inner) => {
+                        *inner
+                    }
+                    _ => VariableType::Any,
+                };
+            }
+            TraversalOperator::Index(_) | TraversalOperator::LegacyIndex(_) => {
+                if consumed < header_get_attrs {
+                    // Instance access between header GetAttrs —
+                    // type-invariant, skip.
+                    continue;
+                }
+                current = match current {
+                    VariableType::List(inner)
+                    | VariableType::Set(inner)
+                    | VariableType::Map(inner) => *inner,
+                    VariableType::Tuple(items) if !items.is_empty() => items[0].clone(),
+                    _ => VariableType::Any,
+                };
+            }
+            TraversalOperator::AttrSplat(_) | TraversalOperator::FullSplat(_) => {
+                // `aws_*[*].id` — splat fans out across a list. The
+                // result is a list of the post-splat attr type.
+                // We don't yet track this precisely; the surrounding
+                // type stays as it was.
+                continue;
+            }
+        }
     }
-    // <type>.<name>.<attr…> — attr is idents[1].
-    let _name = idents.first()?;
-    let attr = *idents.get(1)?;
-    schema.resource_attr(&base, attr)
+    Some(current)
 }
 
 /// Recognise `[for v in <resource>.<name> : v.<attr>]` (or the
@@ -710,27 +752,6 @@ pub fn merge_observations(obs: &[VariableType]) -> Option<VariableType> {
     Some(iter.fold(first, |acc, t| merge_types(&acc, t)))
 }
 
-/// Walk a chain of `.field` accessors against an inferred value
-/// shape, descending one level per ident. `Object` lookups return
-/// the named field; `Map(T)`/`List(T)`/`Set(T)` return their
-/// element type for the next step. Anything else collapses to
-/// `Any`. Empty `path` returns the input unchanged — used as the
-/// no-op for traversals that already resolved to their target.
-pub(crate) fn drill_into_object(mut ty: VariableType, path: &[&str]) -> VariableType {
-    for ident in path {
-        ty = match ty {
-            VariableType::Object(fields) => fields
-                .get(*ident)
-                .cloned()
-                .unwrap_or(VariableType::Any),
-            VariableType::Map(inner) | VariableType::List(inner) | VariableType::Set(inner) => {
-                *inner
-            }
-            _ => VariableType::Any,
-        };
-    }
-    ty
-}
 
 /// Check whether a value whose inferred shape is `actual` satisfies
 /// the declared `type` constraint. `Any` on either side is a free
