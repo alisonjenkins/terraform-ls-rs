@@ -33,7 +33,7 @@ async-trait = "0.1"
 
 # LSP
 tower-lsp = "0.20"
-lsp-types = "0.94"
+lsp-types = "0.97"
 
 # HCL parsing
 hcl-edit = "0.9"
