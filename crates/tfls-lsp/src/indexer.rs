@@ -525,7 +525,10 @@ async fn bulk_workspace_scan(
     // reads to suggest `type = …` for variables that have no
     // `default`.
     for dir in dirs {
-        rebuild_assigned_variable_types_for_dir(state, &dir);
+        // TODO(diag-regression): bisect — disabled per plan
+        // /home/ali/.claude/plans/is-it-possible-for-expressive-cook.md
+        // Suspected cause of post-bulk diagnostics dropout.
+        // rebuild_assigned_variable_types_for_dir(state, &dir);
         state.mark_scan_completed(dir);
     }
 
@@ -755,7 +758,10 @@ async fn scan_dir_into_state(
             // now; per-dir scans index silently.
             scan_files_parallel(state, client, files, /* with_progress */ false).await;
             state.mark_scan_completed(dir.to_path_buf());
-            rebuild_assigned_variable_types_for_dir(state, dir);
+            // TODO(diag-regression): bisect — disabled per plan
+            // /home/ali/.claude/plans/is-it-possible-for-expressive-cook.md
+            // Suspected cause of per-dir scan diagnostics dropout.
+            // rebuild_assigned_variable_types_for_dir(state, dir);
             enqueue_child_module_scans(state, queue, dir);
             // Cross-file symbols just changed — any open buffer in
             // this directory (or referencing this directory via a
@@ -1001,6 +1007,8 @@ async fn scan_files_parallel(
 /// affected target dirs from a current snapshot, so a removed
 /// caller or deleted tfvars file doesn't leave a stale type
 /// hanging around.
+// Currently disabled — see TODO(diag-regression) at call sites.
+#[allow(dead_code)]
 fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
     use std::collections::HashMap;
     use tfls_core::variable_type::{VariableType, parse_value_shape_with_schema};
