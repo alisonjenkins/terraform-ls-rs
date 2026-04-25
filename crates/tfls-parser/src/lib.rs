@@ -10,6 +10,7 @@ pub mod json;
 pub mod parse;
 pub mod position;
 pub mod references;
+pub mod safe;
 pub mod tfvars;
 pub mod traversal;
 
@@ -18,6 +19,7 @@ pub use fallback_references::extract_references_fallback;
 pub use fallback_symbols::extract_symbols_fallback;
 pub use json::parse_json_source;
 pub use parse::{ParsedFile, parse_source, parse_source_for_uri};
+pub use safe::{BodyParseError, ParsePanic, parse_body};
 pub use position::{
     byte_offset_to_lsp_position, hcl_span_to_lsp_range, lsp_position_to_byte_offset,
 };

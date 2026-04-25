@@ -7,11 +7,18 @@
 //! return a `name → VariableType` map. The LSP layer then uses this
 //! to back the "infer variable type" code action when a variable
 //! has no `default` but is assigned in one or more tfvars files.
+//!
+//! Goes through [`crate::safe::parse_body`] like every other
+//! hcl-edit parser entry point — see that module for the full
+//! list of upstream panic sites we guard against. A single bad
+//! tfvars file becomes an empty result + a structured `error!` log,
+//! never an aborted tokio task.
 
 use std::collections::HashMap;
 
-use hcl_edit::structure::Body;
 use tfls_core::variable_type::{VariableType, parse_value_shape};
+
+use crate::safe::parse_body;
 
 /// Parse a tfvars HCL source body and return the inferred type for
 /// each top-level assignment.
@@ -23,9 +30,11 @@ use tfls_core::variable_type::{VariableType, parse_value_shape};
 /// are excluded for the same ambiguity reason as the
 /// default-driven inference path.
 pub fn parse_tfvars(source: &str) -> HashMap<String, VariableType> {
-    let body: Body = match source.parse() {
-        Ok(b) => b,
-        Err(_) => return HashMap::new(),
+    let Ok(body) = parse_body(source) else {
+        // Either a normal hcl-edit syntax error (returned `Err`) or a
+        // panic ferried via `catch_unwind` (already logged in
+        // `safe::catch`). Either way, we have nothing to infer from.
+        return HashMap::new();
     };
     let mut out: HashMap<String, VariableType> = HashMap::new();
     for structure in body.iter() {

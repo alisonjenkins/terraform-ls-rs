@@ -2645,6 +2645,7 @@ name = "tfls-format"
 version = "0.1.0"
 dependencies = [
  "hcl-edit",
+ "tfls-parser",
  "thiserror 2.0.18",
 ]
 

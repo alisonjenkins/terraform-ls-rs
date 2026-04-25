@@ -12,3 +12,4 @@ workspace = true
 [dependencies]
 thiserror.workspace = true
 hcl-edit.workspace = true
+tfls-parser = { path = "../tfls-parser" }

@@ -1,14 +1,13 @@
 //! HCL parsing wrapper around `hcl-edit`.
 
-use hcl_edit::structure::Body;
-
 use crate::error::ParseError;
+use crate::safe::{BodyParseError, parse_body};
 
 /// Result of parsing a single `.tf` file.
 #[derive(Debug)]
 pub struct ParsedFile {
     /// The parsed body — present even on partial failure if recoverable.
-    pub body: Option<Body>,
+    pub body: Option<hcl_edit::structure::Body>,
     /// Parse errors, if any.
     pub errors: Vec<ParseError>,
 }
@@ -23,13 +22,17 @@ impl ParsedFile {
 ///
 /// On success, returns the parsed body with no errors. On failure, the body
 /// may be absent and `errors` will contain one or more diagnostics.
+///
+/// Goes through [`crate::safe::parse_body`] to isolate panics from
+/// hcl-edit's parser — see that module's docstring for the full
+/// list of upstream `.unwrap()` sites we're guarding against.
 pub fn parse_source(source: &str) -> ParsedFile {
-    match source.parse::<Body>() {
+    match parse_body(source) {
         Ok(body) => ParsedFile {
             body: Some(body),
             errors: Vec::new(),
         },
-        Err(e) => {
+        Err(BodyParseError::Syntax(e)) => {
             let message = e.to_string();
             ParsedFile {
                 body: None,
@@ -39,6 +42,14 @@ pub fn parse_source(source: &str) -> ParsedFile {
                 }],
             }
         }
+        Err(BodyParseError::Panicked(p)) => ParsedFile {
+            body: None,
+            errors: vec![ParseError::Panicked {
+                message: p.message,
+                source_excerpt: p.source_excerpt,
+                source_bytes: p.source_bytes,
+            }],
+        },
     }
 }
 

@@ -18,13 +18,16 @@ pub use error::FormatError;
 ///
 /// Returns the formatted text if parsing succeeds; otherwise propagates
 /// the parse error (refusing to touch invalid source).
+///
+/// Goes through [`tfls_parser::parse_body`] to isolate panics from
+/// hcl-edit's parser — see `tfls_parser::safe` for the upstream
+/// audit.
 pub fn format_source(source: &str) -> Result<String, FormatError> {
-    // Validate via a real HCL parse so we never rewrite malformed text.
-    source
-        .parse::<hcl_edit::structure::Body>()
-        .map_err(FormatError::Parse)?;
-
-    Ok(apply_normalisations(source))
+    match tfls_parser::parse_body(source) {
+        Ok(_body) => Ok(apply_normalisations(source)),
+        Err(tfls_parser::BodyParseError::Syntax(e)) => Err(FormatError::Parse(e)),
+        Err(tfls_parser::BodyParseError::Panicked(p)) => Err(FormatError::Panicked(p)),
+    }
 }
 
 fn apply_normalisations(source: &str) -> String {

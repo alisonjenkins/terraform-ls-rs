@@ -9,6 +9,19 @@ pub enum ParseError {
         source: hcl_edit::parser::Error,
     },
 
+    /// `hcl-edit`'s parser hit one of its internal `.unwrap()` /
+    /// `panic!` sites on this input. We caught the panic via
+    /// [`crate::safe::catch`] so the worker stays alive; this
+    /// variant carries enough context to triage the offending file.
+    #[error(
+        "HCL parser panicked: {message} (source: {source_bytes} bytes; excerpt: {source_excerpt:?})"
+    )]
+    Panicked {
+        message: String,
+        source_excerpt: String,
+        source_bytes: usize,
+    },
+
     #[error("failed to read file '{path}'")]
     FileRead {
         path: String,
