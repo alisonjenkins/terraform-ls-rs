@@ -1024,6 +1024,74 @@ async fn scan_files_parallel(
 /// produced by `tfls_parser::parse_body`, which catches any
 /// upstream parser panic at the source. So the indexer can call
 /// these directly without its own `catch_unwind`.
+/// Derive the element type of a `for_each` collection so
+/// `each.value` can resolve.
+///
+/// - `Map(T)` / `List(T)` / `Set(T)` → `T`.
+/// - `Object({k → V, …})` with all values equal → that shared `V`.
+///   (This covers the common dict-of-records pattern that Terraform
+///   accepts as a `for_each` value.)
+/// - `Object({…})` with heterogeneous values → return the object
+///   itself; `each.value.<field>` will drill in via
+///   [`tfls_core::variable_type::drill_into_object`], which returns
+///   the field's type when present and `Any` when absent. Drill
+///   semantics that good enough for the common
+///   `each.value.bucket_name = string` pattern even when other
+///   sites add extra fields.
+/// - Anything else → `None` (we don't claim to know).
+fn element_type_of(
+    collection: &tfls_core::variable_type::VariableType,
+) -> Option<tfls_core::variable_type::VariableType> {
+    use tfls_core::variable_type::VariableType;
+    match collection {
+        VariableType::Map(inner) | VariableType::List(inner) | VariableType::Set(inner) => {
+            Some((**inner).clone())
+        }
+        VariableType::Object(fields) => {
+            if fields.is_empty() {
+                return None;
+            }
+            // Collapse to a per-field "best-effort" object: for each
+            // field name appearing in any of the dict values, infer
+            // the type from the first value that has it. Keeps
+            // `each.value.bucket_name → string` working even when
+            // some entries omit the field.
+            let mut entries: Vec<&std::collections::BTreeMap<String, VariableType>> =
+                Vec::new();
+            for v in fields.values() {
+                if let VariableType::Object(inner) = v {
+                    entries.push(inner);
+                } else {
+                    // Non-object value — fall back to direct inner
+                    // type if all are equal.
+                    let mut iter = fields.values();
+                    let first = iter.next()?.clone();
+                    return if iter.all(|x| x == &first) {
+                        Some(first)
+                    } else {
+                        None
+                    };
+                }
+            }
+            let mut merged: std::collections::BTreeMap<String, VariableType> =
+                std::collections::BTreeMap::new();
+            for obj in &entries {
+                for (k, v) in obj.iter() {
+                    if !merged.contains_key(k) {
+                        merged.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            if merged.is_empty() {
+                None
+            } else {
+                Some(VariableType::Object(merged))
+            }
+        }
+        _ => None,
+    }
+}
+
 /// `SchemaLookup` that combines `StateStore`'s schema-aware
 /// resource / data-source attribute resolution with caller-side
 /// variable / local / module-output context. Used by section 2 of
@@ -1041,6 +1109,10 @@ async fn scan_files_parallel(
 struct CallerScopedLookup<'a> {
     state: &'a StateStore,
     caller_dir: &'a Path,
+    /// Type of `each.value` when this lookup is being used inside
+    /// a `for_each = …` module block. `None` for module blocks
+    /// without `for_each`.
+    each_value: Option<tfls_core::variable_type::VariableType>,
 }
 
 impl CallerScopedLookup<'_> {
@@ -1100,6 +1172,9 @@ impl tfls_core::variable_type::SchemaLookup for CallerScopedLookup<'_> {
         name: &str,
     ) -> Option<tfls_core::variable_type::VariableType> {
         self.with_caller_dir_symbols(|sym| sym.local_shapes.get(name).cloned())
+    }
+    fn each_value(&self) -> Option<tfls_core::variable_type::VariableType> {
+        self.each_value.clone()
     }
     fn module_output(
         &self,
@@ -1251,9 +1326,36 @@ pub fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
             // `attr = var.X` collapses to `Any` and we lose the
             // type info even though the caller's variable block
             // declares it.
+            // Resolve `for_each = …` in the caller's module block,
+            // if present. The collection's element type becomes
+            // `each.value`'s type, which lets attributes like
+            // `bucket_name = each.value.bucket_name` resolve to a
+            // concrete shape instead of `Any`.
+            let mut each_value: Option<tfls_core::variable_type::VariableType> = None;
+            for sub in block.body.iter() {
+                let Some(attr) = sub.as_attribute() else {
+                    continue;
+                };
+                if attr.key.as_str() != "for_each" {
+                    continue;
+                }
+                // Use a caller-scope lookup WITHOUT each_value for
+                // the for_each expression itself — `each` is only
+                // valid inside the block's body, not in the
+                // for_each value.
+                let scope = CallerScopedLookup {
+                    state,
+                    caller_dir: dir,
+                    each_value: None,
+                };
+                let collection = parse_value_shape_with_schema(&attr.value, &scope);
+                each_value = element_type_of(&collection);
+                break;
+            }
             let lookup = CallerScopedLookup {
                 state,
                 caller_dir: dir,
+                each_value,
             };
             let bucket = staged.entry(child_dir).or_default();
             for body_struct in block.body.iter() {
