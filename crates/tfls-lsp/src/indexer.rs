@@ -533,7 +533,6 @@ async fn bulk_workspace_scan(
     // reads to suggest `type = …` for variables that have no
     // `default`.
     for dir in dirs {
-        // BISECT step A: call site re-enabled, body short-circuited.
         rebuild_assigned_variable_types_for_dir(state, &dir);
         state.mark_scan_completed(dir);
     }
@@ -764,7 +763,6 @@ async fn scan_dir_into_state(
             // now; per-dir scans index silently.
             scan_files_parallel(state, client, files, /* with_progress */ false).await;
             state.mark_scan_completed(dir.to_path_buf());
-            // BISECT step A: call site re-enabled, body short-circuited.
             rebuild_assigned_variable_types_for_dir(state, dir);
             enqueue_child_module_scans(state, queue, dir);
             // Cross-file symbols just changed — any open buffer in
@@ -1052,13 +1050,21 @@ fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
     // attribution rule.
     if let Ok(tfvars) = tfls_walker::discover_tfvars_attributable_to(dir) {
         let mut for_dir: HashMap<String, Vec<VariableType>> = HashMap::new();
-        for path in tfvars {
-            let Ok(text) = std::fs::read_to_string(&path) else {
+        for path in &tfvars {
+            let Ok(text) = std::fs::read_to_string(path) else {
                 continue;
             };
             for (name, ty) in tfls_parser::parse_tfvars(&text) {
                 for_dir.entry(name).or_default().push(ty);
             }
+        }
+        if !tfvars.is_empty() || !for_dir.is_empty() {
+            tracing::info!(
+                dir = %dir.display(),
+                tfvars_count = tfvars.len(),
+                names = ?for_dir.keys().collect::<Vec<_>>(),
+                "rebuild_assigned_variable_types: section 1 (tfvars) staged",
+            );
         }
         if !for_dir.is_empty() {
             staged.insert(dir.to_path_buf(), for_dir);
