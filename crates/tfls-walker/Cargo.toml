@@ -17,3 +17,11 @@ notify.workspace = true
 notify-debouncer-full.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
+tempfile = "3"
+
+[[bench]]
+name = "benchmarks"
+harness = false

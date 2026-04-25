@@ -402,16 +402,20 @@ dependencies = [
  "ciborium",
  "clap",
  "criterion-plot",
+ "futures",
  "is-terminal",
  "itertools",
  "num-traits",
  "once_cell",
  "oorandom",
+ "plotters",
+ "rayon",
  "regex",
  "serde",
  "serde_derive",
  "serde_json",
  "tinytemplate",
+ "tokio",
  "walkdir",
 ]
 
@@ -1682,6 +1686,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
+name = "plotters"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5aeb6f403d7a4911efb1e33402027fc44f29b5bf6def3effcc22d7bb75f2b747"
+dependencies = [
+ "num-traits",
+ "plotters-backend",
+ "plotters-svg",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
+name = "plotters-backend"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df42e13c12958a16b3f7f4386b9ab1f3e7933914ecea48da7139435263a4172a"
+
+[[package]]
+name = "plotters-svg"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "51bae2ac328883f7acdfea3d66a7c35751187f870bc81f94563733a154d7a670"
+dependencies = [
+ "plotters-backend",
+]
+
+[[package]]
 name = "potential_utf"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2618,6 +2650,7 @@ dependencies = [
 name = "tfls-core"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "hcl-edit",
  "lsp-types",
  "serde",
@@ -2630,6 +2663,7 @@ dependencies = [
 name = "tfls-diag"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "hcl-edit",
  "lsp-types",
  "ropey",
@@ -2746,6 +2780,7 @@ dependencies = [
 name = "tfls-state"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "dashmap 6.1.0",
  "lsp-types",
  "ropey",
@@ -2765,8 +2800,10 @@ dependencies = [
 name = "tfls-walker"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "notify",
  "notify-debouncer-full",
+ "tempfile",
  "tfls-core",
  "tfls-state",
  "thiserror 2.0.18",

@@ -19,4 +19,9 @@ ropey.workspace = true
 hcl-edit.workspace = true
 
 [dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
 sonic-rs.workspace = true
+
+[[bench]]
+name = "benchmarks"
+harness = false

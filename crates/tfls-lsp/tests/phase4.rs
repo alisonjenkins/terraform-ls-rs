@@ -551,3 +551,76 @@ async fn code_action_skips_when_block_already_has_type() {
         "must not offer action when block already has type; got {actions:?}"
     );
 }
+
+/// End-to-end pin for the env-split tfvars layout the user was hitting:
+/// root module declares `variable "envtype" {}` (no type, no default),
+/// and `params/{nonprod,prod}/params.tfvars` each assign
+/// `envtype = "..."`. Confirms that `rebuild_assigned_variable_types_for_dir`
+/// stages those assignments under the root dir and the code-action
+/// handler returns the inferred quick-fix.
+#[tokio::test]
+async fn end_to_end_envtype_inference_via_subdir_tfvars() {
+    use std::fs;
+
+    // Real tmpdir — `discover_tfvars_attributable_to` walks the FS.
+    let workspace = std::env::temp_dir().join(format!(
+        "tfls-e2e-envtype-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let _ = fs::remove_dir_all(&workspace);
+    fs::create_dir_all(workspace.join("params/nonprod")).unwrap();
+    fs::create_dir_all(workspace.join("params/prod")).unwrap();
+
+    let main_tf = workspace.join("variables.tf");
+    fs::write(
+        &main_tf,
+        "variable \"envtype\" {}\n\
+         output \"e\" { value = var.envtype }\n",
+    )
+    .unwrap();
+    fs::write(
+        workspace.join("params/nonprod/params.tfvars"),
+        "envtype = \"nonprod\"\n",
+    )
+    .unwrap();
+    fs::write(
+        workspace.join("params/prod/params.tfvars"),
+        "envtype = \"prod\"\n",
+    )
+    .unwrap();
+
+    let u = Url::from_file_path(&main_tf).expect("file uri");
+    let backend = fresh_backend(
+        "variable \"envtype\" {}\noutput \"e\" { value = var.envtype }\n",
+        &u,
+    );
+
+    // Run the indexer's per-dir rebuild — same call site bulk scan
+    // and `did_open` use in production.
+    tfls_lsp::indexer::rebuild_assigned_variable_types_for_dir(&backend.state, &workspace);
+
+    // Sanity-check the staged map directly.
+    let merged = backend.state.merged_assigned_type(&workspace, "envtype");
+    assert_eq!(
+        merged,
+        Some(tfls_core::variable_type::VariableType::Primitive(
+            tfls_core::variable_type::Primitive::String
+        )),
+        "section 1 should stage envtype as String from both tfvars; got {merged:?}",
+    );
+
+    // Now confirm the full code-action path returns a quick-fix.
+    let actions = code_actions_for(&backend, &u, "variable has no type").await;
+    assert!(!actions.is_empty(), "expected quick-fix; got none");
+    let new_text = first_inserted_text(&actions, &u);
+    assert!(
+        new_text.contains("type = string"),
+        "quick-fix should insert `type = string`; got: {new_text:?}"
+    );
+
+    fs::remove_dir_all(&workspace).ok();
+}

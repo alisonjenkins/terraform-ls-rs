@@ -1024,7 +1024,7 @@ async fn scan_files_parallel(
 /// produced by `tfls_parser::parse_body`, which catches any
 /// upstream parser panic at the source. So the indexer can call
 /// these directly without its own `catch_unwind`.
-fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
+pub fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
     use std::collections::HashMap;
     use tfls_core::variable_type::{VariableType, parse_value_shape_with_schema};
 
