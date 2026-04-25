@@ -1042,8 +1042,15 @@ fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
     // replace each affected dir's entry atomically at the end.
     let mut staged: HashMap<PathBuf, HashMap<String, Vec<VariableType>>> = HashMap::new();
 
-    // 1. Tfvars in `dir` → assignments target `dir` itself.
-    if let Ok(tfvars) = tfls_walker::discover_tfvars_files_in_dir(dir) {
+    // 1. Tfvars attributable to `dir` → assignments target `dir`.
+    //
+    // Includes `dir`'s own `*.tfvars` AND any tfvars under `dir` that
+    // sit in a "tfvars-only" subdir (no `.tf` of its own — common
+    // env-split layouts like `params/nonprod/params.tfvars`). Sibling
+    // module dirs are skipped: their tfvars belong to them, not us.
+    // See `tfls_walker::discover_tfvars_attributable_to` for the full
+    // attribution rule.
+    if let Ok(tfvars) = tfls_walker::discover_tfvars_attributable_to(dir) {
         let mut for_dir: HashMap<String, Vec<VariableType>> = HashMap::new();
         for path in tfvars {
             let Ok(text) = std::fs::read_to_string(&path) else {

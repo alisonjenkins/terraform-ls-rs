@@ -156,6 +156,82 @@ pub fn discover_tfvars_files_in_dir(dir: &Path) -> Result<Vec<PathBuf>, WalkerEr
     Ok(out)
 }
 
+/// Walk `module_dir`'s subtree and return every `*.tfvars` /
+/// `*.tfvars.json` file that should be attributed to `module_dir`'s
+/// variables — i.e. files whose nearest `.tf`/`.tf.json`-bearing
+/// ancestor is `module_dir`.
+///
+/// Use case: a common Terraform layout puts environment-specific
+/// var-files under sibling subdirs that contain no `.tf` of their own
+/// (`params/nonprod/params.tfvars`, `envs/prod/terraform.tfvars`,
+/// `vars/staging.auto.tfvars`). Terraform applies these to the root
+/// module via `-var-file=`. For LSP type inference we mirror that
+/// semantic: any tfvars in a subtree that isn't itself a module
+/// (no `.tf` files in the dir) feeds the closest ancestor module.
+///
+/// Crucially, sibling MODULE dirs are skipped — a tfvars file that
+/// happens to live next to `modules/foo/main.tf` belongs to `foo`,
+/// not the parent calling `foo`. We detect this by stopping descent
+/// (and skipping tfvars discovery) at any non-root subdir that
+/// contains `.tf` / `.tf.json` files of its own.
+pub fn discover_tfvars_attributable_to(
+    module_dir: &Path,
+) -> Result<Vec<PathBuf>, WalkerError> {
+    let mut out = Vec::new();
+    let mut stack: Vec<(PathBuf, bool)> = vec![(module_dir.to_path_buf(), true)];
+    while let Some((dir, is_root)) = stack.pop() {
+        let entries = std::fs::read_dir(&dir).map_err(|source| WalkerError::DirectoryRead {
+            path: dir.display().to_string(),
+            source,
+        })?;
+        let mut subdirs: Vec<PathBuf> = Vec::new();
+        let mut tfvars: Vec<PathBuf> = Vec::new();
+        let mut has_tf = false;
+        for entry in entries {
+            let entry = entry.map_err(|source| WalkerError::DirectoryRead {
+                path: dir.display().to_string(),
+                source,
+            })?;
+            let path = entry.path();
+            let file_type = entry.file_type().map_err(|source| WalkerError::DirectoryRead {
+                path: path.display().to_string(),
+                source,
+            })?;
+            if file_type.is_dir() {
+                let name_is_ignored = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(is_ignored_dir)
+                    .unwrap_or(false);
+                if !name_is_ignored {
+                    subdirs.push(path);
+                }
+            } else if file_type.is_file() {
+                if is_terraform_file(&path) {
+                    has_tf = true;
+                } else if is_tfvars_file(&path) {
+                    tfvars.push(path);
+                }
+            }
+        }
+        // Include this dir's tfvars and descend further when:
+        //  - we're at `module_dir` (always — its own tfvars belong
+        //    to it, even if it also has its own `.tf` siblings); OR
+        //  - this is a deeper "tfvars-only" holder (no `.tf`).
+        // Otherwise the dir IS its own module: stop, leave its
+        // tfvars to it.
+        let include = is_root || !has_tf;
+        if include {
+            out.extend(tfvars);
+            for sd in subdirs {
+                stack.push((sd, false));
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
 /// Recursive: every `*.tfvars` / `*.tfvars.json` under `root`. Honours
 /// the same `is_ignored_dir` pruning as the regular walker.
 pub fn discover_tfvars_files(root: &Path) -> Result<Vec<PathBuf>, WalkerError> {
@@ -271,5 +347,73 @@ mod tests {
         assert!(is_ignored_dir(".terraform"));
         assert!(is_ignored_dir(".git"));
         assert!(!is_ignored_dir("modules"));
+    }
+
+    #[test]
+    fn attributable_includes_module_dir_tfvars() {
+        let dir = tmp_dir("attr_root_tfvars");
+        fs::write(dir.join("main.tf"), "").unwrap();
+        fs::write(dir.join("terraform.tfvars"), "x = 1").unwrap();
+
+        let found = discover_tfvars_attributable_to(&dir).expect("walk");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].file_name().unwrap(), "terraform.tfvars");
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn attributable_includes_tfvars_only_subdir() {
+        // Common layout: `params/nonprod/params.tfvars` feeds the
+        // root module via `-var-file`, no `.tf` next to it.
+        let dir = tmp_dir("attr_subdir");
+        fs::write(dir.join("main.tf"), "").unwrap();
+        fs::create_dir_all(dir.join("params/nonprod")).unwrap();
+        fs::create_dir_all(dir.join("params/prod")).unwrap();
+        fs::write(dir.join("params/nonprod/params.tfvars"), "envtype = \"nonprod\"").unwrap();
+        fs::write(dir.join("params/prod/params.tfvars"), "envtype = \"prod\"").unwrap();
+
+        let found = discover_tfvars_attributable_to(&dir).expect("walk");
+        let names: Vec<_> = found
+            .iter()
+            .map(|p| p.strip_prefix(&dir).unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&"params/nonprod/params.tfvars".to_string()), "{names:?}");
+        assert!(names.contains(&"params/prod/params.tfvars".to_string()), "{names:?}");
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn attributable_excludes_sibling_module_tfvars() {
+        // `modules/foo/foo.tfvars` is foo's own var-file (foo has
+        // its own `.tf` files). The PARENT module shouldn't claim it.
+        let dir = tmp_dir("attr_sibling_module");
+        fs::write(dir.join("main.tf"), "").unwrap();
+        fs::create_dir_all(dir.join("modules/foo")).unwrap();
+        fs::write(dir.join("modules/foo/main.tf"), "").unwrap();
+        fs::write(dir.join("modules/foo/foo.tfvars"), "x = 1").unwrap();
+
+        let found = discover_tfvars_attributable_to(&dir).expect("walk");
+        assert!(found.is_empty(), "unexpected: {found:?}");
+
+        // But invoking on `modules/foo` itself should pick it up.
+        let nested = discover_tfvars_attributable_to(&dir.join("modules/foo")).expect("walk");
+        assert_eq!(nested.len(), 1);
+
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn attributable_skips_ignored_dirs() {
+        let dir = tmp_dir("attr_ignored");
+        fs::write(dir.join("main.tf"), "").unwrap();
+        fs::create_dir_all(dir.join(".terraform/modules")).unwrap();
+        fs::write(dir.join(".terraform/modules/cache.tfvars"), "y = 2").unwrap();
+
+        let found = discover_tfvars_attributable_to(&dir).expect("walk");
+        assert!(found.is_empty(), "unexpected: {found:?}");
+
+        fs::remove_dir_all(dir).ok();
     }
 }
