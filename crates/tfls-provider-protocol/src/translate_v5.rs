@@ -155,7 +155,7 @@ mod tests {
     use super::*;
 
     /// MessagePack for `"string"` — reused across attribute tests.
-    const CTY_STRING: &[u8] = &[0xa6, b's', b't', b'r', b'i', b'n', b'g'];
+    const CTY_STRING: &[u8] = br#""string""#;
 
     #[test]
     fn schema_from_empty_proto() {

@@ -122,6 +122,22 @@ fn non_empty(s: &str) -> Option<String> {
 /// We don't enforce full cty semantics — just pass the rmpv value
 /// through as JSON, which preserves the shape.
 pub fn cty_msgpack_to_json(bytes: &[u8]) -> Result<sonic_rs::Value, ProtocolError> {
+    // Plugin protocol v5 and v6 both ship `Attribute.Type` as JSON
+    // bytes (NOT msgpack), per the terraform-plugin-go contract:
+    // > Type is the JSON-encoded type expression.
+    // Earlier code used `rmpv` which silently mis-decoded the leading
+    // `"` of `"string"` as a positive-fixint and turned every
+    // primitive type into `Number(34)`. Parse as JSON directly.
+    sonic_rs::from_slice(bytes)
+        .map_err(|e| ProtocolError::CtyDecode(format!("parse json: {e}")))
+}
+
+/// Legacy msgpack decoder, retained for tests / fallback paths that
+/// genuinely want msgpack semantics. Production schema decoding goes
+/// through [`cty_msgpack_to_json`] which actually parses JSON bytes
+/// per the plugin-protocol contract.
+#[allow(dead_code)]
+pub fn rmpv_msgpack_to_json(bytes: &[u8]) -> Result<sonic_rs::Value, ProtocolError> {
     let mut cursor = std::io::Cursor::new(bytes);
     let v = rmpv::decode::read_value(&mut cursor)
         .map_err(|e| ProtocolError::CtyDecode(e.to_string()))?;
@@ -251,11 +267,12 @@ fn parameter_from_proto(
 mod tests {
     use super::*;
 
-    /// MessagePack-encoded cty primitive `"string"` is literally the
-    /// 6-byte sequence `a6 73 74 72 69 6e 67`.
+    /// Plugin protocol encodes `cty` types as JSON bytes — the
+    /// primitive `string` arrives as the literal 8-byte JSON
+    /// string `"string"`.
     #[test]
     fn decodes_string_primitive() {
-        let bytes = &[0xa6, b's', b't', b'r', b'i', b'n', b'g'];
+        let bytes = br#""string""#;
         let v = cty_msgpack_to_json(bytes).unwrap();
         use sonic_rs::JsonValueTrait;
         assert_eq!(v.as_str(), Some("string"));
@@ -263,10 +280,7 @@ mod tests {
 
     #[test]
     fn decodes_list_of_string() {
-        // MessagePack fixarray of 2: 0x92, then "list", then "string".
-        let bytes = &[
-            0x92, 0xa4, b'l', b'i', b's', b't', 0xa6, b's', b't', b'r', b'i', b'n', b'g',
-        ];
+        let bytes = br#"["list","string"]"#;
         let v = cty_msgpack_to_json(bytes).unwrap();
         use sonic_rs::{JsonContainerTrait, JsonValueTrait};
         let arr = v.as_array().expect("array");
