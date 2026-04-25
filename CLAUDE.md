@@ -47,3 +47,45 @@ Schema fetch has two paths:
 2. **CLI fallback** — `tofu providers schema -json` when no `.terraform/providers/` exists
 
 Registry docs enrichment fills missing attribute descriptions (e.g. AWS SDKv2 providers) from the Terraform Registry HTTP API, cached to `$XDG_CACHE_HOME/terraform-ls-rs/provider-docs/`.
+
+## Debug binaries
+
+Three standalone binaries in `crates/tfls-cli/src/bin/` for offline analysis without an LSP client. All use the same `tfls_state::StateStore` + `tfls_lsp::indexer` plumbing as the main `tfls` server, so behaviour matches what a live `did_open` would produce.
+
+### `tfls-diag-dump`
+
+Loads a directory, fetches schemas, runs the full `compute_diagnostics` pipeline over every `.tf` / `.tf.json`, prints results grouped by file. Mirror of what `did_open` would publish.
+
+```bash
+cargo run --bin tfls-diag-dump -- <workspace_dir>
+cargo run --bin tfls-diag-dump -- <workspace_dir> --errors-only --grep 'undefined'
+cargo run --bin tfls-diag-dump -- <workspace_dir> --no-schemas    # skip provider schema fetch
+```
+
+Use this first when a user reports "diagnostics not showing up" or "wrong diagnostics" — output isolates server-side correctness from LSP transport / client rendering.
+
+### `tfls-nav-probe`
+
+Tests goto-definition / hover / references at a specific cursor position without driving an LSP client. Pinpoints navigation regressions.
+
+### `tfls-infer-coverage`
+
+Variable-type inference coverage report. Walks the workspace (including `.terraform/modules/*` so external module outputs resolve), runs `rebuild_assigned_variable_types_for_dir` on every dir, classifies each declared variable as one of:
+
+- **match** — declared type agrees with inferred shape.
+- **mismatch** — both resolved, disagree (often a real authoring bug).
+- **no-decl-inferred** — no `type =`, but inference would suggest one (the `Set variable type` quick-fix targets these).
+- **no-decl-no-inf** — neither type nor inferable signal.
+- **no-inference** — `type =` declared but no caller / default provides a signal. Usually orphaned modules.
+
+```bash
+cargo run --bin tfls-infer-coverage -- <workspace_dir>
+cargo run --bin tfls-infer-coverage -- <workspace_dir> --list-gaps          # show every no-inference variable + caller expr kind
+cargo run --bin tfls-infer-coverage -- <workspace_dir> --dump-dir modules/X # show staged assigned_variable_types[X]
+cargo run --bin tfls-infer-coverage -- <workspace_dir> --no-schemas         # skip schema fetch (slashes coverage)
+```
+
+Use this when:
+- Investigating "code action doesn't suggest a type" — `--list-gaps` shows the caller expression kind so you know whether the gap is a missing schema, a `var.X` chain, an `each.X` pattern, etc.
+- After changes to `parse_value_shape_with_schema` / `merge_observations` / `traversal_attr_type` — the percentage figures in commit messages come from this binary.
+- Spot-checking a specific module — `--dump-dir` prints the raw `assigned_variable_types` map for one dir.

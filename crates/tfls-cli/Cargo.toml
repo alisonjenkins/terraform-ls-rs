@@ -21,12 +21,18 @@ path = "src/bin/diag_dump.rs"
 name = "tfls-nav-probe"
 path = "src/bin/nav_probe.rs"
 
+[[bin]]
+name = "tfls-infer-coverage"
+path = "src/bin/infer_coverage.rs"
+
 [dependencies]
 tfls-lsp.workspace = true
 tfls-state.workspace = true
 tfls-walker.workspace = true
 tfls-schema.workspace = true
 tfls-provider-protocol.workspace = true
+tfls-core.workspace = true
+hcl-edit.workspace = true
 lsp-types.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
