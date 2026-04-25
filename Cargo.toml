@@ -46,7 +46,7 @@ dashmap = "6"
 
 # File watching
 notify = "7"
-notify-debouncer-full = "0.4"
+notify-debouncer-full = "0.7"
 
 # JSON (SIMD-accelerated)
 sonic-rs = "0.3"
