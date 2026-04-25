@@ -525,10 +525,8 @@ async fn bulk_workspace_scan(
     // reads to suggest `type = …` for variables that have no
     // `default`.
     for dir in dirs {
-        // TODO(diag-regression): bisect — disabled per plan
-        // /home/ali/.claude/plans/is-it-possible-for-expressive-cook.md
-        // Suspected cause of post-bulk diagnostics dropout.
-        // rebuild_assigned_variable_types_for_dir(state, &dir);
+        // BISECT step A: call site re-enabled, body short-circuited.
+        rebuild_assigned_variable_types_for_dir(state, &dir);
         state.mark_scan_completed(dir);
     }
 
@@ -758,10 +756,8 @@ async fn scan_dir_into_state(
             // now; per-dir scans index silently.
             scan_files_parallel(state, client, files, /* with_progress */ false).await;
             state.mark_scan_completed(dir.to_path_buf());
-            // TODO(diag-regression): bisect — disabled per plan
-            // /home/ali/.claude/plans/is-it-possible-for-expressive-cook.md
-            // Suspected cause of per-dir scan diagnostics dropout.
-            // rebuild_assigned_variable_types_for_dir(state, dir);
+            // BISECT step A: call site re-enabled, body short-circuited.
+            rebuild_assigned_variable_types_for_dir(state, dir);
             enqueue_child_module_scans(state, queue, dir);
             // Cross-file symbols just changed — any open buffer in
             // this directory (or referencing this directory via a
@@ -1007,10 +1003,9 @@ async fn scan_files_parallel(
 /// affected target dirs from a current snapshot, so a removed
 /// caller or deleted tfvars file doesn't leave a stale type
 /// hanging around.
-// Currently disabled — see TODO(diag-regression) at call sites.
-#[allow(dead_code)]
 fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
     use std::collections::HashMap;
+    #[allow(unused_imports)]
     use tfls_core::variable_type::{VariableType, parse_value_shape_with_schema};
 
     // Skip meta-attributes that aren't user-declared module inputs.
@@ -1043,6 +1038,11 @@ fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
 
     // 2. Module calls authored in `.tf` files in `dir`. Each
     //    contributes assignments to its CHILD module's directory.
+    //
+    // BISECT step B: schema-aware module-call section short-circuited.
+    // If diagnostics still work with this disabled, schema walk is
+    // the culprit. If they still break, tfvars walk above is.
+    if false {
     for entry in state.documents.iter() {
         let Ok(doc_path) = entry.key().to_file_path() else {
             continue;
@@ -1104,6 +1104,7 @@ fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
             }
         }
     }
+    } // end BISECT step B `if false` block
 
     for (target_dir, assignments) in staged {
         state.replace_assigned_variable_types(target_dir, assignments);
