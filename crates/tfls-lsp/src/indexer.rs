@@ -1024,14 +1024,32 @@ fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
 
     // 1. Tfvars in `dir` → assignments target `dir` itself.
     //
-    // BISECT step C: keep discovery, skip read_to_string + parse_tfvars.
-    // If diagnostics return → file read or parse is the culprit.
-    // If diagnostics still gone → discovery is the culprit.
+    // BISECT step D: keep read_to_string, still skip parse_tfvars.
+    // If diagnostics still return → parse_tfvars is the culprit.
+    // If diagnostics break → read_to_string is the culprit
+    // (sync I/O blocking tokio worker, or a giant file).
     if let Ok(tfvars) = tfls_walker::discover_tfvars_files_in_dir(dir) {
+        let count = tfvars.len();
+        let mut total_bytes = 0usize;
+        for path in &tfvars {
+            match std::fs::read_to_string(path) {
+                Ok(text) => {
+                    total_bytes += text.len();
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "tfvars read failed (step D)",
+                    );
+                }
+            }
+        }
         tracing::info!(
             dir = %dir.display(),
-            count = tfvars.len(),
-            "rebuild_assigned_variable_types: discovered tfvars (read+parse skipped)",
+            count,
+            total_bytes,
+            "rebuild_assigned_variable_types: read tfvars (parse skipped)",
         );
     }
 
