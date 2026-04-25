@@ -156,6 +156,20 @@ pub trait SchemaLookup {
     fn resource_attr(&self, resource_type: &str, attr: &str) -> Option<VariableType>;
     /// Same as `resource_attr` but for `data.<type>.<name>.<attr>`.
     fn data_source_attr(&self, type_name: &str, attr: &str) -> Option<VariableType>;
+    /// `var.<name>` in the current scope. Default `None` keeps
+    /// callers that don't have local variable context working.
+    fn variable_type(&self, _name: &str) -> Option<VariableType> {
+        None
+    }
+    /// `local.<name>` in the current scope. Default `None`.
+    fn local_shape(&self, _name: &str) -> Option<VariableType> {
+        None
+    }
+    /// `module.<name>.<output>` — the named module's declared
+    /// output type. Default `None`.
+    fn module_output(&self, _module: &str, _output: &str) -> Option<VariableType> {
+        None
+    }
 }
 
 /// Schema-free convenience wrapper. Equivalent to calling
@@ -202,6 +216,13 @@ pub fn parse_value_shape_with_schema(
             VariableType::Tuple(items)
         }
         Expression::String(_) => VariableType::Primitive(Primitive::String),
+        // String interpolations always evaluate to a string. The
+        // result of `"${anything}"` and heredocs is `string` per
+        // Terraform's type system, regardless of the inner
+        // expressions.
+        Expression::StringTemplate(_) | Expression::HeredocTemplate(_) => {
+            VariableType::Primitive(Primitive::String)
+        }
         Expression::Number(_) => VariableType::Primitive(Primitive::Number),
         Expression::Bool(_) => VariableType::Primitive(Primitive::Bool),
         Expression::FuncCall(call) => {
@@ -229,6 +250,156 @@ pub fn parse_value_shape_with_schema(
                     .next()
                     .map(|e| parse_value_shape_with_schema(e, schema))
                     .unwrap_or(VariableType::Any),
+                // `element(list, idx)` returns the element type of
+                // its first argument. For inference, walk the first
+                // arg recursively: `Tuple([T, ...])` → T, `List(T)`
+                // → T, anything else → Any.
+                "element" => {
+                    let Some(first) = call.args.iter().next() else {
+                        return VariableType::Any;
+                    };
+                    let collected = parse_value_shape_with_schema(first, schema);
+                    match collected {
+                        VariableType::Tuple(items) => {
+                            if items.is_empty() {
+                                VariableType::Any
+                            } else if items.iter().all(|t| t == &items[0]) {
+                                items.into_iter().next().unwrap_or(VariableType::Any)
+                            } else {
+                                VariableType::Any
+                            }
+                        }
+                        VariableType::List(inner) | VariableType::Set(inner) => *inner,
+                        _ => VariableType::Any,
+                    }
+                }
+                // `concat(list1, list2, ...)` returns a list of the
+                // common element type. If every arg yields a
+                // homogeneous element type we keep it; otherwise
+                // fall back to Any.
+                "concat" => {
+                    let mut element_types: Vec<VariableType> = Vec::new();
+                    for arg in call.args.iter() {
+                        match parse_value_shape_with_schema(arg, schema) {
+                            VariableType::Tuple(items) => element_types.extend(items),
+                            VariableType::List(inner) | VariableType::Set(inner) => {
+                                element_types.push(*inner)
+                            }
+                            other => element_types.push(other),
+                        }
+                    }
+                    if element_types.is_empty() {
+                        VariableType::Any
+                    } else {
+                        let first = element_types[0].clone();
+                        if element_types.iter().all(|t| t == &first) {
+                            VariableType::List(Box::new(first))
+                        } else {
+                            VariableType::Any
+                        }
+                    }
+                }
+                // Common string-returning functions.
+                "format" | "join" | "trim" | "trimspace" | "trimprefix" | "trimsuffix"
+                | "upper" | "lower" | "title" | "replace" | "regex" | "abspath"
+                | "dirname" | "basename" | "pathexpand" | "uuid" | "uuidv5"
+                | "base64encode" | "base64decode" | "filebase64" | "filemd5"
+                | "filesha1" | "filesha256" | "filesha512" | "md5" | "sha1"
+                | "sha256" | "sha512" | "bcrypt" | "templatefile" | "file"
+                | "yamlencode" | "jsonencode" | "timestamp" | "formatdate" => {
+                    VariableType::Primitive(Primitive::String)
+                }
+                "length" | "ceil" | "floor" | "abs" | "log" | "max" | "min"
+                | "pow" | "signum" | "parseint" => VariableType::Primitive(Primitive::Number),
+                "alltrue" | "anytrue" | "can" | "contains" | "startswith"
+                | "endswith" | "fileexists" | "issensitive" => {
+                    VariableType::Primitive(Primitive::Bool)
+                }
+                "split" => VariableType::List(Box::new(VariableType::Primitive(Primitive::String))),
+                "keys" => VariableType::List(Box::new(VariableType::Primitive(Primitive::String))),
+                "values" => {
+                    // `values(map)` returns a list of the map's element type.
+                    if let Some(first) = call.args.iter().next() {
+                        match parse_value_shape_with_schema(first, schema) {
+                            VariableType::Map(inner) => return VariableType::List(inner),
+                            VariableType::Object(fields) => {
+                                let mut iter = fields.values();
+                                if let Some(first_val) = iter.next() {
+                                    let f = first_val.clone();
+                                    if iter.all(|v| v == &f) {
+                                        return VariableType::List(Box::new(f));
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    VariableType::Any
+                }
+                "merge" => {
+                    // `merge(obj1, obj2, ...)` — combine all object
+                    // fields. Keys from later args win.
+                    let mut combined = BTreeMap::new();
+                    let mut all_objects = true;
+                    for arg in call.args.iter() {
+                        match parse_value_shape_with_schema(arg, schema) {
+                            VariableType::Object(fields) => combined.extend(fields),
+                            _ => {
+                                all_objects = false;
+                                break;
+                            }
+                        }
+                    }
+                    if all_objects && !combined.is_empty() {
+                        VariableType::Object(combined)
+                    } else {
+                        VariableType::Any
+                    }
+                }
+                "lookup" => {
+                    // `lookup(map, key, default?)` returns the map's
+                    // value type. Pull from first arg if it's a map.
+                    if let Some(first) = call.args.iter().next() {
+                        match parse_value_shape_with_schema(first, schema) {
+                            VariableType::Map(inner) => return *inner,
+                            VariableType::Object(fields) => {
+                                let mut iter = fields.values();
+                                if let Some(first_val) = iter.next() {
+                                    let f = first_val.clone();
+                                    if iter.all(|v| v == &f) {
+                                        return f;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    VariableType::Any
+                }
+                "try" => {
+                    // `try(a, b, c)` returns the type of the first
+                    // arg that doesn't error. We can't simulate
+                    // failure, so pick the first that yields
+                    // something concrete.
+                    for arg in call.args.iter() {
+                        let t = parse_value_shape_with_schema(arg, schema);
+                        if !matches!(&t, VariableType::Any) {
+                            return t;
+                        }
+                    }
+                    VariableType::Any
+                }
+                "coalesce" => {
+                    // `coalesce(a, b, c)` returns the first non-null.
+                    // Take the first concrete arg's type.
+                    for arg in call.args.iter() {
+                        let t = parse_value_shape_with_schema(arg, schema);
+                        if !matches!(&t, VariableType::Any) {
+                            return t;
+                        }
+                    }
+                    VariableType::Any
+                }
                 // Users sometimes write `object({ … })` in a value
                 // position by mistake (confusing it with the type
                 // expression). Treat it as the object literal the
@@ -294,8 +465,8 @@ pub fn parse_value_shape_with_schema(
 
 /// Resolve `<resource_type>.<name>.<attr>` /
 /// `data.<resource_type>.<name>.<attr>` traversals against the
-/// schema oracle. Returns `None` for any other shape (var.x,
-/// local.x, module.x, count, …).
+/// schema oracle. Also handles `var.<name>` and `local.<name>` via
+/// the optional caller-scope methods on [`SchemaLookup`].
 fn traversal_attr_type(tv: &Traversal, schema: &dyn SchemaLookup) -> Option<VariableType> {
     let base = match &tv.expr {
         Expression::Variable(v) => v.as_str().to_string(),
@@ -308,6 +479,21 @@ fn traversal_attr_type(tv: &Traversal, schema: &dyn SchemaLookup) -> Option<Vari
             TraversalOperator::GetAttr(i) => idents.push(i.as_str()),
             _ => break,
         }
+    }
+    if base == "var" {
+        // `var.<name>` → look up the caller's declared variable type.
+        let name = *idents.first()?;
+        return schema.variable_type(name);
+    }
+    if base == "local" {
+        let name = *idents.first()?;
+        return schema.local_shape(name);
+    }
+    if base == "module" {
+        // `module.<name>.<output>` → child module's output type.
+        let mod_name = *idents.first()?;
+        let output = *idents.get(1)?;
+        return schema.module_output(mod_name, output);
     }
     if base == "data" {
         // data.<type>.<name>.<attr…> — attr is idents[2].

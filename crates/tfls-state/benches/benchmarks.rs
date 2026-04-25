@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use criterion::{criterion_group, criterion_main, Criterion};
 use lsp_types::Url;
 use tfls_state::{document::DocumentState, store::StateStore};

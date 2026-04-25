@@ -1024,6 +1024,141 @@ async fn scan_files_parallel(
 /// produced by `tfls_parser::parse_body`, which catches any
 /// upstream parser panic at the source. So the indexer can call
 /// these directly without its own `catch_unwind`.
+/// `SchemaLookup` that combines `StateStore`'s schema-aware
+/// resource / data-source attribute resolution with caller-side
+/// variable / local / module-output context. Used by section 2 of
+/// the rebuild loop so a module-call attribute like
+/// `name = var.account_number` resolves through the caller's
+/// `variable "account_number" { type = string }` declaration to
+/// `Primitive(String)` instead of collapsing to `Any`.
+///
+/// Aggregates symbols across EVERY indexed `.tf` file whose parent
+/// directory matches `caller_dir`, not just the single doc that
+/// contains the module-call block. Real Terraform stacks split
+/// `variables.tf` from the call sites (`apigw.tf`, `route53.tf`,
+/// …); a caller doc's own `SymbolTable` rarely declares the
+/// variables it references.
+struct CallerScopedLookup<'a> {
+    state: &'a StateStore,
+    caller_dir: &'a Path,
+}
+
+impl CallerScopedLookup<'_> {
+    /// Walk every indexed doc whose parent dir is the caller's,
+    /// invoking `visit` on its `SymbolTable`. Stops early if the
+    /// visitor returns `Some`.
+    fn with_caller_dir_symbols<R, F>(&self, mut visit: F) -> Option<R>
+    where
+        F: FnMut(&tfls_core::SymbolTable) -> Option<R>,
+    {
+        for entry in self.state.documents.iter() {
+            let Ok(p) = entry.key().to_file_path() else { continue };
+            if p.parent() != Some(self.caller_dir) {
+                continue;
+            }
+            if let Some(r) = visit(&entry.value().symbols) {
+                return Some(r);
+            }
+        }
+        None
+    }
+}
+
+impl tfls_core::variable_type::SchemaLookup for CallerScopedLookup<'_> {
+    fn resource_attr(
+        &self,
+        resource_type: &str,
+        attr: &str,
+    ) -> Option<tfls_core::variable_type::VariableType> {
+        self.state.resource_attr(resource_type, attr)
+    }
+    fn data_source_attr(
+        &self,
+        type_name: &str,
+        attr: &str,
+    ) -> Option<tfls_core::variable_type::VariableType> {
+        self.state.data_source_attr(type_name, attr)
+    }
+    fn variable_type(
+        &self,
+        name: &str,
+    ) -> Option<tfls_core::variable_type::VariableType> {
+        // Prefer the declared `type = …` first; fall back to the
+        // shape inferred from `default = …` so a typeless variable
+        // with `default = "x"` still resolves. Walks every peer
+        // doc in the caller's dir — variables are typically split
+        // into `variables.tf` while module calls live elsewhere.
+        self.with_caller_dir_symbols(|sym| {
+            sym.variable_types
+                .get(name)
+                .cloned()
+                .or_else(|| sym.variable_defaults.get(name).cloned())
+        })
+    }
+    fn local_shape(
+        &self,
+        name: &str,
+    ) -> Option<tfls_core::variable_type::VariableType> {
+        self.with_caller_dir_symbols(|sym| sym.local_shapes.get(name).cloned())
+    }
+    fn module_output(
+        &self,
+        module_name: &str,
+        output_name: &str,
+    ) -> Option<tfls_core::variable_type::VariableType> {
+        // 1. Find the source for `module "<name>" {}` in any peer
+        //    doc of the caller's dir.
+        let source = self.with_caller_dir_symbols(|sym| sym.module_sources.get(module_name).cloned())?;
+        // 2. Resolve to the child module directory.
+        let child_dir = crate::handlers::util::resolve_module_source(
+            self.caller_dir,
+            module_name,
+            &source,
+        )?;
+        // 3. Walk indexed docs for that child dir; find an
+        //    `output "<output>" { value = … }` block; infer the
+        //    value's shape.
+        for doc in self.state.documents.iter() {
+            let Ok(p) = doc.key().to_file_path() else { continue };
+            if p.parent() != Some(&child_dir) {
+                continue;
+            }
+            let Some(body) = doc.value().parsed.body.as_ref() else { continue };
+            for s in body.iter() {
+                let Some(block) = s.as_block() else { continue };
+                if block.ident.as_str() != "output" {
+                    continue;
+                }
+                let label = match block.labels.first()? {
+                    hcl_edit::structure::BlockLabel::String(s) => s.value().to_string(),
+                    hcl_edit::structure::BlockLabel::Ident(i) => i.as_str().to_string(),
+                };
+                if label != output_name {
+                    continue;
+                }
+                for sub in block.body.iter() {
+                    let Some(attr) = sub.as_attribute() else { continue };
+                    if attr.key.as_str() != "value" {
+                        continue;
+                    }
+                    // Recurse with state-only lookup — child module
+                    // outputs reference values in their own scope,
+                    // not the parent caller's. A module's own
+                    // outputs that hit `var.X` would need a separate
+                    // child-scoped lookup; for now, state-only is
+                    // good enough for the common case (output =
+                    // resource attr).
+                    return Some(tfls_core::variable_type::parse_value_shape_with_schema(
+                        &attr.value,
+                        self.state,
+                    ));
+                }
+            }
+        }
+        None
+    }
+}
+
 pub fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
     use std::collections::HashMap;
     use tfls_core::variable_type::{VariableType, parse_value_shape_with_schema};
@@ -1107,6 +1242,19 @@ pub fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
             };
             // Walk each attribute of the module block; infer the
             // type of its RHS; stage under the child dir.
+            //
+            // Caller-scoped lookup: extends the state's
+            // resource/data-source schema lookup with the CALLER
+            // doc's `variable_types` + `local_shapes` so traversal
+            // resolution covers `var.X` / `local.X` / `module.X.Y`
+            // references the caller passes in. Without this, every
+            // `attr = var.X` collapses to `Any` and we lose the
+            // type info even though the caller's variable block
+            // declares it.
+            let lookup = CallerScopedLookup {
+                state,
+                caller_dir: dir,
+            };
             let bucket = staged.entry(child_dir).or_default();
             for body_struct in block.body.iter() {
                 let Some(attr) = body_struct.as_attribute() else {
@@ -1116,7 +1264,7 @@ pub fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
                 if is_meta_attr(attr_name) {
                     continue;
                 }
-                let ty = parse_value_shape_with_schema(&attr.value, state);
+                let ty = parse_value_shape_with_schema(&attr.value, &lookup);
                 if matches!(&ty, VariableType::Any) {
                     continue;
                 }

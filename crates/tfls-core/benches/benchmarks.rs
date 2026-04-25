@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use criterion::{criterion_group, criterion_main, Criterion};
 use tfls_core::completion::classify_context;
 
