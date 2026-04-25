@@ -1216,17 +1216,25 @@ impl tfls_core::variable_type::SchemaLookup for CallerScopedLookup<'_> {
                     if attr.key.as_str() != "value" {
                         continue;
                     }
-                    // Recurse with state-only lookup — child module
-                    // outputs reference values in their own scope,
-                    // not the parent caller's. A module's own
-                    // outputs that hit `var.X` would need a separate
-                    // child-scoped lookup; for now, state-only is
-                    // good enough for the common case (output =
-                    // resource attr).
-                    return Some(tfls_core::variable_type::parse_value_shape_with_schema(
-                        &attr.value,
-                        self.state,
-                    ));
+                    // Recurse with a CHILD-scoped lookup so that an
+                    // output value referencing the child module's
+                    // own `local.X` / `var.X` / `module.Y.Z` chains
+                    // resolves correctly. Child outputs aren't
+                    // limited to plain resource traversals — many
+                    // wrap a `local.<name>` indirection over the
+                    // actual resource attr (`output "oidc_issuer"
+                    // { value = local.oidc_issuer_url }`).
+                    let child_scope = CallerScopedLookup {
+                        state: self.state,
+                        caller_dir: &child_dir,
+                        each_value: None,
+                    };
+                    return Some(
+                        tfls_core::variable_type::parse_value_shape_with_schema(
+                            &attr.value,
+                            &child_scope,
+                        ),
+                    );
                 }
             }
         }
