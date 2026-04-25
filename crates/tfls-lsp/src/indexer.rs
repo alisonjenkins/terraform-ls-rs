@@ -169,8 +169,16 @@ pub fn index_module_dir_sync(state: &StateStore, dir: &Path) {
         let Some(url) = path_to_url(&path) else {
             continue;
         };
-        if state.documents.contains_key(&url) {
-            continue;
+        // Skip only if the doc is already fully parsed. Cache
+        // hydration (`DocumentState::hydrated_from_cache`) leaves
+        // `parsed.body = None` — overwrite those entries with a
+        // freshly-parsed `DocumentState::new` so body-dependent
+        // passes (module-call inference, body-walking diagnostics)
+        // see the AST.
+        if let Some(doc) = state.documents.get(&url) {
+            if doc.parsed.body.is_some() {
+                continue;
+            }
         }
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
@@ -799,9 +807,18 @@ async fn scan_files_parallel(
     let parse_start = std::time::Instant::now();
     let parsed: Vec<DocumentState> = tokio::task::spawn_blocking({
         let files = files.clone();
+        // Only skip docs that have a fully parsed body. Cache
+        // hydration (`DocumentState::hydrated_from_cache`) leaves
+        // `parsed.body = None` so per-doc symbols can populate
+        // ahead of parse, but body-dependent passes (the
+        // module-call walk in `rebuild_assigned_variable_types_for_dir`,
+        // body-walking diagnostics, etc.) need the AST. Re-parse
+        // those — the cost is bounded by `cache-hydrated count`
+        // and the cache still covers the symbol-side speedup.
         let skip: std::collections::HashSet<lsp_types::Url> = state
             .documents
             .iter()
+            .filter(|e| e.value().parsed.body.is_some())
             .map(|e| e.key().clone())
             .collect();
         move || {
