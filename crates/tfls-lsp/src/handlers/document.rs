@@ -131,15 +131,21 @@ pub(crate) enum DidOpenPublish {
     PublishReal,
 }
 
-pub(crate) fn did_open_publish_action(state: &StateStore) -> DidOpenPublish {
-    if state
-        .client_supports_pull_diagnostics
-        .load(std::sync::atomic::Ordering::Relaxed)
-    {
-        DidOpenPublish::ClearPushNamespaceThenPull
-    } else {
-        DidOpenPublish::PublishReal
-    }
+pub(crate) fn did_open_publish_action(_state: &StateStore) -> DidOpenPublish {
+    // ALWAYS push. The server's `capabilities.diagnostic_provider`
+    // is `None` (see `capabilities.rs`), so no client will ever
+    // pull from us, regardless of whether the client itself
+    // advertises pull support. Returning `ClearPushNamespaceThenPull`
+    // based on the CLIENT's capability — without considering
+    // whether THIS server actually serves pull — emits an empty
+    // publishDiagnostics and then waits for a pull that never
+    // arrives. Net effect: every client (e.g. nvim, which always
+    // advertises `textDocument.diagnostic`) sees zero diagnostics
+    // forever.
+    //
+    // If/when we re-enable `diagnostic_provider`, restore the
+    // capability check here.
+    DidOpenPublish::PublishReal
 }
 
 pub async fn did_change(backend: &Backend, params: DidChangeTextDocumentParams) {
@@ -1011,19 +1017,17 @@ mod did_open_publish_tests {
     use tfls_state::StateStore;
 
     #[test]
-    fn clear_push_namespace_when_client_supports_pull() {
+    fn always_publish_real_while_pull_unadvertised() {
+        // Server doesn't advertise `diagnostic_provider`, so push
+        // is the only mode. Either client capability flag must
+        // produce `PublishReal`.
         let store = StateStore::new();
         store.set_client_supports_pull_diagnostics(true);
         assert_eq!(
             did_open_publish_action(&store),
-            DidOpenPublish::ClearPushNamespaceThenPull
+            DidOpenPublish::PublishReal
         );
-    }
-
-    #[test]
-    fn publish_real_when_client_is_push_only() {
         let store = StateStore::new();
-        // Pull not advertised; default is false.
         assert_eq!(
             did_open_publish_action(&store),
             DidOpenPublish::PublishReal
