@@ -375,11 +375,20 @@ async fn code_action_offers_any_placeholder_when_default_resolves_to_any() {
     let backend = fresh_backend(src, &u);
 
     let actions = code_actions_for(&backend, &u, "variable has no type").await;
-    let only_placeholder = actions.len() == 1
-        && matches!(&actions[0], CodeActionOrCommand::CodeAction(ca)
-            if ca.title.contains("Set variable type to `any`"));
-    assert!(
-        only_placeholder,
+    let placeholders: Vec<_> = actions
+        .iter()
+        .filter_map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca)
+                if ca.title.contains("Set variable type to `any`") =>
+            {
+                Some(ca)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        placeholders.len(),
+        1,
         "expected one `type = any` placeholder; got {actions:?}",
     );
 }
@@ -399,11 +408,20 @@ async fn code_action_offers_any_placeholder_for_empty_array_default() {
     let backend = fresh_backend(src, &u);
 
     let actions = code_actions_for(&backend, &u, "variable has no type").await;
-    let only_placeholder = actions.len() == 1
-        && matches!(&actions[0], CodeActionOrCommand::CodeAction(ca)
-            if ca.title.contains("Set variable type to `any`"));
-    assert!(
-        only_placeholder,
+    let placeholders: Vec<_> = actions
+        .iter()
+        .filter_map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca)
+                if ca.title.contains("Set variable type to `any`") =>
+            {
+                Some(ca)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        placeholders.len(),
+        1,
         "expected one `type = any` placeholder; got {actions:?}",
     );
 }
@@ -477,11 +495,20 @@ async fn code_action_offers_any_placeholder_when_assigned_types_disagree() {
         .replace_assigned_variable_types(PathBuf::from("/mod"), for_dir);
 
     let actions = code_actions_for(&backend, &u, "variable has no type").await;
-    let only_placeholder = actions.len() == 1
-        && matches!(&actions[0], CodeActionOrCommand::CodeAction(ca)
-            if ca.title.contains("Set variable type to `any`"));
-    assert!(
-        only_placeholder,
+    let placeholders: Vec<_> = actions
+        .iter()
+        .filter_map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca)
+                if ca.title.contains("Set variable type to `any`") =>
+            {
+                Some(ca)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        placeholders.len(),
+        1,
         "expected one `type = any` placeholder; got {actions:?}",
     );
 }
@@ -1354,6 +1381,143 @@ async fn scope_declare_undefined_module_uses_union_of_declarations() {
     assert!(saw_create);
     assert!(new_text_combined.contains("variable \"only_in_b\" {}"));
     assert!(!new_text_combined.contains("variable \"shared\""));
+}
+
+#[tokio::test]
+async fn move_outputs_creates_outputs_tf_when_missing() {
+    // main.tf has 2 outputs; no outputs.tf exists. Action emits
+    // documentChanges:
+    //   - delete both outputs from main.tf
+    //   - create outputs.tf with both block sources concatenated
+    let main = uri("file:///nonexistent-mod-mo/main.tf");
+    let src = "resource \"null_resource\" \"r\" {}\n\
+               output \"a\" { value = 1 }\n\
+               output \"b\" { value = 2 }\n";
+    let backend = fresh_backend(src, &main);
+    let actions = all_actions_for(&backend, &main).await;
+    let action = find_action(&actions, "Move 2 output blocks in this module");
+
+    use tower_lsp::lsp_types::{
+        DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp,
+    };
+    let target = uri("file:///nonexistent-mod-mo/outputs.tf");
+    let dc = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.document_changes.as_ref())
+        .expect("documentChanges present");
+    let ops = match dc {
+        DocumentChanges::Operations(o) => o,
+        _ => panic!("expected Operations"),
+    };
+    let mut saw_create = false;
+    let mut saw_main_delete_count = 0usize;
+    let mut saw_target_text = String::new();
+    for op in ops {
+        match op {
+            DocumentChangeOperation::Op(ResourceOp::Create(c)) => {
+                assert_eq!(c.uri, target);
+                saw_create = true;
+            }
+            DocumentChangeOperation::Edit(te) => {
+                if te.text_document.uri == main {
+                    for e in &te.edits {
+                        let OneOf::Left(edit) = e else {
+                            panic!("annotated edit not expected");
+                        };
+                        assert!(
+                            edit.new_text.is_empty(),
+                            "main edits delete only, got {:?}",
+                            edit.new_text
+                        );
+                        saw_main_delete_count += 1;
+                    }
+                } else if te.text_document.uri == target {
+                    for e in &te.edits {
+                        let OneOf::Left(edit) = e else {
+                            panic!("annotated edit not expected");
+                        };
+                        saw_target_text.push_str(&edit.new_text);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_create, "CreateFile op for outputs.tf");
+    assert_eq!(saw_main_delete_count, 2, "two deletions on main.tf");
+    assert!(saw_target_text.contains("output \"a\""), "got {saw_target_text:?}");
+    assert!(saw_target_text.contains("output \"b\""), "got {saw_target_text:?}");
+}
+
+#[tokio::test]
+async fn move_outputs_skips_outputs_tf_itself() {
+    // outputs.tf already exists in state. main.tf has 1 output.
+    // Move action should: delete from main, append to outputs.tf
+    // (NOT create), and NOT also pull outputs out of outputs.tf.
+    let main = uri("file:///nonexistent-mod-mo2/main.tf");
+    let outputs = uri("file:///nonexistent-mod-mo2/outputs.tf");
+    let backend = fresh_backend(
+        "resource \"null_resource\" \"r\" {}\noutput \"a\" { value = 1 }\n",
+        &main,
+    );
+    add_doc(&backend, &outputs, "output \"existing\" { value = 0 }\n");
+    let actions = all_actions_for(&backend, &main).await;
+    let action = find_action(&actions, "Move 1 output block in this module");
+
+    use tower_lsp::lsp_types::{
+        DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp,
+    };
+    let dc = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.document_changes.as_ref())
+        .expect("documentChanges present");
+    let ops = match dc {
+        DocumentChanges::Operations(o) => o,
+        _ => panic!("expected Operations"),
+    };
+    for op in ops {
+        if matches!(op, DocumentChangeOperation::Op(ResourceOp::Create(_))) {
+            panic!("must NOT create existing outputs.tf");
+        }
+        if let DocumentChangeOperation::Edit(te) = op {
+            if te.text_document.uri == outputs {
+                for e in &te.edits {
+                    let OneOf::Left(edit) = e else { continue };
+                    assert!(
+                        edit.new_text.contains("output \"a\""),
+                        "outputs.tf gains the moved output"
+                    );
+                }
+            }
+            if te.text_document.uri == main {
+                for e in &te.edits {
+                    let OneOf::Left(edit) = e else { continue };
+                    assert!(
+                        edit.new_text.is_empty(),
+                        "main delete: empty new_text"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn move_outputs_skips_when_no_out_of_place_outputs() {
+    // main.tf has resources only; outputs.tf has the lone output.
+    // Action should NOT appear.
+    let main = uri("file:///nonexistent-mod-mo3/main.tf");
+    let outputs = uri("file:///nonexistent-mod-mo3/outputs.tf");
+    let backend = fresh_backend("resource \"null_resource\" \"r\" {}\n", &main);
+    add_doc(&backend, &outputs, "output \"a\" { value = 1 }\n");
+    let actions = all_actions_for(&backend, &main).await;
+    let any_move = actions.iter().any(|a| match a {
+        CodeActionOrCommand::CodeAction(ca) => ca.title.starts_with("Move "),
+        _ => false,
+    });
+    assert!(!any_move, "no move-outputs action when nothing to move");
 }
 
 #[tokio::test]

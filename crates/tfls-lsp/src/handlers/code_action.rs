@@ -210,6 +210,10 @@ pub async fn code_action(
     // unrelated files; Selection is N/A for an EOF append).
     emit_declare_undefined_actions(state, &uri, &mut actions);
 
+    // Move out-of-place outputs into the module's `outputs.tf`,
+    // matching the standard-module-structure rule. Module scope.
+    emit_move_outputs_actions(state, &uri, &mut actions);
+
     if actions.is_empty() { Ok(None) } else { Ok(Some(actions)) }
 }
 
@@ -325,7 +329,7 @@ fn emit_declare_undefined_actions(
     let Ok(target_url) = Url::from_file_path(&target_path) else {
         return;
     };
-    let strategy = resolve_variables_tf_strategy(state, &target_url, &target_path);
+    let strategy = resolve_target_strategy(state, &target_url, &target_path);
     let edit = build_declare_undefined_workspace_edit(&target_url, &strategy, &undeclared);
 
     let count = undeclared.len();
@@ -388,7 +392,7 @@ fn collect_undeclared_names(
 }
 
 /// How we should reach `variables.tf` to insert the new stubs.
-enum VariablesTfStrategy {
+enum TargetFileStrategy {
     /// File is in `state.documents` — append at the rope's EOF.
     Loaded {
         eof: Position,
@@ -405,11 +409,11 @@ enum VariablesTfStrategy {
     Create,
 }
 
-fn resolve_variables_tf_strategy(
+fn resolve_target_strategy(
     state: &StateStore,
     target_url: &Url,
     target_path: &std::path::Path,
-) -> VariablesTfStrategy {
+) -> TargetFileStrategy {
     if let Some(doc) = state.documents.get(target_url) {
         let total = doc.rope.len_bytes();
         let last_char = if total == 0 {
@@ -424,20 +428,20 @@ fn resolve_variables_tf_strategy(
         let needs_leading_newline = total > 0 && last_char != Some('\n');
         let eof = tfls_parser::byte_offset_to_lsp_position(&doc.rope, total)
             .unwrap_or(Position::new(0, 0));
-        return VariablesTfStrategy::Loaded {
+        return TargetFileStrategy::Loaded {
             eof,
             needs_leading_newline,
         };
     }
     let Ok(content) = std::fs::read_to_string(target_path) else {
-        return VariablesTfStrategy::Create;
+        return TargetFileStrategy::Create;
     };
     let rope = ropey::Rope::from_str(&content);
     let total = rope.len_bytes();
     let needs_leading_newline = total > 0 && !content.ends_with('\n');
     let eof = tfls_parser::byte_offset_to_lsp_position(&rope, total)
         .unwrap_or(Position::new(0, 0));
-    VariablesTfStrategy::OnDisk {
+    TargetFileStrategy::OnDisk {
         eof,
         needs_leading_newline,
     }
@@ -445,7 +449,7 @@ fn resolve_variables_tf_strategy(
 
 fn build_declare_undefined_workspace_edit(
     target_url: &Url,
-    strategy: &VariablesTfStrategy,
+    strategy: &TargetFileStrategy,
     undeclared: &std::collections::BTreeSet<String>,
 ) -> WorkspaceEdit {
     let mut blocks = String::new();
@@ -454,11 +458,11 @@ fn build_declare_undefined_workspace_edit(
     }
 
     match strategy {
-        VariablesTfStrategy::Loaded {
+        TargetFileStrategy::Loaded {
             eof,
             needs_leading_newline,
         }
-        | VariablesTfStrategy::OnDisk {
+        | TargetFileStrategy::OnDisk {
             eof,
             needs_leading_newline,
         } => {
@@ -482,7 +486,7 @@ fn build_declare_undefined_workspace_edit(
                 ..Default::default()
             }
         }
-        VariablesTfStrategy::Create => {
+        TargetFileStrategy::Create => {
             use lsp_types::{
                 CreateFile, CreateFileOptions, DocumentChangeOperation, DocumentChanges,
                 OneOf, OptionalVersionedTextDocumentIdentifier, ResourceOp, TextDocumentEdit,
@@ -514,6 +518,267 @@ fn build_declare_undefined_workspace_edit(
                 ..Default::default()
             }
         }
+    }
+}
+
+/// Move-outputs source-action: relocate every `output "X" { … }`
+/// block in any sibling `.tf` file (other than `outputs.tf`) into
+/// the module's `outputs.tf`. Mirror of declare-undefined's
+/// "always target a canonical file" UX, driven by the same
+/// `terraform_standard_module_structure` rule that flags outputs
+/// living outside `outputs.tf`.
+///
+/// Module scope only. Skips entirely when the active doc isn't
+/// part of a resolvable module dir, or when no out-of-place
+/// outputs exist anywhere in the module.
+fn emit_move_outputs_actions(
+    state: &StateStore,
+    primary_uri: &Url,
+    actions: &mut Vec<CodeActionOrCommand>,
+) {
+    use crate::handlers::code_action_scope::{scope_kind, scope_title};
+
+    let Some(module_dir) = crate::handlers::util::parent_dir(primary_uri) else {
+        return;
+    };
+
+    // Collect out-of-place output blocks across the module.
+    // (uri, delete-range, source-text-of-block).
+    let mut deletions: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    let mut moved_sources: Vec<String> = Vec::new();
+    for_each_doc_in_scope(state, primary_uri, Scope::Module, |doc_uri, doc| {
+        if filename_of(doc_uri).as_deref() == Some("outputs.tf") {
+            return;
+        }
+        let Some(body) = doc.parsed.body.as_ref() else {
+            return;
+        };
+        for (range, src) in scan_output_blocks(body, &doc.rope) {
+            deletions
+                .entry(doc_uri.clone())
+                .or_default()
+                .push(TextEdit {
+                    range,
+                    new_text: String::new(),
+                });
+            moved_sources.push(src);
+        }
+    });
+    if moved_sources.is_empty() {
+        return;
+    }
+
+    let target_path = module_dir.join("outputs.tf");
+    let Ok(target_url) = Url::from_file_path(&target_path) else {
+        return;
+    };
+    let strategy = resolve_target_strategy(state, &target_url, &target_path);
+    let combined = combine_block_sources(&moved_sources);
+
+    let workspace_edit = build_move_outputs_workspace_edit(
+        &deletions,
+        &target_url,
+        &strategy,
+        &combined,
+    );
+
+    let count = moved_sources.len();
+    let title = scope_title(
+        "Move output blocks",
+        "output block",
+        Scope::Module,
+        count,
+    );
+    actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+        title: format!("{title} (to `outputs.tf`)"),
+        kind: Some(scope_kind(Scope::Module, "move-outputs-to-outputs-tf")),
+        diagnostics: None,
+        edit: Some(workspace_edit),
+        is_preferred: None,
+        ..Default::default()
+    }));
+}
+
+/// Last path segment of a `file://` URI, e.g. `"main.tf"`.
+fn filename_of(uri: &Url) -> Option<String> {
+    let path = uri.to_file_path().ok()?;
+    Some(path.file_name()?.to_string_lossy().into_owned())
+}
+
+/// Find every `output` block in `body` and return its
+/// `(LSP delete-range, original source text)`. The delete-range
+/// extends from the block's start through any trailing newline +
+/// blank line so the cleanup leaves no double-blank-line scar.
+fn scan_output_blocks(body: &Body, rope: &Rope) -> Vec<(Range, String)> {
+    use hcl_edit::repr::Span as _;
+
+    let mut out = Vec::new();
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
+        if block.ident.as_str() != "output" {
+            continue;
+        }
+        let Some(span) = block.span() else { continue };
+        let total = rope.len_bytes();
+        let mut end = span.end.min(total);
+        // Pull in trailing whitespace + a single line break so the
+        // remaining file isn't left with stranded blank lines
+        // exactly where the block used to be.
+        while end < total {
+            let ch = rope
+                .byte_slice(end..end + 1)
+                .to_string()
+                .chars()
+                .next();
+            match ch {
+                Some('\n') => {
+                    end += 1;
+                    break;
+                }
+                Some(' ') | Some('\t') | Some('\r') => end += 1,
+                _ => break,
+            }
+        }
+        let Ok(start_pos) = tfls_parser::byte_offset_to_lsp_position(rope, span.start) else {
+            continue;
+        };
+        let Ok(end_pos) = tfls_parser::byte_offset_to_lsp_position(rope, end) else {
+            continue;
+        };
+        let src = rope.byte_slice(span.start..end).to_string();
+        out.push((
+            Range {
+                start: start_pos,
+                end: end_pos,
+            },
+            src,
+        ));
+    }
+    out
+}
+
+/// Concatenate moved block source texts. Each entry from
+/// `scan_output_blocks` already has a trailing newline (we
+/// expanded the delete range past one newline), so plain
+/// concatenation gives a clean result.
+fn combine_block_sources(blocks: &[String]) -> String {
+    let mut out = String::new();
+    for b in blocks {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        // Insert a single blank line between blocks so the result
+        // is readable even if individual block sources didn't have
+        // trailing whitespace beyond the closing brace newline.
+        if !out.is_empty() && !out.ends_with("\n\n") {
+            out.push('\n');
+        }
+        out.push_str(b);
+    }
+    out
+}
+
+/// Combine deletions across source files with the target write
+/// (append-or-create). Always uses `documentChanges` so we can
+/// mix `CreateFile` ops with `TextDocumentEdit`s — clients that
+/// support documentChanges (which all major LSP clients do)
+/// honour the order, applying the create before its initial
+/// edit.
+fn build_move_outputs_workspace_edit(
+    deletions: &HashMap<Url, Vec<TextEdit>>,
+    target_url: &Url,
+    strategy: &TargetFileStrategy,
+    combined: &str,
+) -> WorkspaceEdit {
+    use lsp_types::{
+        CreateFile, CreateFileOptions, DocumentChangeOperation, DocumentChanges, OneOf,
+        OptionalVersionedTextDocumentIdentifier, ResourceOp, TextDocumentEdit,
+    };
+
+    let mut ops: Vec<DocumentChangeOperation> = Vec::new();
+
+    // Source file deletions (one TextDocumentEdit per source URI).
+    for (uri, edits) in deletions {
+        if edits.is_empty() {
+            continue;
+        }
+        ops.push(DocumentChangeOperation::Edit(TextDocumentEdit {
+            text_document: OptionalVersionedTextDocumentIdentifier {
+                uri: uri.clone(),
+                version: None,
+            },
+            edits: edits
+                .iter()
+                .cloned()
+                .map(OneOf::Left)
+                .collect(),
+        }));
+    }
+
+    // Target outputs.tf: append or create-then-write.
+    match strategy {
+        TargetFileStrategy::Loaded {
+            eof,
+            needs_leading_newline,
+        }
+        | TargetFileStrategy::OnDisk {
+            eof,
+            needs_leading_newline,
+        } => {
+            let mut text = String::new();
+            if *needs_leading_newline {
+                text.push('\n');
+            }
+            text.push('\n');
+            text.push_str(combined);
+            let append = TextEdit {
+                range: Range {
+                    start: *eof,
+                    end: *eof,
+                },
+                new_text: text,
+            };
+            ops.push(DocumentChangeOperation::Edit(TextDocumentEdit {
+                text_document: OptionalVersionedTextDocumentIdentifier {
+                    uri: target_url.clone(),
+                    version: None,
+                },
+                edits: vec![OneOf::Left(append)],
+            }));
+        }
+        TargetFileStrategy::Create => {
+            ops.push(DocumentChangeOperation::Op(ResourceOp::Create(
+                CreateFile {
+                    uri: target_url.clone(),
+                    options: Some(CreateFileOptions {
+                        overwrite: Some(false),
+                        ignore_if_exists: Some(true),
+                    }),
+                    annotation_id: None,
+                },
+            )));
+            let initial = TextEdit {
+                range: Range {
+                    start: Position::new(0, 0),
+                    end: Position::new(0, 0),
+                },
+                new_text: combined.to_string(),
+            };
+            ops.push(DocumentChangeOperation::Edit(TextDocumentEdit {
+                text_document: OptionalVersionedTextDocumentIdentifier {
+                    uri: target_url.clone(),
+                    version: None,
+                },
+                edits: vec![OneOf::Left(initial)],
+            }));
+        }
+    }
+
+    WorkspaceEdit {
+        document_changes: Some(DocumentChanges::Operations(ops)),
+        ..Default::default()
     }
 }
 
