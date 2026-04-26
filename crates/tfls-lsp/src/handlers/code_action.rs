@@ -85,6 +85,32 @@ pub async fn code_action(
         actions.push(CodeActionOrCommand::CodeAction(action));
     }
 
+    // Cursor-driven per-variable insert. Triggered when the cursor
+    // sits ANYWHERE inside an untyped `variable "X" { … }` block,
+    // not only when the diag's narrow `variable` keyword span is
+    // in `params.context.diagnostics`. nvim only ships diags whose
+    // ranges intersect the cursor, so an action gated purely on
+    // the diag would never appear when the user is on the block
+    // label or interior — even though the diag is firing.
+    if let Some(action) = make_insert_variable_type_action_at_cursor(
+        &uri,
+        params.range.start,
+        body,
+        &doc.rope,
+        &doc.symbols,
+        &backend.state,
+    ) {
+        // Avoid stacking two identical actions when the diag-driven
+        // path already produced one for the same variable name.
+        let already = actions.iter().any(|a| match a {
+            CodeActionOrCommand::CodeAction(ca) => ca.title == action.title,
+            _ => false,
+        });
+        if !already {
+            actions.push(CodeActionOrCommand::CodeAction(action));
+        }
+    }
+
     // "Refine `type = any`" — for every variable declared with
     // `type = any` whose default / caller signal yields a more
     // concrete shape, replace `any` with the inferred type.
@@ -600,6 +626,97 @@ fn make_insert_variable_type_action(
         }),
         // Object/tuple shapes can be coarse — leave the action
         // available but not preferred so other plugins can win.
+        is_preferred: Some(matches!(
+            inferred,
+            tfls_core::variable_type::VariableType::Primitive(_)
+        )),
+        ..Default::default()
+    })
+}
+
+/// Cursor-position variant of [`make_insert_variable_type_action`].
+/// Walks the file for the `variable` block whose span contains
+/// `cursor`; if it has no `type` attribute and inference yields a
+/// concrete shape, builds the same `Set variable type` quick-fix
+/// the diag-driven path produces. Used so the action surfaces from
+/// anywhere inside the block — nvim only ships diagnostics whose
+/// ranges intersect the cursor, and the typed-variables warning's
+/// range is just the `variable` keyword.
+fn make_insert_variable_type_action_at_cursor(
+    uri: &Url,
+    cursor: Position,
+    body: &Body,
+    rope: &Rope,
+    symbols: &tfls_core::SymbolTable,
+    state: &tfls_state::StateStore,
+) -> Option<CodeAction> {
+    use hcl_edit::repr::Span as _;
+
+    // Find the variable block whose source span contains the cursor.
+    let mut target: Option<(&Block, String)> = None;
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else { continue };
+        if block.ident.as_str() != "variable" {
+            continue;
+        }
+        let Some(span) = block.span() else { continue };
+        let Ok(range) = hcl_span_to_lsp_range(rope, span) else { continue };
+        if !contains(&range, cursor) {
+            continue;
+        }
+        let Some(name) = block.labels.first().and_then(label_str) else {
+            continue;
+        };
+        target = Some((block, name.to_string()));
+        break;
+    }
+    let (block, var_name) = target?;
+    if block_has_attribute(block, "type") {
+        return None;
+    }
+
+    let inferred_from_default = symbols
+        .variable_defaults
+        .get(&var_name)
+        .filter(|t| is_actionable_inference(t))
+        .cloned();
+    let inferred = inferred_from_default.or_else(|| {
+        let module_dir = crate::handlers::util::parent_dir(uri)?;
+        let merged = state.merged_assigned_type(&module_dir, &var_name)?;
+        if !is_actionable_inference(&merged) {
+            return None;
+        }
+        Some(merged)
+    })?;
+    let rendered = inferred.to_string();
+    let (insert_pos, prefix) = insertion_position(block, rope)?;
+    let new_text = format!("{prefix}  type = {rendered}\n");
+    let edit = TextEdit {
+        range: Range {
+            start: insert_pos,
+            end: insert_pos,
+        },
+        new_text,
+    };
+    let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    changes.insert(uri.clone(), vec![edit]);
+    let title_source = if symbols
+        .variable_defaults
+        .get(&var_name)
+        .is_some_and(is_actionable_inference)
+    {
+        "default"
+    } else {
+        "tfvars / module callers"
+    };
+    Some(CodeAction {
+        title: format!("Set variable type to `{rendered}` from {title_source}"),
+        kind: Some(CodeActionKind::QUICKFIX),
+        diagnostics: None,
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
         is_preferred: Some(matches!(
             inferred,
             tfls_core::variable_type::VariableType::Primitive(_)

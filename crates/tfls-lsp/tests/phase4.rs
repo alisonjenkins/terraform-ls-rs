@@ -694,6 +694,62 @@ async fn code_action_fix_all_inserts_types_for_every_untyped_variable() {
 }
 
 #[tokio::test]
+async fn code_action_inserts_inferred_type_from_cursor_without_diagnostic() {
+    // The typed-variables warning's range covers only the
+    // `variable` keyword, so nvim won't include the diag in
+    // `params.context.diagnostics` when the cursor is on the
+    // block label or interior. The cursor-position fallback path
+    // should still produce the per-variable quick-fix.
+    let u = uri("file:///mod/main.tf");
+    let src = "variable \"region\" {\n  default = \"us-east-1\"\n}\n";
+    let backend = fresh_backend(src, &u);
+
+    // Cursor on the block label (col 13 of line 0), NOT on the
+    // `variable` keyword.
+    let resp = tfls_lsp::handlers::code_action::code_action(
+        &backend,
+        CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: u.clone() },
+            range: Range {
+                start: Position::new(0, 13),
+                end: Position::new(0, 13),
+            },
+            context: CodeActionContext {
+                // Empty — simulate nvim sending no overlapping diags.
+                diagnostics: vec![],
+                only: None,
+                trigger_kind: None,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        },
+    )
+    .await
+    .expect("ok")
+    .expect("response");
+
+    let action = resp
+        .iter()
+        .find_map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca)
+                if ca.title.contains("Set variable type to `string`") =>
+            {
+                Some(ca)
+            }
+            _ => None,
+        })
+        .expect("per-variable quick-fix should appear from cursor in block");
+    let edits = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .and_then(|c| c.get(&u))
+        .expect("edits");
+    assert_eq!(edits.len(), 1);
+    assert!(edits[0].new_text.contains("type = string"));
+}
+
+#[tokio::test]
 async fn code_action_unwraps_deprecated_interpolation() {
     let u = uri("file:///mod/main.tf");
     let src = "variable \"region\" { default = \"x\" }\n\

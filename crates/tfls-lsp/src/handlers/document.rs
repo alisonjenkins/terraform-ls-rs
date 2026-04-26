@@ -125,6 +125,12 @@ pub(crate) enum DidOpenPublish {
     /// empty `publishDiagnostics`; subsequent pulls populate the
     /// pull namespace. Total lifetime push count for this URI
     /// under pull mode: exactly 1 (the empty clear).
+    ///
+    /// Currently unreachable — `did_open_publish_action` forces
+    /// `PublishReal` because the server does not advertise
+    /// `diagnostic_provider`. Variant retained for the if/when we
+    /// re-enable pull. Marked `#[allow(dead_code)]` until then.
+    #[allow(dead_code)]
     ClearPushNamespaceThenPull,
     /// Client didn't advertise pull. Compute + push real
     /// diagnostics the normal way.
