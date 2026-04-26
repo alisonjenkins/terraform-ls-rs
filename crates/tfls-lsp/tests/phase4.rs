@@ -357,8 +357,11 @@ async fn code_action_inserts_inferred_object_type_with_nested_keys() {
 }
 
 #[tokio::test]
-async fn code_action_no_action_when_default_resolves_to_any() {
-    // Reference defaults can't be statically typed.
+async fn code_action_offers_any_placeholder_when_default_resolves_to_any() {
+    // Reference defaults can't be statically typed → no concrete
+    // inference. The diag-driven action skips, but the
+    // cursor-driven fallback emits a `type = any` placeholder so
+    // the menu isn't empty when the user invokes on the block.
     let u = uri("file:///vars.tf");
     let src = concat!(
         "variable \"x\" {\n",
@@ -372,16 +375,20 @@ async fn code_action_no_action_when_default_resolves_to_any() {
     let backend = fresh_backend(src, &u);
 
     let actions = code_actions_for(&backend, &u, "variable has no type").await;
+    let only_placeholder = actions.len() == 1
+        && matches!(&actions[0], CodeActionOrCommand::CodeAction(ca)
+            if ca.title.contains("Set variable type to `any`"));
     assert!(
-        actions.is_empty(),
-        "must not offer action for unresolvable default; got {actions:?}"
+        only_placeholder,
+        "expected one `type = any` placeholder; got {actions:?}",
     );
 }
 
 #[tokio::test]
-async fn code_action_no_action_for_empty_array_default() {
-    // `default = []` is too ambiguous (could be list/set of any
-    // primitive). Refuse rather than guess.
+async fn code_action_offers_any_placeholder_for_empty_array_default() {
+    // `default = []` is too ambiguous to suggest a concrete
+    // collection type. The diag-driven path skips; cursor-driven
+    // fallback offers `type = any` so the user has SOMETHING.
     let u = uri("file:///vars.tf");
     let src = concat!(
         "variable \"items\" {\n",
@@ -392,9 +399,12 @@ async fn code_action_no_action_for_empty_array_default() {
     let backend = fresh_backend(src, &u);
 
     let actions = code_actions_for(&backend, &u, "variable has no type").await;
+    let only_placeholder = actions.len() == 1
+        && matches!(&actions[0], CodeActionOrCommand::CodeAction(ca)
+            if ca.title.contains("Set variable type to `any`"));
     assert!(
-        actions.is_empty(),
-        "empty array is too ambiguous; got {actions:?}"
+        only_placeholder,
+        "expected one `type = any` placeholder; got {actions:?}",
     );
 }
 
@@ -440,9 +450,10 @@ async fn code_action_falls_back_to_assigned_types_when_no_default() {
 }
 
 #[tokio::test]
-async fn code_action_skips_when_assigned_types_disagree() {
-    // Two callers / tfvars files give DIFFERENT types for the same
-    // variable → no canonical answer → no action.
+async fn code_action_offers_any_placeholder_when_assigned_types_disagree() {
+    // Two callers give DIFFERENT types (string vs number) → no
+    // canonical inference. Diag-driven path skips; cursor-driven
+    // fallback offers `type = any` placeholder.
     let u = uri("file:///mod/main.tf");
     let src = concat!(
         "variable \"thing\" {}\n",
@@ -466,9 +477,12 @@ async fn code_action_skips_when_assigned_types_disagree() {
         .replace_assigned_variable_types(PathBuf::from("/mod"), for_dir);
 
     let actions = code_actions_for(&backend, &u, "variable has no type").await;
+    let only_placeholder = actions.len() == 1
+        && matches!(&actions[0], CodeActionOrCommand::CodeAction(ca)
+            if ca.title.contains("Set variable type to `any`"));
     assert!(
-        actions.is_empty(),
-        "disagreement must skip the action; got {actions:?}"
+        only_placeholder,
+        "expected one `type = any` placeholder; got {actions:?}",
     );
 }
 
@@ -747,6 +761,55 @@ async fn code_action_inserts_inferred_type_from_cursor_without_diagnostic() {
         .expect("edits");
     assert_eq!(edits.len(), 1);
     assert!(edits[0].new_text.contains("type = string"));
+}
+
+#[tokio::test]
+async fn code_action_offers_any_placeholder_when_no_inference() {
+    // Variable declared but no default, no caller in workspace
+    // → no inference. The cursor-driven path should still offer
+    // a `type = any` placeholder so the user has SOMETHING to
+    // pick from the menu rather than only the file-wide fix-all.
+    let u = uri("file:///mod/main.tf");
+    let src = "variable \"unknown\" {}\noutput \"u\" { value = var.unknown }\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::code_action::code_action(
+        &backend,
+        CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: u.clone() },
+            range: Range {
+                start: Position::new(0, 13),
+                end: Position::new(0, 13),
+            },
+            context: CodeActionContext {
+                diagnostics: vec![],
+                only: None,
+                trigger_kind: None,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        },
+    )
+    .await
+    .expect("ok")
+    .expect("response");
+    let action = resp
+        .iter()
+        .find_map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca)
+                if ca.title.contains("Set variable type to `any`") =>
+            {
+                Some(ca)
+            }
+            _ => None,
+        })
+        .expect("placeholder action when no inference");
+    let edits = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .and_then(|c| c.get(&u))
+        .expect("edits");
+    assert!(edits[0].new_text.contains("type = any"));
 }
 
 #[tokio::test]

@@ -717,9 +717,35 @@ fn make_insert_variable_type_action_at_cursor(
             return None;
         }
         Some(merged)
-    })?;
-    let rendered = inferred.to_string();
+    });
+
     let (insert_pos, prefix) = insertion_position(block, rope)?;
+
+    // When no concrete inference is available (typical for
+    // modules with no callers in the workspace), still offer a
+    // `type = any` placeholder. The user always wants SOMETHING
+    // to land at the cursor; sitting on an untyped block with
+    // only the file-level fix-all option visible is confusing.
+    // The placeholder is semantically safe (`any` matches
+    // anything) and the existing "Refine `type = any`" source
+    // action will replace it later if/when an inference signal
+    // appears.
+    let (rendered, title_source, is_placeholder) = match &inferred {
+        Some(ty) => {
+            let src = if symbols
+                .variable_defaults
+                .get(&var_name)
+                .is_some_and(is_actionable_inference)
+            {
+                "default"
+            } else {
+                "tfvars / module callers"
+            };
+            (ty.to_string(), src, false)
+        }
+        None => ("any".to_string(), "no inference — adjust as needed", true),
+    };
+
     let new_text = format!("{prefix}  type = {rendered}\n");
     let edit = TextEdit {
         range: Range {
@@ -730,27 +756,24 @@ fn make_insert_variable_type_action_at_cursor(
     };
     let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
     changes.insert(uri.clone(), vec![edit]);
-    let title_source = if symbols
-        .variable_defaults
-        .get(&var_name)
-        .is_some_and(is_actionable_inference)
-    {
-        "default"
-    } else {
-        "tfvars / module callers"
-    };
     Some(CodeAction {
-        title: format!("Set variable type to `{rendered}` from {title_source}"),
+        title: format!("Set variable type to `{rendered}` ({title_source})"),
         kind: Some(CodeActionKind::QUICKFIX),
         diagnostics: None,
         edit: Some(WorkspaceEdit {
             changes: Some(changes),
             ..Default::default()
         }),
-        is_preferred: Some(matches!(
-            inferred,
-            tfls_core::variable_type::VariableType::Primitive(_)
-        )),
+        // Placeholder shouldn't auto-apply via "fix all"
+        // shortcuts — we don't actually know the type.
+        is_preferred: if is_placeholder {
+            Some(false)
+        } else {
+            Some(matches!(
+                inferred,
+                Some(tfls_core::variable_type::VariableType::Primitive(_))
+            ))
+        },
         ..Default::default()
     })
 }
