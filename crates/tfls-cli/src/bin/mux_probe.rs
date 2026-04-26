@@ -111,6 +111,27 @@ async fn run(cli: Cli) -> Result<(), String> {
     write_lspmux_config(&tmp, port).map_err(|e| format!("write config: {e}"))?;
 
     let mut daemon = spawn_daemon(&cli.lspmux_path, &tmp).map_err(|e| format!("spawn daemon: {e}"))?;
+    // Pipe daemon stderr to a file for post-mortem inspection.
+    let daemon_log = tmp.join("lspmux.stderr.log");
+    if let Some(stderr) = daemon.stderr.take() {
+        let log = daemon_log.clone();
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut f = match tokio::fs::File::create(&log).await {
+                Ok(f) => f,
+                Err(_) => return,
+            };
+            let mut reader = stderr;
+            let mut buf = [0u8; 8192];
+            while let Ok(n) = reader.read(&mut buf).await {
+                if n == 0 {
+                    break;
+                }
+                let _ = tokio::io::AsyncWriteExt::write_all(&mut f, &buf[..n]).await;
+            }
+        });
+    }
+    eprintln!("daemon log: {daemon_log:?}");
 
     // Wait for the daemon to bind. Poll the TCP port.
     if let Err(e) = wait_for_port(port).await {

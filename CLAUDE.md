@@ -68,6 +68,21 @@ Use this first when a user reports "diagnostics not showing up" or "wrong diagno
 
 Tests goto-definition / hover / references at a specific cursor position without driving an LSP client. Pinpoints navigation regressions.
 
+### `tfls-mux-probe`
+
+Spawns an isolated `lspmux server` (random port, override `XDG_CONFIG_HOME` so it doesn't clash with the user's running daemon), then drives N sequential `lspmux client` subprocesses against the same `tfls` binary — each session simulates one nvim launch. Captures `textDocument/publishDiagnostics` per session, prints a summary table, and flags the multi-client republish bug ("session 1 received diagnostics, subsequent sessions did not") when reproduced.
+
+```bash
+cargo run --bin tfls-mux-probe -- \
+  --tfls-path target/debug/tfls \
+  --lspmux-path "$(which lspmux)" \
+  --workspace ~/git/terraform/main \
+  --file modules/game_server/launchconf.tf \
+  --sessions 3
+```
+
+Use this when investigating LSP message-routing bugs that span multiple client connections (lspmux dedupe, fanout, late-attach republish). Daemon stderr is captured to `<tmp>/lspmux.stderr.log` for post-mortem.
+
 ### `tfls-infer-coverage`
 
 Variable-type inference coverage report. Walks the workspace (including `.terraform/modules/*` so external module outputs resolve), runs `rebuild_assigned_variable_types_for_dir` on every dir, classifies each declared variable as one of:
