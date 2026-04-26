@@ -57,6 +57,33 @@ fn init_tracing(verbosity: u8) {
         EnvFilter::new(format!("tfls={level},tower_lsp=info"))
     });
 
+    // File sink path. Defaults to `$XDG_RUNTIME_DIR/tfls.log`
+    // (typically `/run/user/<uid>/tfls.log`) — accessible to the
+    // user but cleared on logout. Falls back to `/tmp/tfls.log`.
+    // Override with `TFLS_LOG_FILE=…`. Critical because tfls
+    // runs under `lspmux` daemon mode where stderr is detached
+    // to `/dev/null` and journald never sees the trace stream.
+    let log_path = std::env::var("TFLS_LOG_FILE").unwrap_or_else(|_| {
+        if let Ok(rt) = std::env::var("XDG_RUNTIME_DIR") {
+            format!("{rt}/tfls.log")
+        } else {
+            "/tmp/tfls.log".to_string()
+        }
+    });
+    if let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        use std::sync::Mutex;
+        let _ = fmt()
+            .with_env_filter(filter)
+            .with_writer(Mutex::new(file))
+            .with_ansi(false)
+            .try_init();
+        return;
+    }
+
     let _ = fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)

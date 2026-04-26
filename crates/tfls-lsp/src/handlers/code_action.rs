@@ -654,14 +654,32 @@ fn make_insert_variable_type_action_at_cursor(
 
     // Find the variable block whose source span contains the cursor.
     let mut target: Option<(&Block, String)> = None;
+    let mut block_count = 0usize;
     for structure in body.iter() {
         let Some(block) = structure.as_block() else { continue };
         if block.ident.as_str() != "variable" {
             continue;
         }
-        let Some(span) = block.span() else { continue };
+        block_count += 1;
+        let Some(span) = block.span() else {
+            tracing::info!(
+                cursor_line = cursor.line,
+                cursor_char = cursor.character,
+                "infer-type at-cursor: variable block has no span",
+            );
+            continue;
+        };
         let Ok(range) = hcl_span_to_lsp_range(rope, span) else { continue };
-        if !contains(&range, cursor) {
+        let inside = contains(&range, cursor);
+        tracing::info!(
+            cursor_line = cursor.line,
+            cursor_char = cursor.character,
+            block_start = format!("{}:{}", range.start.line, range.start.character),
+            block_end = format!("{}:{}", range.end.line, range.end.character),
+            inside,
+            "infer-type at-cursor: candidate block",
+        );
+        if !inside {
             continue;
         }
         let Some(name) = block.labels.first().and_then(label_str) else {
@@ -670,8 +688,20 @@ fn make_insert_variable_type_action_at_cursor(
         target = Some((block, name.to_string()));
         break;
     }
-    let (block, var_name) = target?;
+    let Some((block, var_name)) = target else {
+        tracing::info!(
+            cursor_line = cursor.line,
+            cursor_char = cursor.character,
+            block_count,
+            "infer-type at-cursor: no enclosing variable block found",
+        );
+        return None;
+    };
     if block_has_attribute(block, "type") {
+        tracing::info!(
+            var = %var_name,
+            "infer-type at-cursor: block already has type",
+        );
         return None;
     }
 
