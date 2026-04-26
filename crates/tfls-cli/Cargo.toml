@@ -25,6 +25,10 @@ path = "src/bin/nav_probe.rs"
 name = "tfls-infer-coverage"
 path = "src/bin/infer_coverage.rs"
 
+[[bin]]
+name = "tfls-mux-probe"
+path = "src/bin/mux_probe.rs"
+
 [dependencies]
 tfls-lsp.workspace = true
 tfls-state.workspace = true
@@ -33,6 +37,7 @@ tfls-schema.workspace = true
 tfls-provider-protocol.workspace = true
 tfls-core.workspace = true
 hcl-edit.workspace = true
+serde_json = "1"
 lsp-types.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

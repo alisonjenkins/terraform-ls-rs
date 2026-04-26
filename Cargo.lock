@@ -2635,6 +2635,7 @@ dependencies = [
  "clap",
  "hcl-edit",
  "lsp-types",
+ "serde_json",
  "tfls-core",
  "tfls-lsp",
  "tfls-provider-protocol",

@@ -67,6 +67,11 @@ pub async fn did_open(backend: &Backend, params: DidOpenTextDocumentParams) {
     // invariant it pins.
     match action {
         DidOpenPublish::ClearPushNamespaceThenPull => {
+            tracing::info!(
+                uri = %uri,
+                action = "ClearPushNamespaceThenPull",
+                "did_open: publishing 0 diagnostics (clear push, pull takes over)",
+            );
             // Empty `publishDiagnostics` resets the push namespace.
             // Subsequent pulls populate the (separate) pull
             // namespace; nvim's display is pull-only for this URI.
@@ -76,6 +81,12 @@ pub async fn did_open(backend: &Backend, params: DidOpenTextDocumentParams) {
                 .await;
         }
         DidOpenPublish::PublishReal => {
+            tracing::info!(
+                uri = %uri,
+                action = "PublishReal",
+                count = diagnostics.len(),
+                "did_open: publishing diagnostics",
+            );
             backend
                 .client
                 .publish_diagnostics(uri.clone(), diagnostics, None)
