@@ -775,6 +775,31 @@ async fn code_action_declares_undefined_variables() {
 }
 
 #[tokio::test]
+async fn code_action_converts_2arg_lookup_to_index() {
+    let u = uri("file:///mod/main.tf");
+    let src = "variable \"m\" { default = { k = \"v\" } }\n\
+               output \"o\" { value = lookup(var.m, \"k\") }\n";
+    let backend = fresh_backend(src, &u);
+    let actions = code_actions_for(&backend, &u, "two-argument `lookup()`").await;
+    let new_text = first_inserted_text(&actions, &u);
+    assert_eq!(new_text, "var.m[\"k\"]", "got: {new_text:?}");
+}
+
+#[tokio::test]
+async fn code_action_lookup_to_index_handles_complex_first_arg() {
+    // First arg is a function call — index notation must wrap the
+    // ENTIRE first-arg expression, not just its tail.
+    let u = uri("file:///mod/main.tf");
+    let src = "variable \"a\" { default = {} }\n\
+               variable \"b\" { default = {} }\n\
+               output \"o\" { value = lookup(merge(var.a, var.b), \"key\") }\n";
+    let backend = fresh_backend(src, &u);
+    let actions = code_actions_for(&backend, &u, "two-argument `lookup()`").await;
+    let new_text = first_inserted_text(&actions, &u);
+    assert_eq!(new_text, "merge(var.a, var.b)[\"key\"]", "got: {new_text:?}");
+}
+
+#[tokio::test]
 async fn code_action_declare_undefined_skips_when_all_resolved() {
     let u = uri("file:///mod/main.tf");
     let src = "variable \"a\" { default = \"x\" }\n\

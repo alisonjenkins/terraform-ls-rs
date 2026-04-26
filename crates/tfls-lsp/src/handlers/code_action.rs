@@ -57,6 +57,12 @@ pub async fn code_action(
             {
                 actions.push(CodeActionOrCommand::CodeAction(action));
             }
+        } else if is_deprecated_lookup(diag) {
+            if let Some(action) =
+                make_convert_lookup_to_index_action(&uri, diag, body, &doc.rope)
+            {
+                actions.push(CodeActionOrCommand::CodeAction(action));
+            }
         }
     }
 
@@ -233,6 +239,99 @@ fn is_deprecated_interpolation(diag: &Diagnostic) -> bool {
         && diag
             .message
             .contains("interpolation-only expressions are deprecated")
+}
+
+/// Match the `terraform_deprecated_lookup` warning so we can offer
+/// a rewrite from `lookup(X, "k")` (deprecated 2-arg form) to
+/// `X["k"]` (index notation, type-agnostic).
+fn is_deprecated_lookup(diag: &Diagnostic) -> bool {
+    diag.severity == Some(DiagnosticSeverity::WARNING)
+        && diag.source.as_deref() == Some("terraform-ls-rs")
+        && diag
+            .message
+            .contains("two-argument `lookup()` is deprecated")
+}
+
+/// Quick-fix for `terraform_deprecated_lookup`. Rewrites
+/// `lookup(X, "k")` to `X["k"]` — index notation, semantically
+/// equivalent and valid for ANY collection type. We deliberately
+/// do NOT rewrite to `X.k` even when the key is a valid identifier,
+/// because:
+///
+/// - For `Object({k = …})` both `X.k` and `X["k"]` work.
+/// - For `Map(T)` runtime maps where `k` is a runtime value,
+///   `X.k` is a static error if `k` isn't a known field — we
+///   can't tell at parse time.
+///
+/// `X["k"]` works in both cases. The user can hand-simplify to
+/// `X.k` afterwards if they know `X` is an Object.
+fn make_convert_lookup_to_index_action(
+    uri: &Url,
+    diag: &Diagnostic,
+    body: &Body,
+    rope: &Rope,
+) -> Option<CodeAction> {
+    use hcl_edit::expr::Expression;
+    use hcl_edit::repr::Span as _;
+
+    let diag_start = tfls_parser::lsp_position_to_byte_offset(rope, diag.range.start).ok()?;
+    let diag_end = tfls_parser::lsp_position_to_byte_offset(rope, diag.range.end).ok()?;
+
+    // Find the 2-arg `lookup` FuncCall whose span matches the diag range.
+    let mut found: Option<(String, String)> = None;
+    tfls_diag::expr_walk::for_each_expression(body, |expr| {
+        if found.is_some() {
+            return;
+        }
+        let Expression::FuncCall(call) = expr else { return };
+        if !call.name.namespace.is_empty() {
+            return;
+        }
+        if call.name.name.as_str() != "lookup" {
+            return;
+        }
+        if call.args.iter().count() != 2 {
+            return;
+        }
+        let Some(span) = call.span() else { return };
+        if span.start != diag_start || span.end != diag_end {
+            return;
+        }
+        let mut args = call.args.iter();
+        let arg1 = args.next();
+        let arg2 = args.next();
+        let (Some(a1), Some(a2)) = (arg1, arg2) else { return };
+        let (Some(s1), Some(s2)) = (a1.span(), a2.span()) else { return };
+        let arg1_src = rope.byte_slice(s1.start..s1.end).to_string();
+        let arg2_src = rope.byte_slice(s2.start..s2.end).to_string();
+        found = Some((arg1_src, arg2_src));
+    });
+
+    let (arg1_src, arg2_src) = found?;
+    let arg1_trim = arg1_src.trim().to_string();
+    let arg2_trim = arg2_src.trim().to_string();
+    let new_text = format!("{arg1_trim}[{arg2_trim}]");
+
+    let edit = TextEdit {
+        range: diag.range,
+        new_text: new_text.clone(),
+    };
+    let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    changes.insert(uri.clone(), vec![edit]);
+    Some(CodeAction {
+        title: format!("Convert `lookup({arg1_trim}, {arg2_trim})` to `{new_text}`"),
+        kind: Some(CodeActionKind::QUICKFIX),
+        diagnostics: Some(vec![diag.clone()]),
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        // Index notation is semantics-preserving, but `X.k` may
+        // be the user's preferred final form — leave the choice
+        // open by not pinning `is_preferred = true`.
+        is_preferred: None,
+        ..Default::default()
+    })
 }
 
 /// Quick-fix for `terraform_deprecated_interpolation`. Replaces
