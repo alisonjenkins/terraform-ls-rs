@@ -286,47 +286,68 @@ fn emit_scoped_actions<F>(
     }
 }
 
-/// Scope iteration for `declare-undefined-variables`. Special-cased
-/// because:
+/// Scope iteration for `declare-undefined-variables`.
 ///
-/// - Module scope needs the union of variable declarations
-///   across every sibling `.tf` file — declarations in a separate
-///   file in the same module aren't "undefined" even though the
-///   active doc's `symbols.variables` doesn't list them.
-/// - All N undeclared vars per doc collapse into ONE end-of-file
-///   `TextEdit`, so the standard title format (which counts
-///   edits) would under-report. We construct the title manually
-///   from the actual undeclared-name count.
+/// Always targets `<module-dir>/variables.tf` regardless of which
+/// file the action was invoked from. Anything else trips
+/// `terraform_standard_module_structure` — declaring variables in
+/// `main.tf` (or any other file) is itself a flagged authoring
+/// mistake. If the target file already exists (loaded or on
+/// disk), we append at EOF; otherwise the WorkspaceEdit
+/// includes a `CreateFile` op so the LSP client materialises it.
+///
+/// Module-scope only — File/Selection/Workspace don't fit:
+/// - File: would imply per-source-doc routing, but we always
+///   write to `variables.tf`. Single Module entry is enough.
+/// - Selection: appends are at EOF, not in the selection.
+/// - Workspace: stubs would scatter across unrelated modules.
 fn emit_declare_undefined_actions(
     state: &StateStore,
     primary_uri: &Url,
     actions: &mut Vec<CodeActionOrCommand>,
 ) {
-    // File scope: declared = current doc's declarations only.
-    let (file_edits, file_count) = collect_declare_undefined(
-        state,
-        primary_uri,
-        Scope::File,
-        &per_doc_declared_set(state, primary_uri, Scope::File),
-    );
-    if let Some(action) = build_declare_undefined_action(Scope::File, file_edits, file_count) {
-        actions.push(CodeActionOrCommand::CodeAction(action));
+    use crate::handlers::code_action_scope::{scope_kind, scope_title};
+
+    let Some(module_dir) = crate::handlers::util::parent_dir(primary_uri) else {
+        return;
+    };
+
+    // Undeclared = module-wide refs minus the union of every
+    // sibling `.tf` file's declarations. A var declared in any
+    // sibling counts as "declared" for the whole module.
+    let declared = per_doc_declared_set(state, primary_uri, Scope::Module);
+    let undeclared = collect_undeclared_names(state, primary_uri, Scope::Module, &declared);
+    if undeclared.is_empty() {
+        return;
     }
 
-    // Module scope: declared = union of declarations across every
-    // sibling `.tf` file in the same module dir.
-    let module_declared = per_doc_declared_set(state, primary_uri, Scope::Module);
-    let (mod_edits, mod_count) =
-        collect_declare_undefined(state, primary_uri, Scope::Module, &module_declared);
-    if let Some(action) = build_declare_undefined_action(Scope::Module, mod_edits, mod_count) {
-        actions.push(CodeActionOrCommand::CodeAction(action));
-    }
+    let target_path = module_dir.join("variables.tf");
+    let Ok(target_url) = Url::from_file_path(&target_path) else {
+        return;
+    };
+    let strategy = resolve_variables_tf_strategy(state, &target_url, &target_path);
+    let edit = build_declare_undefined_workspace_edit(&target_url, &strategy, &undeclared);
+
+    let count = undeclared.len();
+    actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+        title: scope_title(
+            "Declare undefined variables",
+            "undefined variable",
+            Scope::Module,
+            count,
+        ),
+        kind: Some(scope_kind(Scope::Module, "declare-undefined-variables")),
+        diagnostics: None,
+        edit: Some(edit),
+        is_preferred: None,
+        ..Default::default()
+    }));
 }
 
 /// Build the union of variable declarations across the docs that
-/// `scope` would visit. Used as the "declared" set for
-/// `scan_declare_undefined_variables` so module-wide declarations
-/// suppress would-be undefined references.
+/// `scope` would visit. Used as the "declared" set so module-wide
+/// declarations suppress what would otherwise look like undefined
+/// references in a peer file.
 fn per_doc_declared_set(
     state: &StateStore,
     primary_uri: &Url,
@@ -341,71 +362,159 @@ fn per_doc_declared_set(
     out
 }
 
-/// Run `scan_declare_undefined_variables` over every doc in `scope`,
-/// returning the per-uri edit map plus the total count of undeclared
-/// variable names (NOT edits — see `emit_declare_undefined_actions`).
-fn collect_declare_undefined(
+/// Distinct `var.X` reference names across `scope`'s docs that
+/// aren't in `declared`. BTreeSet so the resulting `variable "X"
+/// {}` stubs land in deterministic order.
+fn collect_undeclared_names(
     state: &StateStore,
     primary_uri: &Url,
     scope: Scope,
     declared: &HashSet<String>,
-) -> (HashMap<Url, Vec<TextEdit>>, usize) {
+) -> std::collections::BTreeSet<String> {
     use std::collections::BTreeSet;
     use tfls_parser::ReferenceKind;
 
-    let mut edits_by_uri: HashMap<Url, Vec<TextEdit>> = HashMap::new();
-    let mut total_undeclared: BTreeSet<String> = BTreeSet::new();
-    for_each_doc_in_scope(state, primary_uri, scope, |doc_uri, doc| {
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    for_each_doc_in_scope(state, primary_uri, scope, |_uri, doc| {
         for r in &doc.references {
             if let ReferenceKind::Variable { name } = &r.kind {
                 if !declared.contains(name) {
-                    total_undeclared.insert(name.clone());
+                    out.insert(name.clone());
                 }
             }
         }
-        let v = scan_declare_undefined_variables(&doc.rope, &doc.references, declared);
-        if !v.is_empty() {
-            edits_by_uri.insert(doc_uri.clone(), v);
-        }
     });
-    (edits_by_uri, total_undeclared.len())
+    out
 }
 
-/// Assemble the final scoped `CodeAction` for declare-undefined.
-/// `count` is the count of distinct undeclared variable NAMES in
-/// scope; the standard title-from-edits path would under-report
-/// because every doc's N undeclared names collapse into one EOF
-/// `TextEdit`.
-fn build_declare_undefined_action(
-    scope: Scope,
-    edits_by_uri: HashMap<Url, Vec<TextEdit>>,
-    count: usize,
-) -> Option<CodeAction> {
-    use crate::handlers::code_action_scope::{scope_kind, scope_title};
+/// How we should reach `variables.tf` to insert the new stubs.
+enum VariablesTfStrategy {
+    /// File is in `state.documents` — append at the rope's EOF.
+    Loaded {
+        eof: Position,
+        needs_leading_newline: bool,
+    },
+    /// File exists on disk but isn't a tracked document — read it
+    /// to compute the EOF position, then send a plain `TextEdit`.
+    OnDisk {
+        eof: Position,
+        needs_leading_newline: bool,
+    },
+    /// File doesn't exist; emit a `CreateFile` op so the client
+    /// materialises it before applying the inserts.
+    Create,
+}
 
-    let edits_by_uri: HashMap<Url, Vec<TextEdit>> = edits_by_uri
-        .into_iter()
-        .filter(|(_, v)| !v.is_empty())
-        .collect();
-    if edits_by_uri.is_empty() || count == 0 {
-        return None;
+fn resolve_variables_tf_strategy(
+    state: &StateStore,
+    target_url: &Url,
+    target_path: &std::path::Path,
+) -> VariablesTfStrategy {
+    if let Some(doc) = state.documents.get(target_url) {
+        let total = doc.rope.len_bytes();
+        let last_char = if total == 0 {
+            None
+        } else {
+            doc.rope
+                .byte_slice(total - 1..total)
+                .to_string()
+                .chars()
+                .next()
+        };
+        let needs_leading_newline = total > 0 && last_char != Some('\n');
+        let eof = tfls_parser::byte_offset_to_lsp_position(&doc.rope, total)
+            .unwrap_or(Position::new(0, 0));
+        return VariablesTfStrategy::Loaded {
+            eof,
+            needs_leading_newline,
+        };
     }
-    Some(CodeAction {
-        title: scope_title(
-            "Declare undefined variables",
-            "undefined variable",
-            scope,
-            count,
-        ),
-        kind: Some(scope_kind(scope, "declare-undefined-variables")),
-        diagnostics: None,
-        edit: Some(WorkspaceEdit {
-            changes: Some(edits_by_uri),
-            ..Default::default()
-        }),
-        is_preferred: None,
-        ..Default::default()
-    })
+    let Ok(content) = std::fs::read_to_string(target_path) else {
+        return VariablesTfStrategy::Create;
+    };
+    let rope = ropey::Rope::from_str(&content);
+    let total = rope.len_bytes();
+    let needs_leading_newline = total > 0 && !content.ends_with('\n');
+    let eof = tfls_parser::byte_offset_to_lsp_position(&rope, total)
+        .unwrap_or(Position::new(0, 0));
+    VariablesTfStrategy::OnDisk {
+        eof,
+        needs_leading_newline,
+    }
+}
+
+fn build_declare_undefined_workspace_edit(
+    target_url: &Url,
+    strategy: &VariablesTfStrategy,
+    undeclared: &std::collections::BTreeSet<String>,
+) -> WorkspaceEdit {
+    let mut blocks = String::new();
+    for name in undeclared {
+        blocks.push_str(&format!("variable \"{name}\" {{}}\n"));
+    }
+
+    match strategy {
+        VariablesTfStrategy::Loaded {
+            eof,
+            needs_leading_newline,
+        }
+        | VariablesTfStrategy::OnDisk {
+            eof,
+            needs_leading_newline,
+        } => {
+            let mut text = String::new();
+            if *needs_leading_newline {
+                text.push('\n');
+            }
+            text.push('\n');
+            text.push_str(&blocks);
+            let edit = TextEdit {
+                range: Range {
+                    start: *eof,
+                    end: *eof,
+                },
+                new_text: text,
+            };
+            let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+            changes.insert(target_url.clone(), vec![edit]);
+            WorkspaceEdit {
+                changes: Some(changes),
+                ..Default::default()
+            }
+        }
+        VariablesTfStrategy::Create => {
+            use lsp_types::{
+                CreateFile, CreateFileOptions, DocumentChangeOperation, DocumentChanges,
+                OneOf, OptionalVersionedTextDocumentIdentifier, ResourceOp, TextDocumentEdit,
+            };
+            let create_op = DocumentChangeOperation::Op(ResourceOp::Create(CreateFile {
+                uri: target_url.clone(),
+                options: Some(CreateFileOptions {
+                    overwrite: Some(false),
+                    ignore_if_exists: Some(true),
+                }),
+                annotation_id: None,
+            }));
+            let initial_edit = TextEdit {
+                range: Range {
+                    start: Position::new(0, 0),
+                    end: Position::new(0, 0),
+                },
+                new_text: blocks,
+            };
+            let doc_edit = DocumentChangeOperation::Edit(TextDocumentEdit {
+                text_document: OptionalVersionedTextDocumentIdentifier {
+                    uri: target_url.clone(),
+                    version: None,
+                },
+                edits: vec![OneOf::Left(initial_edit)],
+            });
+            WorkspaceEdit {
+                document_changes: Some(DocumentChanges::Operations(vec![create_op, doc_edit])),
+                ..Default::default()
+            }
+        }
+    }
 }
 
 fn is_missing_required(diag: &Diagnostic) -> bool {
@@ -765,68 +874,6 @@ fn make_unwrap_interpolation_action(
         is_preferred: Some(true),
         ..Default::default()
     })
-}
-
-/// Walk this document's `var.<name>` references and, for any name
-/// NOT in `declared`, return a single end-of-file `TextEdit` that
-/// appends `variable "<name>" {}` stubs.
-///
-/// `declared` is the union of variable declarations the caller
-/// considers in scope. For File scope it's just `doc.symbols.
-/// variables`; for Module scope it's the union across every
-/// sibling `.tf` file (so a var declared in one file isn't
-/// re-declared from references in another).
-///
-/// Returns `Vec` (with 0 or 1 elements) so the result drops into
-/// the same per-doc-scan slot every other action uses.
-fn scan_declare_undefined_variables(
-    rope: &Rope,
-    references: &[tfls_parser::Reference],
-    declared: &std::collections::HashSet<String>,
-) -> Vec<TextEdit> {
-    use std::collections::BTreeSet;
-    use tfls_parser::ReferenceKind;
-
-    let mut undeclared: BTreeSet<String> = BTreeSet::new();
-    for r in references {
-        if let ReferenceKind::Variable { name } = &r.kind {
-            if !declared.contains(name) {
-                undeclared.insert(name.clone());
-            }
-        }
-    }
-    if undeclared.is_empty() {
-        return Vec::new();
-    }
-
-    let mut new_text = String::new();
-    let total_bytes = rope.len_bytes();
-    let last_char = if total_bytes == 0 {
-        None
-    } else {
-        rope.byte_slice(total_bytes - 1..total_bytes)
-            .to_string()
-            .chars()
-            .next()
-    };
-    if last_char != Some('\n') && total_bytes > 0 {
-        new_text.push('\n');
-    }
-    new_text.push('\n');
-    for name in &undeclared {
-        new_text.push_str(&format!("variable \"{name}\" {{}}\n"));
-    }
-
-    let Ok(end_pos) = tfls_parser::byte_offset_to_lsp_position(rope, total_bytes) else {
-        return Vec::new();
-    };
-    vec![TextEdit {
-        range: Range {
-            start: end_pos,
-            end: end_pos,
-        },
-        new_text,
-    }]
 }
 
 fn make_insert_variable_type_action(

@@ -837,10 +837,12 @@ async fn code_action_unwraps_interpolation_with_inner_braces() {
 
 #[tokio::test]
 async fn code_action_declares_undefined_variables() {
-    // Three `var.X` references; only one is declared. The
-    // source-level action should append `variable "missing_a" {}`
-    // and `variable "missing_b" {}` at end-of-file.
-    let u = uri("file:///mod/main.tf");
+    // Three `var.X` references; only one is declared. Active file
+    // is `main.tf` — declarations must NOT land in main.tf
+    // (would trip terraform_standard_module_structure). They go
+    // into `<module-dir>/variables.tf`. variables.tf doesn't
+    // exist on disk, so the WorkspaceEdit needs a CreateFile op.
+    let u = uri("file:///nonexistent-mod-for-create/main.tf");
     let src = "variable \"declared\" { default = \"x\" }\n\
                output \"a\" { value = var.declared }\n\
                output \"b\" { value = var.missing_a }\n\
@@ -879,18 +881,52 @@ async fn code_action_declares_undefined_variables() {
             _ => None,
         })
         .expect("declare-undefined action present");
-    let edits = action
+    // Active file is main.tf — must NOT be edited.
+    if let Some(changes) = action.edit.as_ref().and_then(|e| e.changes.as_ref()) {
+        assert!(!changes.contains_key(&u), "main.tf must not be edited");
+    }
+    // Target file does not exist → expect documentChanges with
+    // a CreateFile op for variables.tf + an initial insert.
+    use tower_lsp::lsp_types::{
+        DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp,
+    };
+    let dc = action
         .edit
         .as_ref()
-        .and_then(|e| e.changes.as_ref())
-        .and_then(|c| c.get(&u))
-        .expect("edits");
-    assert_eq!(edits.len(), 1, "single end-of-file insertion");
-    let txt = &edits[0].new_text;
-    assert!(txt.contains("variable \"missing_a\" {}"), "got {txt:?}");
-    assert!(txt.contains("variable \"missing_b\" {}"), "got {txt:?}");
-    // Already-declared variable should NOT be re-emitted.
-    assert!(!txt.contains("variable \"declared\""), "got {txt:?}");
+        .and_then(|e| e.document_changes.as_ref())
+        .expect("documentChanges present");
+    let ops = match dc {
+        DocumentChanges::Operations(o) => o,
+        _ => panic!("expected Operations variant"),
+    };
+    let target_url = uri("file:///nonexistent-mod-for-create/variables.tf");
+    let mut saw_create = false;
+    let mut saw_edit_with_blocks = false;
+    for op in ops {
+        match op {
+            DocumentChangeOperation::Op(ResourceOp::Create(c)) => {
+                assert_eq!(c.uri, target_url);
+                saw_create = true;
+            }
+            DocumentChangeOperation::Edit(te) => {
+                assert_eq!(te.text_document.uri, target_url);
+                for e in &te.edits {
+                    let OneOf::Left(edit) = e else {
+                        panic!("annotated edit not expected");
+                    };
+                    if edit.new_text.contains("variable \"missing_a\" {}")
+                        && edit.new_text.contains("variable \"missing_b\" {}")
+                        && !edit.new_text.contains("variable \"declared\"")
+                    {
+                        saw_edit_with_blocks = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_create, "CreateFile op for variables.tf");
+    assert!(saw_edit_with_blocks, "TextEdit inserts the missing stubs");
 }
 
 #[tokio::test]
@@ -1261,11 +1297,12 @@ async fn scope_set_variable_types_module_aggregates_inferences() {
 
 #[tokio::test]
 async fn scope_declare_undefined_module_uses_union_of_declarations() {
-    // /mod/a.tf declares `var.shared`; /mod/b.tf references it. In
-    // File scope b would flag `shared` as undefined; in Module
-    // scope it must NOT — declared in a sibling file.
-    let a = uri("file:///mod/a.tf");
-    let b = uri("file:///mod/b.tf");
+    // /nonexistent-mod-A/a.tf declares `var.shared`; /…/b.tf
+    // references it. Module scope must drop `shared`. Active
+    // file is b.tf — declarations land in the module's
+    // variables.tf (created since it doesn't exist).
+    let a = uri("file:///nonexistent-mod-A/a.tf");
+    let b = uri("file:///nonexistent-mod-A/b.tf");
     let backend = fresh_backend("variable \"shared\" {}\n", &a);
     add_doc(
         &backend,
@@ -1274,20 +1311,49 @@ async fn scope_declare_undefined_module_uses_union_of_declarations() {
     );
 
     let actions = all_actions_for(&backend, &b).await;
-    // File scope on b would consider `shared` undefined too.
-    let file = find_action(&actions, "Declare 2 undefined variables in this file");
-    let _ = file;
-    // Module scope must drop `shared` (declared in sibling a.tf).
     let module = find_action(&actions, "Declare 1 undefined variable in this module");
-    let edits = module
+
+    // Active file (b.tf) and sibling (a.tf) MUST NOT be edited.
+    if let Some(changes) = module.edit.as_ref().and_then(|e| e.changes.as_ref()) {
+        assert!(!changes.contains_key(&b), "b.tf must not be edited");
+        assert!(!changes.contains_key(&a), "a.tf must not be edited");
+    }
+    use tower_lsp::lsp_types::{
+        DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp,
+    };
+    let dc = module
         .edit
         .as_ref()
-        .and_then(|e| e.changes.as_ref())
-        .and_then(|c| c.get(&b))
-        .unwrap();
-    assert_eq!(edits.len(), 1, "single EOF insertion");
-    assert!(edits[0].new_text.contains("variable \"only_in_b\" {}"));
-    assert!(!edits[0].new_text.contains("variable \"shared\""));
+        .and_then(|e| e.document_changes.as_ref())
+        .expect("documentChanges present");
+    let ops = match dc {
+        DocumentChanges::Operations(o) => o,
+        _ => panic!("expected Operations"),
+    };
+    let target = uri("file:///nonexistent-mod-A/variables.tf");
+    let mut saw_create = false;
+    let mut new_text_combined = String::new();
+    for op in ops {
+        match op {
+            DocumentChangeOperation::Op(ResourceOp::Create(c)) => {
+                assert_eq!(c.uri, target);
+                saw_create = true;
+            }
+            DocumentChangeOperation::Edit(te) => {
+                assert_eq!(te.text_document.uri, target);
+                for e in &te.edits {
+                    let OneOf::Left(edit) = e else {
+                        panic!("annotated edit not expected");
+                    };
+                    new_text_combined.push_str(&edit.new_text);
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_create);
+    assert!(new_text_combined.contains("variable \"only_in_b\" {}"));
+    assert!(!new_text_combined.contains("variable \"shared\""));
 }
 
 #[tokio::test]
