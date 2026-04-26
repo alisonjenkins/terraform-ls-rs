@@ -4,7 +4,7 @@
 //! Currently provides one fix: insert any required attributes that a
 //! resource block is missing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use hcl_edit::repr::Span;
 use hcl_edit::structure::{Block, BlockLabel, Body};
@@ -15,9 +15,13 @@ use lsp_types::{
 };
 use ropey::Rope;
 use tfls_parser::hcl_span_to_lsp_range;
+use tfls_state::{DocumentState, StateStore};
 use tower_lsp::jsonrpc;
 
 use crate::backend::Backend;
+use crate::handlers::code_action_scope::{
+    Scope, build_scoped_action, for_each_doc_in_scope, range_intersects, range_is_empty,
+};
 
 pub async fn code_action(
     backend: &Backend,
@@ -27,49 +31,55 @@ pub async fn code_action(
     let Some(doc) = backend.state.documents.get(&uri) else {
         return Ok(None);
     };
-    let Some(body) = doc.parsed.body.as_ref() else {
-        return Ok(None);
-    };
 
     let mut actions: Vec<CodeActionOrCommand> = Vec::new();
 
     tracing::info!(
         uri = %uri,
         diag_count = params.context.diagnostics.len(),
+        body_some = doc.parsed.body.is_some(),
         diags = ?params.context.diagnostics.iter().map(|d| (
             d.severity, d.source.as_deref().unwrap_or(""), d.message.clone()
         )).collect::<Vec<_>>(),
         "code_action: invocation",
     );
-    for diag in &params.context.diagnostics {
-        if is_missing_required(diag) {
-            if let Some(action) =
-                make_insert_required_action(backend, &uri, diag, body, &doc.rope)
-            {
-                actions.push(CodeActionOrCommand::CodeAction(action));
-            }
-        } else if is_missing_variable_type(diag) {
-            if let Some(action) = make_insert_variable_type_action(
-                &uri,
-                diag,
-                body,
-                &doc.rope,
-                &doc.symbols,
-                &backend.state,
-            ) {
-                actions.push(CodeActionOrCommand::CodeAction(action));
-            }
-        } else if is_deprecated_interpolation(diag) {
-            if let Some(action) =
-                make_unwrap_interpolation_action(&uri, diag, &doc.rope)
-            {
-                actions.push(CodeActionOrCommand::CodeAction(action));
-            }
-        } else if is_deprecated_lookup(diag) {
-            if let Some(action) =
-                make_convert_lookup_to_index_action(&uri, diag, body, &doc.rope)
-            {
-                actions.push(CodeActionOrCommand::CodeAction(action));
+
+    // Per-diag and cursor-driven Instance actions need a parsed
+    // body; skip them if the active doc didn't parse, but DO fall
+    // through to the scoped variants below — Module/Workspace
+    // scope can still surface fixes from sibling docs that did
+    // parse.
+    if let Some(body) = doc.parsed.body.as_ref() {
+        for diag in &params.context.diagnostics {
+            if is_missing_required(diag) {
+                if let Some(action) =
+                    make_insert_required_action(backend, &uri, diag, body, &doc.rope)
+                {
+                    actions.push(CodeActionOrCommand::CodeAction(action));
+                }
+            } else if is_missing_variable_type(diag) {
+                if let Some(action) = make_insert_variable_type_action(
+                    &uri,
+                    diag,
+                    body,
+                    &doc.rope,
+                    &doc.symbols,
+                    &backend.state,
+                ) {
+                    actions.push(CodeActionOrCommand::CodeAction(action));
+                }
+            } else if is_deprecated_interpolation(diag) {
+                if let Some(action) =
+                    make_unwrap_interpolation_action(&uri, diag, &doc.rope)
+                {
+                    actions.push(CodeActionOrCommand::CodeAction(action));
+                }
+            } else if is_deprecated_lookup(diag) {
+                if let Some(action) =
+                    make_convert_lookup_to_index_action(&uri, diag, body, &doc.rope)
+                {
+                    actions.push(CodeActionOrCommand::CodeAction(action));
+                }
             }
         }
     }
@@ -79,10 +89,12 @@ pub async fn code_action(
     // independently of `params.context.diagnostics` so the user
     // can invoke it from a generic source-action menu without
     // having to position the cursor on a specific diagnostic.
-    if let Some(action) =
-        make_fix_all_variable_types_action(&uri, body, &doc.rope, &doc.symbols, &backend.state)
-    {
-        actions.push(CodeActionOrCommand::CodeAction(action));
+    if let Some(body) = doc.parsed.body.as_ref() {
+        if let Some(action) =
+            make_fix_all_variable_types_action(&uri, body, &doc.rope, &doc.symbols, &backend.state)
+        {
+            actions.push(CodeActionOrCommand::CodeAction(action));
+        }
     }
 
     // Cursor-driven per-variable insert. Triggered when the cursor
@@ -92,48 +104,308 @@ pub async fn code_action(
     // ranges intersect the cursor, so an action gated purely on
     // the diag would never appear when the user is on the block
     // label or interior — even though the diag is firing.
-    if let Some(action) = make_insert_variable_type_action_at_cursor(
-        &uri,
-        params.range.start,
-        body,
-        &doc.rope,
-        &doc.symbols,
-        &backend.state,
-    ) {
-        // Avoid stacking two identical actions when the diag-driven
-        // path already produced one for the same variable name.
-        let already = actions.iter().any(|a| match a {
-            CodeActionOrCommand::CodeAction(ca) => ca.title == action.title,
-            _ => false,
-        });
-        if !already {
-            actions.push(CodeActionOrCommand::CodeAction(action));
+    if let Some(body) = doc.parsed.body.as_ref() {
+        if let Some(action) = make_insert_variable_type_action_at_cursor(
+            &uri,
+            params.range.start,
+            body,
+            &doc.rope,
+            &doc.symbols,
+            &backend.state,
+        ) {
+            // Avoid stacking two identical actions when the diag-driven
+            // path already produced one for the same variable name.
+            let already = actions.iter().any(|a| match a {
+                CodeActionOrCommand::CodeAction(ca) => ca.title == action.title,
+                _ => false,
+            });
+            if !already {
+                actions.push(CodeActionOrCommand::CodeAction(action));
+            }
         }
     }
 
-    // "Refine `type = any`" — for every variable declared with
-    // `type = any` whose default / caller signal yields a more
-    // concrete shape, replace `any` with the inferred type.
-    if let Some(action) =
-        make_refine_any_types_action(&uri, body, &doc.rope, &doc.symbols, &backend.state)
-    {
-        actions.push(CodeActionOrCommand::CodeAction(action));
-    }
+    // Drop the per-doc shard guard before iterating again under
+    // `for_each_doc_in_scope` (which acquires its own guards on
+    // `state.documents`).
+    drop(doc);
 
-    // "Generate variable declarations for undefined `var.X` references"
-    // — walk the doc's references; for any `var.<name>` whose target
-    // isn't declared in this module's symbol table, append a stub
-    // `variable "<name>" {}` block at the end of the current file.
-    if let Some(action) = make_declare_undefined_variables_action(
+    let selection = if range_is_empty(&params.range) {
+        None
+    } else {
+        Some(params.range)
+    };
+
+    // Multi-scope variants. Each emit covers (Selection?) + File +
+    // Module + Workspace. Per-doc scan returns 0+ TextEdits; the
+    // helper assembles WorkspaceEdits + scope-tagged kinds + dedup.
+    let state = &backend.state;
+    emit_scoped_actions(
+        state,
         &uri,
-        &doc.rope,
-        &doc.symbols,
-        &doc.references,
-    ) {
-        actions.push(CodeActionOrCommand::CodeAction(action));
-    }
+        selection,
+        true,
+        "Unwrap interpolation",
+        "deprecated interpolation",
+        "unwrap-interpolation",
+        &mut actions,
+        |_doc_uri, doc| {
+            let Some(body) = doc.parsed.body.as_ref() else {
+                return Vec::new();
+            };
+            scan_unwrap_interpolations(body, &doc.rope)
+        },
+    );
+    emit_scoped_actions(
+        state,
+        &uri,
+        selection,
+        true,
+        "Convert deprecated lookup to index notation",
+        "deprecated lookup",
+        "convert-lookup-to-index",
+        &mut actions,
+        |_doc_uri, doc| {
+            let Some(body) = doc.parsed.body.as_ref() else {
+                return Vec::new();
+            };
+            scan_lookup_to_index(body, &doc.rope)
+        },
+    );
+    emit_scoped_actions(
+        state,
+        &uri,
+        selection,
+        true,
+        "Set variable types",
+        "untyped variable",
+        "set-variable-types",
+        &mut actions,
+        |doc_uri, doc| {
+            let Some(body) = doc.parsed.body.as_ref() else {
+                return Vec::new();
+            };
+            scan_insert_variable_types(doc_uri, body, &doc.rope, &doc.symbols, state)
+        },
+    );
+    emit_scoped_actions(
+        state,
+        &uri,
+        selection,
+        true,
+        "Refine `type = any`",
+        "`type = any` variable",
+        "refine-any-types",
+        &mut actions,
+        |doc_uri, doc| {
+            let Some(body) = doc.parsed.body.as_ref() else {
+                return Vec::new();
+            };
+            scan_refine_any_types(doc_uri, body, &doc.rope, &doc.symbols, state)
+        },
+    );
+
+    // Declare undefined variables — File + Module only (the edit
+    // appends to EOF, so Workspace would scatter stubs across
+    // unrelated files; Selection is N/A for an EOF append).
+    emit_declare_undefined_actions(state, &uri, &mut actions);
 
     if actions.is_empty() { Ok(None) } else { Ok(Some(actions)) }
+}
+
+/// Generic scope iterator for actions whose per-doc transform can
+/// be expressed as a pure `(uri, doc) -> Vec<TextEdit>` scan.
+///
+/// Emits up to 4 `CodeAction`s: optional Selection, then File,
+/// Module, optional Workspace. Each variant uses
+/// [`build_scoped_action`] for title + LSP `CodeActionKind`
+/// derivation, so the menu strings stay consistent across actions
+/// (see `code_action_scope::scope_title`).
+///
+/// `scan` is called once per visited doc inside
+/// [`for_each_doc_in_scope`]'s callback. The closure gets each
+/// doc's URI and `DocumentState`; for Selection scope the
+/// returned edits are filtered down to those whose range
+/// intersects `selection`.
+#[allow(clippy::too_many_arguments)]
+fn emit_scoped_actions<F>(
+    state: &StateStore,
+    primary_uri: &Url,
+    selection: Option<Range>,
+    include_workspace: bool,
+    title_template: &str,
+    item_label: &str,
+    action_id: &str,
+    actions: &mut Vec<CodeActionOrCommand>,
+    mut scan: F,
+) where
+    F: FnMut(&Url, &DocumentState) -> Vec<TextEdit>,
+{
+    let mut scopes: Vec<Scope> = Vec::new();
+    if let Some(range) = selection {
+        scopes.push(Scope::Selection { range });
+    }
+    scopes.extend([Scope::File, Scope::Module]);
+    if include_workspace {
+        scopes.push(Scope::Workspace);
+    }
+
+    for scope in scopes {
+        let mut edits_by_uri: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        let mut visited = 0usize;
+        let mut total_edits = 0usize;
+        for_each_doc_in_scope(state, primary_uri, scope, |doc_uri, doc| {
+            visited += 1;
+            let mut v = scan(doc_uri, doc);
+            if let Scope::Selection { range } = scope {
+                v.retain(|e| range_intersects(&e.range, &range));
+            }
+            total_edits += v.len();
+            if !v.is_empty() {
+                edits_by_uri.insert(doc_uri.clone(), v);
+            }
+        });
+        tracing::info!(
+            action_id,
+            scope = ?scope,
+            visited,
+            docs_with_edits = edits_by_uri.len(),
+            total_edits,
+            "scoped action scan",
+        );
+        if let Some(action) = build_scoped_action(
+            scope,
+            edits_by_uri,
+            title_template,
+            item_label,
+            None,
+            action_id,
+        ) {
+            actions.push(CodeActionOrCommand::CodeAction(action));
+        }
+    }
+}
+
+/// Scope iteration for `declare-undefined-variables`. Special-cased
+/// because:
+///
+/// - Module scope needs the union of variable declarations
+///   across every sibling `.tf` file — declarations in a separate
+///   file in the same module aren't "undefined" even though the
+///   active doc's `symbols.variables` doesn't list them.
+/// - All N undeclared vars per doc collapse into ONE end-of-file
+///   `TextEdit`, so the standard title format (which counts
+///   edits) would under-report. We construct the title manually
+///   from the actual undeclared-name count.
+fn emit_declare_undefined_actions(
+    state: &StateStore,
+    primary_uri: &Url,
+    actions: &mut Vec<CodeActionOrCommand>,
+) {
+    // File scope: declared = current doc's declarations only.
+    let (file_edits, file_count) = collect_declare_undefined(
+        state,
+        primary_uri,
+        Scope::File,
+        &per_doc_declared_set(state, primary_uri, Scope::File),
+    );
+    if let Some(action) = build_declare_undefined_action(Scope::File, file_edits, file_count) {
+        actions.push(CodeActionOrCommand::CodeAction(action));
+    }
+
+    // Module scope: declared = union of declarations across every
+    // sibling `.tf` file in the same module dir.
+    let module_declared = per_doc_declared_set(state, primary_uri, Scope::Module);
+    let (mod_edits, mod_count) =
+        collect_declare_undefined(state, primary_uri, Scope::Module, &module_declared);
+    if let Some(action) = build_declare_undefined_action(Scope::Module, mod_edits, mod_count) {
+        actions.push(CodeActionOrCommand::CodeAction(action));
+    }
+}
+
+/// Build the union of variable declarations across the docs that
+/// `scope` would visit. Used as the "declared" set for
+/// `scan_declare_undefined_variables` so module-wide declarations
+/// suppress would-be undefined references.
+fn per_doc_declared_set(
+    state: &StateStore,
+    primary_uri: &Url,
+    scope: Scope,
+) -> HashSet<String> {
+    let mut out: HashSet<String> = HashSet::new();
+    for_each_doc_in_scope(state, primary_uri, scope, |_uri, doc| {
+        for name in doc.symbols.variables.keys() {
+            out.insert(name.clone());
+        }
+    });
+    out
+}
+
+/// Run `scan_declare_undefined_variables` over every doc in `scope`,
+/// returning the per-uri edit map plus the total count of undeclared
+/// variable names (NOT edits — see `emit_declare_undefined_actions`).
+fn collect_declare_undefined(
+    state: &StateStore,
+    primary_uri: &Url,
+    scope: Scope,
+    declared: &HashSet<String>,
+) -> (HashMap<Url, Vec<TextEdit>>, usize) {
+    use std::collections::BTreeSet;
+    use tfls_parser::ReferenceKind;
+
+    let mut edits_by_uri: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    let mut total_undeclared: BTreeSet<String> = BTreeSet::new();
+    for_each_doc_in_scope(state, primary_uri, scope, |doc_uri, doc| {
+        for r in &doc.references {
+            if let ReferenceKind::Variable { name } = &r.kind {
+                if !declared.contains(name) {
+                    total_undeclared.insert(name.clone());
+                }
+            }
+        }
+        let v = scan_declare_undefined_variables(&doc.rope, &doc.references, declared);
+        if !v.is_empty() {
+            edits_by_uri.insert(doc_uri.clone(), v);
+        }
+    });
+    (edits_by_uri, total_undeclared.len())
+}
+
+/// Assemble the final scoped `CodeAction` for declare-undefined.
+/// `count` is the count of distinct undeclared variable NAMES in
+/// scope; the standard title-from-edits path would under-report
+/// because every doc's N undeclared names collapse into one EOF
+/// `TextEdit`.
+fn build_declare_undefined_action(
+    scope: Scope,
+    edits_by_uri: HashMap<Url, Vec<TextEdit>>,
+    count: usize,
+) -> Option<CodeAction> {
+    use crate::handlers::code_action_scope::{scope_kind, scope_title};
+
+    let edits_by_uri: HashMap<Url, Vec<TextEdit>> = edits_by_uri
+        .into_iter()
+        .filter(|(_, v)| !v.is_empty())
+        .collect();
+    if edits_by_uri.is_empty() || count == 0 {
+        return None;
+    }
+    Some(CodeAction {
+        title: scope_title(
+            "Declare undefined variables",
+            "undefined variable",
+            scope,
+            count,
+        ),
+        kind: Some(scope_kind(scope, "declare-undefined-variables")),
+        diagnostics: None,
+        edit: Some(WorkspaceEdit {
+            changes: Some(edits_by_uri),
+            ..Default::default()
+        }),
+        is_preferred: None,
+        ..Default::default()
+    })
 }
 
 fn is_missing_required(diag: &Diagnostic) -> bool {
@@ -295,6 +567,74 @@ fn is_deprecated_lookup(diag: &Diagnostic) -> bool {
             .contains("two-argument `lookup()` is deprecated")
 }
 
+/// Compute the `(arg1_src, arg2_src)` pair for the 2-arg `lookup`
+/// FuncCall whose span matches `(start, end)`. Shared between the
+/// per-diag instance action and `scan_lookup_to_index`.
+fn lookup_args_at(
+    body: &Body,
+    rope: &Rope,
+    start: usize,
+    end: usize,
+) -> Option<(String, String)> {
+    use hcl_edit::expr::Expression;
+    use hcl_edit::repr::Span as _;
+
+    let mut found: Option<(String, String)> = None;
+    tfls_diag::expr_walk::for_each_expression(body, |expr| {
+        if found.is_some() {
+            return;
+        }
+        let Expression::FuncCall(call) = expr else { return };
+        if !call.name.namespace.is_empty() {
+            return;
+        }
+        if call.name.name.as_str() != "lookup" {
+            return;
+        }
+        if call.args.iter().count() != 2 {
+            return;
+        }
+        let Some(span) = call.span() else { return };
+        if span.start != start || span.end != end {
+            return;
+        }
+        let mut args = call.args.iter();
+        let arg1 = args.next();
+        let arg2 = args.next();
+        let (Some(a1), Some(a2)) = (arg1, arg2) else { return };
+        let (Some(s1), Some(s2)) = (a1.span(), a2.span()) else { return };
+        let arg1_src = rope.byte_slice(s1.start..s1.end).to_string();
+        let arg2_src = rope.byte_slice(s2.start..s2.end).to_string();
+        found = Some((arg1_src, arg2_src));
+    });
+    found
+}
+
+/// Compute the `lookup(X, k)` → `X[k]` rewrite for the call whose
+/// span matches `range`. Shared between the per-diag instance
+/// action and the multi-scope per-doc scan.
+fn compute_lookup_to_index_edit(
+    body: &Body,
+    rope: &Rope,
+    range: Range,
+) -> Option<TextEdit> {
+    let start = tfls_parser::lsp_position_to_byte_offset(rope, range.start).ok()?;
+    let end = tfls_parser::lsp_position_to_byte_offset(rope, range.end).ok()?;
+    let (arg1_src, arg2_src) = lookup_args_at(body, rope, start, end)?;
+    let new_text = format!("{}[{}]", arg1_src.trim(), arg2_src.trim());
+    Some(TextEdit { range, new_text })
+}
+
+/// Walk every deprecated 2-arg lookup() in `body`, return one
+/// `TextEdit` per call. Built on top of the shared diagnostic
+/// walker so action and warning stay aligned.
+fn scan_lookup_to_index(body: &Body, rope: &Rope) -> Vec<TextEdit> {
+    tfls_diag::deprecated_lookup_diagnostics(body, rope)
+        .into_iter()
+        .filter_map(|diag| compute_lookup_to_index_edit(body, rope, diag.range))
+        .collect()
+}
+
 /// Quick-fix for `terraform_deprecated_lookup`. Rewrites
 /// `lookup(X, "k")` to `X["k"]` — index notation, semantically
 /// equivalent and valid for ANY collection type. We deliberately
@@ -314,51 +654,13 @@ fn make_convert_lookup_to_index_action(
     body: &Body,
     rope: &Rope,
 ) -> Option<CodeAction> {
-    use hcl_edit::expr::Expression;
-    use hcl_edit::repr::Span as _;
-
-    let diag_start = tfls_parser::lsp_position_to_byte_offset(rope, diag.range.start).ok()?;
-    let diag_end = tfls_parser::lsp_position_to_byte_offset(rope, diag.range.end).ok()?;
-
-    // Find the 2-arg `lookup` FuncCall whose span matches the diag range.
-    let mut found: Option<(String, String)> = None;
-    tfls_diag::expr_walk::for_each_expression(body, |expr| {
-        if found.is_some() {
-            return;
-        }
-        let Expression::FuncCall(call) = expr else { return };
-        if !call.name.namespace.is_empty() {
-            return;
-        }
-        if call.name.name.as_str() != "lookup" {
-            return;
-        }
-        if call.args.iter().count() != 2 {
-            return;
-        }
-        let Some(span) = call.span() else { return };
-        if span.start != diag_start || span.end != diag_end {
-            return;
-        }
-        let mut args = call.args.iter();
-        let arg1 = args.next();
-        let arg2 = args.next();
-        let (Some(a1), Some(a2)) = (arg1, arg2) else { return };
-        let (Some(s1), Some(s2)) = (a1.span(), a2.span()) else { return };
-        let arg1_src = rope.byte_slice(s1.start..s1.end).to_string();
-        let arg2_src = rope.byte_slice(s2.start..s2.end).to_string();
-        found = Some((arg1_src, arg2_src));
-    });
-
-    let (arg1_src, arg2_src) = found?;
-    let arg1_trim = arg1_src.trim().to_string();
-    let arg2_trim = arg2_src.trim().to_string();
-    let new_text = format!("{arg1_trim}[{arg2_trim}]");
-
-    let edit = TextEdit {
-        range: diag.range,
-        new_text: new_text.clone(),
-    };
+    let edit = compute_lookup_to_index_edit(body, rope, diag.range)?;
+    let new_text = edit.new_text.clone();
+    let start = tfls_parser::lsp_position_to_byte_offset(rope, diag.range.start).ok()?;
+    let end = tfls_parser::lsp_position_to_byte_offset(rope, diag.range.end).ok()?;
+    let (arg1_src, arg2_src) = lookup_args_at(body, rope, start, end)?;
+    let arg1_trim = arg1_src.trim();
+    let arg2_trim = arg2_src.trim();
     let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
     changes.insert(uri.clone(), vec![edit]);
     Some(CodeAction {
@@ -377,19 +679,16 @@ fn make_convert_lookup_to_index_action(
     })
 }
 
-/// Quick-fix for `terraform_deprecated_interpolation`. Replaces
-/// the entire `"${EXPR}"` slice with just `EXPR`. The diagnostic
-/// range covers the whole string template, so we slice the rope
-/// at that range, strip the leading `"${` (with optional
-/// whitespace) and the trailing `}"`, and emit a `TextEdit` whose
-/// `new_text` is the inner expression text.
-fn make_unwrap_interpolation_action(
-    uri: &Url,
-    diag: &Diagnostic,
-    rope: &Rope,
-) -> Option<CodeAction> {
-    let start = tfls_parser::lsp_position_to_byte_offset(rope, diag.range.start).ok()?;
-    let end = tfls_parser::lsp_position_to_byte_offset(rope, diag.range.end).ok()?;
+/// Compute the `TextEdit` that replaces a `"${EXPR}"` slice
+/// covered by `range` with just `EXPR`. Returns `None` when the
+/// slice doesn't actually look like a whole-string interpolation
+/// (e.g. unbalanced braces or empty inner expression).
+///
+/// Shared between the per-diagnostic instance action and the
+/// per-doc scan used by file/module/workspace scope variants.
+fn compute_unwrap_interpolation_edit(rope: &Rope, range: Range) -> Option<TextEdit> {
+    let start = tfls_parser::lsp_position_to_byte_offset(rope, range.start).ok()?;
+    let end = tfls_parser::lsp_position_to_byte_offset(rope, range.end).ok()?;
     if end <= start {
         return None;
     }
@@ -423,11 +722,36 @@ fn make_unwrap_interpolation_action(
     if inner.is_empty() {
         return None;
     }
-
-    let edit = TextEdit {
-        range: diag.range,
+    Some(TextEdit {
+        range,
         new_text: inner.to_string(),
-    };
+    })
+}
+
+/// Walk every deprecated interpolation in `body`, return one
+/// `TextEdit` per occurrence. Built on top of the existing
+/// `tfls_diag::deprecated_interpolation_diagnostics` walker so
+/// the action and the diagnostic stay in lock-step on what
+/// counts as "deprecated".
+fn scan_unwrap_interpolations(body: &Body, rope: &Rope) -> Vec<TextEdit> {
+    tfls_diag::deprecated_interpolation_diagnostics(body, rope)
+        .into_iter()
+        .filter_map(|diag| compute_unwrap_interpolation_edit(rope, diag.range))
+        .collect()
+}
+
+/// Per-diagnostic single-instance action — used when a specific
+/// `terraform_deprecated_interpolation` warning is in
+/// `params.context.diagnostics`. Emits the
+/// `Unwrap interpolation: \`EXPR\`` quickfix with the original
+/// diagnostic attached.
+fn make_unwrap_interpolation_action(
+    uri: &Url,
+    diag: &Diagnostic,
+    rope: &Rope,
+) -> Option<CodeAction> {
+    let edit = compute_unwrap_interpolation_edit(rope, diag.range)?;
+    let inner = edit.new_text.clone();
     let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
     changes.insert(uri.clone(), vec![edit]);
     Some(CodeAction {
@@ -443,34 +767,36 @@ fn make_unwrap_interpolation_action(
     })
 }
 
-/// Source-level action: walk every `var.<name>` reference in this
-/// document and, for any `<name>` not declared as a `variable
-/// "<name>"` block in the local module's symbol table, append a
-/// stub `variable "<name>" {}` at end-of-file. Bulk version of
-/// what a user would do by hand when an undefined-variable warning
-/// fires; saves the per-block round-trip.
+/// Walk this document's `var.<name>` references and, for any name
+/// NOT in `declared`, return a single end-of-file `TextEdit` that
+/// appends `variable "<name>" {}` stubs.
 ///
-/// Only fires when at least one undeclared `var.X` reference exists
-/// — otherwise no menu entry.
-fn make_declare_undefined_variables_action(
-    uri: &Url,
+/// `declared` is the union of variable declarations the caller
+/// considers in scope. For File scope it's just `doc.symbols.
+/// variables`; for Module scope it's the union across every
+/// sibling `.tf` file (so a var declared in one file isn't
+/// re-declared from references in another).
+///
+/// Returns `Vec` (with 0 or 1 elements) so the result drops into
+/// the same per-doc-scan slot every other action uses.
+fn scan_declare_undefined_variables(
     rope: &Rope,
-    symbols: &tfls_core::SymbolTable,
     references: &[tfls_parser::Reference],
-) -> Option<CodeAction> {
+    declared: &std::collections::HashSet<String>,
+) -> Vec<TextEdit> {
     use std::collections::BTreeSet;
     use tfls_parser::ReferenceKind;
 
     let mut undeclared: BTreeSet<String> = BTreeSet::new();
     for r in references {
         if let ReferenceKind::Variable { name } = &r.kind {
-            if !symbols.variables.contains_key(name) {
+            if !declared.contains(name) {
                 undeclared.insert(name.clone());
             }
         }
     }
     if undeclared.is_empty() {
-        return None;
+        return Vec::new();
     }
 
     let mut new_text = String::new();
@@ -491,40 +817,16 @@ fn make_declare_undefined_variables_action(
         new_text.push_str(&format!("variable \"{name}\" {{}}\n"));
     }
 
-    let end_pos = tfls_parser::byte_offset_to_lsp_position(rope, total_bytes).ok()?;
-    let edit = TextEdit {
+    let Ok(end_pos) = tfls_parser::byte_offset_to_lsp_position(rope, total_bytes) else {
+        return Vec::new();
+    };
+    vec![TextEdit {
         range: Range {
             start: end_pos,
             end: end_pos,
         },
         new_text,
-    };
-    let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
-    changes.insert(uri.clone(), vec![edit]);
-
-    let count = undeclared.len();
-    let names_preview: Vec<&str> = undeclared.iter().take(3).map(String::as_str).collect();
-    let more_suffix = if count > 3 {
-        format!(", … and {} more", count - 3)
-    } else {
-        String::new()
-    };
-    Some(CodeAction {
-        title: format!(
-            "Declare {count} undefined variable{plural}: {names}{more}",
-            plural = if count == 1 { "" } else { "s" },
-            names = names_preview.join(", "),
-            more = more_suffix,
-        ),
-        kind: Some(CodeActionKind::SOURCE),
-        diagnostics: None,
-        edit: Some(WorkspaceEdit {
-            changes: Some(changes),
-            ..Default::default()
-        }),
-        is_preferred: None,
-        ..Default::default()
-    })
+    }]
 }
 
 fn make_insert_variable_type_action(
@@ -778,22 +1080,21 @@ fn make_insert_variable_type_action_at_cursor(
     })
 }
 
-/// Walk every `variable` block in the file. For each one missing a
-/// `type` attribute that has a concrete inferable shape (default
-/// literal, tfvars assignment, or module-caller value), produce a
-/// single combined `CodeAction` whose `WorkspaceEdit` inserts
-/// `type = …` into all of them at once.
+/// Walk every untyped `variable` block in `body` and emit a
+/// `type = <inferred>` insertion edit for each one with a
+/// concrete inferable shape. Returns one edit per variable.
 ///
-/// Returns `None` when the file has no fixable variables — the
-/// handler then skips this action so the menu doesn't show a
-/// no-op entry.
-fn make_fix_all_variable_types_action(
+/// Powers both the legacy file-scope `source.fixAll` action and
+/// the multi-scope (selection / file / module / workspace)
+/// variants. Module/workspace iteration just changes WHICH docs
+/// get scanned; the per-doc inference is identical.
+fn scan_insert_variable_types(
     uri: &Url,
     body: &Body,
     rope: &Rope,
     symbols: &tfls_core::SymbolTable,
     state: &tfls_state::StateStore,
-) -> Option<CodeAction> {
+) -> Vec<TextEdit> {
     let module_dir = crate::handlers::util::parent_dir(uri);
     let mut edits: Vec<TextEdit> = Vec::new();
     for structure in body.iter() {
@@ -837,6 +1138,22 @@ fn make_fix_all_variable_types_action(
             new_text,
         });
     }
+    edits
+}
+
+/// Legacy file-scope `source.fixAll` — kept so the existing
+/// `source.fixAll.terraform-ls-rs` kind remains stable for
+/// clients filtering by it. The scoped variant
+/// (`source.fixAll.terraform-ls-rs.set-variable-types`) is
+/// emitted separately by `emit_scoped_actions`.
+fn make_fix_all_variable_types_action(
+    uri: &Url,
+    body: &Body,
+    rope: &Rope,
+    symbols: &tfls_core::SymbolTable,
+    state: &tfls_state::StateStore,
+) -> Option<CodeAction> {
+    let edits = scan_insert_variable_types(uri, body, rope, symbols, state);
     if edits.is_empty() {
         return None;
     }
@@ -862,27 +1179,23 @@ fn make_fix_all_variable_types_action(
     })
 }
 
-/// Source-level action: walk every `variable` block whose `type =`
-/// is the bare `any` (not parametrised — `list(any)` / `map(any)`
-/// stay untouched since they're already specifying a collection
-/// shape) and, if inference yields a more concrete shape, replace
-/// `any` with the inferred type. Single combined `WorkspaceEdit`
-/// covering all such blocks.
-///
-/// Suppressed when no variable qualifies — keeps the menu clean.
-fn make_refine_any_types_action(
+/// Walk every `variable` block whose `type =` is the bare `any`
+/// (not parametrised — `list(any)` / `map(any)` stay untouched
+/// since they're already specifying a collection shape) and,
+/// if inference yields a more concrete shape, emit an edit
+/// replacing `any` with the inferred type.
+fn scan_refine_any_types(
     uri: &Url,
     body: &Body,
     rope: &Rope,
     symbols: &tfls_core::SymbolTable,
     state: &tfls_state::StateStore,
-) -> Option<CodeAction> {
+) -> Vec<TextEdit> {
     use hcl_edit::expr::Expression;
     use hcl_edit::repr::Span as _;
 
     let module_dir = crate::handlers::util::parent_dir(uri);
     let mut edits: Vec<TextEdit> = Vec::new();
-    let mut refined_count = 0usize;
 
     for structure in body.iter() {
         let Some(block) = structure.as_block() else { continue };
@@ -892,17 +1205,12 @@ fn make_refine_any_types_action(
         let Some(name) = block.labels.first().and_then(label_str) else {
             continue;
         };
-        // Find the `type = …` attribute. Only proceed when the
-        // value is the bare `any` identifier — `list(any)` etc are
-        // already shape-specifying and not the target here.
-        let mut type_attr_span: Option<std::ops::Range<usize>> = None;
         let mut type_value_span: Option<std::ops::Range<usize>> = None;
         for sub in block.body.iter() {
             let Some(attr) = sub.as_attribute() else { continue };
             if attr.key.as_str() != "type" {
                 continue;
             }
-            type_attr_span = attr.span();
             if let Expression::Variable(v) = &attr.value {
                 if v.as_str() == "any" {
                     type_value_span = attr.value.span();
@@ -911,7 +1219,6 @@ fn make_refine_any_types_action(
             break;
         }
         let Some(value_span) = type_value_span else { continue };
-        let _ = type_attr_span; // reserved for future "remove `type =` line" variant
 
         // Inference: same priority order as the fix-all action.
         let inferred_from_default = symbols
@@ -943,28 +1250,9 @@ fn make_refine_any_types_action(
             range: Range { start, end },
             new_text: ty.to_string(),
         });
-        refined_count += 1;
     }
 
-    if edits.is_empty() {
-        return None;
-    }
-    let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
-    changes.insert(uri.clone(), edits);
-    Some(CodeAction {
-        title: format!(
-            "Refine `type = any` to inferred shape on {refined_count} variable{plural}",
-            plural = if refined_count == 1 { "" } else { "s" },
-        ),
-        kind: Some(CodeActionKind::SOURCE),
-        diagnostics: None,
-        edit: Some(WorkspaceEdit {
-            changes: Some(changes),
-            ..Default::default()
-        }),
-        is_preferred: None,
-        ..Default::default()
-    })
+    edits
 }
 
 fn find_variable_block<'b>(body: &'b Body, name: &str) -> Option<&'b Block> {

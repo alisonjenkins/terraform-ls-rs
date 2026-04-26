@@ -104,3 +104,32 @@ Use this when:
 - Investigating "code action doesn't suggest a type" — `--list-gaps` shows the caller expression kind so you know whether the gap is a missing schema, a `var.X` chain, an `each.X` pattern, etc.
 - After changes to `parse_value_shape_with_schema` / `merge_observations` / `traversal_attr_type` — the percentage figures in commit messages come from this binary.
 - Spot-checking a specific module — `--dump-dir` prints the raw `assigned_variable_types` map for one dir.
+
+## Code-action scopes
+
+Every multi-target code action (unwrap interpolation, convert lookup, set variable types, refine `type = any`, declare undefined variables) is offered at multiple scopes via `crates/tfls-lsp/src/handlers/code_action_scope.rs`:
+
+| Scope       | Iteration set                                     | LSP `CodeActionKind`                                            |
+|-------------|---------------------------------------------------|-----------------------------------------------------------------|
+| `Instance`  | The single thing under cursor / on a diagnostic   | `quickfix`                                                      |
+| `Selection` | Edits whose range intersects `params.range` (when non-empty) | `quickfix.terraform-ls-rs.<id>.selection`            |
+| `File`      | Active doc only                                   | `source.fixAll.terraform-ls-rs.<id>`                            |
+| `Module`    | Every doc whose parent dir matches the active doc | `source.fixAll.terraform-ls-rs.<id>.module`                     |
+| `Workspace` | Every indexed `.tf` doc (skips `.terraform/`)     | `source.fixAll.terraform-ls-rs.<id>.workspace`                  |
+
+`<id>` is a stable per-action identifier (e.g. `unwrap-interpolation`, `convert-lookup-to-index`). Clients filter via `params.context.only` against these kinds; keep them stable.
+
+### Adding a new scoped action
+
+1. Write a per-doc scan: `fn scan_X(uri, body, rope, …) -> Vec<TextEdit>` — pure, returns one edit per occurrence.
+2. Call `emit_scoped_actions(state, &uri, selection, include_workspace, "Title verb …", "item label", "action-id", &mut actions, |doc_uri, doc| { scan_X(...) })` from the `code_action` handler.
+3. (Optional) For an `Instance` variant attached to a specific diagnostic, write a `make_X_action(uri, diag, …)` that returns a `quickfix` `CodeAction` and call it inside the per-diagnostic loop.
+
+`emit_scoped_actions` handles Selection-range filtering, empty-edit suppression, and title formatting. Unwrap, lookup, set-variable-types, and refine-any all fit this mold; declare-undefined-variables uses a custom helper because module scope needs the union of declarations across sibling files (see `emit_declare_undefined_actions`).
+
+Title format produced by `scope_title` (`"<verb> N <item-label>s in <where>"`):
+- `Instance`: title template verbatim, e.g. `"Unwrap interpolation"`.
+- `Selection`: `"Unwrap 3 deprecated interpolations in selection"`.
+- `File`: `"Unwrap 5 deprecated interpolations in this file"`.
+- `Module`: `"Unwrap 12 deprecated interpolations in this module"`.
+- `Workspace`: `"Unwrap 47 deprecated interpolations in workspace"`.

@@ -960,7 +960,7 @@ async fn code_action_refines_type_any_to_inferred() {
         .iter()
         .find_map(|a| match a {
             CodeActionOrCommand::CodeAction(ca)
-                if ca.title.starts_with("Refine `type = any`") =>
+                if ca.title.starts_with("Refine 2 `type = any` variables") =>
             {
                 Some(ca)
             }
@@ -1005,7 +1005,7 @@ async fn code_action_refine_any_skips_when_nothing_qualifies() {
     .expect("ok");
     let actions = resp.unwrap_or_default();
     let any_refine = actions.iter().any(|a| match a {
-        CodeActionOrCommand::CodeAction(ca) => ca.title.starts_with("Refine `type = any`"),
+        CodeActionOrCommand::CodeAction(ca) => ca.title.starts_with("Refine ") && ca.title.contains("`type = any`"),
         _ => false,
     });
     assert!(!any_refine, "no refine action when nothing qualifies");
@@ -1056,4 +1056,264 @@ async fn code_action_declare_undefined_skips_when_all_resolved() {
         _ => false,
     });
     assert!(!any_declare, "no declare action when all vars resolved");
+}
+
+// -- Multi-scope code action tests -------------------------------------
+
+/// Insert a sibling `.tf` doc into the backend so module-scope
+/// iteration sees more than just the active file.
+fn add_doc(backend: &Backend, u: &Url, src: &str) {
+    backend
+        .state
+        .upsert_document(DocumentState::new(u.clone(), src, 1));
+}
+
+/// Drive `code_action()` with no diagnostics + an empty range —
+/// matches the cursor-only invocation an editor sends when the
+/// user opens the menu without a visual selection.
+async fn all_actions_for(backend: &Backend, u: &Url) -> Vec<CodeActionOrCommand> {
+    tfls_lsp::handlers::code_action::code_action(
+        backend,
+        CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: u.clone() },
+            range: Range {
+                start: Position::new(0, 0),
+                end: Position::new(0, 0),
+            },
+            context: CodeActionContext {
+                diagnostics: vec![],
+                only: None,
+                trigger_kind: None,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        },
+    )
+    .await
+    .expect("ok")
+    .unwrap_or_default()
+}
+
+/// Same as `all_actions_for` but driven with a non-empty visual
+/// selection so the Selection scope kicks in.
+async fn all_actions_for_selection(
+    backend: &Backend,
+    u: &Url,
+    range: Range,
+) -> Vec<CodeActionOrCommand> {
+    tfls_lsp::handlers::code_action::code_action(
+        backend,
+        CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: u.clone() },
+            range,
+            context: CodeActionContext {
+                diagnostics: vec![],
+                only: None,
+                trigger_kind: None,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        },
+    )
+    .await
+    .expect("ok")
+    .unwrap_or_default()
+}
+
+fn find_action<'a>(
+    actions: &'a [CodeActionOrCommand],
+    title_prefix: &str,
+) -> &'a tower_lsp::lsp_types::CodeAction {
+    actions
+        .iter()
+        .find_map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca) if ca.title.starts_with(title_prefix) => Some(ca),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no action with prefix {title_prefix:?}"))
+}
+
+#[tokio::test]
+async fn scope_unwrap_interpolation_module_covers_all_files() {
+    // Three .tf files in /mod, each with a single deprecated
+    // `"${expr}"`. The Module-scope action's WorkspaceEdit must
+    // cover all three URIs.
+    let a = uri("file:///mod/a.tf");
+    let b = uri("file:///mod/b.tf");
+    let c = uri("file:///mod/c.tf");
+    let backend = fresh_backend(
+        "output \"a\" { value = \"${var.a}\" }\nvariable \"a\" {}\n",
+        &a,
+    );
+    add_doc(
+        &backend,
+        &b,
+        "output \"b\" { value = \"${var.b}\" }\nvariable \"b\" {}\n",
+    );
+    add_doc(
+        &backend,
+        &c,
+        "output \"c\" { value = \"${var.c}\" }\nvariable \"c\" {}\n",
+    );
+
+    let actions = all_actions_for(&backend, &a).await;
+    let action = find_action(&actions, "Unwrap 3 deprecated interpolations in this module");
+    let changes = action.edit.as_ref().and_then(|e| e.changes.as_ref()).unwrap();
+    assert_eq!(changes.len(), 3, "all three module files");
+    for url in [&a, &b, &c] {
+        assert!(changes.contains_key(url), "{url} edited");
+    }
+}
+
+#[tokio::test]
+async fn scope_unwrap_interpolation_selection_filters_by_range() {
+    // Four deprecated interpolations on lines 1, 5, 10, 15.
+    // Selection covering lines 4..=11 should keep edits on 5 + 10
+    // only.
+    let u = uri("file:///mod/main.tf");
+    let mut src = String::new();
+    src.push_str("output \"o0\" { value = \"${var.x}\" }\n"); // line 0
+    for i in 1..=15 {
+        if [1, 5, 10, 15].contains(&i) {
+            src.push_str(&format!(
+                "output \"o{i}\" {{ value = \"${{var.v{i}}}\" }}\n"
+            ));
+        } else {
+            src.push_str(&format!("variable \"v{i}\" {{}}\n"));
+        }
+    }
+    let backend = fresh_backend(&src, &u);
+
+    let selection = Range {
+        start: Position::new(4, 0),
+        end: Position::new(11, 0),
+    };
+    let actions = all_actions_for_selection(&backend, &u, selection).await;
+    let action = find_action(&actions, "Unwrap 2 deprecated interpolations in selection");
+    let edits = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .and_then(|c| c.get(&u))
+        .unwrap();
+    assert_eq!(edits.len(), 2, "selection narrows to lines 5 + 10");
+}
+
+#[tokio::test]
+async fn scope_lookup_to_index_workspace_covers_unrelated_dirs() {
+    // Two files in different module dirs each with a 2-arg lookup.
+    // Workspace scope MUST cover both; Module scope only one.
+    let a = uri("file:///modA/main.tf");
+    let b = uri("file:///modB/main.tf");
+    let backend = fresh_backend(
+        "variable \"m\" { default = { k = \"v\" } }\noutput \"o\" { value = lookup(var.m, \"k\") }\n",
+        &a,
+    );
+    add_doc(
+        &backend,
+        &b,
+        "variable \"m\" { default = { k = \"v\" } }\noutput \"o\" { value = lookup(var.m, \"k\") }\n",
+    );
+
+    let actions = all_actions_for(&backend, &a).await;
+
+    let module = find_action(&actions, "Convert 1 deprecated lookup in this module");
+    let mod_changes = module
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .unwrap();
+    assert_eq!(mod_changes.len(), 1, "module scope = one dir");
+    assert!(mod_changes.contains_key(&a));
+
+    let workspace = find_action(&actions, "Convert 2 deprecated lookups in workspace");
+    let ws_changes = workspace
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .unwrap();
+    assert_eq!(ws_changes.len(), 2, "workspace scope = both dirs");
+    assert!(ws_changes.contains_key(&a));
+    assert!(ws_changes.contains_key(&b));
+}
+
+#[tokio::test]
+async fn scope_set_variable_types_module_aggregates_inferences() {
+    // Two .tf files in the same module, each with one untyped
+    // variable that has a usable `default`. Module scope should
+    // emit edits for BOTH variables across both files.
+    let a = uri("file:///mod/a.tf");
+    let b = uri("file:///mod/b.tf");
+    let backend = fresh_backend("variable \"region\" { default = \"us-east-1\" }\n", &a);
+    add_doc(&backend, &b, "variable \"port\" { default = 8080 }\n");
+
+    let actions = all_actions_for(&backend, &a).await;
+    let module = find_action(&actions, "Set 2 untyped variables in this module");
+    let changes = module
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .unwrap();
+    assert_eq!(changes.len(), 2);
+    assert_eq!(changes.get(&a).map(Vec::len), Some(1));
+    assert_eq!(changes.get(&b).map(Vec::len), Some(1));
+}
+
+#[tokio::test]
+async fn scope_declare_undefined_module_uses_union_of_declarations() {
+    // /mod/a.tf declares `var.shared`; /mod/b.tf references it. In
+    // File scope b would flag `shared` as undefined; in Module
+    // scope it must NOT — declared in a sibling file.
+    let a = uri("file:///mod/a.tf");
+    let b = uri("file:///mod/b.tf");
+    let backend = fresh_backend("variable \"shared\" {}\n", &a);
+    add_doc(
+        &backend,
+        &b,
+        "output \"o\" { value = var.shared }\noutput \"p\" { value = var.only_in_b }\n",
+    );
+
+    let actions = all_actions_for(&backend, &b).await;
+    // File scope on b would consider `shared` undefined too.
+    let file = find_action(&actions, "Declare 2 undefined variables in this file");
+    let _ = file;
+    // Module scope must drop `shared` (declared in sibling a.tf).
+    let module = find_action(&actions, "Declare 1 undefined variable in this module");
+    let edits = module
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .and_then(|c| c.get(&b))
+        .unwrap();
+    assert_eq!(edits.len(), 1, "single EOF insertion");
+    assert!(edits[0].new_text.contains("variable \"only_in_b\" {}"));
+    assert!(!edits[0].new_text.contains("variable \"shared\""));
+}
+
+#[tokio::test]
+async fn scope_kind_namespacing_matches_spec() {
+    // Pin the LSP `CodeActionKind` strings the helper produces so
+    // clients filtering via `context.only` keep working.
+    let u = uri("file:///mod/main.tf");
+    let backend = fresh_backend("output \"o\" { value = \"${var.x}\" }\nvariable \"x\" {}\n", &u);
+    let actions = all_actions_for(&backend, &u).await;
+    let mut seen_file = false;
+    let mut seen_module = false;
+    let mut seen_workspace = false;
+    for a in &actions {
+        let CodeActionOrCommand::CodeAction(ca) = a else { continue };
+        let Some(kind) = ca.kind.as_ref() else { continue };
+        if kind.as_str() == "source.fixAll.terraform-ls-rs.unwrap-interpolation" {
+            seen_file = true;
+        }
+        if kind.as_str() == "source.fixAll.terraform-ls-rs.unwrap-interpolation.module" {
+            seen_module = true;
+        }
+        if kind.as_str() == "source.fixAll.terraform-ls-rs.unwrap-interpolation.workspace" {
+            seen_workspace = true;
+        }
+    }
+    assert!(seen_file, "file kind emitted");
+    assert!(seen_module, "module kind emitted");
+    assert!(seen_workspace, "workspace kind emitted");
 }
