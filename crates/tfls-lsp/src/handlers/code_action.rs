@@ -33,6 +33,14 @@ pub async fn code_action(
 
     let mut actions: Vec<CodeActionOrCommand> = Vec::new();
 
+    tracing::info!(
+        uri = %uri,
+        diag_count = params.context.diagnostics.len(),
+        diags = ?params.context.diagnostics.iter().map(|d| (
+            d.severity, d.source.as_deref().unwrap_or(""), d.message.clone()
+        )).collect::<Vec<_>>(),
+        "code_action: invocation",
+    );
     for diag in &params.context.diagnostics {
         if is_missing_required(diag) {
             if let Some(action) =
