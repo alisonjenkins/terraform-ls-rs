@@ -57,6 +57,17 @@ struct Cli {
     #[arg(long, default_value_t = 2500)]
     drain_ms: u64,
 
+    /// When set, sessions 2..N do NOT send didOpen — they just
+    /// initialize, drain, and exit. Tests whether
+    /// workspace-wide diagnostics from session 1's bulk scan are
+    /// replayed to subsequent attaching clients.
+    #[arg(long)]
+    no_open_after_first: bool,
+
+    /// Capture publishes for ANY URI, not just `--file`.
+    #[arg(long)]
+    any_uri: bool,
+
     /// Increase verbosity (`-v` = info, `-vv` = debug, `-vvv` = trace).
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -143,6 +154,7 @@ async fn run(cli: Cli) -> Result<(), String> {
     let mut summaries: Vec<SessionSummary> = Vec::new();
     for n in 1..=cli.sessions {
         eprintln!("\n--- session {n} ---");
+        let send_open = n == 1 || !cli.no_open_after_first;
         let summary = drive_session(
             &cli.lspmux_path,
             &cli.tfls_path,
@@ -151,6 +163,8 @@ async fn run(cli: Cli) -> Result<(), String> {
             &file_uri,
             &file_text,
             cli.drain_ms,
+            send_open,
+            cli.any_uri,
         )
         .await
         .map_err(|e| format!("session {n}: {e}"))?;
@@ -194,6 +208,7 @@ struct SessionSummary {
     first_publish_at: Option<Duration>,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn drive_session(
     lspmux: &Path,
     tfls: &Path,
@@ -202,6 +217,8 @@ async fn drive_session(
     file_uri: &str,
     file_text: &str,
     drain_ms: u64,
+    send_open: bool,
+    any_uri: bool,
 ) -> Result<SessionSummary, String> {
     let workspace_uri = format!("file://{}", workspace.to_str().ok_or("ws not utf-8")?);
 
@@ -247,21 +264,26 @@ async fn drive_session(
     )
     .await?;
 
-    // 3. didOpen
-    let did_open = json!({
-        "jsonrpc": "2.0",
-        "method": "textDocument/didOpen",
-        "params": {
-            "textDocument": {
-                "uri": file_uri,
-                "languageId": "terraform",
-                "version": 1,
-                "text": file_text,
-            }
-        }
-    });
+    // 3. didOpen (skipped when `send_open` is false — used to
+    //    test pure attach-time replay of cached diagnostics).
     let session_start = Instant::now();
-    send(&mut stdin, &did_open).await?;
+    if send_open {
+        let did_open = json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": file_uri,
+                    "languageId": "terraform",
+                    "version": 1,
+                    "text": file_text,
+                }
+            }
+        });
+        send(&mut stdin, &did_open).await?;
+    } else {
+        eprintln!("  (didOpen skipped — pure attach-time replay test)");
+    }
 
     // 4. drain publishes for `drain_ms`.
     let mut publish_count = 0usize;
@@ -288,7 +310,8 @@ async fn drive_session(
             continue;
         }
         let Some(params) = value.get("params") else { continue };
-        if params.get("uri").and_then(|u| u.as_str()) != Some(file_uri) {
+        let uri = params.get("uri").and_then(|u| u.as_str()).unwrap_or("");
+        if !any_uri && uri != file_uri {
             continue;
         }
         publish_count += 1;
@@ -301,7 +324,11 @@ async fn drive_session(
         if first_at.is_none() {
             first_at = Some(session_start.elapsed());
         }
-        eprintln!("  publish #{publish_count}: {n} diagnostics");
+        if any_uri {
+            eprintln!("  publish #{publish_count}: {n} diagnostics  uri={uri}");
+        } else {
+            eprintln!("  publish #{publish_count}: {n} diagnostics");
+        }
     }
 
     // 5. shutdown + exit so the lspmux client closes cleanly. (We
