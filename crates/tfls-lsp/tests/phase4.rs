@@ -786,6 +786,113 @@ async fn code_action_converts_2arg_lookup_to_index() {
 }
 
 #[tokio::test]
+async fn code_action_refines_type_any_to_inferred() {
+    // Two `type = any` variables. One has a concrete default
+    // (string), one has a tfvars assignment (number via assigned
+    // map). One has `type = list(any)` and shouldn't be touched
+    // (parametrised, not bare `any`). One has `type = any` but no
+    // signal — should also be skipped.
+    let u = uri("file:///mod/main.tf");
+    let src = concat!(
+        "variable \"region\" {\n  type = any\n  default = \"us-east-1\"\n}\n",
+        "variable \"port\" {\n  type = any\n}\n",
+        "variable \"tags\" {\n  type = list(any)\n  default = []\n}\n",
+        "variable \"unknown\" {\n  type = any\n}\n",
+        "output \"r\" { value = var.region }\n",
+        "output \"p\" { value = var.port }\n",
+        "output \"u\" { value = var.unknown }\n",
+    );
+    let backend = fresh_backend(src, &u);
+
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use tfls_core::variable_type::{Primitive, VariableType};
+    let mut for_dir: HashMap<String, Vec<VariableType>> = HashMap::new();
+    for_dir.insert(
+        "port".to_string(),
+        vec![VariableType::Primitive(Primitive::Number)],
+    );
+    backend
+        .state
+        .replace_assigned_variable_types(PathBuf::from("/mod"), for_dir);
+
+    let resp = tfls_lsp::handlers::code_action::code_action(
+        &backend,
+        CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: u.clone() },
+            range: Range {
+                start: Position::new(0, 0),
+                end: Position::new(0, 0),
+            },
+            context: CodeActionContext {
+                diagnostics: vec![],
+                only: None,
+                trigger_kind: None,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        },
+    )
+    .await
+    .expect("ok")
+    .expect("response");
+
+    let action = resp
+        .iter()
+        .find_map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca)
+                if ca.title.starts_with("Refine `type = any`") =>
+            {
+                Some(ca)
+            }
+            _ => None,
+        })
+        .expect("refine action present");
+    let edits = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .and_then(|c| c.get(&u))
+        .expect("edits");
+    assert_eq!(edits.len(), 2, "should refine exactly 2 of 4 vars");
+    let texts: Vec<&str> = edits.iter().map(|e| e.new_text.as_str()).collect();
+    assert!(texts.contains(&"string"), "got: {texts:?}");
+    assert!(texts.contains(&"number"), "got: {texts:?}");
+}
+
+#[tokio::test]
+async fn code_action_refine_any_skips_when_nothing_qualifies() {
+    let u = uri("file:///mod/main.tf");
+    let src = "variable \"x\" { type = string }\nvariable \"y\" { type = list(any) default = [] }\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::code_action::code_action(
+        &backend,
+        CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: u.clone() },
+            range: Range {
+                start: Position::new(0, 0),
+                end: Position::new(0, 0),
+            },
+            context: CodeActionContext {
+                diagnostics: vec![],
+                only: None,
+                trigger_kind: None,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        },
+    )
+    .await
+    .expect("ok");
+    let actions = resp.unwrap_or_default();
+    let any_refine = actions.iter().any(|a| match a {
+        CodeActionOrCommand::CodeAction(ca) => ca.title.starts_with("Refine `type = any`"),
+        _ => false,
+    });
+    assert!(!any_refine, "no refine action when nothing qualifies");
+}
+
+#[tokio::test]
 async fn code_action_lookup_to_index_handles_complex_first_arg() {
     // First arg is a function call — index notation must wrap the
     // ENTIRE first-arg expression, not just its tail.

@@ -77,6 +77,15 @@ pub async fn code_action(
         actions.push(CodeActionOrCommand::CodeAction(action));
     }
 
+    // "Refine `type = any`" — for every variable declared with
+    // `type = any` whose default / caller signal yields a more
+    // concrete shape, replace `any` with the inferred type.
+    if let Some(action) =
+        make_refine_any_types_action(&uri, body, &doc.rope, &doc.symbols, &backend.state)
+    {
+        actions.push(CodeActionOrCommand::CodeAction(action));
+    }
+
     // "Generate variable declarations for undefined `var.X` references"
     // — walk the doc's references; for any `var.<name>` whose target
     // isn't declared in this module's symbol table, append a stub
@@ -665,6 +674,111 @@ fn make_fix_all_variable_types_action(
         // generic "fix all" / "source action" menu without
         // requiring a specific diagnostic at the cursor.
         kind: Some(CodeActionKind::SOURCE_FIX_ALL),
+        diagnostics: None,
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        is_preferred: None,
+        ..Default::default()
+    })
+}
+
+/// Source-level action: walk every `variable` block whose `type =`
+/// is the bare `any` (not parametrised — `list(any)` / `map(any)`
+/// stay untouched since they're already specifying a collection
+/// shape) and, if inference yields a more concrete shape, replace
+/// `any` with the inferred type. Single combined `WorkspaceEdit`
+/// covering all such blocks.
+///
+/// Suppressed when no variable qualifies — keeps the menu clean.
+fn make_refine_any_types_action(
+    uri: &Url,
+    body: &Body,
+    rope: &Rope,
+    symbols: &tfls_core::SymbolTable,
+    state: &tfls_state::StateStore,
+) -> Option<CodeAction> {
+    use hcl_edit::expr::Expression;
+    use hcl_edit::repr::Span as _;
+
+    let module_dir = crate::handlers::util::parent_dir(uri);
+    let mut edits: Vec<TextEdit> = Vec::new();
+    let mut refined_count = 0usize;
+
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else { continue };
+        if block.ident.as_str() != "variable" {
+            continue;
+        }
+        let Some(name) = block.labels.first().and_then(label_str) else {
+            continue;
+        };
+        // Find the `type = …` attribute. Only proceed when the
+        // value is the bare `any` identifier — `list(any)` etc are
+        // already shape-specifying and not the target here.
+        let mut type_attr_span: Option<std::ops::Range<usize>> = None;
+        let mut type_value_span: Option<std::ops::Range<usize>> = None;
+        for sub in block.body.iter() {
+            let Some(attr) = sub.as_attribute() else { continue };
+            if attr.key.as_str() != "type" {
+                continue;
+            }
+            type_attr_span = attr.span();
+            if let Expression::Variable(v) = &attr.value {
+                if v.as_str() == "any" {
+                    type_value_span = attr.value.span();
+                }
+            }
+            break;
+        }
+        let Some(value_span) = type_value_span else { continue };
+        let _ = type_attr_span; // reserved for future "remove `type =` line" variant
+
+        // Inference: same priority order as the fix-all action.
+        let inferred_from_default = symbols
+            .variable_defaults
+            .get(name)
+            .filter(|t| is_actionable_inference(t))
+            .filter(|t| !matches!(t, tfls_core::variable_type::VariableType::Any))
+            .cloned();
+        let inferred = inferred_from_default.or_else(|| {
+            let dir = module_dir.as_deref()?;
+            let merged = state.merged_assigned_type(dir, name)?;
+            if !is_actionable_inference(&merged) {
+                return None;
+            }
+            if matches!(&merged, tfls_core::variable_type::VariableType::Any) {
+                return None;
+            }
+            Some(merged)
+        });
+        let Some(ty) = inferred else { continue };
+
+        let Ok(start) = tfls_parser::byte_offset_to_lsp_position(rope, value_span.start) else {
+            continue;
+        };
+        let Ok(end) = tfls_parser::byte_offset_to_lsp_position(rope, value_span.end) else {
+            continue;
+        };
+        edits.push(TextEdit {
+            range: Range { start, end },
+            new_text: ty.to_string(),
+        });
+        refined_count += 1;
+    }
+
+    if edits.is_empty() {
+        return None;
+    }
+    let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    changes.insert(uri.clone(), edits);
+    Some(CodeAction {
+        title: format!(
+            "Refine `type = any` to inferred shape on {refined_count} variable{plural}",
+            plural = if refined_count == 1 { "" } else { "s" },
+        ),
+        kind: Some(CodeActionKind::SOURCE),
         diagnostics: None,
         edit: Some(WorkspaceEdit {
             changes: Some(changes),
