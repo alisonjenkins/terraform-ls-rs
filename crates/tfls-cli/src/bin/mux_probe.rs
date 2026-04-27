@@ -68,6 +68,28 @@ struct Cli {
     #[arg(long)]
     any_uri: bool,
 
+    /// Skip the per-session `textDocument/codeAction` probe.
+    /// By default each session, after draining diagnostics,
+    /// sends a codeAction request and the summary table reports
+    /// how many actions came back. The `code_action` symptom
+    /// (session 1 sees actions, session 2+ sees none) reproduces
+    /// the multi-client routing bug we're chasing.
+    #[arg(long)]
+    no_code_action: bool,
+
+    /// Cursor line for the codeAction probe (0-indexed).
+    #[arg(long, default_value_t = 0)]
+    cursor_line: u32,
+
+    /// Cursor character for the codeAction probe (0-indexed).
+    #[arg(long, default_value_t = 0)]
+    cursor_char: u32,
+
+    /// Print every codeAction title returned per session, not
+    /// just the count.
+    #[arg(long)]
+    print_actions: bool,
+
     /// Increase verbosity (`-v` = info, `-vv` = debug, `-vvv` = trace).
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -165,6 +187,10 @@ async fn run(cli: Cli) -> Result<(), String> {
             cli.drain_ms,
             send_open,
             cli.any_uri,
+            !cli.no_code_action,
+            cli.cursor_line,
+            cli.cursor_char,
+            cli.print_actions,
         )
         .await
         .map_err(|e| format!("session {n}: {e}"))?;
@@ -177,25 +203,58 @@ async fn run(cli: Cli) -> Result<(), String> {
             .first_publish_at
             .map(|d| format!("{:>5}ms", d.as_millis()))
             .unwrap_or_else(|| " -    ".to_string());
+        let actions_cell = match s.action_count {
+            None => "  skip".to_string(),
+            Some(n) => format!("{n:>5}"),
+        };
         eprintln!(
-            "session {} : publishes={:>2}  total_diags={:>3}  first_at={}",
+            "session {} : publishes={:>2}  total_diags={:>3}  first_at={}  actions={}",
             i + 1,
             s.publish_count,
             s.total_diags,
             first,
+            actions_cell,
         );
     }
 
-    let bug = summaries.first().is_some_and(|s| s.publish_count > 0)
+    let diag_bug = summaries.first().is_some_and(|s| s.publish_count > 0)
         && summaries.iter().skip(1).all(|s| s.publish_count == 0);
-    if bug {
+    let action_bug = summaries
+        .first()
+        .and_then(|s| s.action_count)
+        .is_some_and(|n| n > 0)
+        && summaries
+            .iter()
+            .skip(1)
+            .all(|s| s.action_count.unwrap_or(0) == 0);
+
+    if diag_bug {
         eprintln!(
-            "\nBUG REPRODUCED: session 1 received diagnostics, subsequent sessions did not."
+            "\nBUG REPRODUCED (diagnostics): session 1 received diagnostics, subsequent sessions did not."
         );
     } else if summaries.iter().all(|s| s.publish_count > 0) {
         eprintln!("\nALL SESSIONS RECEIVED DIAGNOSTICS — bug not reproduced (or already fixed).");
     } else {
-        eprintln!("\nMIXED OUTCOME — see per-session table.");
+        eprintln!("\nMIXED OUTCOME (diagnostics) — see per-session table.");
+    }
+    if !cli.no_code_action {
+        if action_bug {
+            eprintln!(
+                "BUG REPRODUCED (code actions): session 1 got code actions, subsequent sessions did not."
+            );
+        } else if summaries
+            .iter()
+            .all(|s| s.action_count.unwrap_or(0) > 0)
+        {
+            eprintln!("ALL SESSIONS RECEIVED CODE ACTIONS — bug not reproduced for codeAction routing.");
+        } else if summaries.iter().any(|s| s.action_count.unwrap_or(0) > 0) {
+            eprintln!("MIXED OUTCOME (code actions) — see per-session table.");
+        } else {
+            eprintln!(
+                "NO CODE ACTIONS in any session — file may have nothing to fix at cursor {}:{}.",
+                cli.cursor_line, cli.cursor_char
+            );
+        }
     }
 
     let _ = daemon.kill().await;
@@ -206,6 +265,9 @@ struct SessionSummary {
     publish_count: usize,
     total_diags: usize,
     first_publish_at: Option<Duration>,
+    /// `None` when the codeAction probe was skipped; otherwise
+    /// the number of `CodeAction`s in the response.
+    action_count: Option<usize>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -219,6 +281,10 @@ async fn drive_session(
     drain_ms: u64,
     send_open: bool,
     any_uri: bool,
+    probe_code_action: bool,
+    cursor_line: u32,
+    cursor_char: u32,
+    print_actions: bool,
 ) -> Result<SessionSummary, String> {
     let workspace_uri = format!("file://{}", workspace.to_str().ok_or("ws not utf-8")?);
 
@@ -331,7 +397,74 @@ async fn drive_session(
         }
     }
 
-    // 5. shutdown + exit so the lspmux client closes cleanly. (We
+    // 5. textDocument/codeAction probe — confirms the
+    //    request/response round-trip works for THIS session.
+    //    The previously-attached client may have populated
+    //    tfls's document state; routing back to the new client
+    //    is the failure mode we want to see.
+    let action_count = if probe_code_action {
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "textDocument/codeAction",
+            "params": {
+                "textDocument": { "uri": file_uri },
+                "range": {
+                    "start": { "line": cursor_line, "character": cursor_char },
+                    "end":   { "line": cursor_line, "character": cursor_char }
+                },
+                "context": { "diagnostics": [] }
+            }
+        });
+        send(&mut stdin, &req).await?;
+        let resp_body = match tokio::time::timeout(
+            Duration::from_millis(drain_ms),
+            recv_response(&mut reader, 7),
+        )
+        .await
+        {
+            Ok(Ok(s)) => Some(s),
+            Ok(Err(e)) => {
+                eprintln!("  codeAction recv error: {e}");
+                None
+            }
+            Err(_) => {
+                eprintln!("  codeAction timed out after {drain_ms}ms — request did not get a response");
+                None
+            }
+        };
+        let count = resp_body
+            .as_deref()
+            .and_then(|body| serde_json::from_str::<Value>(body).ok())
+            .and_then(|v| {
+                let arr = v.get("result")?.as_array()?.clone();
+                Some(arr)
+            })
+            .map(|arr| {
+                if print_actions {
+                    for (i, a) in arr.iter().enumerate() {
+                        let title = a
+                            .get("title")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("(no title)");
+                        let kind = a
+                            .get("kind")
+                            .and_then(|k| k.as_str())
+                            .unwrap_or("");
+                        eprintln!("  action #{:>2} [{kind}] {title}", i + 1);
+                    }
+                }
+                arr.len()
+            });
+        if let Some(n) = count {
+            eprintln!("  codeAction response: {n} action(s)");
+        }
+        Some(count.unwrap_or(0))
+    } else {
+        None
+    };
+
+    // 6. shutdown + exit so the lspmux client closes cleanly. (We
     //    deliberately let the daemon stay alive across sessions.)
     let _ = send(
         &mut stdin,
@@ -352,6 +485,7 @@ async fn drive_session(
         publish_count,
         total_diags,
         first_publish_at: first_at,
+        action_count,
     })
 }
 

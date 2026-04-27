@@ -81,7 +81,9 @@ cargo run --bin tfls-mux-probe -- \
   --sessions 3
 ```
 
-Use this when investigating LSP message-routing bugs that span multiple client connections (lspmux dedupe, fanout, late-attach republish). Daemon stderr is captured to `<tmp>/lspmux.stderr.log` for post-mortem.
+After the per-session diagnostic drain, the probe also fires a `textDocument/codeAction` request at `--cursor-line/--cursor-char` (default 0:0) and reports how many actions came back. Use `--print-actions` to dump every title + kind. The codeAction routing bug — session 1 sees actions, session 2+ sees none — surfaces in the summary's `actions=` column. `--no-code-action` skips this probe if you only care about diagnostics.
+
+Use this when investigating LSP message-routing bugs that span multiple client connections (lspmux dedupe, fanout, late-attach republish, codeAction request/response routing). Daemon stderr is captured to `<tmp>/lspmux.stderr.log` for post-mortem.
 
 ### `tfls-infer-coverage`
 
