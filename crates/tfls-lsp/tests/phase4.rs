@@ -587,9 +587,16 @@ async fn code_action_skips_when_block_already_has_type() {
     .await
     .expect("ok")
     .unwrap_or_default();
+    // Move-variables / move-outputs may still fire (file is
+    // `vars.tf`, not `variables.tf` / `outputs.tf`). What MUST
+    // not fire is anything touching the block's `type`.
+    let any_set_type = actions.iter().any(|a| match a {
+        CodeActionOrCommand::CodeAction(ca) => ca.title.starts_with("Set variable type"),
+        _ => false,
+    });
     assert!(
-        actions.is_empty(),
-        "must not offer action when block already has type; got {actions:?}"
+        !any_set_type,
+        "must not offer set-type action when block already has type; got {actions:?}"
     );
 }
 
@@ -1498,6 +1505,106 @@ async fn move_outputs_skips_outputs_tf_itself() {
                         edit.new_text.is_empty(),
                         "main delete: empty new_text"
                     );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn move_variables_creates_variables_tf_when_missing() {
+    // main.tf has 2 variable blocks; no variables.tf exists. Action
+    // should delete from main + create variables.tf with both.
+    let main = uri("file:///nonexistent-mod-mv/main.tf");
+    let src = "resource \"null_resource\" \"r\" {}\n\
+               variable \"a\" {}\n\
+               variable \"b\" { default = 1 }\n";
+    let backend = fresh_backend(src, &main);
+    let actions = all_actions_for(&backend, &main).await;
+    let action = find_action(&actions, "Move 2 variable blocks in this module");
+
+    use tower_lsp::lsp_types::{
+        DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp,
+    };
+    let target = uri("file:///nonexistent-mod-mv/variables.tf");
+    let dc = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.document_changes.as_ref())
+        .expect("documentChanges present");
+    let ops = match dc {
+        DocumentChanges::Operations(o) => o,
+        _ => panic!("expected Operations"),
+    };
+    let mut saw_create = false;
+    let mut delete_count = 0usize;
+    let mut target_text = String::new();
+    for op in ops {
+        match op {
+            DocumentChangeOperation::Op(ResourceOp::Create(c)) => {
+                assert_eq!(c.uri, target);
+                saw_create = true;
+            }
+            DocumentChangeOperation::Edit(te) => {
+                if te.text_document.uri == main {
+                    for e in &te.edits {
+                        let OneOf::Left(edit) = e else {
+                            panic!("annotated edit not expected");
+                        };
+                        assert!(edit.new_text.is_empty());
+                        delete_count += 1;
+                    }
+                } else if te.text_document.uri == target {
+                    for e in &te.edits {
+                        let OneOf::Left(edit) = e else { continue };
+                        target_text.push_str(&edit.new_text);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_create);
+    assert_eq!(delete_count, 2);
+    assert!(target_text.contains("variable \"a\""));
+    assert!(target_text.contains("variable \"b\""));
+}
+
+#[tokio::test]
+async fn move_variables_skips_variables_tf_itself() {
+    // variables.tf already exists; main.tf has 1 variable. Action
+    // appends to existing variables.tf, doesn't create.
+    let main = uri("file:///nonexistent-mod-mv2/main.tf");
+    let vars = uri("file:///nonexistent-mod-mv2/variables.tf");
+    let backend = fresh_backend(
+        "resource \"null_resource\" \"r\" {}\nvariable \"a\" {}\n",
+        &main,
+    );
+    add_doc(&backend, &vars, "variable \"existing\" {}\n");
+    let actions = all_actions_for(&backend, &main).await;
+    let action = find_action(&actions, "Move 1 variable block in this module");
+
+    use tower_lsp::lsp_types::{
+        DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp,
+    };
+    let dc = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.document_changes.as_ref())
+        .expect("documentChanges present");
+    let ops = match dc {
+        DocumentChanges::Operations(o) => o,
+        _ => panic!("expected Operations"),
+    };
+    for op in ops {
+        if matches!(op, DocumentChangeOperation::Op(ResourceOp::Create(_))) {
+            panic!("must NOT create existing variables.tf");
+        }
+        if let DocumentChangeOperation::Edit(te) = op {
+            if te.text_document.uri == vars {
+                for e in &te.edits {
+                    let OneOf::Left(edit) = e else { continue };
+                    assert!(edit.new_text.contains("variable \"a\""));
                 }
             }
         }

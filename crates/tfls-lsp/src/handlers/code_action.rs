@@ -210,9 +210,10 @@ pub async fn code_action(
     // unrelated files; Selection is N/A for an EOF append).
     emit_declare_undefined_actions(state, &uri, &mut actions);
 
-    // Move out-of-place outputs into the module's `outputs.tf`,
-    // matching the standard-module-structure rule. Module scope.
+    // Move out-of-place outputs / variables into the module's
+    // canonical files. Same standard-module-structure driver.
     emit_move_outputs_actions(state, &uri, &mut actions);
+    emit_move_variables_actions(state, &uri, &mut actions);
 
     if actions.is_empty() { Ok(None) } else { Ok(Some(actions)) }
 }
@@ -553,7 +554,7 @@ fn emit_move_outputs_actions(
         let Some(body) = doc.parsed.body.as_ref() else {
             return;
         };
-        for (range, src) in scan_output_blocks(body, &doc.rope) {
+        for (range, src) in scan_blocks_of_kind(body, &doc.rope, "output") {
             deletions
                 .entry(doc_uri.clone())
                 .or_default()
@@ -575,7 +576,7 @@ fn emit_move_outputs_actions(
     let strategy = resolve_target_strategy(state, &target_url, &target_path);
     let combined = combine_block_sources(&moved_sources);
 
-    let workspace_edit = build_move_outputs_workspace_edit(
+    let workspace_edit = build_move_blocks_workspace_edit(
         &deletions,
         &target_url,
         &strategy,
@@ -599,17 +600,89 @@ fn emit_move_outputs_actions(
     }));
 }
 
+/// Symmetric counterpart to `emit_move_outputs_actions`: lifts
+/// every `variable "X" { … }` block from any sibling `.tf` file
+/// (other than `variables.tf`) into the module's `variables.tf`.
+/// Same `terraform_standard_module_structure` driver — that rule
+/// flags variable declarations living outside `variables.tf`
+/// just like it does for outputs.
+fn emit_move_variables_actions(
+    state: &StateStore,
+    primary_uri: &Url,
+    actions: &mut Vec<CodeActionOrCommand>,
+) {
+    use crate::handlers::code_action_scope::{scope_kind, scope_title};
+
+    let Some(module_dir) = crate::handlers::util::parent_dir(primary_uri) else {
+        return;
+    };
+
+    let mut deletions: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    let mut moved_sources: Vec<String> = Vec::new();
+    for_each_doc_in_scope(state, primary_uri, Scope::Module, |doc_uri, doc| {
+        if filename_of(doc_uri).as_deref() == Some("variables.tf") {
+            return;
+        }
+        let Some(body) = doc.parsed.body.as_ref() else {
+            return;
+        };
+        for (range, src) in scan_blocks_of_kind(body, &doc.rope, "variable") {
+            deletions
+                .entry(doc_uri.clone())
+                .or_default()
+                .push(TextEdit {
+                    range,
+                    new_text: String::new(),
+                });
+            moved_sources.push(src);
+        }
+    });
+    if moved_sources.is_empty() {
+        return;
+    }
+
+    let target_path = module_dir.join("variables.tf");
+    let Ok(target_url) = Url::from_file_path(&target_path) else {
+        return;
+    };
+    let strategy = resolve_target_strategy(state, &target_url, &target_path);
+    let combined = combine_block_sources(&moved_sources);
+
+    let workspace_edit = build_move_blocks_workspace_edit(
+        &deletions,
+        &target_url,
+        &strategy,
+        &combined,
+    );
+
+    let count = moved_sources.len();
+    let title = scope_title(
+        "Move variable blocks",
+        "variable block",
+        Scope::Module,
+        count,
+    );
+    actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+        title: format!("{title} (to `variables.tf`)"),
+        kind: Some(scope_kind(Scope::Module, "move-variables-to-variables-tf")),
+        diagnostics: None,
+        edit: Some(workspace_edit),
+        is_preferred: None,
+        ..Default::default()
+    }));
+}
+
 /// Last path segment of a `file://` URI, e.g. `"main.tf"`.
 fn filename_of(uri: &Url) -> Option<String> {
     let path = uri.to_file_path().ok()?;
     Some(path.file_name()?.to_string_lossy().into_owned())
 }
 
-/// Find every `output` block in `body` and return its
+/// Find every block of the given kind in `body` and return its
 /// `(LSP delete-range, original source text)`. The delete-range
 /// extends from the block's start through any trailing newline +
 /// blank line so the cleanup leaves no double-blank-line scar.
-fn scan_output_blocks(body: &Body, rope: &Rope) -> Vec<(Range, String)> {
+fn scan_blocks_of_kind(body: &Body, rope: &Rope, kind: &str) -> Vec<(Range, String)> {
     use hcl_edit::repr::Span as _;
 
     let mut out = Vec::new();
@@ -617,7 +690,7 @@ fn scan_output_blocks(body: &Body, rope: &Rope) -> Vec<(Range, String)> {
         let Some(block) = structure.as_block() else {
             continue;
         };
-        if block.ident.as_str() != "output" {
+        if block.ident.as_str() != kind {
             continue;
         }
         let Some(span) = block.span() else { continue };
@@ -686,7 +759,7 @@ fn combine_block_sources(blocks: &[String]) -> String {
 /// support documentChanges (which all major LSP clients do)
 /// honour the order, applying the create before its initial
 /// edit.
-fn build_move_outputs_workspace_edit(
+fn build_move_blocks_workspace_edit(
     deletions: &HashMap<Url, Vec<TextEdit>>,
     target_url: &Url,
     strategy: &TargetFileStrategy,

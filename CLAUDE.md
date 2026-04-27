@@ -107,7 +107,7 @@ Use this when:
 
 ## Code-action scopes
 
-Every multi-target code action (unwrap interpolation, convert lookup, set variable types, refine `type = any`, declare undefined variables, move outputs to `outputs.tf`) is offered at multiple scopes via `crates/tfls-lsp/src/handlers/code_action_scope.rs`:
+Every multi-target code action (unwrap interpolation, convert lookup, set variable types, refine `type = any`, declare undefined variables, move outputs to `outputs.tf`, move variables to `variables.tf`) is offered at multiple scopes via `crates/tfls-lsp/src/handlers/code_action_scope.rs`:
 
 | Scope       | Iteration set                                     | LSP `CodeActionKind`                                            |
 |-------------|---------------------------------------------------|-----------------------------------------------------------------|
