@@ -74,15 +74,17 @@ pub async fn range_formatting(
     }]))
 }
 
-/// `textDocument/onTypeFormatting` — triggered after typing `}`.
-/// Finds the enclosing block that ends at (or includes) the cursor
-/// and re-formats that block only.
+/// `textDocument/onTypeFormatting` — triggered after typing `}`
+/// (close of an enclosing block) or `=` (assignment, where
+/// alignment fires across the surrounding run of single-line
+/// attributes). Either way, we reformat the smallest enclosing
+/// block; tf-format's `=` alignment then re-aligns the column
+/// across that block's attribute run.
 pub async fn on_type_formatting(
     backend: &Backend,
     params: DocumentOnTypeFormattingParams,
 ) -> jsonrpc::Result<Option<Vec<TextEdit>>> {
-    // Only respond to `}` — we advertise just that trigger.
-    if params.ch != "}" {
+    if !matches!(params.ch.as_str(), "}" | "=") {
         return Ok(None);
     }
 

@@ -44,9 +44,14 @@ pub fn server_capabilities() -> ServerCapabilities {
         ),
         document_formatting_provider: Some(OneOf::Left(true)),
         document_range_formatting_provider: Some(OneOf::Left(true)),
+        // Re-format on `}` (close of the enclosing block) and on
+        // `=` (re-aligns the equals column across the surrounding
+        // attribute run as the user types). Both triggers reformat
+        // the smallest enclosing block, so the cost is bounded by
+        // block size and the rewrite is deterministic.
         document_on_type_formatting_provider: Some(DocumentOnTypeFormattingOptions {
             first_trigger_character: "}".to_string(),
-            more_trigger_character: None,
+            more_trigger_character: Some(vec!["=".to_string()]),
         }),
         document_link_provider: Some(DocumentLinkOptions {
             resolve_provider: Some(false),
