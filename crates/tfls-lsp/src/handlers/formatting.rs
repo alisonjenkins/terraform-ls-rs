@@ -19,24 +19,32 @@ pub async fn formatting(
     params: DocumentFormattingParams,
 ) -> jsonrpc::Result<Option<Vec<TextEdit>>> {
     let uri = params.text_document.uri;
+    let style = backend.state.config.snapshot().format_style;
+    tracing::info!(uri = %uri, ?style, "formatting: invocation");
     let Some(doc) = backend.state.documents.get(&uri) else {
+        tracing::info!(uri = %uri, "formatting: document not in state");
         return Ok(None);
     };
 
     let text = doc.rope.to_string();
-    let style = backend.state.config.snapshot().format_style;
     let formatted = match format_source(&text, style) {
         Ok(s) => s,
         Err(e) => {
-            tracing::debug!(error = %e, "format: skipping — source did not parse");
+            tracing::info!(error = %e, "formatting: backend rejected source");
             return Ok(None);
         }
     };
 
     if formatted == text {
+        tracing::info!("formatting: no-op (already formatted)");
         return Ok(Some(Vec::new()));
     }
 
+    tracing::info!(
+        in_bytes = text.len(),
+        out_bytes = formatted.len(),
+        "formatting: emitting edit"
+    );
     Ok(Some(vec![TextEdit {
         range: whole_document_range(&doc.rope),
         new_text: formatted,
