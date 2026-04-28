@@ -50,4 +50,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # still builds the examples — the flamegraph feature in fetch_local
 # is a no-op on non-Unix.
 [target.'cfg(unix)'.dev-dependencies]
-pprof = { version = "0.14", default-features = false, features = ["flamegraph"] }
+pprof = { version = "0.15", default-features = false, features = ["flamegraph"] }
