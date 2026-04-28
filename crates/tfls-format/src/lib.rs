@@ -1,70 +1,30 @@
-//! HCL formatting.
+//! HCL formatting — thin wrapper around the [`tf_format`] crate.
 //!
-//! Phase 4 formatter: parses the source via `hcl-edit` to validate
-//! syntax, then applies safe text-level normalisations that match a
-//! subset of `terraform fmt` behaviour without risking semantic
-//! changes:
+//! tfls always invokes the backend with `FormatStyle::Minimal`,
+//! the `terraform fmt` / `tofu fmt` parity mode. Source-order is
+//! preserved; only spacing + `=` alignment changes are applied.
+//! The opinionated reorder/hoist/expand transforms tf-format
+//! offers under its default style would reshape repos that
+//! haven't opted in to that style — undesirable for a language
+//! server's format-on-save flow, where the user's expectation is
+//! "match `terraform fmt`".
 //!
-//! - trims trailing whitespace on each line
-//! - collapses runs of blank lines to a single blank line
-//! - ensures a single trailing newline at end of file
-//! - normalises the indentation of leading whitespace to use spaces
+//! If the backend ever needs to be swapped (e.g. for a custom
+//! style or to layer additional passes), this is the single
+//! place to do it — `crates/tfls-lsp/src/handlers/formatting.rs`
+//! depends only on `format_source`'s signature.
 
 pub mod error;
 
 pub use error::FormatError;
 
-/// Format a Terraform source string.
+/// Format an HCL source string using `terraform fmt`-style rules.
 ///
-/// Returns the formatted text if parsing succeeds; otherwise propagates
-/// the parse error (refusing to touch invalid source).
-///
-/// Goes through [`tfls_parser::parse_body`] to isolate panics from
-/// hcl-edit's parser — see `tfls_parser::safe` for the upstream
-/// audit.
+/// Returns the formatted text; propagates any error from the
+/// underlying [`tf_format`] formatter (typically a parse error).
 pub fn format_source(source: &str) -> Result<String, FormatError> {
-    match tfls_parser::parse_body(source) {
-        Ok(_body) => Ok(apply_normalisations(source)),
-        Err(tfls_parser::BodyParseError::Syntax(e)) => Err(FormatError::Parse(e)),
-        Err(tfls_parser::BodyParseError::Panicked(p)) => Err(FormatError::Panicked(p)),
-    }
-}
-
-fn apply_normalisations(source: &str) -> String {
-    let mut lines: Vec<String> = source
-        .split('\n')
-        .map(|l| l.trim_end().to_string())
-        .map(|l| l.replace('\t', "  "))
-        .collect();
-
-    collapse_consecutive_blanks(&mut lines);
-    trim_leading_trailing_blanks(&mut lines);
-
-    let mut out = lines.join("\n");
-    if !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out
-}
-
-fn collapse_consecutive_blanks(lines: &mut Vec<String>) {
-    let mut i = 0;
-    while i + 1 < lines.len() {
-        if lines[i].is_empty() && lines[i + 1].is_empty() {
-            lines.remove(i + 1);
-        } else {
-            i += 1;
-        }
-    }
-}
-
-fn trim_leading_trailing_blanks(lines: &mut Vec<String>) {
-    while lines.first().map(String::is_empty).unwrap_or(false) {
-        lines.remove(0);
-    }
-    while lines.last().map(String::is_empty).unwrap_or(false) {
-        lines.pop();
-    }
+    let opts = tf_format::FormatOptions::minimal();
+    Ok(tf_format::format_hcl_with(source, &opts)?)
 }
 
 #[cfg(test)]
@@ -73,53 +33,70 @@ mod tests {
     use super::*;
 
     #[test]
-    fn trims_trailing_whitespace() {
-        let src = "variable \"x\" {}   \n";
-        let got = format_source(src).expect("valid");
-        assert_eq!(got, "variable \"x\" {}\n");
+    fn aligns_equals_signs_within_a_block() {
+        // Spacing transform — exactly what `tofu fmt` would do.
+        let src = "resource \"x\" \"y\" {\n  ami = \"a\"\n  instance_type = \"t\"\n}\n";
+        let out = format_source(src).expect("formats");
+        assert!(
+            out.contains("ami           = \"a\""),
+            "expected aligned `ami`, got:\n{out}"
+        );
+        assert!(
+            out.contains("instance_type = \"t\""),
+            "expected aligned `instance_type`, got:\n{out}"
+        );
     }
 
     #[test]
-    fn collapses_blank_lines() {
-        let src = "variable \"a\" {}\n\n\n\nvariable \"b\" {}\n";
-        let got = format_source(src).expect("valid");
-        assert_eq!(got, "variable \"a\" {}\n\nvariable \"b\" {}\n");
+    fn preserves_resource_block_order() {
+        // Opinionated mode would alphabetise these; minimal mode
+        // must NOT.
+        let src = concat!(
+            "resource \"x\" \"z\" { ami = \"z\" }\n",
+            "resource \"x\" \"a\" { ami = \"a\" }\n",
+        );
+        let out = format_source(src).expect("formats");
+        let z_pos = out
+            .find("resource \"x\" \"z\"")
+            .expect("z block present");
+        let a_pos = out
+            .find("resource \"x\" \"a\"")
+            .expect("a block present");
+        assert!(
+            z_pos < a_pos,
+            "minimal mode must keep z before a; got:\n{out}"
+        );
     }
 
     #[test]
-    fn expands_tabs_to_two_spaces() {
-        let src = "variable \"x\" {\n\tdefault = 1\n}\n";
-        let got = format_source(src).expect("valid");
-        assert!(got.contains("  default = 1"));
-        assert!(!got.contains('\t'));
-    }
-
-    #[test]
-    fn ensures_trailing_newline() {
-        let src = "variable \"x\" {}";
-        let got = format_source(src).expect("valid");
-        assert!(got.ends_with('\n'));
-    }
-
-    #[test]
-    fn strips_leading_and_trailing_blank_lines() {
-        let src = "\n\nvariable \"x\" {}\n\n\n";
-        let got = format_source(src).expect("valid");
-        assert_eq!(got, "variable \"x\" {}\n");
-    }
-
-    #[test]
-    fn refuses_to_format_broken_source() {
-        let src = "variable \"x\" { default =";
-        let err = format_source(src);
-        assert!(matches!(err, Err(FormatError::Parse(_))));
+    fn does_not_hoist_meta_arguments() {
+        // `count` written AFTER `ami`. Opinionated mode would
+        // promote `count` to the top of the block; minimal mode
+        // must leave it where the author put it.
+        let src = "resource \"x\" \"y\" {\n  ami = \"a\"\n  count = 1\n}\n";
+        let out = format_source(src).expect("formats");
+        let ami_pos = out.find("ami").expect("ami present");
+        let count_pos = out.find("count").expect("count present");
+        assert!(
+            ami_pos < count_pos,
+            "minimal mode must not hoist count; got:\n{out}"
+        );
     }
 
     #[test]
     fn idempotent_on_clean_input() {
-        let src = "variable \"region\" {\n  default = \"us-east-1\"\n}\n";
-        let once = format_source(src).expect("valid");
-        let twice = format_source(&once).expect("valid");
-        assert_eq!(once, twice);
+        let src = "resource \"x\" \"y\" {\n  ami           = \"a\"\n  instance_type = \"t\"\n}\n";
+        let once = format_source(src).expect("formats");
+        let twice = format_source(&once).expect("formats");
+        assert_eq!(once, twice, "format must be idempotent");
+    }
+
+    #[test]
+    fn refuses_to_format_broken_source() {
+        let src = "resource \"x\" {\n";
+        let err = format_source(src).expect_err("must reject broken source");
+        // Surface comes from tf-format; we only assert that a
+        // failure path exists.
+        let _ = err;
     }
 }

@@ -35,7 +35,7 @@ crates/
   tfls-schema/             Provider schema types, async CLI fetcher, bundled snapshot
   tfls-state/              StateStore (DashMap), DocumentState (rope + AST), JobQueue
   tfls-diag/               Syntax, undefined-ref, schema-validation diagnostics
-  tfls-format/             Formatter (parse-validated, idempotent)
+  tfls-format/             Formatter — thin wrapper around `tf-format` in `terraform fmt`-style minimal mode
   tfls-walker/             FS discovery + notify-debouncer-full file watcher
   tfls-provider-protocol/  Terraform plugin gRPC protocol (v5+v6), mTLS, registry docs
   tfls-lsp/                Backend (tower-lsp) + handlers + background indexer

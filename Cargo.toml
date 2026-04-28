@@ -38,6 +38,11 @@ lsp-types = "0.94"
 # HCL parsing
 hcl-edit = "0.9"
 
+# HCL formatting backend (pinned to a `feat/minimal-style` rev that
+# adds `FormatStyle::Minimal` upstream — switch to a tag once the PR
+# merges + release-please cuts a tagged release).
+tf-format = { git = "https://github.com/alisonjenkins/tf-format", rev = "937610ed24e031d496fdf2ff82e762879ab397ac" }
+
 # Text buffers
 ropey = "1.6"
 
