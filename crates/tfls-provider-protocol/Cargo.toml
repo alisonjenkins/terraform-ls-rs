@@ -30,7 +30,7 @@ base64 = "0.22"
 rmpv = "1"
 sonic-rs.workspace = true
 serde_json = "1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "json", "gzip"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-tls-webpki-roots", "json", "gzip"] }
 futures = "0.3"
 regex = "1"
 serde = { workspace = true }
