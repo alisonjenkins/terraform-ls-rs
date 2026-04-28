@@ -12,3 +12,4 @@ workspace = true
 [dependencies]
 thiserror.workspace = true
 tf-format.workspace = true
+tfls-state.workspace = true

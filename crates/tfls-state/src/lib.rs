@@ -12,7 +12,7 @@ pub mod jobs;
 pub mod lookup;
 pub mod store;
 
-pub use config::{Config, ConfigCell};
+pub use config::{Config, ConfigCell, FormatStyle};
 pub use document::DocumentState;
 pub use error::StateError;
 pub use index_cache::IndexCache;

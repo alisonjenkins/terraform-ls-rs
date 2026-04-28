@@ -24,7 +24,8 @@ pub async fn formatting(
     };
 
     let text = doc.rope.to_string();
-    let formatted = match format_source(&text) {
+    let style = backend.state.config.snapshot().format_style;
+    let formatted = match format_source(&text, style) {
         Ok(s) => s,
         Err(e) => {
             tracing::debug!(error = %e, "format: skipping — source did not parse");
@@ -59,7 +60,8 @@ pub async fn range_formatting(
     let Some(slice) = slice_text(&doc.rope, params.range) else {
         return Ok(None);
     };
-    let Ok(formatted) = format_source(&slice) else {
+    let style = backend.state.config.snapshot().format_style;
+    let Ok(formatted) = format_source(&slice, style) else {
         return Ok(None);
     };
     if formatted == slice {
@@ -99,7 +101,8 @@ pub async fn on_type_formatting(
     let Some(slice) = slice_text(&doc.rope, range) else {
         return Ok(None);
     };
-    let Ok(formatted) = format_source(&slice) else {
+    let style = backend.state.config.snapshot().format_style;
+    let Ok(formatted) = format_source(&slice, style) else {
         return Ok(None);
     };
     if formatted == slice {

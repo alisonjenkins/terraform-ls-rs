@@ -35,7 +35,7 @@ crates/
   tfls-schema/             Provider schema types, async CLI fetcher, bundled snapshot
   tfls-state/              StateStore (DashMap), DocumentState (rope + AST), JobQueue
   tfls-diag/               Syntax, undefined-ref, schema-validation diagnostics
-  tfls-format/             Formatter — thin wrapper around `tf-format` in `terraform fmt`-style minimal mode
+  tfls-format/             Formatter — thin wrapper around `tf-format`; style runtime-toggleable (see "Formatting style" below)
   tfls-walker/             FS discovery + notify-debouncer-full file watcher
   tfls-provider-protocol/  Terraform plugin gRPC protocol (v5+v6), mTLS, registry docs
   tfls-lsp/                Backend (tower-lsp) + handlers + background indexer
@@ -106,6 +106,26 @@ Use this when:
 - Investigating "code action doesn't suggest a type" — `--list-gaps` shows the caller expression kind so you know whether the gap is a missing schema, a `var.X` chain, an `each.X` pattern, etc.
 - After changes to `parse_value_shape_with_schema` / `merge_observations` / `traversal_attr_type` — the percentage figures in commit messages come from this binary.
 - Spot-checking a specific module — `--dump-dir` prints the raw `assigned_variable_types` map for one dir.
+
+## Formatting style
+
+The formatter (`crates/tfls-format`) wraps the [`tf-format`](https://github.com/alisonjenkins/tf-format) crate. Two styles, switchable at runtime:
+
+- `minimal` (default) — `terraform fmt` / `tofu fmt` parity. Alignment + spacing only; source order preserved. Safe to apply to any repo.
+- `opinionated` — full tf-format behaviour: alphabetises top-level blocks, hoists meta-arguments, sorts attributes/object keys, expands wide single-line objects, adds trailing commas.
+
+Set via either:
+
+1. `initializationOptions.formatStyle` on the LSP `initialize` request:
+   ```json
+   { "initializationOptions": { "formatStyle": "opinionated" } }
+   ```
+2. `workspace/didChangeConfiguration` notification (live toggle, no restart):
+   ```json
+   { "settings": { "terraform-ls-rs": { "formatStyle": "minimal" } } }
+   ```
+
+Storage lives on `tfls_state::Config::format_style`; LSP handlers (`textDocument/formatting`, `rangeFormatting`, `onTypeFormatting`) read the live snapshot per-request via `state.config.snapshot()`. Unknown values keep the previous setting.
 
 ## Code-action scopes
 

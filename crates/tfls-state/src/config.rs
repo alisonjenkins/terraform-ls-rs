@@ -4,6 +4,31 @@
 use std::sync::RwLock;
 use std::time::Duration;
 
+/// Formatting style. Mirrors `tf_format::FormatStyle`; defined
+/// here so the LSP-facing config layer doesn't have to depend on
+/// the formatting crate. `tfls-format` maps this to the backend
+/// enum at the call site.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FormatStyle {
+    /// `terraform fmt` / `tofu fmt` parity: alignment + spacing
+    /// only. The default — safe to apply to any repo.
+    #[default]
+    Minimal,
+    /// Full opinionated formatting (alphabetisation, hoisting,
+    /// expansion). Opt-in via the `formatStyle` config key.
+    Opinionated,
+}
+
+impl FormatStyle {
+    pub fn from_str_lossy(s: &str) -> Option<Self> {
+        match s {
+            "minimal" | "Minimal" => Some(Self::Minimal),
+            "opinionated" | "Opinionated" => Some(Self::Opinionated),
+            _ => None,
+        }
+    }
+}
+
 /// All tunable runtime settings in one place. Clone is cheap —
 /// settings are scalars or short strings.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +53,10 @@ pub struct Config {
     /// Default `false` — matches tflint's own recommended preset
     /// (these rules live in the `all` preset only).
     pub style_rules: bool,
+    /// Active formatting style. Updated live via
+    /// `workspace/didChangeConfiguration` (key: `formatStyle`).
+    /// Default [`FormatStyle::Minimal`].
+    pub format_style: FormatStyle,
 }
 
 impl Default for Config {
@@ -39,6 +68,7 @@ impl Default for Config {
             cli_binary: "tofu".to_string(),
             stale_version_days: 180,
             style_rules: false,
+            format_style: FormatStyle::default(),
         }
     }
 }
@@ -98,6 +128,13 @@ impl ConfigCell {
         if let Some(v) = obj.get("styleRules").and_then(|v| v.as_bool()) {
             guard.style_rules = v;
         }
+        if let Some(v) = obj.get("formatStyle").and_then(|v| v.as_str()) {
+            if let Some(style) = FormatStyle::from_str_lossy(v) {
+                guard.format_style = style;
+            } else {
+                tracing::warn!(value = v, "unknown formatStyle value — keeping previous");
+            }
+        }
     }
 }
 
@@ -150,6 +187,34 @@ mod tests {
             sonic_rs::from_str(r#"{"madeUpSetting": 42}"#).expect("parse");
         cell.update_from_json(&value);
         assert_eq!(cell.snapshot(), Config::default());
+    }
+
+    #[test]
+    fn format_style_round_trip() {
+        let cell = ConfigCell::default();
+        assert_eq!(cell.snapshot().format_style, FormatStyle::Minimal);
+
+        let v: sonic_rs::Value =
+            sonic_rs::from_str(r#"{"formatStyle":"opinionated"}"#).expect("parse");
+        cell.update_from_json(&v);
+        assert_eq!(cell.snapshot().format_style, FormatStyle::Opinionated);
+
+        let v: sonic_rs::Value =
+            sonic_rs::from_str(r#"{"formatStyle":"minimal"}"#).expect("parse");
+        cell.update_from_json(&v);
+        assert_eq!(cell.snapshot().format_style, FormatStyle::Minimal);
+    }
+
+    #[test]
+    fn format_style_unknown_value_keeps_previous() {
+        let cell = ConfigCell::default();
+        let v: sonic_rs::Value =
+            sonic_rs::from_str(r#"{"formatStyle":"opinionated"}"#).expect("parse");
+        cell.update_from_json(&v);
+        let v: sonic_rs::Value =
+            sonic_rs::from_str(r#"{"formatStyle":"banana"}"#).expect("parse");
+        cell.update_from_json(&v);
+        assert_eq!(cell.snapshot().format_style, FormatStyle::Opinionated);
     }
 }
 

@@ -167,6 +167,23 @@ impl LanguageServer for Backend {
         self.state
             .set_client_supports_diagnostic_refresh(client_does_refresh);
 
+        // Apply `initializationOptions` to the live config cell so
+        // `formatStyle` (and any other future LSP setting) takes
+        // effect immediately, before any did_open / format request
+        // fires. Clients can still re-tune later via
+        // `workspace/didChangeConfiguration`.
+        if let Some(opts) = params.initialization_options.as_ref() {
+            if let Ok(serialised) = serde_json::to_string(opts) {
+                if let Ok(sonic) = sonic_rs::from_str::<sonic_rs::Value>(&serialised) {
+                    self.state.config.update_from_json(&sonic);
+                } else {
+                    tracing::warn!(
+                        "initializationOptions: failed to reparse as sonic-rs value"
+                    );
+                }
+            }
+        }
+
         self.spawn_background().await;
 
         for folder in params.workspace_folders.unwrap_or_default() {
