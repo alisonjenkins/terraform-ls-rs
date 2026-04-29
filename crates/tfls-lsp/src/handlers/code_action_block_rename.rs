@@ -203,6 +203,175 @@ fn resolved_to(spec: &BlockRenameSpec) -> String {
     }
 }
 
+/// Cursor-driven Instance variant. Surfaces a single-block
+/// `Convert <from>.<name> to <to>` quickfix when the cursor
+/// sits inside a deprecated `<from>` block whose spec is
+/// gate-supported. Filters reference rewrites to the converted
+/// block's name only — the user is migrating ONE resource;
+/// other instances of the same `<from>` type stay untouched.
+///
+/// Returns `None` when no matching block is at the cursor or
+/// the spec's gate isn't admitted by the active module.
+pub fn make_replace_block_at_cursor(
+    state: &StateStore,
+    uri: &Url,
+    cursor: Position,
+    body: &Body,
+    rope: &Rope,
+) -> Option<CodeAction> {
+    use hcl_edit::repr::Span as _;
+
+    let module_dir = crate::handlers::util::parent_dir(uri)?;
+
+    // Find the block at cursor whose `(block_kind, label)`
+    // matches a spec.
+    let by_kind_label: HashMap<(&'static str, &'static str), (usize, &BlockRenameSpec)> =
+        ALL_BLOCK_RENAMES
+            .iter()
+            .enumerate()
+            .map(|(i, s)| ((s.block_kind, s.from), (i, s)))
+            .collect();
+
+    let mut matched: Option<(usize, &BlockRenameSpec, String, Range)> = None;
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
+        let kind = block.ident.as_str();
+        let Some(label) = block.labels.first() else {
+            continue;
+        };
+        let Some(label_text) = label_str(label) else {
+            continue;
+        };
+        let Some(&(idx, spec)) = by_kind_label.get(&(kind, label_text)) else {
+            continue;
+        };
+        let Some(block_span) = block.span() else { continue };
+        let Ok(block_range) = hcl_span_to_lsp_range(rope, block_span) else {
+            continue;
+        };
+        if !crate::handlers::code_action::contains(&block_range, cursor) {
+            continue;
+        }
+        let Some(name) = block.labels.get(1).and_then(label_str) else {
+            continue;
+        };
+        let Some(label_span) = label.span() else { continue };
+        let Ok(label_range) = hcl_span_to_lsp_range(rope, label_span) else {
+            continue;
+        };
+        matched = Some((idx, spec, name.to_string(), label_range));
+        break;
+    }
+    let (idx, spec, name, label_range) = matched?;
+
+    // Gate check.
+    let mut provider_constraint_cache: HashMap<(PathBuf, &'static str), Option<String>> =
+        HashMap::new();
+    let supported = compute_supported_specs(state, &module_dir, &mut provider_constraint_cache);
+    if !supported.get(idx).copied().unwrap_or(false) {
+        return None;
+    }
+
+    let to = resolved_to(spec);
+
+    // Build the per-block edit set:
+    //   1. Single label rewrite for this block.
+    //   2. Reference rewrites limited to `<from>.<name>` (drop refs to
+    //      other instances of the same `<from>` type).
+    let label_rewrite = TextEdit {
+        range: label_range,
+        new_text: format!("\"{to}\""),
+    };
+
+    let mut by_from: HashMap<&'static str, (usize, &BlockRenameSpec)> = HashMap::new();
+    by_from.insert(spec.from, (idx, spec));
+    let all_refs = scan_ref_rewrites(body, rope, &by_from, &supported);
+    let name_filtered_refs = filter_refs_by_name(body, rope, &all_refs, spec.from, &name);
+
+    let mut rewrites: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    let mut doc_edits = vec![label_rewrite];
+    doc_edits.extend(name_filtered_refs.into_iter().map(|(_, e)| e));
+    rewrites.insert(uri.clone(), doc_edits);
+
+    // moved.tf entry per the spec's StateMigration kind.
+    let module_admits_terraform_1_8 =
+        module_admits_terraform_at_least(state, &module_dir, "1.8.0");
+    let pending_kind = match spec.state_migration {
+        StateMigration::Aliased => Some(PendingKind::Real),
+        StateMigration::RequiresTerraform18 => Some(if module_admits_terraform_1_8 {
+            PendingKind::Real
+        } else {
+            PendingKind::Commented(CommentReason::NeedsTerraform18)
+        }),
+        StateMigration::Manual => Some(PendingKind::Commented(CommentReason::ManualMigration)),
+    };
+    let mut renames_by_module: HashMap<PathBuf, Vec<(usize, String, PendingKind)>> =
+        HashMap::new();
+    if let Some(kind) = pending_kind {
+        if spec.is_resource() {
+            renames_by_module.insert(module_dir, vec![(idx, name.clone(), kind)]);
+        }
+    }
+
+    let workspace_edit = build_workspace_edit(state, rewrites, renames_by_module);
+
+    Some(CodeAction {
+        title: format!("Convert {}.{name} to {to}", spec.from),
+        kind: Some(lsp_types::CodeActionKind::QUICKFIX),
+        diagnostics: None,
+        edit: Some(workspace_edit),
+        is_preferred: Some(true),
+        ..Default::default()
+    })
+}
+
+/// Filter ref-rewrite edits (head-ident swaps from
+/// `scan_ref_rewrites`) to those whose matching traversal's
+/// resource-name accessor (the first GetAttr after the head)
+/// equals `target_name`. Re-walks the body alongside the edits
+/// to recover names; cheap because the bodies are typically
+/// small relative to ref-edit count.
+fn filter_refs_by_name(
+    body: &Body,
+    rope: &Rope,
+    all_refs: &[(usize, TextEdit)],
+    from_type: &str,
+    target_name: &str,
+) -> Vec<(usize, TextEdit)> {
+    use hcl_edit::repr::Span as _;
+    // Build a position → name map by walking traversals.
+    let mut name_by_pos: HashMap<(u32, u32), String> = HashMap::new();
+    walk_expressions(body, &mut |expr| {
+        let Expression::Traversal(t) = expr else { return };
+        let Expression::Variable(v) = &t.expr else { return };
+        if v.as_str() != from_type {
+            return;
+        }
+        let Some(name) = t.operators.iter().find_map(|op| match op.value() {
+            TraversalOperator::GetAttr(ident) => Some(ident.as_str().to_string()),
+            _ => None,
+        }) else {
+            return;
+        };
+        let Some(span) = v.span() else { return };
+        if let Ok(start) = byte_offset_to_lsp_position(rope, span.start) {
+            name_by_pos.insert((start.line, start.character), name);
+        }
+    });
+    all_refs
+        .iter()
+        .filter(|(_, edit)| {
+            name_by_pos
+                .get(&(edit.range.start.line, edit.range.start.character))
+                .map(|n| n == target_name)
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect()
+}
+
 /// Multi-scope emit driving the generic block-rename action.
 /// Called from `code_action()` once per invocation. Caller
 /// supplies the per-call cache for module-level provider
@@ -250,13 +419,8 @@ pub fn emit_block_rename_actions(
     // of scope count. Stores raw (block-rewrite triples,
     // ref-rewrite pairs) so per-scope filtering (selection
     // range, etc.) runs against cached output without re-walking.
-    let mut scan_cache: HashMap<
-        Url,
-        (
-            Vec<(usize, String, TextEdit)>,
-            Vec<(usize, TextEdit)>,
-        ),
-    > = HashMap::new();
+    type ScanRow = (Vec<(usize, String, TextEdit)>, Vec<(usize, TextEdit)>);
+    let mut scan_cache: HashMap<Url, ScanRow> = HashMap::new();
 
     for scope in scopes {
         // Per-scope: collect (uri, edits) + (module_dir, name list per spec).

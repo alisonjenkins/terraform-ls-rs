@@ -151,6 +151,30 @@ pub async fn code_action(
         }
     }
 
+    // Cursor-driven generic block-rename quickfix. Surfaces
+    // when the cursor sits inside a deprecated provider type
+    // (AWS rename family or Kubernetes _v1 family). Emits a
+    // single-block fix with name-filtered reference rewrites.
+    if let Some(body) = doc.parsed.body.as_ref() {
+        if let Some(action) =
+            crate::handlers::code_action_block_rename::make_replace_block_at_cursor(
+                &backend.state,
+                &uri,
+                params.range.start,
+                body,
+                &doc.rope,
+            )
+        {
+            let already = actions.iter().any(|a| match a {
+                CodeActionOrCommand::CodeAction(ca) => ca.title == action.title,
+                _ => false,
+            });
+            if !already {
+                actions.push(CodeActionOrCommand::CodeAction(action));
+            }
+        }
+    }
+
     // Cursor-driven `null_resource` → `terraform_data` rewrite.
     // Surfaces the Instance variant when the cursor sits inside
     // a `resource "null_resource" "X" { … }` block; broader
@@ -2283,7 +2307,7 @@ fn find_block_at<'b>(
     None
 }
 
-fn contains(range: &Range, pos: Position) -> bool {
+pub(crate) fn contains(range: &Range, pos: Position) -> bool {
     let after_start = (pos.line, pos.character) >= (range.start.line, range.start.character);
     let before_end = (pos.line, pos.character) <= (range.end.line, range.end.character);
     after_start && before_end

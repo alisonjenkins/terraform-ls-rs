@@ -2935,6 +2935,243 @@ async fn rename_action_skipped_when_no_matching_blocks() {
     assert!(!any_rename, "no rename action when no matching blocks");
 }
 
+// ── Cursor variant for the block-rename action ───────────────
+
+/// Cursor inside an `aws_alb` block surfaces the Instance
+/// quickfix `Convert aws_alb.<name> to aws_lb`.
+#[tokio::test]
+async fn block_rename_cursor_variant_surfaces_aws_alb_quickfix() {
+    let u = uri("file:///fmt-cursor-alb/main.tf");
+    let src = "resource \"aws_alb\" \"web\" {\n  name = \"web\"\n}\n";
+    let backend = fresh_backend(src, &u);
+
+    use tower_lsp::lsp_types::*;
+    let params = CodeActionParams {
+        text_document: TextDocumentIdentifier { uri: u.clone() },
+        range: Range {
+            start: Position::new(0, 22), // inside the block label
+            end: Position::new(0, 22),
+        },
+        context: Default::default(),
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+    let actions = tower_lsp::LanguageServer::code_action(&backend, params)
+        .await
+        .expect("code_action ok")
+        .unwrap_or_default();
+
+    let action = find_action(&actions, "Convert aws_alb.web to aws_lb");
+    assert_eq!(action.kind, Some(CodeActionKind::QUICKFIX));
+    let edits = doc_change_edits(action);
+    let main_edits = edits.get(&u).expect("main.tf edits");
+    assert!(main_edits.iter().any(|e| e.new_text == "\"aws_lb\""));
+}
+
+/// Cursor inside one `kubernetes_pod` block when another
+/// `kubernetes_pod.other` exists in the same file: the
+/// quickfix applies ONLY to the block at cursor — references
+/// to `kubernetes_pod.other` stay untouched.
+#[tokio::test]
+async fn block_rename_cursor_variant_filters_refs_by_name() {
+    let u = uri("file:///fmt-cursor-k8s/main.tf");
+    let src = concat!(
+        "resource \"kubernetes_pod\" \"target\" {\n  metadata {\n    name = \"t\"\n  }\n}\n",
+        "resource \"kubernetes_pod\" \"other\" {\n  metadata {\n    name = \"o\"\n  }\n}\n",
+        "output \"target_meta\" { value = kubernetes_pod.target.metadata }\n",
+        "output \"other_meta\" { value = kubernetes_pod.other.metadata }\n",
+    );
+    let backend = fresh_backend(src, &u);
+
+    use tower_lsp::lsp_types::*;
+    let params = CodeActionParams {
+        text_document: TextDocumentIdentifier { uri: u.clone() },
+        range: Range {
+            start: Position::new(0, 22), // inside `kubernetes_pod` "target" block
+            end: Position::new(0, 22),
+        },
+        context: Default::default(),
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+    let actions = tower_lsp::LanguageServer::code_action(&backend, params)
+        .await
+        .expect("code_action ok")
+        .unwrap_or_default();
+
+    let action = find_action(&actions, "Convert kubernetes_pod.target to kubernetes_pod_v1");
+    let edits = doc_change_edits(action);
+    let main_edits = edits.get(&u).expect("main.tf edits");
+
+    // Exactly one label rewrite (the target block).
+    let label_count = main_edits
+        .iter()
+        .filter(|e| e.new_text == "\"kubernetes_pod_v1\"")
+        .count();
+    assert_eq!(label_count, 1, "label rewrite should fire on cursor block only");
+
+    // Exactly one ref rewrite (target_meta), NOT other_meta.
+    let head_rewrites: Vec<_> = main_edits
+        .iter()
+        .filter(|e| e.new_text == "kubernetes_pod_v1")
+        .collect();
+    assert_eq!(
+        head_rewrites.len(),
+        1,
+        "ref rewrite should be name-filtered to `target` only; got {head_rewrites:?}"
+    );
+}
+
+/// Cursor inside an `aws_alb` block under a module pinned to
+/// AWS provider 1.5 (pre-aws_lb-introduction): no quickfix.
+#[tokio::test]
+async fn block_rename_cursor_variant_suppressed_by_gate() {
+    let u = uri("file:///fmt-cursor-old-aws/main.tf");
+    let src = concat!(
+        "terraform {\n  required_providers {\n    aws = \"~> 1.5\"\n  }\n}\n",
+        "resource \"aws_alb\" \"web\" {\n  name = \"web\"\n}\n",
+    );
+    let backend = fresh_backend(src, &u);
+
+    use tower_lsp::lsp_types::*;
+    let params = CodeActionParams {
+        text_document: TextDocumentIdentifier { uri: u.clone() },
+        range: Range {
+            // Inside the aws_alb block (line 5).
+            start: Position::new(5, 22),
+            end: Position::new(5, 22),
+        },
+        context: Default::default(),
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+    let actions = tower_lsp::LanguageServer::code_action(&backend, params)
+        .await
+        .expect("code_action ok")
+        .unwrap_or_default();
+
+    let any_convert = actions.iter().any(|a| match a {
+        CodeActionOrCommand::CodeAction(ca) => ca.title.starts_with("Convert aws_alb"),
+        _ => false,
+    });
+    assert!(!any_convert, "gate must suppress; got {actions:?}");
+}
+
+/// Cursor inside an `aws_alb` block emits a real `moved` block
+/// (Aliased migration kind — safe to auto-emit).
+#[tokio::test]
+async fn block_rename_cursor_variant_emits_real_moved_for_aliased() {
+    let u = uri("file:///fmt-cursor-alb-moved/main.tf");
+    let src = "resource \"aws_alb\" \"web\" {\n  name = \"web\"\n}\n";
+    let backend = fresh_backend(src, &u);
+
+    use tower_lsp::lsp_types::*;
+    let params = CodeActionParams {
+        text_document: TextDocumentIdentifier { uri: u.clone() },
+        range: Range {
+            start: Position::new(0, 22),
+            end: Position::new(0, 22),
+        },
+        context: Default::default(),
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+    let actions = tower_lsp::LanguageServer::code_action(&backend, params)
+        .await
+        .expect("code_action ok")
+        .unwrap_or_default();
+    let action = find_action(&actions, "Convert aws_alb.web to aws_lb");
+
+    let edits = doc_change_edits(action);
+    let moved = uri("file:///fmt-cursor-alb-moved/moved.tf");
+    assert!(has_create_file(action, &moved));
+    let body = edits
+        .get(&moved)
+        .expect("moved.tf edits")
+        .iter()
+        .map(|e| e.new_text.clone())
+        .collect::<String>();
+    assert!(body.contains("from = aws_alb.web"));
+    assert!(body.contains("to   = aws_lb.web"));
+    // Real moved (not commented).
+    assert!(!body.contains("# moved {"), "should be active block");
+}
+
+/// Cursor inside a `kubernetes_pod` block emits commented
+/// scaffolding (Manual migration kind — never auto-emit).
+#[tokio::test]
+async fn block_rename_cursor_variant_emits_commented_for_manual() {
+    let u = uri("file:///fmt-cursor-k8s-manual/main.tf");
+    let src = "resource \"kubernetes_pod\" \"p\" {\n  metadata {\n    name = \"p\"\n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+
+    use tower_lsp::lsp_types::*;
+    let params = CodeActionParams {
+        text_document: TextDocumentIdentifier { uri: u.clone() },
+        range: Range {
+            start: Position::new(0, 22),
+            end: Position::new(0, 22),
+        },
+        context: Default::default(),
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+    let actions = tower_lsp::LanguageServer::code_action(&backend, params)
+        .await
+        .expect("code_action ok")
+        .unwrap_or_default();
+    let action = find_action(&actions, "Convert kubernetes_pod.p to kubernetes_pod_v1");
+
+    let edits = doc_change_edits(action);
+    let moved = uri("file:///fmt-cursor-k8s-manual/moved.tf");
+    let body = edits
+        .get(&moved)
+        .expect("moved.tf edits")
+        .iter()
+        .map(|e| e.new_text.clone())
+        .collect::<String>();
+    assert!(body.contains("VERIFY BEFORE UNCOMMENTING"));
+    assert!(body.contains("# moved {"));
+}
+
+/// No quickfix when cursor is outside any deprecated block.
+#[tokio::test]
+async fn block_rename_cursor_variant_no_action_outside_block() {
+    let u = uri("file:///fmt-cursor-outside/main.tf");
+    let src = "resource \"aws_instance\" \"x\" { ami = \"a\" }\n";
+    let backend = fresh_backend(src, &u);
+
+    use tower_lsp::lsp_types::*;
+    let params = CodeActionParams {
+        text_document: TextDocumentIdentifier { uri: u.clone() },
+        range: Range {
+            start: Position::new(0, 12),
+            end: Position::new(0, 12),
+        },
+        context: Default::default(),
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+    let actions = tower_lsp::LanguageServer::code_action(&backend, params)
+        .await
+        .expect("code_action ok")
+        .unwrap_or_default();
+    let any_convert = actions.iter().any(|a| match a {
+        CodeActionOrCommand::CodeAction(ca) => ca.title.starts_with("Convert "),
+        _ => false,
+    });
+    // Specifically no block-rename Convert action; other
+    // actions (e.g. format) may still be present.
+    let any_rename_convert = actions.iter().any(|a| match a {
+        CodeActionOrCommand::CodeAction(ca) => {
+            ca.title.starts_with("Convert aws_") || ca.title.starts_with("Convert kubernetes_")
+        }
+        _ => false,
+    });
+    assert!(!any_rename_convert, "no rename quickfix outside block");
+    let _ = any_convert; // null_resource action is gated separately
+}
+
 #[tokio::test]
 async fn rename_action_idempotent_when_moved_block_exists() {
     let main = uri("file:///fmt-rename-idem/main.tf");
