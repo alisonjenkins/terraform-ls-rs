@@ -26,6 +26,7 @@ async-trait.workspace = true
 tracing.workspace = true
 ropey.workspace = true
 dashmap.workspace = true
+rustc-hash.workspace = true
 hcl-edit.workspace = true
 sonic-rs.workspace = true
 serde.workspace = true

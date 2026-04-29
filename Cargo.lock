@@ -2717,6 +2717,7 @@ dependencies = [
  "lsp-types",
  "rayon",
  "ropey",
+ "rustc-hash",
  "serde",
  "serde_json",
  "sonic-rs",

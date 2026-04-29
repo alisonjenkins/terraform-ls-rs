@@ -47,6 +47,15 @@ ropey = "1.6"
 # Concurrent data structures
 dashmap = "6"
 
+# Fast non-cryptographic hashing for server-internal HashMaps
+# (per-call caches, etc.). Default `std::collections::HashMap`
+# uses SipHash 1-3 — DOS-resistant but ~2-3× slower than FxHash
+# on the short keys (Url / &'static str / PathBuf) we feed our
+# caches. Cache keys are never untrusted user input, so the DOS
+# resistance buys nothing. `rustc-hash` is the same FxHash impl
+# rustc itself uses; tiny, well-maintained.
+rustc-hash = "2"
+
 # File watching
 notify = "7"
 notify-debouncer-full = "0.4"

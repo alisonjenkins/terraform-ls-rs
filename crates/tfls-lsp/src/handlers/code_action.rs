@@ -6,6 +6,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use rustc_hash::FxHashMap;
+
 use hcl_edit::repr::Span;
 use hcl_edit::structure::{Block, BlockLabel, Body};
 use sonic_rs::JsonValueTrait;
@@ -286,7 +288,8 @@ pub async fn code_action(
     // both deprecations — and adding a third deprecation that
     // hooks into the same cache costs only a leaf-check per
     // expression node, not a fresh body walk.
-    let mut combined_ref_cache: HashMap<Url, CombinedDeprecationRefs> = HashMap::new();
+    let mut combined_ref_cache: FxHashMap<Url, CombinedDeprecationRefs> =
+        FxHashMap::default();
     emit_null_resource_actions(
         state,
         &uri,
@@ -372,10 +375,10 @@ fn emit_scoped_actions<F>(
     // per (uri, doc), so each scope only differs in its
     // post-filter (Selection range). Compute once, filter
     // multiple times.
-    let mut scan_cache: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    let mut scan_cache: FxHashMap<Url, Vec<TextEdit>> = FxHashMap::default();
 
     for scope in scopes {
-        let mut edits_by_uri: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        let mut edits_by_uri: FxHashMap<Url, Vec<TextEdit>> = FxHashMap::default();
         let mut visited = 0usize;
         let mut total_edits = 0usize;
         for_each_doc_in_scope(state, primary_uri, scope, |doc_uri, doc| {
@@ -927,7 +930,7 @@ fn emit_format_actions(
     //    `apply_change` / `reparse`. Repeated code-action menu
     //    opens on an unchanged doc skip the formatter
     //    entirely.
-    let mut intra_call_cache: HashMap<Url, Option<TextEdit>> = HashMap::new();
+    let mut intra_call_cache: FxHashMap<Url, Option<TextEdit>> = FxHashMap::default();
 
     for scope in [Scope::File, Scope::Module, Scope::Workspace] {
         let mut edits_by_uri: HashMap<Url, Vec<TextEdit>> = HashMap::new();
@@ -1420,7 +1423,7 @@ fn push_template_file_hit(
 /// it on miss via [`walk_combined_deprecation_refs`]. Filters
 /// matches by `names` (None = all), flattens into a `Vec<TextEdit>`.
 fn null_refs_from_cache(
-    cache: &mut HashMap<Url, CombinedDeprecationRefs>,
+    cache: &mut FxHashMap<Url, CombinedDeprecationRefs>,
     uri: &Url,
     body: &Body,
     rope: &Rope,
@@ -1435,7 +1438,7 @@ fn null_refs_from_cache(
 /// Read a `template_file` ref edit set from `cache`. Caller's
 /// `names` is the converted-data-source set for the doc's module.
 fn template_refs_from_cache(
-    cache: &mut HashMap<Url, CombinedDeprecationRefs>,
+    cache: &mut FxHashMap<Url, CombinedDeprecationRefs>,
     uri: &Url,
     body: &Body,
     rope: &Rope,
@@ -1611,9 +1614,10 @@ fn make_replace_null_resource_for_diag(
         if edits.is_empty() {
             return None;
         }
-        let mut rewrites: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        let mut rewrites: FxHashMap<Url, Vec<TextEdit>> = FxHashMap::default();
         rewrites.insert(uri.clone(), edits);
-        let mut names_by_module: HashMap<std::path::PathBuf, Vec<String>> = HashMap::new();
+        let mut names_by_module: FxHashMap<std::path::PathBuf, Vec<String>> =
+            FxHashMap::default();
         if let Some(dir) = crate::handlers::util::parent_dir(uri) {
             names_by_module.insert(dir, vec![name.to_string()]);
         }
@@ -1750,7 +1754,7 @@ fn emit_null_resource_actions(
     primary_uri: &Url,
     selection: Option<Range>,
     actions: &mut Vec<CodeActionOrCommand>,
-    combined_ref_cache: &mut HashMap<Url, CombinedDeprecationRefs>,
+    combined_ref_cache: &mut FxHashMap<Url, CombinedDeprecationRefs>,
 ) {
     use crate::handlers::code_action_scope::scope_kind;
     use std::path::PathBuf;
@@ -1761,17 +1765,17 @@ fn emit_null_resource_actions(
     }
     scopes.extend([Scope::File, Scope::Module, Scope::Workspace]);
 
-    let mut module_gate_cache: HashMap<PathBuf, bool> = HashMap::new();
+    let mut module_gate_cache: FxHashMap<PathBuf, bool> = FxHashMap::default();
     // Per-doc scan cache. Stores block-only edits + names —
     // ref edits come from the shared `combined_ref_cache`,
     // which is populated by the first deprecation emit fn that
     // walks the doc and reused by subsequent emits.
     type ScanRow = Option<(Vec<TextEdit>, Vec<String>)>;
-    let mut scan_cache: HashMap<Url, ScanRow> = HashMap::new();
+    let mut scan_cache: FxHashMap<Url, ScanRow> = FxHashMap::default();
 
     for scope in scopes {
-        let mut edits_by_uri: HashMap<Url, Vec<TextEdit>> = HashMap::new();
-        let mut names_by_module: HashMap<PathBuf, Vec<String>> = HashMap::new();
+        let mut edits_by_uri: FxHashMap<Url, Vec<TextEdit>> = FxHashMap::default();
+        let mut names_by_module: FxHashMap<PathBuf, Vec<String>> = FxHashMap::default();
         let mut total_blocks = 0usize;
         for_each_doc_in_scope(state, primary_uri, scope, |doc_uri, doc| {
             if !scan_cache.contains_key(doc_uri) {
@@ -1915,8 +1919,8 @@ fn names_intersecting_edits(body: &Body, edits: &[TextEdit]) -> Vec<String> {
 /// `documentChanges`.
 fn build_null_resource_workspace_edit(
     state: &StateStore,
-    rewrites: HashMap<Url, Vec<TextEdit>>,
-    names_by_module: HashMap<std::path::PathBuf, Vec<String>>,
+    rewrites: FxHashMap<Url, Vec<TextEdit>>,
+    names_by_module: FxHashMap<std::path::PathBuf, Vec<String>>,
 ) -> WorkspaceEdit {
     use lsp_types::{
         CreateFile, CreateFileOptions, DocumentChangeOperation, DocumentChanges, OneOf,
@@ -2087,9 +2091,10 @@ fn make_replace_null_resource_at_cursor(
             return None;
         }
 
-        let mut rewrites: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        let mut rewrites: FxHashMap<Url, Vec<TextEdit>> = FxHashMap::default();
         rewrites.insert(uri.clone(), edits);
-        let mut names_by_module: HashMap<std::path::PathBuf, Vec<String>> = HashMap::new();
+        let mut names_by_module: FxHashMap<std::path::PathBuf, Vec<String>> =
+            FxHashMap::default();
         if let Some(dir) = crate::handlers::util::parent_dir(uri) {
             names_by_module.insert(dir, vec![name.to_string()]);
         }
@@ -3423,7 +3428,7 @@ fn emit_template_file_actions(
     primary_uri: &Url,
     selection: Option<Range>,
     actions: &mut Vec<CodeActionOrCommand>,
-    combined_ref_cache: &mut HashMap<Url, CombinedDeprecationRefs>,
+    combined_ref_cache: &mut FxHashMap<Url, CombinedDeprecationRefs>,
 ) {
     use crate::handlers::code_action_scope::scope_kind;
     use crate::handlers::util::module_supports_templatefile;
@@ -3435,23 +3440,25 @@ fn emit_template_file_actions(
     }
     scopes.extend([Scope::File, Scope::Module, Scope::Workspace]);
 
-    let mut module_gate_cache: HashMap<PathBuf, bool> = HashMap::new();
-    let mut module_locals_cache: HashMap<PathBuf, HashSet<String>> = HashMap::new();
+    let mut module_gate_cache: FxHashMap<PathBuf, bool> = FxHashMap::default();
+    let mut module_locals_cache: FxHashMap<PathBuf, HashSet<String>> = FxHashMap::default();
     // Per-doc scan cache (module dir + already-collision-filtered
     // targets). One walk per doc per code_action call regardless
     // of scope count.
-    let mut targets_cache: HashMap<Url, Option<(PathBuf, Vec<TemplateFileTarget>)>> =
-        HashMap::new();
+    let mut targets_cache: FxHashMap<Url, Option<(PathBuf, Vec<TemplateFileTarget>)>> =
+        FxHashMap::default();
     // Per-(uri, sorted name set) ref-walk cache — same names
     // across File/Module/Workspace scopes hit one walk. Names
     // sorted so the key is canonical regardless of insertion
     // order from the per-doc names_set.
-    let mut ref_edits_cache: HashMap<(Url, Vec<String>), Vec<TextEdit>> = HashMap::new();
+    let mut ref_edits_cache: FxHashMap<(Url, Vec<String>), Vec<TextEdit>> =
+        FxHashMap::default();
 
     for scope in scopes {
         // Pass 1 — collect convertible targets per doc, gated.
-        let mut targets_by_doc: HashMap<Url, Vec<TemplateFileTarget>> = HashMap::new();
-        let mut names_by_module: HashMap<PathBuf, HashSet<String>> = HashMap::new();
+        let mut targets_by_doc: FxHashMap<Url, Vec<TemplateFileTarget>> =
+            FxHashMap::default();
+        let mut names_by_module: FxHashMap<PathBuf, HashSet<String>> = FxHashMap::default();
         let mut total_blocks = 0usize;
 
         for_each_doc_in_scope(state, primary_uri, scope, |doc_uri, doc| {
@@ -3502,7 +3509,7 @@ fn emit_template_file_actions(
         }
 
         // Pass 2 — build per-doc edit lists.
-        let mut edits_by_uri: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        let mut edits_by_uri: FxHashMap<Url, Vec<TextEdit>> = FxHashMap::default();
 
         // Host-doc edits.
         for (uri, targets) in &targets_by_doc {
@@ -3514,7 +3521,7 @@ fn emit_template_file_actions(
         // inside soon-to-be-deleted blocks — LSP rejects
         // overlapping edits). Empty for docs that contribute no
         // host edits (refs-only sweep).
-        let delete_ranges_by_uri: HashMap<Url, Vec<Range>> = targets_by_doc
+        let delete_ranges_by_uri: FxHashMap<Url, Vec<Range>> = targets_by_doc
             .iter()
             .map(|(uri, targets)| {
                 (
@@ -3605,11 +3612,14 @@ fn emit_template_file_actions(
         let title = format!(
             "Convert {total_blocks} template_file data block{plural} to templatefile() in {where_}"
         );
+        // Convert to std HashMap at the LSP boundary —
+        // `WorkspaceEdit::changes` is fixed by lsp-types.
+        let changes: HashMap<Url, Vec<TextEdit>> = edits_by_uri.into_iter().collect();
         actions.push(CodeActionOrCommand::CodeAction(CodeAction {
             title,
             kind: Some(scope_kind(scope, "template-file-to-templatefile")),
             edit: Some(WorkspaceEdit {
-                changes: Some(edits_by_uri),
+                changes: Some(changes),
                 ..Default::default()
             }),
             ..Default::default()

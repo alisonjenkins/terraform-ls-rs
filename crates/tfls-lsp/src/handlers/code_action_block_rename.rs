@@ -29,8 +29,10 @@
 //! path; future consolidation possible if more attribute-rename
 //! cases appear.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
+
+use rustc_hash::FxHashMap;
 
 use hcl_edit::expr::{Expression, TraversalOperator};
 use hcl_edit::repr::Span;
@@ -225,7 +227,7 @@ pub fn make_replace_block_at_cursor(
 
     // Find the block at cursor whose `(block_kind, label)`
     // matches a spec.
-    let by_kind_label: HashMap<(&'static str, &'static str), (usize, &BlockRenameSpec)> =
+    let by_kind_label: FxHashMap<(&'static str, &'static str), (usize, &BlockRenameSpec)> =
         ALL_BLOCK_RENAMES
             .iter()
             .enumerate()
@@ -267,8 +269,8 @@ pub fn make_replace_block_at_cursor(
     let (idx, spec, name, label_range) = matched?;
 
     // Gate check.
-    let mut provider_constraint_cache: HashMap<(PathBuf, &'static str), Option<String>> =
-        HashMap::new();
+    let mut provider_constraint_cache: FxHashMap<(PathBuf, &'static str), Option<String>> =
+        FxHashMap::default();
     let supported = compute_supported_specs(state, &module_dir, &mut provider_constraint_cache);
     if !supported.get(idx).copied().unwrap_or(false) {
         return None;
@@ -285,12 +287,12 @@ pub fn make_replace_block_at_cursor(
         new_text: format!("\"{to}\""),
     };
 
-    let mut by_from: HashMap<&'static str, (usize, &BlockRenameSpec)> = HashMap::new();
+    let mut by_from: FxHashMap<&'static str, (usize, &BlockRenameSpec)> = FxHashMap::default();
     by_from.insert(spec.from, (idx, spec));
     let all_refs = scan_ref_rewrites(body, rope, &by_from, &supported);
     let name_filtered_refs = filter_refs_by_name(body, rope, &all_refs, spec.from, &name);
 
-    let mut rewrites: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    let mut rewrites: FxHashMap<Url, Vec<TextEdit>> = FxHashMap::default();
     let mut doc_edits = vec![label_rewrite];
     doc_edits.extend(name_filtered_refs.into_iter().map(|(_, e)| e));
     rewrites.insert(uri.clone(), doc_edits);
@@ -307,8 +309,8 @@ pub fn make_replace_block_at_cursor(
         }),
         StateMigration::Manual => Some(PendingKind::Commented(CommentReason::ManualMigration)),
     };
-    let mut renames_by_module: HashMap<PathBuf, Vec<(usize, String, PendingKind)>> =
-        HashMap::new();
+    let mut renames_by_module: FxHashMap<PathBuf, Vec<(usize, String, PendingKind)>> =
+        FxHashMap::default();
     if let Some(kind) = pending_kind {
         if spec.is_resource() {
             renames_by_module.insert(module_dir, vec![(idx, name.clone(), kind)]);
@@ -342,7 +344,7 @@ fn filter_refs_by_name(
 ) -> Vec<(usize, TextEdit)> {
     use hcl_edit::repr::Span as _;
     // Build a position → name map by walking traversals.
-    let mut name_by_pos: HashMap<(u32, u32), String> = HashMap::new();
+    let mut name_by_pos: FxHashMap<(u32, u32), String> = FxHashMap::default();
     walk_expressions(body, &mut |expr| {
         let Expression::Traversal(t) = expr else { return };
         let Expression::Variable(v) = &t.expr else { return };
@@ -392,8 +394,8 @@ pub fn emit_block_rename_actions(
     // Per-call cache: provider name → joined constraint (None = no
     // constraint declared). One extraction per (provider, module);
     // each spec consults its own provider's entry.
-    let mut provider_constraint_cache: HashMap<(PathBuf, &'static str), Option<String>> =
-        HashMap::new();
+    let mut provider_constraint_cache: FxHashMap<(PathBuf, &'static str), Option<String>> =
+        FxHashMap::default();
 
     // Two indices over the spec table (built once per call):
     // - `by_kind_label` for block-label scans (`<block_kind> "<from>"`)
@@ -401,13 +403,13 @@ pub fn emit_block_rename_actions(
     // Both store `(spec_index, &spec)` so callers can walk a body
     // once with O(1) lookup per match instead of linear-scanning
     // the 26-spec table per traversal.
-    let by_kind_label: HashMap<(&'static str, &'static str), (usize, &BlockRenameSpec)> =
+    let by_kind_label: FxHashMap<(&'static str, &'static str), (usize, &BlockRenameSpec)> =
         ALL_BLOCK_RENAMES
             .iter()
             .enumerate()
             .map(|(i, s)| ((s.block_kind, s.from), (i, s)))
             .collect();
-    let by_from: HashMap<&'static str, (usize, &BlockRenameSpec)> = ALL_BLOCK_RENAMES
+    let by_from: FxHashMap<&'static str, (usize, &BlockRenameSpec)> = ALL_BLOCK_RENAMES
         .iter()
         .enumerate()
         .map(|(i, s)| (s.from, (i, s)))
@@ -420,17 +422,17 @@ pub fn emit_block_rename_actions(
     // ref-rewrite pairs) so per-scope filtering (selection
     // range, etc.) runs against cached output without re-walking.
     type ScanRow = (Vec<(usize, String, TextEdit)>, Vec<(usize, TextEdit)>);
-    let mut scan_cache: HashMap<Url, ScanRow> = HashMap::new();
+    let mut scan_cache: FxHashMap<Url, ScanRow> = FxHashMap::default();
 
     for scope in scopes {
         // Per-scope: collect (uri, edits) + (module_dir, name list per spec).
-        let mut edits_by_uri: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        let mut edits_by_uri: FxHashMap<Url, Vec<TextEdit>> = FxHashMap::default();
         // Per-module per-spec converted entries for the
         // moved.tf builder. Tuple: (spec_index, name, pending_kind).
         // PendingKind partitions into real `moved` blocks vs
         // commented-out scaffolding the user vets manually.
-        let mut renames_by_module: HashMap<PathBuf, Vec<(usize, String, PendingKind)>> =
-            HashMap::new();
+        let mut renames_by_module: FxHashMap<PathBuf, Vec<(usize, String, PendingKind)>> =
+            FxHashMap::default();
         let mut total_blocks = 0usize;
 
         for_each_doc_in_scope(state, primary_uri, scope, |doc_uri, doc| {
@@ -570,7 +572,7 @@ pub fn emit_block_rename_actions(
 fn compute_supported_specs(
     state: &StateStore,
     module_dir: &std::path::Path,
-    cache: &mut HashMap<(PathBuf, &'static str), Option<String>>,
+    cache: &mut FxHashMap<(PathBuf, &'static str), Option<String>>,
 ) -> Vec<bool> {
     let mut supported = vec![false; ALL_BLOCK_RENAMES.len()];
     for (i, spec) in ALL_BLOCK_RENAMES.iter().enumerate() {
@@ -688,7 +690,7 @@ fn module_constraint_for_provider_dir(
 fn scan_block_rewrites(
     body: &Body,
     rope: &Rope,
-    by_kind_label: &HashMap<(&'static str, &'static str), (usize, &BlockRenameSpec)>,
+    by_kind_label: &FxHashMap<(&'static str, &'static str), (usize, &BlockRenameSpec)>,
     supported: &[bool],
 ) -> Vec<(usize, String, TextEdit)> {
     use hcl_edit::repr::Span as _;
@@ -738,7 +740,7 @@ fn scan_block_rewrites(
 fn scan_ref_rewrites(
     body: &Body,
     rope: &Rope,
-    by_from: &HashMap<&'static str, (usize, &BlockRenameSpec)>,
+    by_from: &FxHashMap<&'static str, (usize, &BlockRenameSpec)>,
     supported: &[bool],
 ) -> Vec<(usize, TextEdit)> {
     let mut out: Vec<(usize, TextEdit)> = Vec::new();
@@ -785,8 +787,8 @@ fn scan_ref_rewrites(
 /// before uncommenting).
 fn build_workspace_edit(
     state: &StateStore,
-    rewrites: HashMap<Url, Vec<TextEdit>>,
-    renames_by_module: HashMap<PathBuf, Vec<(usize, String, PendingKind)>>,
+    rewrites: FxHashMap<Url, Vec<TextEdit>>,
+    renames_by_module: FxHashMap<PathBuf, Vec<(usize, String, PendingKind)>>,
 ) -> WorkspaceEdit {
     let mut ops: Vec<DocumentChangeOperation> = Vec::new();
 

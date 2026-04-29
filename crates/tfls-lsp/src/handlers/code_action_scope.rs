@@ -130,12 +130,17 @@ pub fn for_each_doc_in_scope<F>(
 /// actions vec without a separate is_empty check.
 pub fn build_scoped_action(
     scope: Scope,
-    edits_by_uri: HashMap<Url, Vec<TextEdit>>,
+    edits_by_uri: rustc_hash::FxHashMap<Url, Vec<TextEdit>>,
     title_template: &str,
     item_label: &str,
     diagnostics: Option<Vec<Diagnostic>>,
     action_id: &str,
 ) -> Option<CodeAction> {
+    // Drop empty entries on the FxHashMap; collect into std
+    // HashMap at the boundary because `WorkspaceEdit::changes`
+    // is a std HashMap (LSP-types crate fixes the field type).
+    // The conversion is a single iter pass — sub-microsecond
+    // for the per-call edit-set sizes we ever produce.
     let edits_by_uri: HashMap<Url, Vec<TextEdit>> = edits_by_uri
         .into_iter()
         .filter(|(_, v)| !v.is_empty())
@@ -308,7 +313,7 @@ mod tests {
 
     #[test]
     fn build_action_returns_none_when_empty() {
-        let map: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        let map: rustc_hash::FxHashMap<Url, Vec<TextEdit>> = rustc_hash::FxHashMap::default();
         assert!(build_scoped_action(
             Scope::File,
             map,
@@ -322,7 +327,7 @@ mod tests {
 
     #[test]
     fn build_action_drops_empty_uri_entries() {
-        let mut map: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        let mut map: rustc_hash::FxHashMap<Url, Vec<TextEdit>> = rustc_hash::FxHashMap::default();
         let url = Url::parse("file:///x.tf").unwrap();
         map.insert(url, Vec::new());
         assert!(build_scoped_action(
