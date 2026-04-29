@@ -1,5 +1,6 @@
 pub mod attr_ref_map;
 pub mod code_action;
+pub mod code_action_block_rename;
 pub mod code_action_scope;
 pub mod code_lens;
 pub mod commands;

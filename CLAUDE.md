@@ -205,8 +205,8 @@ Live rules:
 | `template_file`                                  | `data`      | Terraform `>= 0.12.0`                           | Convert to `local` calling `templatefile()`     |
 | `template_dir`                                   | `data`      | Terraform `>= 0.12.0`                           | Diagnostic only                                 |
 | `null_data_source`                               | `data`      | Terraform `>= 0.10.0`                           | Diagnostic only                                 |
-| AWS rename family (6 resources)                  | `resource`  | AWS provider `>= 1.7.0` / `>= 4.0.0` (s3 object)| Diagnostic only (table)                         |
-| Kubernetes `_v1` rename family (20 resources)    | `resource`  | kubernetes provider `>= 2.0.0`                  | Diagnostic only (table)                         |
+| AWS rename family (6 resources)                  | `resource`  | AWS provider `>= 1.7.0` / `>= 4.0.0` (s3 object)| **Auto-fix** via generic block-rename action    |
+| Kubernetes `_v1` rename family (20 resources)    | `resource`  | kubernetes provider `>= 2.0.0`                  | **Auto-fix** via generic block-rename action    |
 | Azure VM split family (2 resources)              | `resource`  | azurerm `>= 2.40.0`                             | Diagnostic only (table)                         |
 | GCP Dataflow split                               | `resource`  | google `>= 3.45.0`                              | Diagnostic only (table)                         |
 
@@ -218,6 +218,18 @@ new rule to a family = one table entry + one
 The multi-rule body walker (`deprecation_rule::diagnostics_from_table`) visits each block ONCE regardless of rule count — `(block_kind, label)` HashMap lookup per block, single body iteration. So a table with N entries pays O(blocks) total, not O(blocks × rules). Per-rule gate evaluation runs through the caller's `rule_supported` closure, which the LSP layer wires via `provider_rule_filter(constraint)` (one provider-version constraint extracted per module per code-action call, regardless of how many rules in the table use that provider).
 
 `deprecation_rule::body_supports_rule(rule, body)` is the body-only fallback; `module_constraint_for_provider(state, primary_uri, name)` is the LSP-layer module-aware path. Each provider module provides `<provider>_diagnostics` (body-only convenience) + `<provider>_diagnostics_for_module` (closure-driven, used by `compute_diagnostics_with_lookup`).
+
+### Generic block-rename code action
+
+`crates/tfls-lsp/src/handlers/code_action_block_rename.rs` drives the auto-fix for the AWS and Kubernetes rename families off a single shared `BlockRenameSpec` table. Mechanics per match:
+
+1. **Block label rewrite** — `"<from>"` → `"<to>"` on the matching `<block_kind> "<from>" "X"` block.
+2. **Reference rewrite** — every `<from>.X[.attr]` traversal in the body gets its head ident swapped for `<to>` (schemas are identical between the two types, so attribute paths stay the same).
+3. **`moved` block emit** (resources only) — per-name entry into the module's `moved.tf`, created if absent. Idempotent: re-runs skip names already covered by an existing `moved` block in the module.
+
+Multi-scope (Selection / File / Module / Workspace), `CodeActionKind` family `source.fixAll.terraform-ls-rs.rename-deprecated-provider-types[.<scope>]`. Per-call cache keyed by `(module_dir, provider_name)` so a 26-spec table touching 2 providers does at most 2 sibling walks per module per code-action call.
+
+`null_resource → terraform_data` keeps its bespoke action (it has additional attribute-key renames `triggers → triggers_replace` that the generic rename doesn't model). Future consolidation possible if more attribute-rename cases arrive.
 
 Per-table-module test invariants:
 - `rule_table_invariants` — every rule has a non-empty message, correct provider, valid block_kind.

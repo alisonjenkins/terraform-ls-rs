@@ -277,6 +277,16 @@ pub async fn code_action(
         &mut actions,
         &mut combined_ref_cache,
     );
+    // Generic block-type rename action — drives auto-fix for
+    // the AWS rename family + Kubernetes `_v1` rename family
+    // off a shared spec table. See
+    // `crate::handlers::code_action_block_rename`.
+    crate::handlers::code_action_block_rename::emit_block_rename_actions(
+        state,
+        &uri,
+        selection,
+        &mut actions,
+    );
 
     // Declare undefined variables — File + Module only (the edit
     // appends to EOF, so Workspace would scatter stubs across
@@ -1437,7 +1447,7 @@ fn flatten_filtered(
 /// pattern-specific leaf check; one shared traversal lets a
 /// combined entry produce both deprecations' edits in a single
 /// pass.
-fn walk_expressions<F>(body: &Body, f: &mut F)
+pub(crate) fn walk_expressions<F>(body: &Body, f: &mut F)
 where
     F: FnMut(&hcl_edit::expr::Expression),
 {

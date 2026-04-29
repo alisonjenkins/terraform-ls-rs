@@ -71,8 +71,8 @@ action that performs the migration:
 | `data "template_file"` | Terraform `>= 0.12.0` | `templatefile()` function | Hoist to `local`, rewrite `data.template_file.X.rendered` → `local.X` references, unwrap `template = file("path")` to `templatefile("path", ...)`, skip on local-name collision |
 | `data "template_dir"` | Terraform `>= 0.12.0` | `for_each = fileset(...) + templatefile()` | Diagnostic only (migration project-specific) |
 | `data "null_data_source"` | Terraform `>= 0.10.0` | `locals { }` block | Diagnostic only |
-| AWS rename family (6 resources) | AWS provider `>= 1.7.0` (or `>= 4.0.0` for s3 object) | see below | Diagnostic only |
-| Kubernetes `_v1` rename family (20 resources) | Kubernetes provider `>= 2.0.0` | append `_v1` suffix | Diagnostic only |
+| AWS rename family (6 resources) | AWS provider `>= 1.7.0` (or `>= 4.0.0` for s3 object) | see below | **Auto-fix:** rewrite block label + every reference, emit `moved { }` blocks to `moved.tf` for state migration |
+| Kubernetes `_v1` rename family (20 resources) | Kubernetes provider `>= 2.0.0` | append `_v1` suffix | **Auto-fix:** rewrite block label + every reference, emit `moved { }` blocks to `moved.tf` for state migration |
 | Azure VM split family (2 resources) | azurerm `>= 2.40.0` | OS-specific `_linux_` / `_windows_` variants | Diagnostic only (semantic split, schema diverges) |
 | GCP Dataflow split | google `>= 3.45.0` | `google_dataflow_flex_template_job` | Diagnostic only |
 

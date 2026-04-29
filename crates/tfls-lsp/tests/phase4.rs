@@ -2635,3 +2635,225 @@ async fn null_resource_action_appends_to_existing_moved_tf() {
         "x NOT re-appended (already covered); got {body:?}"
     );
 }
+
+// ── AWS rename family auto-fix ────────────────────────────────
+
+#[tokio::test]
+async fn aws_alb_rename_action_emits_label_rewrite_and_moved_block() {
+    let u = uri("file:///fmt-aws-alb/main.tf");
+    let src = concat!(
+        "resource \"aws_alb\" \"web\" {\n  name = \"web\"\n}\n",
+        "output \"arn\" { value = aws_alb.web.arn }\n",
+    );
+    let backend = fresh_backend(src, &u);
+    let actions = all_actions_for(&backend, &u).await;
+    let action = find_action(
+        &actions,
+        "Rename 1 deprecated provider type in this file",
+    );
+    let edits = doc_change_edits(action);
+    let main_edits = edits.get(&u).expect("main.tf edits");
+
+    // Block-label rewrite: `"aws_alb"` → `"aws_lb"`.
+    assert!(
+        main_edits.iter().any(|e| e.new_text == "\"aws_lb\""),
+        "block label rewrite missing; got {main_edits:?}"
+    );
+    // Reference rewrite: head ident `aws_alb` → `aws_lb`.
+    assert!(
+        main_edits.iter().any(|e| e.new_text == "aws_lb"),
+        "reference head rewrite missing; got {main_edits:?}"
+    );
+
+    // moved.tf created with the migration block.
+    let moved = uri("file:///fmt-aws-alb/moved.tf");
+    assert!(has_create_file(action, &moved), "moved.tf must be created");
+    let moved_text = edits
+        .get(&moved)
+        .expect("moved.tf edits")
+        .iter()
+        .map(|e| e.new_text.clone())
+        .collect::<String>();
+    assert!(
+        moved_text.contains("from = aws_alb.web"),
+        "moved from: {moved_text:?}"
+    );
+    assert!(
+        moved_text.contains("to   = aws_lb.web"),
+        "moved to: {moved_text:?}"
+    );
+}
+
+#[tokio::test]
+async fn aws_alb_rename_action_skipped_when_provider_pinned_pre_1_7() {
+    let u = uri("file:///fmt-aws-alb-old/main.tf");
+    let src = concat!(
+        "terraform {\n  required_providers {\n    aws = \"~> 1.5\"\n  }\n}\n",
+        "resource \"aws_alb\" \"web\" {\n  name = \"web\"\n}\n",
+    );
+    let backend = fresh_backend(src, &u);
+    let actions = all_actions_for(&backend, &u).await;
+    let any_rename = actions.iter().any(|a| match a {
+        CodeActionOrCommand::CodeAction(ca) => ca.title.starts_with("Rename "),
+        _ => false,
+    });
+    assert!(!any_rename, "gate must suppress; got {actions:?}");
+}
+
+#[tokio::test]
+async fn aws_alb_rename_action_module_scope_covers_siblings() {
+    let main = uri("file:///fmt-aws-alb-mod/main.tf");
+    let extra = uri("file:///fmt-aws-alb-mod/extra.tf");
+    let backend = fresh_backend(
+        "resource \"aws_alb\" \"a\" {\n  name = \"a\"\n}\n",
+        &main,
+    );
+    add_doc(
+        &backend,
+        &extra,
+        "resource \"aws_alb_target_group\" \"b\" {\n  name = \"b\"\n  port = 80\n  protocol = \"HTTP\"\n  vpc_id = \"v\"\n}\n",
+    );
+    let actions = all_actions_for(&backend, &main).await;
+    let action = find_action(
+        &actions,
+        "Rename 2 deprecated provider types in this module",
+    );
+    let edits = doc_change_edits(action);
+    assert!(edits.contains_key(&main), "main.tf edited");
+    assert!(edits.contains_key(&extra), "extra.tf edited");
+}
+
+#[tokio::test]
+async fn aws_s3_bucket_object_rename_uses_4_0_threshold() {
+    let main = uri("file:///fmt-aws-s3-old/main.tf");
+    // Provider pinned to 3.x — `aws_s3_object` doesn't exist
+    // until 4.0, so suppress the rename action.
+    let src = concat!(
+        "terraform {\n  required_providers {\n    aws = \"~> 3.50\"\n  }\n}\n",
+        "resource \"aws_s3_bucket_object\" \"x\" {\n",
+        "  bucket = \"b\"\n  key = \"k\"\n",
+        "}\n",
+    );
+    let backend = fresh_backend(src, &main);
+    let actions = all_actions_for(&backend, &main).await;
+    let any_rename = actions.iter().any(|a| match a {
+        CodeActionOrCommand::CodeAction(ca) => ca.title.starts_with("Rename "),
+        _ => false,
+    });
+    assert!(!any_rename, "3.x pin must suppress; got {actions:?}");
+}
+
+// ── Kubernetes _v1 rename family auto-fix ─────────────────────
+
+#[tokio::test]
+async fn kubernetes_pod_rename_action_emits_label_rewrite() {
+    let u = uri("file:///fmt-k8s-pod/main.tf");
+    let src = concat!(
+        "resource \"kubernetes_pod\" \"p\" {\n  metadata {\n    name = \"p\"\n  }\n}\n",
+        "output \"name\" { value = kubernetes_pod.p.metadata }\n",
+    );
+    let backend = fresh_backend(src, &u);
+    let actions = all_actions_for(&backend, &u).await;
+    let action = find_action(
+        &actions,
+        "Rename 1 deprecated provider type in this file",
+    );
+    let edits = doc_change_edits(action);
+    let main_edits = edits.get(&u).expect("main.tf edits");
+
+    assert!(
+        main_edits.iter().any(|e| e.new_text == "\"kubernetes_pod_v1\""),
+        "k8s _v1 block label rewrite missing; got {main_edits:?}"
+    );
+    assert!(
+        main_edits.iter().any(|e| e.new_text == "kubernetes_pod_v1"),
+        "k8s _v1 ref head rewrite missing; got {main_edits:?}"
+    );
+
+    let moved = uri("file:///fmt-k8s-pod/moved.tf");
+    assert!(has_create_file(action, &moved), "moved.tf created");
+}
+
+#[tokio::test]
+async fn kubernetes_rename_action_handles_multiple_kinds() {
+    let u = uri("file:///fmt-k8s-multi/main.tf");
+    let src = concat!(
+        "resource \"kubernetes_pod\" \"a\" {\n  metadata {\n    name = \"a\"\n  }\n}\n",
+        "resource \"kubernetes_deployment\" \"b\" {\n  metadata {\n    name = \"b\"\n  }\n}\n",
+        "resource \"kubernetes_service\" \"c\" {\n  metadata {\n    name = \"c\"\n  }\n}\n",
+    );
+    let backend = fresh_backend(src, &u);
+    let actions = all_actions_for(&backend, &u).await;
+    let action = find_action(
+        &actions,
+        "Rename 3 deprecated provider types in this file",
+    );
+    let edits = doc_change_edits(action);
+    let main_edits = edits.get(&u).expect("main.tf edits");
+
+    assert!(main_edits.iter().any(|e| e.new_text == "\"kubernetes_pod_v1\""));
+    assert!(main_edits.iter().any(|e| e.new_text == "\"kubernetes_deployment_v1\""));
+    assert!(main_edits.iter().any(|e| e.new_text == "\"kubernetes_service_v1\""));
+
+    let moved = uri("file:///fmt-k8s-multi/moved.tf");
+    let moved_body = edits
+        .get(&moved)
+        .expect("moved.tf edits")
+        .iter()
+        .map(|e| e.new_text.clone())
+        .collect::<String>();
+    assert!(moved_body.contains("from = kubernetes_pod.a"));
+    assert!(moved_body.contains("to   = kubernetes_pod_v1.a"));
+    assert!(moved_body.contains("from = kubernetes_deployment.b"));
+    assert!(moved_body.contains("to   = kubernetes_deployment_v1.b"));
+}
+
+#[tokio::test]
+async fn rename_action_skipped_when_no_matching_blocks() {
+    let u = uri("file:///fmt-rename-none/main.tf");
+    let src = "resource \"aws_instance\" \"x\" { ami = \"a\" }\n";
+    let backend = fresh_backend(src, &u);
+    let actions = all_actions_for(&backend, &u).await;
+    let any_rename = actions.iter().any(|a| match a {
+        CodeActionOrCommand::CodeAction(ca) => ca.title.starts_with("Rename "),
+        _ => false,
+    });
+    assert!(!any_rename, "no rename action when no matching blocks");
+}
+
+#[tokio::test]
+async fn rename_action_idempotent_when_moved_block_exists() {
+    let main = uri("file:///fmt-rename-idem/main.tf");
+    let moved = uri("file:///fmt-rename-idem/moved.tf");
+    let backend = fresh_backend(
+        "resource \"aws_alb\" \"web\" {\n  name = \"web\"\n}\n",
+        &main,
+    );
+    add_doc(
+        &backend,
+        &moved,
+        "moved {\n  from = aws_alb.web\n  to   = aws_lb.web\n}\n",
+    );
+    let actions = all_actions_for(&backend, &main).await;
+    let action = find_action(
+        &actions,
+        "Rename 1 deprecated provider type in this file",
+    );
+    let edits = doc_change_edits(action);
+    // Action still produces label rewrites (the block in main
+    // still says `aws_alb`); it just doesn't re-add the moved
+    // block (already covered).
+    assert!(edits.contains_key(&main), "main.tf still rewritten");
+    assert!(
+        !has_create_file(action, &moved),
+        "moved.tf must not be re-created"
+    );
+    let moved_appends = edits
+        .get(&moved)
+        .map(|v| v.iter().map(|e| e.new_text.clone()).collect::<String>())
+        .unwrap_or_default();
+    assert!(
+        !moved_appends.contains("aws_alb.web"),
+        "must not duplicate existing moved entry; got {moved_appends:?}"
+    );
+}
