@@ -18,7 +18,7 @@ use tower_lsp::lsp_types::{
 
 use crate::backend::Backend;
 use crate::handlers::util::{
-    module_supports_locals_replacement, module_supports_templatefile,
+    module_supports_aws_lb, module_supports_locals_replacement, module_supports_templatefile,
     module_supports_terraform_data,
 };
 
@@ -475,6 +475,14 @@ pub fn compute_diagnostics_with_lookup(
             body,
             &doc.rope,
             locals_supported,
+        ));
+        // Provider-version-gated rule: AWS provider 1.7+ ships
+        // `aws_lb` as the canonical name for `aws_alb`.
+        let aws_lb_supported = module_supports_aws_lb(state, uri);
+        out.extend(tfls_diag::deprecated_aws_alb_diagnostics_for_module(
+            body,
+            &doc.rope,
+            aws_lb_supported,
         ));
         out.extend(tfls_diag::empty_list_equality_diagnostics(body, &doc.rope));
         out.extend(tfls_diag::map_duplicate_keys_diagnostics(body, &doc.rope));

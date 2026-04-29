@@ -11,12 +11,12 @@ use hcl_edit::structure::Body;
 use lsp_types::Diagnostic;
 use ropey::Rope;
 
-use crate::deprecation_rule::{self, DeprecationRule};
+use crate::deprecation_rule::{self, DeprecationRule, Gate};
 
 const RULE: DeprecationRule = DeprecationRule {
     block_kind: "resource",
     label: "null_resource",
-    threshold: "1.4.0",
+    gate: Gate::TerraformVersion { threshold: "1.4.0" },
     message: "`null_resource` is superseded by the built-in `terraform_data` (Terraform 1.4+) — \
               use the \"Convert null_resource to terraform_data\" code action.",
 };

@@ -65,12 +65,19 @@ constraint (a constraint in `versions.tf` correctly suppresses warnings
 on its sibling files). Each deprecation pairs with a multi-scope code
 action that performs the migration:
 
-| Deprecation | Replacement | Auto-fix |
-|-------------|-------------|----------|
-| `resource "null_resource"` (Terraform 1.4+) | `resource "terraform_data"` | Convert block + rewrite `null_resource.X.triggers` references workspace-wide + emit `moved { }` blocks to `moved.tf` for zero-downtime state migration |
-| `data "template_file"` (Terraform 0.12+) | `templatefile()` function | Hoist to `local`, rewrite `data.template_file.X.rendered` → `local.X` references, unwrap `template = file("path")` to `templatefile("path", ...)`, skip on local-name collision |
-| `data "template_dir"` (Terraform 0.12+) | `for_each = fileset(...) + templatefile()` | Diagnostic only (migration project-specific) |
-| `data "null_data_source"` (Terraform 0.10+) | `locals { }` block | Diagnostic only |
+| Deprecation | Gate | Replacement | Auto-fix |
+|-------------|------|-------------|----------|
+| `resource "null_resource"` | Terraform `>= 1.4.0` | `resource "terraform_data"` | Convert block + rewrite `null_resource.X.triggers` references workspace-wide + emit `moved { }` blocks to `moved.tf` for zero-downtime state migration |
+| `data "template_file"` | Terraform `>= 0.12.0` | `templatefile()` function | Hoist to `local`, rewrite `data.template_file.X.rendered` → `local.X` references, unwrap `template = file("path")` to `templatefile("path", ...)`, skip on local-name collision |
+| `data "template_dir"` | Terraform `>= 0.12.0` | `for_each = fileset(...) + templatefile()` | Diagnostic only (migration project-specific) |
+| `data "null_data_source"` | Terraform `>= 0.10.0` | `locals { }` block | Diagnostic only |
+| `resource "aws_alb"` | AWS provider `>= 1.7.0` | `resource "aws_lb"` | Diagnostic only (rename + ref rewrite trivial; auto-fix held back to surface subtle schema drift) |
+
+Gates come in two flavours: `terraform { required_version }`
+(Terraform-core deprecations) and
+`terraform { required_providers { <name> = ... } }`
+(provider-specific). Both forms — short `"~> 4.0"` and long
+`{ source = "...", version = "~> 4.0" }` — are recognised.
 
 Multi-scope means one click can convert a single block (cursor
 variant), every block in the active file, every block across the
@@ -282,11 +289,13 @@ clients.
 
 Highlights:
 
-- **4 deprecation diagnostics live** — `null_resource`,
-  `template_file`, `template_dir`, `null_data_source`. Each is
-  module-aware (sibling `versions.tf` constraints suppress
-  correctly), each scaled atop a generic `DeprecationRule` framework
-  so adding a fifth is ~25 lines of config.
+- **5 deprecation diagnostics live** — `null_resource`,
+  `template_file`, `template_dir`, `null_data_source`, `aws_alb`.
+  Each is module-aware (sibling `versions.tf` /
+  `required_providers` constraints suppress correctly), each
+  scaled atop a generic `DeprecationRule` framework so adding a
+  sixth is ~25 lines of config. Both Terraform-core and
+  provider-version gates supported.
 - **Multi-scope code actions** — Instance / Selection / File /
   Module / Workspace, with stable `CodeActionKind` strings clients
   can filter on.
@@ -305,9 +314,9 @@ Not yet implemented (future work):
 - Completion inside string-interpolation templates
 - Provider-defined function completion (hover + signature help work,
   but no completion context for function names)
-- Provider-version-gated deprecations (e.g. `aws_alb` → `aws_lb` for
-  AWS provider 4.0+) — current framework gates only on
-  `required_version` (Terraform core)
+- More provider-version-gated deprecations (`aws_s3_bucket_object` →
+  `aws_s3_object`, `aws_alb_target_group` → `aws_lb_target_group`,
+  …). Framework now supports the gate kind; pull requests welcome.
 
 ## License
 

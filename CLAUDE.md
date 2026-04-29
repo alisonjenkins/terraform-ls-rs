@@ -174,14 +174,24 @@ Title format produced by `scope_title` (`"<verb> N <item-label>s in <where>"`):
 
 Live rules:
 
-| Rule                            | Block kind  | Threshold | Action                                          |
-|---------------------------------|-------------|-----------|-------------------------------------------------|
-| `null_resource`                 | `resource`  | `1.4.0`   | Convert to `terraform_data` (+ moved.tf)        |
-| `template_file`                 | `data`      | `0.12.0`  | Convert to `local` calling `templatefile()`     |
-| `template_dir`                  | `data`      | `0.12.0`  | Diagnostic only (migration project-specific)    |
-| `null_data_source`              | `data`      | `0.10.0`  | Diagnostic only (replacement: `locals { }`)     |
+| Rule                            | Block kind  | Gate                                            | Action                                          |
+|---------------------------------|-------------|-------------------------------------------------|-------------------------------------------------|
+| `null_resource`                 | `resource`  | Terraform `>= 1.4.0`                            | Convert to `terraform_data` (+ moved.tf)        |
+| `template_file`                 | `data`      | Terraform `>= 0.12.0`                           | Convert to `local` calling `templatefile()`     |
+| `template_dir`                  | `data`      | Terraform `>= 0.12.0`                           | Diagnostic only (migration project-specific)    |
+| `null_data_source`              | `data`      | Terraform `>= 0.10.0`                           | Diagnostic only (replacement: `locals { }`)     |
+| `aws_alb`                       | `resource`  | AWS provider `>= 1.7.0`                         | Diagnostic only (use `aws_lb`; schema drift)    |
 
-Module-aware version gates live in `crates/tfls-lsp/src/handlers/util.rs` (`module_supports_terraform_data`, `module_supports_templatefile`, `module_supports_locals_replacement`) — each aggregates `required_version` strings across every sibling `.tf` in the module dir before deciding. A `terraform { required_version = "..." }` block typically lives in `versions.tf`, not the file the user is editing; per-file gates would miss this.
+Two gate flavours, set on the rule's `gate: Gate` field:
+
+- **`Gate::TerraformVersion { threshold }`** — checked against `terraform { required_version = "..." }` aggregated across every sibling in the module dir.
+- **`Gate::ProviderVersion { provider, threshold }`** — checked against `terraform { required_providers { <provider> = ... } }`. Both short form (`aws = "~> 4.0"`) and long form (`aws = { source = "...", version = "~> 4.0" }`) are recognised.
+
+Module-aware gates live in `crates/tfls-lsp/src/handlers/util.rs`:
+- `module_supports_terraform_data`, `module_supports_templatefile`, `module_supports_locals_replacement` — terraform-version gates (`module_constraint_admits_at_least` helper).
+- `module_supports_aws_lb` — provider-version gate (`module_provider_constraint_admits_at_least` helper).
+
+Each aggregates the relevant constraint string across every sibling `.tf` in the module dir before deciding. A `terraform { required_version = "..." }` block typically lives in `versions.tf`, not the file the user is editing; per-file gates would miss this.
 
 ### Combined deprecation walker
 

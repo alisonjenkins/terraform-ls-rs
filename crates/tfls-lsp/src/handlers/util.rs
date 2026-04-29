@@ -42,6 +42,57 @@ pub(crate) fn module_supports_locals_replacement(
     module_constraint_admits_at_least(state, primary_uri, tfls_diag::supports_locals_replacement)
 }
 
+/// True when the active module's
+/// `terraform { required_providers { aws = ... } }` constraint
+/// admits AWS provider 1.7+ (the version that introduced
+/// `aws_lb`, the canonical name for what was renamed from
+/// `aws_alb`). Provider-version gates work like terraform-version
+/// gates but pull the constraint string from a different place.
+pub(crate) fn module_supports_aws_lb(state: &StateStore, primary_uri: &Url) -> bool {
+    module_provider_constraint_admits_at_least(
+        state,
+        primary_uri,
+        "aws",
+        tfls_diag::supports_aws_lb,
+    )
+}
+
+/// Helper: aggregate the module's
+/// `required_providers.<name>.version` fragments and feed them
+/// to a per-rule gate predicate. Walks every `.tf` doc in the
+/// active module dir; returns `true` when the module declares
+/// no constraint for the provider (absence of evidence —
+/// can't suppress).
+fn module_provider_constraint_admits_at_least(
+    state: &StateStore,
+    primary_uri: &Url,
+    provider_name: &str,
+    gate: fn(&str) -> bool,
+) -> bool {
+    let Some(target_dir) = parent_dir(primary_uri) else {
+        return true;
+    };
+    let mut fragments: Vec<String> = Vec::new();
+    for entry in state.documents.iter() {
+        let uri = entry.key();
+        let Ok(path) = uri.to_file_path() else { continue };
+        if path.parent() != Some(&target_dir) {
+            continue;
+        }
+        let doc = entry.value();
+        let Some(body) = doc.parsed.body.as_ref() else {
+            continue;
+        };
+        if let Some(s) = tfls_diag::extract_required_provider_version(body, provider_name) {
+            fragments.push(s);
+        }
+    }
+    if fragments.is_empty() {
+        return true;
+    }
+    gate(&fragments.join(", "))
+}
+
 /// Helper: aggregate the module's `required_version` fragments
 /// and feed them to a per-feature gate predicate. Walks every
 /// `.tf` doc in the active module dir.

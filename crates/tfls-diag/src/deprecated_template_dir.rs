@@ -13,12 +13,12 @@ use hcl_edit::structure::Body;
 use lsp_types::Diagnostic;
 use ropey::Rope;
 
-use crate::deprecation_rule::{self, DeprecationRule};
+use crate::deprecation_rule::{self, DeprecationRule, Gate};
 
 const RULE: DeprecationRule = DeprecationRule {
     block_kind: "data",
     label: "template_dir",
-    threshold: "0.12.0",
+    gate: Gate::TerraformVersion { threshold: "0.12.0" },
     message: "`data \"template_dir\"` is part of the unmaintained `hashicorp/template` provider \
               (the bundled binary is unavailable on darwin/arm64 and several modern Linux \
               variants). Migrate to `for_each = fileset(<src_dir>, \"**\")` over a `local_file` \

@@ -20,12 +20,12 @@ use hcl_edit::structure::Body;
 use lsp_types::Diagnostic;
 use ropey::Rope;
 
-use crate::deprecation_rule::{self, DeprecationRule};
+use crate::deprecation_rule::{self, DeprecationRule, Gate};
 
 const RULE: DeprecationRule = DeprecationRule {
     block_kind: "data",
     label: "null_data_source",
-    threshold: "0.10.0",
+    gate: Gate::TerraformVersion { threshold: "0.10.0" },
     message: "`data \"null_data_source\"` is part of the unmaintained `hashicorp/null` provider \
               (the bundled binary is unavailable on darwin/arm64 and several modern Linux \
               variants). Replace with a `locals { ... }` block — Terraform 0.10+ supports \
