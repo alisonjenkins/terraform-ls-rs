@@ -2255,6 +2255,115 @@ async fn template_file_action_instance_at_cursor() {
     assert!(ref_edit.range.start.line >= 4, "ref edit on output line");
 }
 
+/// `template = file("foo.tpl")` is the dominant idiom in real
+/// projects. Naive splice produces
+/// `templatefile(file("foo.tpl"), …)` — `file()` reads raw
+/// bytes, defeating the function. Action must unwrap to
+/// `templatefile("foo.tpl", …)`.
+#[tokio::test]
+async fn template_file_action_unwraps_file_call() {
+    let u = uri("file:///fmt-tf-fileunwrap/main.tf");
+    let src = concat!(
+        "data \"template_file\" \"x\" {\n",
+        "  template = file(\"./foo.tpl\")\n",
+        "  vars = { region = \"us-east-1\" }\n",
+        "}\n",
+    );
+    let backend = fresh_backend(src, &u);
+    let actions = all_actions_for(&backend, &u).await;
+    let action = find_action(
+        &actions,
+        "Convert 1 template_file data block to templatefile() in this file",
+    );
+    let edits = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .and_then(|c| c.get(&u))
+        .expect("file edits");
+    let append = edits
+        .iter()
+        .find(|e| e.new_text.contains("locals {"))
+        .expect("locals append");
+    assert!(
+        append.new_text.contains("templatefile(\"./foo.tpl\","),
+        "expected unwrapped path; got: {}",
+        append.new_text
+    );
+    assert!(
+        !append.new_text.contains("file(\"./foo.tpl\")"),
+        "must not double-wrap with file(); got: {}",
+        append.new_text
+    );
+}
+
+/// `file(<expr>)` where the arg isn't a string literal — e.g.
+/// `file(local.path)` — still unwraps to preserve the path
+/// expression intact.
+#[tokio::test]
+async fn template_file_action_unwraps_file_with_expr_arg() {
+    let u = uri("file:///fmt-tf-fileexpr/main.tf");
+    let src = concat!(
+        "data \"template_file\" \"x\" {\n",
+        "  template = file(local.path)\n",
+        "}\n",
+    );
+    let backend = fresh_backend(src, &u);
+    let actions = all_actions_for(&backend, &u).await;
+    let action = find_action(
+        &actions,
+        "Convert 1 template_file data block to templatefile() in this file",
+    );
+    let edits = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .and_then(|c| c.get(&u))
+        .expect("file edits");
+    let append = edits
+        .iter()
+        .find(|e| e.new_text.contains("locals {"))
+        .expect("locals append");
+    assert!(
+        append.new_text.contains("templatefile(local.path, {})"),
+        "got: {}",
+        append.new_text
+    );
+}
+
+/// Other function calls aren't unwrapped — only `file()` is the
+/// problem case. `template = somefunc("x")` splices verbatim.
+#[tokio::test]
+async fn template_file_action_does_not_unwrap_other_funcs() {
+    let u = uri("file:///fmt-tf-keepfunc/main.tf");
+    let src = concat!(
+        "data \"template_file\" \"x\" {\n",
+        "  template = jsonencode({ a = 1 })\n",
+        "}\n",
+    );
+    let backend = fresh_backend(src, &u);
+    let actions = all_actions_for(&backend, &u).await;
+    let action = find_action(
+        &actions,
+        "Convert 1 template_file data block to templatefile() in this file",
+    );
+    let edits = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .and_then(|c| c.get(&u))
+        .expect("file edits");
+    let append = edits
+        .iter()
+        .find(|e| e.new_text.contains("locals {"))
+        .expect("locals append");
+    assert!(
+        append.new_text.contains("templatefile(jsonencode({ a = 1 }), {})"),
+        "got: {}",
+        append.new_text
+    );
+}
+
 #[tokio::test]
 async fn template_file_action_handles_missing_vars() {
     let u = uri("file:///fmt-tf-novars/main.tf");

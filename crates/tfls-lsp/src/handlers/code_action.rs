@@ -2742,7 +2742,7 @@ fn scan_template_file_targets(rope: &Rope, body: &Body) -> Vec<TemplateFileTarge
         };
         let Some(block_span) = block.span() else { continue };
 
-        let template_src = match attribute_source(rope, &block.body, "template") {
+        let template_src = match template_argument_source(rope, &block.body) {
             Some(s) => s,
             None => continue, // malformed input — skip
         };
@@ -2806,6 +2806,48 @@ fn attribute_source(rope: &Rope, body: &Body, key: &str) -> Option<String> {
         };
         if attr.key.as_str() != key {
             continue;
+        }
+        let span = attr.value.span()?;
+        return Some(rope.byte_slice(span.start..span.end).to_string());
+    }
+    None
+}
+
+/// Pull the source text for the `template = ...` attribute,
+/// unwrapping a `file(<path>)` wrapper if present. The
+/// `template_file` data source semantically takes a *string*
+/// rendered from `template`; users who pre-load that string
+/// from disk write `template = file("path.tpl")`. The native
+/// `templatefile()` function takes the *path* directly, so a
+/// naive splice would produce
+/// `templatefile(file("path.tpl"), …)` — `file()` reads the
+/// raw bytes, defeating the function's whole purpose.
+///
+/// Detect the `file(<arg>)` shape and splice just `<arg>`'s
+/// source. Inline literals + arbitrary expressions splice
+/// verbatim.
+fn template_argument_source(rope: &Rope, body: &Body) -> Option<String> {
+    use hcl_edit::expr::Expression;
+    use hcl_edit::repr::Span as _;
+    for sub in body.iter() {
+        let Some(attr) = sub.as_attribute() else {
+            continue;
+        };
+        if attr.key.as_str() != "template" {
+            continue;
+        }
+        // `file(<arg>)` with the bare-name `file` (no namespace)
+        // and exactly one positional argument.
+        if let Expression::FuncCall(call) = &attr.value {
+            if call.name.namespace.is_empty()
+                && call.name.name.as_str() == "file"
+                && call.args.iter().count() == 1
+            {
+                if let Some(arg) = call.args.iter().next() {
+                    let span = arg.span()?;
+                    return Some(rope.byte_slice(span.start..span.end).to_string());
+                }
+            }
         }
         let span = attr.value.span()?;
         return Some(rope.byte_slice(span.start..span.end).to_string());
