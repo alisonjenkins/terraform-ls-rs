@@ -162,6 +162,81 @@ fn populate_deprecation_workload(
     uri
 }
 
+/// Single-doc fixture parameterised by which deprecation
+/// shape it contains. Used to isolate per-emit cost.
+fn populate_isolated(state: &StateStore, dir: &str, kind: &str, n: usize) -> Url {
+    let mut src = String::from("terraform { required_version = \">= 1.5\" }\n");
+    match kind {
+        "null_resource" => {
+            for i in 0..n {
+                src.push_str(&format!(
+                    "resource \"null_resource\" \"r{i}\" {{\n  triggers = {{ k = \"v{i}\" }}\n}}\n"
+                ));
+                src.push_str(&format!(
+                    "output \"o{i}\" {{ value = null_resource.r{i}.triggers }}\n"
+                ));
+            }
+        }
+        "template_file" => {
+            for i in 0..n {
+                src.push_str(&format!(
+                    "data \"template_file\" \"t{i}\" {{\n  template = \"hi\"\n  vars = {{ k = \"v{i}\" }}\n}}\n"
+                ));
+                src.push_str(&format!(
+                    "output \"o{i}\" {{ value = data.template_file.t{i}.rendered }}\n"
+                ));
+            }
+        }
+        "plain_outputs" => {
+            // No deprecations, just outputs — exercises non-
+            // deprecation emit fns (unwrap, lookup, refine_any,
+            // set-types, declare-undefined, move-outputs,
+            // move-vars, format).
+            for i in 0..n {
+                src.push_str(&format!("output \"o{i}\" {{ value = \"x{i}\" }}\n"));
+            }
+        }
+        _ => unreachable!(),
+    }
+    let uri = Url::parse(&format!("file:///{dir}/main.tf")).expect("url");
+    state.upsert_document(DocumentState::new(uri.clone(), &src, 1));
+    uri
+}
+
+/// Per-shape isolated benches — pinpoints which emit fn
+/// dominates the 500-block cost.
+fn bench_code_action_isolated(c: &mut Criterion) {
+    let rt = Runtime::new().expect("runtime");
+
+    let mut group = c.benchmark_group("code_action_isolated");
+    for kind in ["null_resource", "template_file", "plain_outputs"] {
+        let state = Arc::new(StateStore::new());
+        let uri = populate_isolated(&state, kind, kind, 500);
+        let jobs = Arc::new(JobQueue::new());
+        let backend = backend(Arc::clone(&state), Arc::clone(&jobs));
+
+        let params = CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            range: Range {
+                start: Position::new(2, 0),
+                end: Position::new(2, 0),
+            },
+            context: CodeActionContext::default(),
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        };
+
+        group.bench_function(format!("500_{kind}"), |b| {
+            b.iter(|| {
+                rt.block_on(async {
+                    let _ = handlers::code_action::code_action(&backend, params.clone()).await;
+                });
+            });
+        });
+    }
+    group.finish();
+}
+
 fn bench_code_action_deprecation_pipeline(c: &mut Criterion) {
     let rt = Runtime::new().expect("runtime");
 
@@ -205,6 +280,7 @@ criterion_group!(
     bench_workspace_symbol,
     bench_document_symbol,
     bench_enclosing_call,
-    bench_code_action_deprecation_pipeline
+    bench_code_action_deprecation_pipeline,
+    bench_code_action_isolated
 );
 criterion_main!(benches);

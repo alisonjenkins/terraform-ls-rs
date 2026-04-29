@@ -828,10 +828,24 @@ fn emit_format_actions(
     }
 
     // File / Module / Workspace — per-doc scan_format.
+    //
+    // Cache per-doc format output across scopes. Each scope used
+    // to invoke `scan_format` (full formatter pass over the doc)
+    // independently — for the common single-doc workspace shape
+    // that's 3× redundant formats per code_action call. With
+    // tf-format's output being O(file size) the cost compounds
+    // sharply on big modules. Cache stores `None` for "tried &
+    // matched original" (skipped) vs `Some(edit)` for "format
+    // produces a diff".
+    let mut format_cache: HashMap<Url, Option<TextEdit>> = HashMap::new();
+
     for scope in [Scope::File, Scope::Module, Scope::Workspace] {
         let mut edits_by_uri: HashMap<Url, Vec<TextEdit>> = HashMap::new();
         for_each_doc_in_scope(state, primary_uri, scope, |doc_uri, doc| {
-            if let Some(edit) = scan_format(&doc.rope, style) {
+            let cached = format_cache
+                .entry(doc_uri.clone())
+                .or_insert_with(|| scan_format(&doc.rope, style));
+            if let Some(edit) = cached.clone() {
                 edits_by_uri.insert(doc_uri.clone(), vec![edit]);
             }
         });

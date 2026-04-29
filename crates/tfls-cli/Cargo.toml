@@ -29,6 +29,10 @@ path = "src/bin/infer_coverage.rs"
 name = "tfls-mux-probe"
 path = "src/bin/mux_probe.rs"
 
+[[bin]]
+name = "tfls-code-action-profile"
+path = "src/bin/code_action_profile.rs"
+
 [dependencies]
 tfls-lsp.workspace = true
 tfls-state.workspace = true
