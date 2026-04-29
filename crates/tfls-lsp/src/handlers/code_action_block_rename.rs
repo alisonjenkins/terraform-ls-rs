@@ -29,10 +29,9 @@
 //! path; future consolidation possible if more attribute-rename
 //! cases appear.
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use hcl_edit::expr::{Expression, TraversalOperator};
 use hcl_edit::repr::Span;
@@ -1034,8 +1033,8 @@ fn read_existing_moved_tf_text(
 fn collect_existing_moved_pairs(
     state: &StateStore,
     module_dir: &std::path::Path,
-) -> HashSet<(String, String, String)> {
-    let mut out = HashSet::new();
+) -> FxHashSet<(String, String, String)> {
+    let mut out = FxHashSet::default();
     for entry in state.documents.iter() {
         let uri = entry.key();
         let Ok(path) = uri.to_file_path() else { continue };

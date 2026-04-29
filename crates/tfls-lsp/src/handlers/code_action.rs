@@ -4,9 +4,9 @@
 //! Currently provides one fix: insert any required attributes that a
 //! resource block is missing.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use hcl_edit::repr::Span;
 use hcl_edit::structure::{Block, BlockLabel, Body};
@@ -500,8 +500,8 @@ fn per_doc_declared_set(
     state: &StateStore,
     primary_uri: &Url,
     scope: Scope,
-) -> HashSet<String> {
-    let mut out: HashSet<String> = HashSet::new();
+) -> FxHashSet<String> {
+    let mut out: FxHashSet<String> = FxHashSet::default();
     for_each_doc_in_scope(state, primary_uri, scope, |_uri, doc| {
         for name in doc.symbols.variables.keys() {
             out.insert(name.clone());
@@ -517,7 +517,7 @@ fn collect_undeclared_names(
     state: &StateStore,
     primary_uri: &Url,
     scope: Scope,
-    declared: &HashSet<String>,
+    declared: &FxHashSet<String>,
 ) -> std::collections::BTreeSet<String> {
     use std::collections::BTreeSet;
     use tfls_parser::ReferenceKind;
@@ -1055,7 +1055,7 @@ fn scan_blocks_of_kind(body: &Body, rope: &Rope, kind: &str) -> Vec<(Range, Stri
 fn scan_null_resource_block_edits(
     body: &Body,
     rope: &Rope,
-    names: Option<&HashSet<String>>,
+    names: Option<&FxHashSet<String>>,
 ) -> Vec<TextEdit> {
     use hcl_edit::repr::Span as _;
 
@@ -1123,7 +1123,7 @@ fn scan_null_resource_block_edits(
 fn scan_null_resource_to_terraform_data_for(
     body: &Body,
     rope: &Rope,
-    names: Option<&HashSet<String>>,
+    names: Option<&FxHashSet<String>>,
 ) -> Vec<TextEdit> {
     use hcl_edit::repr::Span as _;
 
@@ -1202,7 +1202,7 @@ fn scan_null_resource_to_terraform_data_for(
 fn visit_body_for_null_resource_refs(
     body: &Body,
     rope: &Rope,
-    names: Option<&HashSet<String>>,
+    names: Option<&FxHashSet<String>>,
     out: &mut Vec<TextEdit>,
 ) {
     walk_expressions(body, &mut |expr| {
@@ -1218,7 +1218,7 @@ fn visit_body_for_null_resource_refs(
 fn emit_null_resource_traversal_edits(
     expr: &hcl_edit::expr::Expression,
     rope: &Rope,
-    names: Option<&HashSet<String>>,
+    names: Option<&FxHashSet<String>>,
     out: &mut Vec<TextEdit>,
 ) {
     use hcl_edit::expr::{Expression as Ex, TraversalOperator};
@@ -1442,7 +1442,7 @@ fn null_refs_from_cache(
     uri: &Url,
     body: &Body,
     rope: &Rope,
-    names: Option<&HashSet<String>>,
+    names: Option<&FxHashSet<String>>,
 ) -> Vec<TextEdit> {
     let combined = cache
         .entry(uri.clone())
@@ -1457,7 +1457,7 @@ fn template_refs_from_cache(
     uri: &Url,
     body: &Body,
     rope: &Rope,
-    names: &HashSet<String>,
+    names: &FxHashSet<String>,
 ) -> Vec<TextEdit> {
     if names.is_empty() {
         return Vec::new();
@@ -1470,7 +1470,7 @@ fn template_refs_from_cache(
 
 fn flatten_filtered(
     hits: &[RefHit],
-    filter: Option<&HashSet<String>>,
+    filter: Option<&FxHashSet<String>>,
 ) -> Vec<TextEdit> {
     match filter {
         None => hits.iter().map(|h| h.edit.clone()).collect(),
@@ -1623,7 +1623,7 @@ fn make_replace_null_resource_for_diag(
             continue;
         }
         let name = block.labels.get(1).and_then(label_str).unwrap_or("?");
-        let mut filter = HashSet::new();
+        let mut filter = FxHashSet::default();
         filter.insert(name.to_string());
         let edits = scan_null_resource_to_terraform_data_for(body, rope, Some(&filter));
         if edits.is_empty() {
@@ -1679,8 +1679,8 @@ fn null_resource_names_in_body(body: &Body) -> Vec<String> {
 /// to = terraform_data.X }` block in `body`. The generator
 /// skips these so re-running the action on a partially migrated
 /// module is idempotent.
-fn existing_null_resource_moved_names(body: &Body) -> HashSet<String> {
-    let mut out = HashSet::new();
+fn existing_null_resource_moved_names(body: &Body) -> FxHashSet<String> {
+    let mut out = FxHashSet::default();
     for structure in body.iter() {
         let Some(block) = structure.as_block() else {
             continue;
@@ -2044,8 +2044,8 @@ fn build_null_resource_workspace_edit(
 fn collect_existing_moved_names(
     state: &StateStore,
     module_dir: &std::path::Path,
-) -> HashSet<String> {
-    let mut out = HashSet::new();
+) -> FxHashSet<String> {
+    let mut out = FxHashSet::default();
     for entry in state.documents.iter() {
         let uri = entry.key();
         let Ok(path) = uri.to_file_path() else { continue };
@@ -2096,7 +2096,7 @@ fn make_replace_null_resource_at_cursor(
         }
 
         let name = block.labels.get(1).and_then(label_str).unwrap_or("?");
-        let mut filter = HashSet::new();
+        let mut filter = FxHashSet::default();
         filter.insert(name.to_string());
         // Name-filtered scan: only edits for THIS block + its
         // own references; any other `null_resource.Y` blocks
@@ -3325,7 +3325,7 @@ fn template_file_host_edits(targets: &[TemplateFileTarget]) -> (Vec<TextEdit>, V
 fn template_file_reference_edits(
     body: &Body,
     rope: &Rope,
-    names: &HashSet<String>,
+    names: &FxHashSet<String>,
     out: &mut Vec<TextEdit>,
 ) {
     if names.is_empty() {
@@ -3344,7 +3344,7 @@ fn template_file_reference_edits(
 fn emit_template_file_traversal_edits(
     expr: &hcl_edit::expr::Expression,
     rope: &Rope,
-    names: &HashSet<String>,
+    names: &FxHashSet<String>,
     out: &mut Vec<TextEdit>,
 ) {
     use hcl_edit::expr::{Expression as Ex, TraversalOperator};
@@ -3399,8 +3399,8 @@ fn emit_template_file_traversal_edits(
 fn collect_existing_local_names(
     state: &StateStore,
     module_dir: &std::path::Path,
-) -> HashSet<String> {
-    let mut out = HashSet::new();
+) -> FxHashSet<String> {
+    let mut out = FxHashSet::default();
     for entry in state.documents.iter() {
         let uri = entry.key();
         let Ok(path) = uri.to_file_path() else { continue };
@@ -3456,7 +3456,7 @@ fn emit_template_file_actions(
     scopes.extend([Scope::File, Scope::Module, Scope::Workspace]);
 
     let mut module_gate_cache: FxHashMap<PathBuf, bool> = FxHashMap::default();
-    let mut module_locals_cache: FxHashMap<PathBuf, HashSet<String>> = FxHashMap::default();
+    let mut module_locals_cache: FxHashMap<PathBuf, FxHashSet<String>> = FxHashMap::default();
     // Per-doc scan cache (module dir + already-collision-filtered
     // targets). One walk per doc per code_action call regardless
     // of scope count.
@@ -3473,7 +3473,7 @@ fn emit_template_file_actions(
         // Pass 1 — collect convertible targets per doc, gated.
         let mut targets_by_doc: FxHashMap<Url, Vec<TemplateFileTarget>> =
             FxHashMap::default();
-        let mut names_by_module: FxHashMap<PathBuf, HashSet<String>> = FxHashMap::default();
+        let mut names_by_module: FxHashMap<PathBuf, FxHashSet<String>> = FxHashMap::default();
         let mut total_blocks = 0usize;
 
         for_each_doc_in_scope(state, primary_uri, scope, |doc_uri, doc| {
@@ -3510,7 +3510,7 @@ fn emit_template_file_actions(
                 return;
             }
             total_blocks += targets.len();
-            let names_set: HashSet<String> =
+            let names_set: FxHashSet<String> =
                 targets.iter().map(|t| t.name.clone()).collect();
             names_by_module
                 .entry(dir.clone())
@@ -3700,7 +3700,7 @@ fn make_replace_template_file_at_cursor(
             targets.iter().map(|t| t.delete_range).collect();
 
         // Refs: only this name, throughout the module.
-        let mut filter = HashSet::new();
+        let mut filter = FxHashSet::default();
         filter.insert(name.clone());
         let module_dir = crate::handlers::util::parent_dir(uri);
         let mut edits_by_uri: HashMap<Url, Vec<TextEdit>> = HashMap::new();
