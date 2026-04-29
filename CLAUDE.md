@@ -85,6 +85,18 @@ After the per-session diagnostic drain, the probe also fires a `textDocument/cod
 
 Use this when investigating LSP message-routing bugs that span multiple client connections (lspmux dedupe, fanout, late-attach republish, codeAction request/response routing). Daemon stderr is captured to `<tmp>/lspmux.stderr.log` for post-mortem.
 
+### `tfls-code-action-profile`
+
+Standalone profile driver for the `code_action` handler. Builds a synthetic in-memory workspace (configurable via positional args), fires N code-action requests against the active doc, prints the average. Used for perf regression hunts without spinning up a real LSP client.
+
+```bash
+cargo build --release -p tfls-cli --bin tfls-code-action-profile
+./target/release/tfls-code-action-profile 500 200          # 500-block fixture, 200 iters
+./target/release/tfls-code-action-profile 100 1000         # smaller fixture, more iters
+```
+
+When investigating cumulative latency, set `TFLS_PROFILE_CODE_ACTION=1` (handler does NOT currently honour it; instrument locally as needed). Pair with `samply record -- ./target/release/tfls-code-action-profile 500 200` for a flamegraph (kernel `perf_event_paranoid <= 1` required).
+
 ### `tfls-infer-coverage`
 
 Variable-type inference coverage report. Walks the workspace (including `.terraform/modules/*` so external module outputs resolve), runs `rebuild_assigned_variable_types_for_dir` on every dir, classifies each declared variable as one of:
@@ -129,7 +141,7 @@ Storage lives on `tfls_state::Config::format_style`; LSP handlers (`textDocument
 
 ## Code-action scopes
 
-Every multi-target code action (unwrap interpolation, convert lookup, set variable types, refine `type = any`, declare undefined variables, move outputs to `outputs.tf`, move variables to `variables.tf`, convert `null_resource` to `terraform_data`, convert `data "template_file"` to `templatefile()`) is offered at multiple scopes via `crates/tfls-lsp/src/handlers/code_action_scope.rs`:
+Every multi-target code action (unwrap interpolation, convert lookup, set variable types, refine `type = any`, declare undefined variables, move outputs to `outputs.tf`, move variables to `variables.tf`, convert `null_resource` to `terraform_data`, convert `data "template_file"` to `templatefile()`) is offered at multiple scopes via `crates/tfls-lsp/src/handlers/code_action_scope.rs`. Diagnostic-only deprecation rules (`data "template_dir"`, `data "null_data_source"`) plug into the same framework but emit no fix.
 
 | Scope       | Iteration set                                     | LSP `CodeActionKind`                                            |
 |-------------|---------------------------------------------------|-----------------------------------------------------------------|
@@ -155,3 +167,38 @@ Title format produced by `scope_title` (`"<verb> N <item-label>s in <where>"`):
 - `File`: `"Unwrap 5 deprecated interpolations in this file"`.
 - `Module`: `"Unwrap 12 deprecated interpolations in this module"`.
 - `Workspace`: `"Unwrap 47 deprecated interpolations in workspace"`.
+
+## Deprecation framework
+
+`crates/tfls-diag/src/deprecation_rule.rs` holds shared scaffolding for "X is deprecated in Terraform N.M, prefer Y" diagnostics. A deprecation rule is a `const DeprecationRule { block_kind, label, threshold, message }` — adding a new one is one config entry plus three thin wrapper fns (~25 lines).
+
+Live rules:
+
+| Rule                            | Block kind  | Threshold | Action                                          |
+|---------------------------------|-------------|-----------|-------------------------------------------------|
+| `null_resource`                 | `resource`  | `1.4.0`   | Convert to `terraform_data` (+ moved.tf)        |
+| `template_file`                 | `data`      | `0.12.0`  | Convert to `local` calling `templatefile()`     |
+| `template_dir`                  | `data`      | `0.12.0`  | Diagnostic only (migration project-specific)    |
+| `null_data_source`              | `data`      | `0.10.0`  | Diagnostic only (replacement: `locals { }`)     |
+
+Module-aware version gates live in `crates/tfls-lsp/src/handlers/util.rs` (`module_supports_terraform_data`, `module_supports_templatefile`, `module_supports_locals_replacement`) — each aggregates `required_version` strings across every sibling `.tf` in the module dir before deciding. A `terraform { required_version = "..." }` block typically lives in `versions.tf`, not the file the user is editing; per-file gates would miss this.
+
+### Combined deprecation walker
+
+Reference rewriting (e.g. `null_resource.X.triggers` → `terraform_data.X.triggers_replace`) used to walk the body once per deprecation kind. Now `walk_combined_deprecation_refs` walks each body once and emits flat `RefHit { name: Arc<str>, edit }` rows for every deprecation pattern. Per-call cache `HashMap<Url, CombinedDeprecationRefs>` threads through the scoped emit fns; first emit fn populates a doc, subsequent emits read from cache.
+
+Adding a third (or fourth, or Nth) ref-rewrite deprecation = one new `push_X_hits` leaf check inside the combined walker, NOT another full body walk. Avoids N×walk scaling as the rule set grows.
+
+## Performance caches
+
+Code-action handler runs many independent body scans / formats per invocation. Several caches keep cumulative cost flat as workspaces grow:
+
+| Cache                                     | Scope                  | Invalidation                                    |
+|-------------------------------------------|------------------------|-------------------------------------------------|
+| `DocumentState::format_cache` (Mutex)     | Cross-call (per-doc)   | `apply_change` clears slot; key `(version, FormatStyle::marker)` |
+| Per-call format scan cache                | Single `code_action()` | Drops on return                                  |
+| Per-call deprecation scan caches          | Single `code_action()` | Drops on return                                  |
+| Combined deprecation ref cache            | Single `code_action()` | Drops on return                                  |
+| Module-supports gate cache                | Single emit fn         | Drops on return                                  |
+
+Bench delta from baseline (`tfls-lsp/benches/handlers.rs::code_action_deprecation` at the 500-block synthetic worst-case): **70 ms → ~11 ms (-84%)**. Real-world workspaces benefit further from the cross-call format cache — repeated code-action menu opens on an unchanged doc skip the formatter entirely.
