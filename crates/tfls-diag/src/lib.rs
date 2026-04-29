@@ -33,7 +33,10 @@ pub use comment_syntax::comment_syntax_diagnostics;
 pub use deprecated_index::deprecated_index_diagnostics;
 pub use deprecated_interpolation::deprecated_interpolation_diagnostics;
 pub use deprecated_lookup::deprecated_lookup_diagnostics;
-pub use deprecated_null_resource::deprecated_null_resource_diagnostics;
+pub use deprecated_null_resource::{
+    deprecated_null_resource_diagnostics, deprecated_null_resource_diagnostics_for_module,
+    extract_required_version, supports_terraform_data,
+};
 pub use documented_outputs::documented_outputs_diagnostics;
 pub use documented_variables::documented_variables_diagnostics;
 pub use empty_list_equality::empty_list_equality_diagnostics;

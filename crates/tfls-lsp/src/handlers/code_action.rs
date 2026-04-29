@@ -22,6 +22,7 @@ use crate::backend::Backend;
 use crate::handlers::code_action_scope::{
     Scope, build_scoped_action, for_each_doc_in_scope, range_intersects, range_is_empty,
 };
+use crate::handlers::util::module_supports_terraform_data;
 
 pub async fn code_action(
     backend: &Backend,
@@ -136,18 +137,20 @@ pub async fn code_action(
     // a `resource "null_resource" "X" { … }` block; broader
     // scopes are emitted below via `emit_scoped_actions`.
     if let Some(body) = doc.parsed.body.as_ref() {
-        if let Some(action) = make_replace_null_resource_at_cursor(
-            &uri,
-            params.range.start,
-            body,
-            &doc.rope,
-        ) {
-            let already = actions.iter().any(|a| match a {
-                CodeActionOrCommand::CodeAction(ca) => ca.title == action.title,
-                _ => false,
-            });
-            if !already {
-                actions.push(CodeActionOrCommand::CodeAction(action));
+        if module_supports_terraform_data(&backend.state, &uri) {
+            if let Some(action) = make_replace_null_resource_at_cursor(
+                &uri,
+                params.range.start,
+                body,
+                &doc.rope,
+            ) {
+                let already = actions.iter().any(|a| match a {
+                    CodeActionOrCommand::CodeAction(ca) => ca.title == action.title,
+                    _ => false,
+                });
+                if !already {
+                    actions.push(CodeActionOrCommand::CodeAction(action));
+                }
             }
         }
     }
@@ -889,67 +892,6 @@ fn scan_blocks_of_kind(body: &Body, rope: &Rope, kind: &str) -> Vec<(Range, Stri
     out
 }
 
-/// `terraform_data` was added in Terraform 1.4. Suppress the
-/// action when the module's `required_version` is loose enough
-/// that the user might actually run a pre-1.4 toolchain (where
-/// the resource type doesn't exist). We probe a battery of
-/// representative pre-1.4 versions; if ANY satisfies the
-/// constraint, suppress.
-fn terraform_data_supported(body: &Body) -> bool {
-    let Some(constraint) = required_version_string(body) else {
-        return true;
-    };
-    let parsed = tfls_core::version_constraint::parse(&constraint);
-    if parsed.constraints.is_empty() {
-        return true;
-    }
-    const PRE_1_4_PROBES: &[&str] = &[
-        "0.11.0", "0.12.0", "0.13.0", "0.14.0", "0.15.0",
-        "1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.3.999",
-    ];
-    !PRE_1_4_PROBES
-        .iter()
-        .any(|v| tfls_core::version_constraint::satisfies_all(&parsed.constraints, v))
-}
-
-/// Pull the literal `required_version = "..."` string out of the
-/// top-level `terraform { }` block, if present.
-fn required_version_string(body: &Body) -> Option<String> {
-    use hcl_edit::expr::Expression;
-
-    for structure in body.iter() {
-        let block = structure.as_block()?;
-        if block.ident.as_str() != "terraform" {
-            continue;
-        }
-        for sub in block.body.iter() {
-            let Some(attr) = sub.as_attribute() else {
-                continue;
-            };
-            if attr.key.as_str() != "required_version" {
-                continue;
-            }
-            return match &attr.value {
-                Expression::String(s) => Some(s.as_str().to_string()),
-                Expression::StringTemplate(t) => {
-                    let mut acc = String::new();
-                    for element in t.iter() {
-                        match element {
-                            hcl_edit::template::Element::Literal(lit) => {
-                                acc.push_str(lit.as_str());
-                            }
-                            _ => return None,
-                        }
-                    }
-                    Some(acc)
-                }
-                _ => None,
-            };
-        }
-    }
-    None
-}
-
 /// Walk every `resource "null_resource" "X"` block in `body`
 /// and emit the text edits that turn it into a `resource
 /// "terraform_data" "X"` block:
@@ -967,10 +909,6 @@ fn required_version_string(body: &Body) -> Option<String> {
 /// out of scope here.
 fn scan_null_resource_to_terraform_data(body: &Body, rope: &Rope) -> Vec<TextEdit> {
     use hcl_edit::repr::Span as _;
-
-    if !terraform_data_supported(body) {
-        return Vec::new();
-    }
 
     let mut out = Vec::new();
     for structure in body.iter() {
@@ -1113,6 +1051,11 @@ fn count_null_resource_blocks(body: &Body) -> usize {
 /// Custom (vs `emit_scoped_actions`) because the standard
 /// title counts EDITS and each block produces 1+ edits — we
 /// want the title to count BLOCKS instead.
+///
+/// Per-doc gate lookup: a `null_resource` block is only offered
+/// for conversion when the *enclosing module* admits Terraform
+/// 1.4+. We cache the decision per module dir so a Workspace-
+/// scope sweep doesn't re-walk siblings for every visited doc.
 fn emit_null_resource_actions(
     state: &StateStore,
     primary_uri: &Url,
@@ -1120,12 +1063,15 @@ fn emit_null_resource_actions(
     actions: &mut Vec<CodeActionOrCommand>,
 ) {
     use crate::handlers::code_action_scope::scope_kind;
+    use std::path::PathBuf;
 
     let mut scopes: Vec<Scope> = Vec::new();
     if let Some(range) = selection {
         scopes.push(Scope::Selection { range });
     }
     scopes.extend([Scope::File, Scope::Module, Scope::Workspace]);
+
+    let mut module_gate_cache: HashMap<PathBuf, bool> = HashMap::new();
 
     for scope in scopes {
         let mut edits_by_uri: HashMap<Url, Vec<TextEdit>> = HashMap::new();
@@ -1134,6 +1080,18 @@ fn emit_null_resource_actions(
             let Some(body) = doc.parsed.body.as_ref() else {
                 return;
             };
+            // Gate per the doc's *own* module — a Workspace sweep
+            // visits docs across many modules.
+            if let Some(dir) = crate::handlers::util::parent_dir(doc_uri) {
+                let supports = *module_gate_cache
+                    .entry(dir)
+                    .or_insert_with(|| module_supports_terraform_data(state, doc_uri));
+                if !supports {
+                    return;
+                }
+            } else if !module_supports_terraform_data(state, doc_uri) {
+                return;
+            }
             let mut v = scan_null_resource_to_terraform_data(body, &doc.rope);
             if let Scope::Selection { range } = scope {
                 v.retain(|e| range_intersects(&e.range, &range));

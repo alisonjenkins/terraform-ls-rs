@@ -18,7 +18,21 @@ use ropey::Rope;
 use tfls_parser::hcl_span_to_lsp_range;
 
 pub fn deprecated_null_resource_diagnostics(body: &Body, rope: &Rope) -> Vec<Diagnostic> {
-    if !terraform_data_supported(body) {
+    deprecated_null_resource_diagnostics_for_module(body, rope, terraform_data_supported(body))
+}
+
+/// Module-aware variant. Caller supplies the precomputed
+/// `supports_terraform_data` decision aggregated across every
+/// sibling `.tf` in the module (so a `required_version` declared
+/// in `versions.tf` correctly gates `null_resource` blocks in
+/// `main.tf`). The body-only gate in
+/// [`deprecated_null_resource_diagnostics`] cannot see siblings.
+pub fn deprecated_null_resource_diagnostics_for_module(
+    body: &Body,
+    rope: &Rope,
+    supports: bool,
+) -> Vec<Diagnostic> {
+    if !supports {
         return Vec::new();
     }
 
@@ -53,33 +67,40 @@ pub fn deprecated_null_resource_diagnostics(body: &Body, rope: &Rope) -> Vec<Dia
     out
 }
 
-/// `terraform_data` was added in Terraform 1.4. The gate's
-/// real question is: "could the user end up running a version
-/// that DOESN'T have it?" — if so, suppress so we don't nag.
+/// `terraform_data` was added in Terraform 1.4. Suppress when
+/// the constraint admits any pre-1.4 version — i.e. when the
+/// constraint's MIN admitted version is below 1.4.0, or when
+/// the constraint sets no lower bound at all (e.g. `< 1.4` or
+/// `!= 1.5`, both of which permit ancient Terraform versions).
 ///
-/// We answer by probing a battery of representative pre-1.4
-/// release versions against the constraint. If ANY pre-1.4
-/// version satisfies, the constraint is loose enough that the
-/// user might actually be running it, so we suppress.
-///
-/// Probe set covers the practical version space — the Terraform
-/// versioning cadence doesn't leave large gaps, so a handful
-/// of representatives is sufficient.
+/// `constraint` is the AND-joined `required_version` string —
+/// callers in multi-file modules should join every sibling's
+/// constraint with `, ` before passing in (HCL constraint AND
+/// syntax).
+pub fn supports_terraform_data(constraint: &str) -> bool {
+    let parsed = tfls_core::version_constraint::parse(constraint);
+    if parsed.constraints.is_empty() {
+        return true;
+    }
+    let Some(min) = tfls_core::version_constraint::min_admitted_version(&parsed.constraints)
+    else {
+        return false;
+    };
+    tfls_core::version_constraint::version_at_least(min, "1.4.0")
+}
+
+/// Extract the literal `required_version = "..."` string out of
+/// the top-level `terraform { }` block, if present. Empty
+/// fragments / non-string forms are ignored.
+pub fn extract_required_version(body: &Body) -> Option<String> {
+    required_version_string(body)
+}
+
 fn terraform_data_supported(body: &Body) -> bool {
     let Some(constraint) = required_version_string(body) else {
         return true;
     };
-    let parsed = tfls_core::version_constraint::parse(&constraint);
-    if parsed.constraints.is_empty() {
-        return true;
-    }
-    const PRE_1_4_PROBES: &[&str] = &[
-        "0.11.0", "0.12.0", "0.13.0", "0.14.0", "0.15.0",
-        "1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.3.999",
-    ];
-    !PRE_1_4_PROBES.iter().any(|v| {
-        tfls_core::version_constraint::satisfies_all(&parsed.constraints, v)
-    })
+    supports_terraform_data(&constraint)
 }
 
 fn required_version_string(body: &Body) -> Option<String> {
@@ -205,5 +226,73 @@ mod tests {
             "resource \"null_resource\" \"b\" {}\n",
         );
         assert_eq!(diags(src).len(), 2);
+    }
+
+    #[test]
+    fn suppressed_when_exact_pin_below_1_4() {
+        // `= 1.3.5` — exactly one admitted version, predates
+        // terraform_data. Probe-set approaches that only test
+        // major.minor.0 floors miss this.
+        let src = concat!(
+            "terraform { required_version = \"= 1.3.5\" }\n",
+            "resource \"null_resource\" \"x\" {}\n",
+        );
+        assert!(diags(src).is_empty());
+    }
+
+    #[test]
+    fn fires_when_exact_pin_at_1_4() {
+        let src = concat!(
+            "terraform { required_version = \"= 1.4.0\" }\n",
+            "resource \"null_resource\" \"x\" {}\n",
+        );
+        assert_eq!(diags(src).len(), 1);
+    }
+
+    #[test]
+    fn suppressed_when_pre_0_11_pin() {
+        // Tofu/Terraform pre-0.11 era. The user explicitly
+        // asked us to support these — projects on 0.10.x exist.
+        let src = concat!(
+            "terraform { required_version = \"< 0.11\" }\n",
+            "resource \"null_resource\" \"x\" {}\n",
+        );
+        assert!(diags(src).is_empty());
+    }
+
+    #[test]
+    fn suppressed_when_upper_bound_below_1_4() {
+        // `<= 1.3.99` admits 0.x → 1.3.99, all pre-terraform_data.
+        let src = concat!(
+            "terraform { required_version = \"<= 1.3.99\" }\n",
+            "resource \"null_resource\" \"x\" {}\n",
+        );
+        assert!(diags(src).is_empty());
+    }
+
+    #[test]
+    fn module_aware_helper_fires_when_supports_overridden() {
+        // `_for_module` lets the LSP layer override the
+        // body-only gate using an aggregated module-wide flag.
+        // Even when the file declares a constraint that admits
+        // pre-1.4, supports=true (e.g. another sibling pinned
+        // >= 1.4) makes the diagnostic fire.
+        let src = concat!(
+            "terraform { required_version = \"< 1.3\" }\n",
+            "resource \"null_resource\" \"x\" {}\n",
+        );
+        let rope = Rope::from_str(src);
+        let body = parse_source(src).body.expect("parses");
+        let d = deprecated_null_resource_diagnostics_for_module(&body, &rope, true);
+        assert_eq!(d.len(), 1);
+    }
+
+    #[test]
+    fn module_aware_helper_suppresses_when_supports_false() {
+        let src = "resource \"null_resource\" \"x\" {}\n";
+        let rope = Rope::from_str(src);
+        let body = parse_source(src).body.expect("parses");
+        let d = deprecated_null_resource_diagnostics_for_module(&body, &rope, false);
+        assert!(d.is_empty());
     }
 }

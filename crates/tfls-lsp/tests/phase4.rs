@@ -1958,3 +1958,101 @@ async fn null_resource_action_workspace_covers_unrelated_dirs() {
         .expect("changes map");
     assert_eq!(changes.len(), 2);
 }
+
+/// `required_version` lives in a sibling `versions.tf` (not the
+/// file with the `null_resource` block). The per-module gate
+/// must aggregate sibling constraints — a per-file gate would
+/// miss this and incorrectly offer the action.
+#[tokio::test]
+async fn null_resource_action_gated_by_sibling_required_version() {
+    let main = uri("file:///fmt-nrt-sib/main.tf");
+    let versions = uri("file:///fmt-nrt-sib/versions.tf");
+    let backend = fresh_backend("resource \"null_resource\" \"x\" {}\n", &main);
+    add_doc(&backend, &versions, "terraform { required_version = \"< 1.3\" }\n");
+
+    let actions = all_actions_for(&backend, &main).await;
+    let any_convert = actions.iter().any(|a| match a {
+        CodeActionOrCommand::CodeAction(ca) => {
+            ca.title.contains("null_resource") && ca.title.contains("terraform_data")
+        }
+        _ => false,
+    });
+    assert!(
+        !any_convert,
+        "sibling versions.tf must gate the active doc; got:\n{actions:?}"
+    );
+}
+
+/// Exact pin `= 1.3.5` admits a single pre-1.4 version. The
+/// previous probe-set gate (which only tested major.minor.0
+/// floors) leaked; the min-admitted-version approach catches it.
+#[tokio::test]
+async fn null_resource_action_suppressed_when_exact_pin_pre_1_4() {
+    let u = uri("file:///fmt-nrt-pin/main.tf");
+    let src = concat!(
+        "terraform { required_version = \"= 1.3.5\" }\n",
+        "resource \"null_resource\" \"x\" {}\n",
+    );
+    let backend = fresh_backend(src, &u);
+    let actions = all_actions_for(&backend, &u).await;
+    let any_convert = actions.iter().any(|a| match a {
+        CodeActionOrCommand::CodeAction(ca) => {
+            ca.title.contains("null_resource") && ca.title.contains("terraform_data")
+        }
+        _ => false,
+    });
+    assert!(
+        !any_convert,
+        "exact 1.3.5 pin must suppress; got:\n{actions:?}"
+    );
+}
+
+/// Pre-0.11 era projects exist (legacy 0.10 deployments). The
+/// gate must cover them — a probe set starting at 0.11.0 misses
+/// `< 0.11`.
+#[tokio::test]
+async fn null_resource_action_suppressed_when_pre_0_11() {
+    let u = uri("file:///fmt-nrt-old/main.tf");
+    let src = concat!(
+        "terraform { required_version = \"< 0.11\" }\n",
+        "resource \"null_resource\" \"x\" {}\n",
+    );
+    let backend = fresh_backend(src, &u);
+    let actions = all_actions_for(&backend, &u).await;
+    let any_convert = actions.iter().any(|a| match a {
+        CodeActionOrCommand::CodeAction(ca) => {
+            ca.title.contains("null_resource") && ca.title.contains("terraform_data")
+        }
+        _ => false,
+    });
+    assert!(
+        !any_convert,
+        "pre-0.11 pin must suppress; got:\n{actions:?}"
+    );
+}
+
+/// Workspace-scope sweep: gate is per the visited doc's *own*
+/// module, not the primary's. dir A admits 1.4+; dir B is
+/// pinned `< 1.3`. Workspace action edits A only.
+#[tokio::test]
+async fn null_resource_action_workspace_gates_per_module() {
+    let a_main = uri("file:///fmt-nrt-W-A/main.tf");
+    let b_main = uri("file:///fmt-nrt-W-B/main.tf");
+    let b_versions = uri("file:///fmt-nrt-W-B/versions.tf");
+    let backend = fresh_backend("resource \"null_resource\" \"a\" {}\n", &a_main);
+    add_doc(&backend, &b_main, "resource \"null_resource\" \"b\" {}\n");
+    add_doc(
+        &backend,
+        &b_versions,
+        "terraform { required_version = \"< 1.3\" }\n",
+    );
+    let actions = all_actions_for(&backend, &a_main).await;
+    let action = find_action(&actions, "Convert 1 null_resource block in workspace");
+    let changes = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .expect("changes map");
+    assert!(changes.contains_key(&a_main), "A edited");
+    assert!(!changes.contains_key(&b_main), "B gated out by its own versions.tf");
+}

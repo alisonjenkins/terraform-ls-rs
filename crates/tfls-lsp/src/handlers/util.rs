@@ -14,6 +14,39 @@ pub(crate) fn parent_dir(uri: &Url) -> Option<PathBuf> {
     uri.to_file_path().ok()?.parent().map(|p| p.to_path_buf())
 }
 
+/// True when the active module's `required_version` admits any
+/// 1.4+ Terraform — the floor at which `terraform_data` exists.
+/// Walks every `.tf` doc in the module dir (constraints typically
+/// live in `versions.tf`, not the file the user is editing) and
+/// AND-joins their `required_version` strings before deciding.
+///
+/// Returns `true` when the module declares no constraint (we
+/// can't suppress on absence of evidence).
+pub(crate) fn module_supports_terraform_data(state: &StateStore, primary_uri: &Url) -> bool {
+    let Some(target_dir) = parent_dir(primary_uri) else {
+        return true;
+    };
+    let mut fragments: Vec<String> = Vec::new();
+    for entry in state.documents.iter() {
+        let uri = entry.key();
+        let Ok(path) = uri.to_file_path() else { continue };
+        if path.parent() != Some(&target_dir) {
+            continue;
+        }
+        let doc = entry.value();
+        let Some(body) = doc.parsed.body.as_ref() else {
+            continue;
+        };
+        if let Some(s) = tfls_diag::extract_required_version(body) {
+            fragments.push(s);
+        }
+    }
+    if fragments.is_empty() {
+        return true;
+    }
+    tfls_diag::supports_terraform_data(&fragments.join(", "))
+}
+
 /// Resolve a `module "<label>" { source = "<source>" }` reference to a
 /// concrete, already-on-disk directory we can index. Handles:
 ///

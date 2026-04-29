@@ -357,6 +357,55 @@ pub fn satisfies_all(constraints: &[Constraint], candidate: &str) -> bool {
     constraints.iter().all(|c| satisfies_one(c, candidate, &candidate_key))
 }
 
+/// Lowest version that satisfies every constraint in the list
+/// (AND semantics). Returns `None` when the constraints don't
+/// establish a lower bound (only `<` / `<=` / `!=`), or when no
+/// constraint is parseable.
+///
+/// Useful for "is feature X (introduced in version V) definitely
+/// available?" gates: if `min_admitted_version >= V`, every
+/// version the user could possibly be running has the feature.
+pub fn min_admitted_version(constraints: &[Constraint]) -> Option<&str> {
+    let mut best: Option<(&str, VersionKey)> = None;
+    for c in constraints {
+        let lower_bound = match c.op {
+            // Lower-bound contributors. `>` rounds up to ≥ for our
+            // discrete-version comparison purposes.
+            ConstraintOp::Eq
+            | ConstraintOp::Gt
+            | ConstraintOp::Gte
+            | ConstraintOp::Pessimistic => Some(c.version.as_str()),
+            ConstraintOp::Lt | ConstraintOp::Lte | ConstraintOp::Ne => None,
+        };
+        let Some(v) = lower_bound else { continue };
+        let Some(key) = version_key(v) else { continue };
+        match &best {
+            None => best = Some((v, key)),
+            Some((_, prev_key)) if &key > prev_key => best = Some((v, key)),
+            _ => {}
+        }
+    }
+    best.map(|(v, _)| v)
+}
+
+/// Compare two version strings. Returns `None` for unparseable
+/// inputs.
+pub fn compare_versions(a: &str, b: &str) -> Option<std::cmp::Ordering> {
+    let ak = version_key(a)?;
+    let bk = version_key(b)?;
+    Some(ak.cmp(&bk))
+}
+
+/// True iff `version >= threshold`. Returns `false` for
+/// unparseable inputs (defensive — caller should never pass
+/// invalid versions, but we don't panic).
+pub fn version_at_least(version: &str, threshold: &str) -> bool {
+    matches!(
+        compare_versions(version, threshold),
+        Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+    )
+}
+
 fn satisfies_one(c: &Constraint, candidate: &str, candidate_key: &VersionKey) -> bool {
     let Some(constraint_key) = version_key(&c.version) else {
         // Malformed constraint version — reject rather than mismatch.
@@ -594,6 +643,64 @@ mod tests {
         assert!(satisfies_all(&p.constraints, "1.99.0"));
         assert!(!satisfies_all(&p.constraints, "2.0.0"));
         assert!(!satisfies_all(&p.constraints, "1.1.9"));
+    }
+
+    #[test]
+    fn min_admitted_pessimistic() {
+        let p = parse("~> 1.4");
+        assert_eq!(min_admitted_version(&p.constraints), Some("1.4"));
+    }
+
+    #[test]
+    fn min_admitted_gte() {
+        let p = parse(">= 1.0");
+        assert_eq!(min_admitted_version(&p.constraints), Some("1.0"));
+    }
+
+    #[test]
+    fn min_admitted_eq() {
+        let p = parse("= 1.3.5");
+        assert_eq!(min_admitted_version(&p.constraints), Some("1.3.5"));
+    }
+
+    #[test]
+    fn min_admitted_compound_takes_max_lower_bound() {
+        // `>= 1.0, ~> 1.4` — the pessimistic floor is the
+        // tighter lower bound.
+        let p = parse(">= 1.0, ~> 1.4");
+        assert_eq!(min_admitted_version(&p.constraints), Some("1.4"));
+    }
+
+    #[test]
+    fn min_admitted_only_upper_bounds() {
+        // `< 1.4` has no lower bound — nothing constrains how
+        // low the user could be running.
+        let p = parse("< 1.4");
+        assert_eq!(min_admitted_version(&p.constraints), None);
+    }
+
+    #[test]
+    fn min_admitted_ignores_ne() {
+        // `!= 1.2.3` only excludes — no lower bound contribution.
+        let p = parse("!= 1.2.3");
+        assert_eq!(min_admitted_version(&p.constraints), None);
+    }
+
+    #[test]
+    fn version_at_least_basic() {
+        assert!(version_at_least("1.4.0", "1.4.0"));
+        assert!(version_at_least("1.4.1", "1.4.0"));
+        assert!(version_at_least("2.0.0", "1.4.0"));
+        assert!(!version_at_least("1.3.999", "1.4.0"));
+        assert!(!version_at_least("0.11.0", "1.4.0"));
+    }
+
+    #[test]
+    fn version_at_least_partial_segments() {
+        // `1.4` parses as 1.4.0.
+        assert!(version_at_least("1.4", "1.4.0"));
+        assert!(version_at_least("1.5", "1.4.0"));
+        assert!(!version_at_least("1.3", "1.4.0"));
     }
 
     #[test]
