@@ -22,6 +22,30 @@ use lsp_types::{Diagnostic, DiagnosticSeverity};
 use ropey::Rope;
 use tfls_parser::hcl_span_to_lsp_range;
 
+/// `(block_kind, label)` pairs for every hardcoded
+/// deprecation rule across the crate. Used by
+/// `schema_validation` to suppress duplicate schema-driven
+/// warnings on resources / data sources we already emit a
+/// richer message for. Keep in sync with the `pub mod
+/// deprecated_*` modules in `lib.rs`.
+pub const HARDCODED_DEPRECATION_LABELS: &[(&str, &str)] = &[
+    ("resource", "null_resource"),
+    ("data", "template_file"),
+    ("data", "template_dir"),
+    ("data", "null_data_source"),
+    ("resource", "aws_alb"),
+];
+
+/// True when `(block_kind, label)` is covered by a hardcoded
+/// rule — caller should suppress its own diagnostic on this
+/// block (the hardcoded rule produces a richer message and
+/// often a paired code action).
+pub fn is_hardcoded_deprecation(block_kind: &str, label: &str) -> bool {
+    HARDCODED_DEPRECATION_LABELS
+        .iter()
+        .any(|(k, l)| *k == block_kind && *l == label)
+}
+
 /// Static description of one "X is deprecated, prefer Y" rule.
 #[derive(Debug, Clone, Copy)]
 pub struct DeprecationRule {

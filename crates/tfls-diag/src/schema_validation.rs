@@ -45,17 +45,51 @@ pub fn resource_diagnostics(
         };
         let ident = block.ident.as_str();
 
-        let (kind, schema) = match (ident, first_label(block)) {
-            ("resource", Some(type_name)) => (BlockKind::Resource, lookup.resource(type_name)),
-            ("data", Some(type_name)) => (BlockKind::Data, lookup.data_source(type_name)),
+        let (kind, type_name, schema) = match (ident, first_label(block)) {
+            ("resource", Some(t)) => (BlockKind::Resource, t, lookup.resource(t)),
+            ("data", Some(t)) => (BlockKind::Data, t, lookup.data_source(t)),
             _ => continue,
         };
         let Some(schema) = schema else { continue };
+
+        // Tier-2 deprecation: provider's schema marks this whole
+        // resource / data source as deprecated. Suppress when a
+        // hardcoded rule already covers this label — the
+        // hardcoded path produces a richer message + (when
+        // applicable) a paired code action.
+        if schema.block.deprecated && !crate::is_hardcoded_deprecation(ident, type_name) {
+            if let Some(label_range) = first_label_range(block, rope) {
+                let kind_word = match kind {
+                    BlockKind::Resource => "resource",
+                    BlockKind::Data => "data source",
+                };
+                out.push(Diagnostic {
+                    range: label_range,
+                    severity: Some(DiagnosticSeverity::WARNING),
+                    source: Some("terraform-ls-rs".to_string()),
+                    message: format!(
+                        "{kind_word} `{type_name}` is deprecated by its provider. \
+                         Check the provider's release notes for the recommended replacement."
+                    ),
+                    ..Default::default()
+                });
+            }
+        }
 
         validate_block(block, rope, &schema, kind, &mut out);
     }
 
     out
+}
+
+/// Range covering just the first block label literal
+/// (`"<type_name>"`). Used by tier-2 deprecation diagnostics so
+/// the squiggle lands on the type name, not the whole header.
+fn first_label_range(block: &Block, rope: &Rope) -> Option<lsp_types::Range> {
+    use hcl_edit::repr::Span as _;
+    let label = block.labels.first()?;
+    let span = label.span()?;
+    hcl_span_to_lsp_range(rope, span).ok()
 }
 
 fn validate_block(
@@ -542,6 +576,132 @@ mod tests {
           instance_type = "t3.micro"
         }"#);
         assert!(d.is_empty(), "got: {d:?}");
+    }
+
+    fn schemas_with_deprecated_blocks() -> ProviderSchemas {
+        sonic_rs::from_str(
+            r#"{
+                "format_version": "1.0",
+                "provider_schemas": {
+                    "registry.terraform.io/hashicorp/aws": {
+                        "provider": { "version": 0, "block": {} },
+                        "resource_schemas": {
+                            "aws_s3_bucket_object": {
+                                "version": 0,
+                                "block": {
+                                    "deprecated": true,
+                                    "attributes": {
+                                        "bucket": { "type": "string", "required": true },
+                                        "key":    { "type": "string", "required": true }
+                                    }
+                                }
+                            },
+                            "aws_alb": {
+                                "version": 0,
+                                "block": {
+                                    "deprecated": true,
+                                    "attributes": {
+                                        "name": { "type": "string", "optional": true }
+                                    }
+                                }
+                            },
+                            "aws_lb": {
+                                "version": 0,
+                                "block": {
+                                    "attributes": {
+                                        "name": { "type": "string", "optional": true }
+                                    }
+                                }
+                            }
+                        },
+                        "data_source_schemas": {
+                            "aws_legacy_ds": {
+                                "version": 0,
+                                "block": {
+                                    "deprecated": true,
+                                    "attributes": {
+                                        "id": { "type": "string", "optional": true }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("parse")
+    }
+
+    /// Tier-2: schema's `deprecated: true` flag on a block surfaces
+    /// as a WARNING with a generic "deprecated by its provider"
+    /// message. Squiggle range covers the type-name label.
+    #[test]
+    fn schema_deprecated_block_emits_warning() {
+        let schemas = schemas_with_deprecated_blocks();
+        let src = r#"resource "aws_s3_bucket_object" "x" {
+          bucket = "b"
+          key    = "k"
+        }"#;
+        let d = diags_with(&schemas, src);
+        let dep = d
+            .iter()
+            .find(|d| d.message.contains("deprecated by its provider"))
+            .expect("schema-driven block deprecation diagnostic");
+        assert_eq!(dep.severity, Some(DiagnosticSeverity::WARNING));
+        assert!(dep.message.contains("aws_s3_bucket_object"), "got: {}", dep.message);
+        // Squiggle on the label literal — line 0, around char 9 ("aws_s3...").
+        assert_eq!(dep.range.start.line, 0);
+    }
+
+    /// Tier-2 deprecated data source — same path, "data source"
+    /// wording in the message.
+    #[test]
+    fn schema_deprecated_data_source_emits_warning() {
+        let schemas = schemas_with_deprecated_blocks();
+        let src = r#"data "aws_legacy_ds" "x" {}"#;
+        let d = diags_with(&schemas, src);
+        let dep = d
+            .iter()
+            .find(|d| d.message.contains("deprecated by its provider"))
+            .expect("schema-driven block deprecation diagnostic");
+        assert!(dep.message.contains("data source"), "got: {}", dep.message);
+        assert!(dep.message.contains("aws_legacy_ds"), "got: {}", dep.message);
+    }
+
+    /// Suppressed when the type is covered by a hardcoded rule:
+    /// `aws_alb` has its own `deprecated_aws_alb` module which
+    /// produces a richer message. Letting both fire would
+    /// double-warn the user.
+    #[test]
+    fn schema_deprecated_suppressed_when_hardcoded_rule_covers_label() {
+        let schemas = schemas_with_deprecated_blocks();
+        let src = r#"resource "aws_alb" "x" { name = "x" }"#;
+        let d = diags_with(&schemas, src);
+        // Only the schema_validation pipeline is consulted in
+        // this test — the `deprecated_aws_alb` rule isn't, since
+        // it lives in its own module. Yet `aws_alb` still appears
+        // in the hardcoded label list, so schema-driven path
+        // must not emit. End result: zero diagnostics from the
+        // schema-validation pipeline for this block (no required
+        // attrs missing, no unknown attrs).
+        assert!(
+            d.iter().all(|d| !d.message.contains("deprecated by its provider")),
+            "schema-driven dedup must skip aws_alb; got: {d:?}"
+        );
+    }
+
+    /// Non-deprecated block doesn't fire tier-2 deprecation
+    /// (sanity check that the `if schema.block.deprecated` guard
+    /// works).
+    #[test]
+    fn schema_deprecated_skipped_when_block_not_marked() {
+        let schemas = schemas_with_deprecated_blocks();
+        let src = r#"resource "aws_lb" "x" { name = "x" }"#;
+        let d = diags_with(&schemas, src);
+        assert!(
+            d.iter().all(|d| !d.message.contains("deprecated")),
+            "got: {d:?}"
+        );
     }
 
     fn schemas_with_relations() -> ProviderSchemas {

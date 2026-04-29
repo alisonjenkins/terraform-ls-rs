@@ -79,6 +79,19 @@ Gates come in two flavours: `terraform { required_version }`
 (provider-specific). Both forms — short `"~> 4.0"` and long
 `{ source = "...", version = "~> 4.0" }` — are recognised.
 
+**Schema-driven deprecation detection (long tail).** Beyond
+the hardcoded rules above, every resource / data source / attribute
+that the provider's own schema marks `deprecated: true` surfaces
+as a WARNING — automatically, no maintenance. Catches the long
+tail of provider deprecations (e.g. `aws_s3_bucket_object`,
+`aws_alb_target_group`, `aws_db_security_group`,
+`kubernetes_pod` v1, dozens of attribute renames per provider
+release) without needing a hand-written rule. Suppressed on
+labels covered by a hardcoded rule so users don't get
+double-warned. Provider-version-correct because it reads the
+*installed* provider's schema — older provider versions don't
+have the deprecation flag set, newer ones do.
+
 Multi-scope means one click can convert a single block (cursor
 variant), every block in the active file, every block across the
 module, or every block in the entire workspace — gated per-module so

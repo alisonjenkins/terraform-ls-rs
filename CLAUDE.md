@@ -193,6 +193,14 @@ Module-aware gates live in `crates/tfls-lsp/src/handlers/util.rs`:
 
 Each aggregates the relevant constraint string across every sibling `.tf` in the module dir before deciding. A `terraform { required_version = "..." }` block typically lives in `versions.tf`, not the file the user is editing; per-file gates would miss this.
 
+### Tier 2: schema-driven deprecation warnings
+
+`crates/tfls-diag/src/schema_validation.rs::resource_diagnostics` reads `BlockSchema.deprecated` (set by the provider in its plugin schema) and emits a generic WARNING on the type-name label of any resource / data source the provider has flagged. Attribute-level `AttributeSchema.deprecated` was already wired (line ~87 of that file).
+
+Suppression: when `is_hardcoded_deprecation(block_kind, label)` returns true, the schema-driven warning is skipped — the hardcoded rule provides a richer message + (often) a paired code action. Single source of truth: `HARDCODED_DEPRECATION_LABELS` in `deprecation_rule.rs`.
+
+Why this matters: every provider release adds new deprecations. The hardcoded rules cover the major migrations (those with auto-fix actions); the schema-driven path catches the long tail (~hundreds of attribute renames + a dozen+ resource renames per provider per major release) with zero maintenance burden — the provider's own schema is the source of truth.
+
 ### Combined deprecation walker
 
 Reference rewriting (e.g. `null_resource.X.triggers` → `terraform_data.X.triggers_replace`) used to walk the body once per deprecation kind. Now `walk_combined_deprecation_refs` walks each body once and emits flat `RefHit { name: Arc<str>, edit }` rows for every deprecation pattern. Per-call cache `HashMap<Url, CombinedDeprecationRefs>` threads through the scoped emit fns; first emit fn populates a doc, subsequent emits read from cache.
