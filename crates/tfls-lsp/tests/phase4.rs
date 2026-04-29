@@ -1839,3 +1839,122 @@ async fn format_action_respects_runtime_style_toggle() {
         edits[0].new_text
     );
 }
+
+// ── null_resource → terraform_data ──────────────────────────────
+
+#[tokio::test]
+async fn null_resource_action_instance_at_cursor() {
+    let u = uri("file:///fmt-nrt-1/main.tf");
+    let src = "resource \"null_resource\" \"x\" {}\n";
+    let backend = fresh_backend(src, &u);
+
+    // Cursor anywhere inside the block.
+    let actions = all_actions_for(&backend, &u).await;
+    let action = find_action(&actions, "Convert null_resource.x to terraform_data");
+    let edits = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .and_then(|c| c.get(&u))
+        .expect("file edit");
+    assert!(
+        edits.iter().any(|e| e.new_text == "\"terraform_data\""),
+        "expected label rewrite, got:\n{edits:?}"
+    );
+}
+
+#[tokio::test]
+async fn null_resource_action_renames_triggers_attribute() {
+    let u = uri("file:///fmt-nrt-2/main.tf");
+    let src = "resource \"null_resource\" \"x\" {\n  triggers = {\n    foo = \"bar\"\n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+
+    let actions = all_actions_for(&backend, &u).await;
+    let action = find_action(&actions, "Convert 1 null_resource block in this file");
+    let edits = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .and_then(|c| c.get(&u))
+        .expect("file edit");
+    assert!(
+        edits.iter().any(|e| e.new_text == "\"terraform_data\""),
+        "label rewrite missing"
+    );
+    assert!(
+        edits.iter().any(|e| e.new_text == "triggers_replace"),
+        "triggers rename missing; got:\n{edits:?}"
+    );
+}
+
+#[tokio::test]
+async fn null_resource_action_module_covers_siblings() {
+    let a = uri("file:///fmt-nrt-3/main.tf");
+    let b = uri("file:///fmt-nrt-3/extra.tf");
+    let backend = fresh_backend("resource \"null_resource\" \"a\" {}\n", &a);
+    add_doc(&backend, &b, "resource \"null_resource\" \"b\" {}\n");
+
+    let actions = all_actions_for(&backend, &a).await;
+    let action = find_action(&actions, "Convert 2 null_resource blocks in this module");
+    let changes = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .expect("changes map");
+    assert!(changes.contains_key(&a));
+    assert!(changes.contains_key(&b));
+}
+
+#[tokio::test]
+async fn null_resource_action_skipped_when_none() {
+    let u = uri("file:///fmt-nrt-4/main.tf");
+    let src = "resource \"aws_instance\" \"x\" { ami = \"a\" }\n";
+    let backend = fresh_backend(src, &u);
+
+    let actions = all_actions_for(&backend, &u).await;
+    let any_convert = actions.iter().any(|a| match a {
+        CodeActionOrCommand::CodeAction(ca) => ca.title.starts_with("Convert null_resource") ||
+            ca.title.starts_with("Convert 1 null_resource") ||
+            ca.title.starts_with("Convert null_resource"),
+        _ => false,
+    });
+    assert!(!any_convert, "no null_resource action when none present");
+}
+
+#[tokio::test]
+async fn null_resource_action_suppressed_when_required_version_excludes_1_4() {
+    // `required_version = "< 1.3"` excludes 1.4 entirely → no action.
+    let u = uri("file:///fmt-nrt-5/main.tf");
+    let src = concat!(
+        "terraform { required_version = \"< 1.3\" }\n",
+        "resource \"null_resource\" \"x\" {}\n",
+    );
+    let backend = fresh_backend(src, &u);
+    let actions = all_actions_for(&backend, &u).await;
+    let any_convert = actions.iter().any(|a| match a {
+        CodeActionOrCommand::CodeAction(ca) => {
+            ca.title.contains("null_resource") && ca.title.contains("terraform_data")
+        }
+        _ => false,
+    });
+    assert!(
+        !any_convert,
+        "version-aware gate failed; got actions:\n{actions:?}"
+    );
+}
+
+#[tokio::test]
+async fn null_resource_action_workspace_covers_unrelated_dirs() {
+    let a = uri("file:///fmt-nrt-A/main.tf");
+    let b = uri("file:///fmt-nrt-B/main.tf");
+    let backend = fresh_backend("resource \"null_resource\" \"a\" {}\n", &a);
+    add_doc(&backend, &b, "resource \"null_resource\" \"b\" {}\n");
+    let actions = all_actions_for(&backend, &a).await;
+    let action = find_action(&actions, "Convert 2 null_resource blocks in workspace");
+    let changes = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .expect("changes map");
+    assert_eq!(changes.len(), 2);
+}

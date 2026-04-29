@@ -80,6 +80,12 @@ pub async fn code_action(
                 {
                     actions.push(CodeActionOrCommand::CodeAction(action));
                 }
+            } else if is_deprecated_null_resource(diag) {
+                if let Some(action) =
+                    make_replace_null_resource_for_diag(&uri, diag, body, &doc.rope)
+                {
+                    actions.push(CodeActionOrCommand::CodeAction(action));
+                }
             }
         }
     }
@@ -115,6 +121,27 @@ pub async fn code_action(
         ) {
             // Avoid stacking two identical actions when the diag-driven
             // path already produced one for the same variable name.
+            let already = actions.iter().any(|a| match a {
+                CodeActionOrCommand::CodeAction(ca) => ca.title == action.title,
+                _ => false,
+            });
+            if !already {
+                actions.push(CodeActionOrCommand::CodeAction(action));
+            }
+        }
+    }
+
+    // Cursor-driven `null_resource` → `terraform_data` rewrite.
+    // Surfaces the Instance variant when the cursor sits inside
+    // a `resource "null_resource" "X" { … }` block; broader
+    // scopes are emitted below via `emit_scoped_actions`.
+    if let Some(body) = doc.parsed.body.as_ref() {
+        if let Some(action) = make_replace_null_resource_at_cursor(
+            &uri,
+            params.range.start,
+            body,
+            &doc.rope,
+        ) {
             let already = actions.iter().any(|a| match a {
                 CodeActionOrCommand::CodeAction(ca) => ca.title == action.title,
                 _ => false,
@@ -204,6 +231,8 @@ pub async fn code_action(
             scan_refine_any_types(doc_uri, body, &doc.rope, &doc.symbols, state)
         },
     );
+
+    emit_null_resource_actions(state, &uri, selection, &mut actions);
 
     // Declare undefined variables — File + Module only (the edit
     // appends to EOF, so Workspace would scatter stubs across
@@ -860,6 +889,360 @@ fn scan_blocks_of_kind(body: &Body, rope: &Rope, kind: &str) -> Vec<(Range, Stri
     out
 }
 
+/// `terraform_data` was added in Terraform 1.4. Suppress the
+/// action when the module's `required_version` is loose enough
+/// that the user might actually run a pre-1.4 toolchain (where
+/// the resource type doesn't exist). We probe a battery of
+/// representative pre-1.4 versions; if ANY satisfies the
+/// constraint, suppress.
+fn terraform_data_supported(body: &Body) -> bool {
+    let Some(constraint) = required_version_string(body) else {
+        return true;
+    };
+    let parsed = tfls_core::version_constraint::parse(&constraint);
+    if parsed.constraints.is_empty() {
+        return true;
+    }
+    const PRE_1_4_PROBES: &[&str] = &[
+        "0.11.0", "0.12.0", "0.13.0", "0.14.0", "0.15.0",
+        "1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.3.999",
+    ];
+    !PRE_1_4_PROBES
+        .iter()
+        .any(|v| tfls_core::version_constraint::satisfies_all(&parsed.constraints, v))
+}
+
+/// Pull the literal `required_version = "..."` string out of the
+/// top-level `terraform { }` block, if present.
+fn required_version_string(body: &Body) -> Option<String> {
+    use hcl_edit::expr::Expression;
+
+    for structure in body.iter() {
+        let block = structure.as_block()?;
+        if block.ident.as_str() != "terraform" {
+            continue;
+        }
+        for sub in block.body.iter() {
+            let Some(attr) = sub.as_attribute() else {
+                continue;
+            };
+            if attr.key.as_str() != "required_version" {
+                continue;
+            }
+            return match &attr.value {
+                Expression::String(s) => Some(s.as_str().to_string()),
+                Expression::StringTemplate(t) => {
+                    let mut acc = String::new();
+                    for element in t.iter() {
+                        match element {
+                            hcl_edit::template::Element::Literal(lit) => {
+                                acc.push_str(lit.as_str());
+                            }
+                            _ => return None,
+                        }
+                    }
+                    Some(acc)
+                }
+                _ => None,
+            };
+        }
+    }
+    None
+}
+
+/// Walk every `resource "null_resource" "X"` block in `body`
+/// and emit the text edits that turn it into a `resource
+/// "terraform_data" "X"` block:
+///
+/// - Replace the `"null_resource"` label literal with
+///   `"terraform_data"` (preserving the surrounding quotes).
+/// - For each `triggers` attribute inside the block, replace
+///   the key with `triggers_replace`.
+///
+/// `null_resource` had only `id` + `triggers` attributes;
+/// `terraform_data` covers both (`id` + `triggers_replace`,
+/// plus `input` / `output`). Cross-file references like
+/// `null_resource.X.triggers` will be flagged by tfls's
+/// existing undefined-attribute diagnostic after the rewrite —
+/// out of scope here.
+fn scan_null_resource_to_terraform_data(body: &Body, rope: &Rope) -> Vec<TextEdit> {
+    use hcl_edit::repr::Span as _;
+
+    if !terraform_data_supported(body) {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
+        if block.ident.as_str() != "resource" {
+            continue;
+        }
+        let Some(label) = block.labels.first() else {
+            continue;
+        };
+        if label_str(label) != Some("null_resource") {
+            continue;
+        }
+
+        // 1. Block label rewrite.
+        if let Some(span) = label.span() {
+            if let (Ok(start), Ok(end)) = (
+                tfls_parser::byte_offset_to_lsp_position(rope, span.start),
+                tfls_parser::byte_offset_to_lsp_position(rope, span.end),
+            ) {
+                out.push(TextEdit {
+                    range: Range { start, end },
+                    new_text: "\"terraform_data\"".into(),
+                });
+            }
+        }
+
+        // 2. `triggers` → `triggers_replace` attribute rename.
+        for sub in block.body.iter() {
+            let Some(attr) = sub.as_attribute() else {
+                continue;
+            };
+            if attr.key.as_str() != "triggers" {
+                continue;
+            }
+            if let Some(span) = attr.key.span() {
+                if let (Ok(start), Ok(end)) = (
+                    tfls_parser::byte_offset_to_lsp_position(rope, span.start),
+                    tfls_parser::byte_offset_to_lsp_position(rope, span.end),
+                ) {
+                    out.push(TextEdit {
+                        range: Range { start, end },
+                        new_text: "triggers_replace".into(),
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Diag-attached Instance variant: builds the
+/// `null_resource` → `terraform_data` rewrite for a specific
+/// `terraform_deprecated_null_resource` warning that nvim has
+/// shipped in `params.context.diagnostics`. Locates the block
+/// by the diag range (the diag's range covers the
+/// `"null_resource"` label literal).
+fn make_replace_null_resource_for_diag(
+    uri: &Url,
+    diag: &Diagnostic,
+    body: &Body,
+    rope: &Rope,
+) -> Option<CodeAction> {
+    use hcl_edit::repr::Span as _;
+
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
+        if block.ident.as_str() != "resource" {
+            continue;
+        }
+        let Some(label) = block.labels.first() else {
+            continue;
+        };
+        if label_str(label) != Some("null_resource") {
+            continue;
+        }
+        let Some(label_span) = label.span() else { continue };
+        let Ok(label_range) = hcl_span_to_lsp_range(rope, label_span) else {
+            continue;
+        };
+        if label_range.start != diag.range.start {
+            continue;
+        }
+        let Some(block_span) = block.span() else { continue };
+        let Ok(block_range) = hcl_span_to_lsp_range(rope, block_span) else {
+            continue;
+        };
+        let edits: Vec<TextEdit> = scan_null_resource_to_terraform_data(body, rope)
+            .into_iter()
+            .filter(|e| range_intersects(&e.range, &block_range))
+            .collect();
+        if edits.is_empty() {
+            return None;
+        }
+        let name = block.labels.get(1).and_then(label_str).unwrap_or("?");
+        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        changes.insert(uri.clone(), edits);
+        return Some(CodeAction {
+            title: format!("Convert null_resource.{name} to terraform_data"),
+            kind: Some(CodeActionKind::QUICKFIX),
+            diagnostics: Some(vec![diag.clone()]),
+            edit: Some(WorkspaceEdit {
+                changes: Some(changes),
+                ..Default::default()
+            }),
+            is_preferred: Some(true),
+            ..Default::default()
+        });
+    }
+    None
+}
+
+/// Count of `resource "null_resource" "X"` blocks in `body`.
+/// Used by the scoped action's title — every other action in
+/// the codebase counts edits, but each null_resource block
+/// produces 1+ edits (label + optional triggers rename), so a
+/// raw edit count would over-report. Block count is the
+/// user-facing intent.
+fn count_null_resource_blocks(body: &Body) -> usize {
+    let mut n = 0;
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
+        if block.ident.as_str() != "resource" {
+            continue;
+        }
+        if block.labels.first().and_then(label_str) == Some("null_resource") {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Scope iteration for `null-resource-to-terraform-data`.
+/// Custom (vs `emit_scoped_actions`) because the standard
+/// title counts EDITS and each block produces 1+ edits — we
+/// want the title to count BLOCKS instead.
+fn emit_null_resource_actions(
+    state: &StateStore,
+    primary_uri: &Url,
+    selection: Option<Range>,
+    actions: &mut Vec<CodeActionOrCommand>,
+) {
+    use crate::handlers::code_action_scope::scope_kind;
+
+    let mut scopes: Vec<Scope> = Vec::new();
+    if let Some(range) = selection {
+        scopes.push(Scope::Selection { range });
+    }
+    scopes.extend([Scope::File, Scope::Module, Scope::Workspace]);
+
+    for scope in scopes {
+        let mut edits_by_uri: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        let mut total_blocks = 0usize;
+        for_each_doc_in_scope(state, primary_uri, scope, |doc_uri, doc| {
+            let Some(body) = doc.parsed.body.as_ref() else {
+                return;
+            };
+            let mut v = scan_null_resource_to_terraform_data(body, &doc.rope);
+            if let Scope::Selection { range } = scope {
+                v.retain(|e| range_intersects(&e.range, &range));
+            }
+            if v.is_empty() {
+                return;
+            }
+            // Block count — for Selection scope, count only
+            // blocks that actually intersect the selection (an
+            // edit there implies the block is in range).
+            let blocks = if matches!(scope, Scope::Selection { .. }) {
+                // Each block contributes at least one edit (the
+                // label). Count distinct label-rewrite edits.
+                v.iter().filter(|e| e.new_text == "\"terraform_data\"").count()
+            } else {
+                count_null_resource_blocks(body)
+            };
+            total_blocks += blocks;
+            edits_by_uri.insert(doc_uri.clone(), v);
+        });
+        if edits_by_uri.is_empty() || total_blocks == 0 {
+            continue;
+        }
+        let plural = if total_blocks == 1 { "" } else { "s" };
+        let where_ = match scope {
+            Scope::Selection { .. } => "selection",
+            Scope::File => "this file",
+            Scope::Module => "this module",
+            Scope::Workspace => "workspace",
+            Scope::Instance => continue,
+        };
+        let title = format!(
+            "Convert {total_blocks} null_resource block{plural} in {where_}"
+        );
+        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+            title,
+            kind: Some(scope_kind(scope, "null-resource-to-terraform-data")),
+            edit: Some(WorkspaceEdit {
+                changes: Some(edits_by_uri),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }));
+    }
+}
+
+/// Cursor-driven Instance variant of the
+/// `null_resource` → `terraform_data` rewrite. Surfaces only
+/// when the cursor sits inside a `resource "null_resource" "X"`
+/// block; broader scopes are emitted via `emit_scoped_actions`.
+fn make_replace_null_resource_at_cursor(
+    uri: &Url,
+    cursor: Position,
+    body: &Body,
+    rope: &Rope,
+) -> Option<CodeAction> {
+    use hcl_edit::repr::Span as _;
+
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
+        if block.ident.as_str() != "resource" {
+            continue;
+        }
+        let Some(label) = block.labels.first() else {
+            continue;
+        };
+        if label_str(label) != Some("null_resource") {
+            continue;
+        }
+        let Some(span) = block.span() else { continue };
+        let Ok(range) = hcl_span_to_lsp_range(rope, span) else {
+            continue;
+        };
+        if !contains(&range, cursor) {
+            continue;
+        }
+
+        // Filter the per-doc scan's output to edits inside this
+        // block. Cheaper than re-implementing the per-block
+        // logic and guaranteed to stay in sync with the
+        // multi-scope path.
+        let edits: Vec<TextEdit> = scan_null_resource_to_terraform_data(body, rope)
+            .into_iter()
+            .filter(|e| range_intersects(&e.range, &range))
+            .collect();
+        if edits.is_empty() {
+            return None;
+        }
+
+        let name = block.labels.get(1).and_then(label_str).unwrap_or("?");
+        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        changes.insert(uri.clone(), edits);
+        return Some(CodeAction {
+            title: format!("Convert null_resource.{name} to terraform_data"),
+            kind: Some(CodeActionKind::QUICKFIX),
+            diagnostics: None,
+            edit: Some(WorkspaceEdit {
+                changes: Some(changes),
+                ..Default::default()
+            }),
+            is_preferred: Some(true),
+            ..Default::default()
+        });
+    }
+    None
+}
+
 /// Concatenate moved block source texts. Each entry from
 /// `scan_output_blocks` already has a trailing newline (we
 /// expanded the delete range past one newline), so plain
@@ -1134,6 +1517,16 @@ fn is_deprecated_interpolation(diag: &Diagnostic) -> bool {
 /// Match the `terraform_deprecated_lookup` warning so we can offer
 /// a rewrite from `lookup(X, "k")` (deprecated 2-arg form) to
 /// `X["k"]` (index notation, type-agnostic).
+/// Match the `terraform_deprecated_null_resource` warning so we
+/// can attach the rewrite action directly to the diagnostic.
+fn is_deprecated_null_resource(diag: &Diagnostic) -> bool {
+    diag.severity == Some(DiagnosticSeverity::WARNING)
+        && diag.source.as_deref() == Some("terraform-ls-rs")
+        && diag
+            .message
+            .contains("`null_resource` is superseded by the built-in `terraform_data`")
+}
+
 fn is_deprecated_lookup(diag: &Diagnostic) -> bool {
     diag.severity == Some(DiagnosticSeverity::WARNING)
         && diag.source.as_deref() == Some("terraform-ls-rs")

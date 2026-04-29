@@ -129,7 +129,7 @@ Storage lives on `tfls_state::Config::format_style`; LSP handlers (`textDocument
 
 ## Code-action scopes
 
-Every multi-target code action (unwrap interpolation, convert lookup, set variable types, refine `type = any`, declare undefined variables, move outputs to `outputs.tf`, move variables to `variables.tf`) is offered at multiple scopes via `crates/tfls-lsp/src/handlers/code_action_scope.rs`:
+Every multi-target code action (unwrap interpolation, convert lookup, set variable types, refine `type = any`, declare undefined variables, move outputs to `outputs.tf`, move variables to `variables.tf`, convert `null_resource` to `terraform_data`) is offered at multiple scopes via `crates/tfls-lsp/src/handlers/code_action_scope.rs`:
 
 | Scope       | Iteration set                                     | LSP `CodeActionKind`                                            |
 |-------------|---------------------------------------------------|-----------------------------------------------------------------|

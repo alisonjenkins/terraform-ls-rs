@@ -444,6 +444,7 @@ pub fn compute_diagnostics_with_lookup(
         out.extend(tfls_diag::deprecated_index_diagnostics(body, &doc.rope));
         out.extend(tfls_diag::deprecated_interpolation_diagnostics(body, &doc.rope));
         out.extend(tfls_diag::deprecated_lookup_diagnostics(body, &doc.rope));
+        out.extend(tfls_diag::deprecated_null_resource_diagnostics(body, &doc.rope));
         out.extend(tfls_diag::empty_list_equality_diagnostics(body, &doc.rope));
         out.extend(tfls_diag::map_duplicate_keys_diagnostics(body, &doc.rope));
 
