@@ -255,8 +255,28 @@ pub async fn code_action(
         },
     );
 
-    emit_null_resource_actions(state, &uri, selection, &mut actions);
-    emit_template_file_actions(state, &uri, selection, &mut actions);
+    // Shared per-call ref-walk cache. Both null_resource and
+    // template_file emit fns walk every doc's expression tree
+    // for refs; without sharing they each do their own walk.
+    // With this cache, each doc is walked exactly once across
+    // both deprecations — and adding a third deprecation that
+    // hooks into the same cache costs only a leaf-check per
+    // expression node, not a fresh body walk.
+    let mut combined_ref_cache: HashMap<Url, CombinedDeprecationRefs> = HashMap::new();
+    emit_null_resource_actions(
+        state,
+        &uri,
+        selection,
+        &mut actions,
+        &mut combined_ref_cache,
+    );
+    emit_template_file_actions(
+        state,
+        &uri,
+        selection,
+        &mut actions,
+        &mut combined_ref_cache,
+    );
 
     // Declare undefined variables — File + Module only (the edit
     // appends to EOF, so Workspace would scatter stubs across
@@ -975,20 +995,71 @@ fn scan_blocks_of_kind(body: &Body, rope: &Rope, kind: &str) -> Vec<(Range, Stri
     out
 }
 
-/// Walk every `resource "null_resource" "X"` block in `body`
-/// and emit the text edits that turn it into a `resource
-/// "terraform_data" "X"` block:
-///
-/// - Replace the `"null_resource"` label literal with
-///   `"terraform_data"` (preserving the surrounding quotes).
-/// - For each `triggers` attribute inside the block, replace
-///   the key with `triggers_replace`.
-/// - Rewrite every `null_resource.X[.attr]` reference in the
-///   body — head ident becomes `terraform_data`, `.triggers`
-///   becomes `.triggers_replace`. Other attributes (`id`, …)
-///   stay untouched.
-fn scan_null_resource_to_terraform_data(body: &Body, rope: &Rope) -> Vec<TextEdit> {
-    scan_null_resource_to_terraform_data_for(body, rope, None)
+/// Block-level edits only: `"null_resource"` label rewrite to
+/// `"terraform_data"` and `triggers` attribute key rename to
+/// `triggers_replace`. Excludes reference rewrites — the scoped
+/// emit path consumes those from the shared combined-ref cache
+/// to avoid a duplicate body walk per deprecation kind.
+fn scan_null_resource_block_edits(
+    body: &Body,
+    rope: &Rope,
+    names: Option<&HashSet<String>>,
+) -> Vec<TextEdit> {
+    use hcl_edit::repr::Span as _;
+
+    let mut out = Vec::new();
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
+        if block.ident.as_str() != "resource" {
+            continue;
+        }
+        let Some(label) = block.labels.first() else {
+            continue;
+        };
+        if label_str(label) != Some("null_resource") {
+            continue;
+        }
+        if let Some(filter) = names {
+            let block_name = block.labels.get(1).and_then(label_str).unwrap_or("");
+            if !filter.contains(block_name) {
+                continue;
+            }
+        }
+
+        if let Some(span) = label.span() {
+            if let (Ok(start), Ok(end)) = (
+                tfls_parser::byte_offset_to_lsp_position(rope, span.start),
+                tfls_parser::byte_offset_to_lsp_position(rope, span.end),
+            ) {
+                out.push(TextEdit {
+                    range: Range { start, end },
+                    new_text: "\"terraform_data\"".into(),
+                });
+            }
+        }
+        for sub in block.body.iter() {
+            let Some(attr) = sub.as_attribute() else {
+                continue;
+            };
+            if attr.key.as_str() != "triggers" {
+                continue;
+            }
+            if let Some(span) = attr.key.span() {
+                if let (Ok(start), Ok(end)) = (
+                    tfls_parser::byte_offset_to_lsp_position(rope, span.start),
+                    tfls_parser::byte_offset_to_lsp_position(rope, span.end),
+                ) {
+                    out.push(TextEdit {
+                        range: Range { start, end },
+                        new_text: "triggers_replace".into(),
+                    });
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Like [`scan_null_resource_to_terraform_data`] but limited to
@@ -1150,6 +1221,205 @@ fn emit_null_resource_traversal_edits(
                 break;
             }
         }
+    }
+}
+
+/// One row in the combined-ref scan: a single `TextEdit` plus
+/// the resource/data name that triggered it. Multi-edit
+/// rewrites (e.g. `null_resource.X.triggers` produces two
+/// edits) become two rows sharing a name. Flat layout — no
+/// inner `Vec` per match — keeps allocation overhead low when
+/// the cache holds thousands of hits.
+#[derive(Debug, Clone)]
+struct RefHit {
+    name: String,
+    edit: TextEdit,
+}
+
+/// Combined, unfiltered output of one body walk. Both variants'
+/// hits are collected together; callers post-filter by name set
+/// to get the edit subset their scope wants. Shape lets us walk
+/// each body exactly once per `code_action` call regardless of
+/// how many deprecation kinds need it.
+#[derive(Debug, Clone, Default)]
+struct CombinedDeprecationRefs {
+    null_resource: Vec<RefHit>,
+    template_file: Vec<RefHit>,
+}
+
+/// Walk `body` once and collect every `null_resource.<X>[.attr]`
+/// AND every `data.template_file.<X>.rendered` traversal as
+/// flat `RefHit` rows. Used to populate a shared per-call cache
+/// (see `code_action`) so emit fns running in sequence don't
+/// each pay for their own body iteration.
+fn walk_combined_deprecation_refs(body: &Body, rope: &Rope) -> CombinedDeprecationRefs {
+    let mut out = CombinedDeprecationRefs::default();
+    walk_expressions(body, &mut |expr| {
+        push_null_resource_hits(expr, rope, &mut out.null_resource);
+        push_template_file_hit(expr, rope, &mut out.template_file);
+    });
+    out
+}
+
+/// `null_resource.<X>[.triggers]` matcher — pushes 1-2 hits
+/// per match (head label rewrite + optional triggers rename),
+/// each tagged with `<X>` so callers can post-filter by name.
+fn push_null_resource_hits(
+    expr: &hcl_edit::expr::Expression,
+    rope: &Rope,
+    out: &mut Vec<RefHit>,
+) {
+    use hcl_edit::expr::{Expression as Ex, TraversalOperator};
+    use hcl_edit::repr::Span as _;
+
+    let Ex::Traversal(t) = expr else { return };
+    let Ex::Variable(v) = &t.expr else { return };
+    if v.as_str() != "null_resource" {
+        return;
+    }
+    let name = match t.operators.iter().find_map(|op| match op.value() {
+        TraversalOperator::GetAttr(ident) => Some(ident.as_str().to_string()),
+        _ => None,
+    }) {
+        Some(n) => n,
+        None => return,
+    };
+    if let Some(span) = v.span() {
+        if let (Ok(start), Ok(end)) = (
+            tfls_parser::byte_offset_to_lsp_position(rope, span.start),
+            tfls_parser::byte_offset_to_lsp_position(rope, span.end),
+        ) {
+            out.push(RefHit {
+                name: name.clone(),
+                edit: TextEdit {
+                    range: Range { start, end },
+                    new_text: "terraform_data".into(),
+                },
+            });
+        }
+    }
+    let mut idx = 0usize;
+    for op in t.operators.iter() {
+        if let TraversalOperator::GetAttr(ident) = op.value() {
+            idx += 1;
+            if idx == 2 && ident.as_str() == "triggers" {
+                if let Some(span) = ident.span() {
+                    if let (Ok(start), Ok(end)) = (
+                        tfls_parser::byte_offset_to_lsp_position(rope, span.start),
+                        tfls_parser::byte_offset_to_lsp_position(rope, span.end),
+                    ) {
+                        out.push(RefHit {
+                            name: name.clone(),
+                            edit: TextEdit {
+                                range: Range { start, end },
+                                new_text: "triggers_replace".into(),
+                            },
+                        });
+                    }
+                }
+                break;
+            }
+        }
+    }
+}
+
+/// `data.template_file.<X>.rendered` matcher — pushes one
+/// `local.<X>` rewrite hit per match.
+fn push_template_file_hit(
+    expr: &hcl_edit::expr::Expression,
+    rope: &Rope,
+    out: &mut Vec<RefHit>,
+) {
+    use hcl_edit::expr::{Expression as Ex, TraversalOperator};
+    use hcl_edit::repr::Span as _;
+
+    let Ex::Traversal(t) = expr else { return };
+    let Ex::Variable(v) = &t.expr else { return };
+    if v.as_str() != "data" {
+        return;
+    }
+    let mut idx = 0usize;
+    let mut kind: Option<&str> = None;
+    let mut name: Option<&str> = None;
+    let mut rendered_seen = false;
+    for op in t.operators.iter() {
+        if let TraversalOperator::GetAttr(ident) = op.value() {
+            idx += 1;
+            match idx {
+                1 => kind = Some(ident.as_str()),
+                2 => name = Some(ident.as_str()),
+                3 => rendered_seen = ident.as_str() == "rendered",
+                _ => break,
+            }
+        } else {
+            break;
+        }
+    }
+    if kind != Some("template_file") || !rendered_seen {
+        return;
+    }
+    let Some(n) = name else { return };
+    let Some(span) = t.span() else { return };
+    let (Ok(start), Ok(end)) = (
+        tfls_parser::byte_offset_to_lsp_position(rope, span.start),
+        tfls_parser::byte_offset_to_lsp_position(rope, span.end),
+    ) else {
+        return;
+    };
+    out.push(RefHit {
+        name: n.to_string(),
+        edit: TextEdit {
+            range: Range { start, end },
+            new_text: format!("local.{n}"),
+        },
+    });
+}
+
+/// Read a `null_resource` ref edit set from `cache`, populating
+/// it on miss via [`walk_combined_deprecation_refs`]. Filters
+/// matches by `names` (None = all), flattens into a `Vec<TextEdit>`.
+fn null_refs_from_cache(
+    cache: &mut HashMap<Url, CombinedDeprecationRefs>,
+    uri: &Url,
+    body: &Body,
+    rope: &Rope,
+    names: Option<&HashSet<String>>,
+) -> Vec<TextEdit> {
+    let combined = cache
+        .entry(uri.clone())
+        .or_insert_with(|| walk_combined_deprecation_refs(body, rope));
+    flatten_filtered(&combined.null_resource, names)
+}
+
+/// Read a `template_file` ref edit set from `cache`. Caller's
+/// `names` is the converted-data-source set for the doc's module.
+fn template_refs_from_cache(
+    cache: &mut HashMap<Url, CombinedDeprecationRefs>,
+    uri: &Url,
+    body: &Body,
+    rope: &Rope,
+    names: &HashSet<String>,
+) -> Vec<TextEdit> {
+    if names.is_empty() {
+        return Vec::new();
+    }
+    let combined = cache
+        .entry(uri.clone())
+        .or_insert_with(|| walk_combined_deprecation_refs(body, rope));
+    flatten_filtered(&combined.template_file, Some(names))
+}
+
+fn flatten_filtered(
+    hits: &[RefHit],
+    filter: Option<&HashSet<String>>,
+) -> Vec<TextEdit> {
+    match filter {
+        None => hits.iter().map(|h| h.edit.clone()).collect(),
+        Some(set) => hits
+            .iter()
+            .filter(|h| set.contains(&h.name))
+            .map(|h| h.edit.clone())
+            .collect(),
     }
 }
 
@@ -1439,6 +1709,7 @@ fn emit_null_resource_actions(
     primary_uri: &Url,
     selection: Option<Range>,
     actions: &mut Vec<CodeActionOrCommand>,
+    combined_ref_cache: &mut HashMap<Url, CombinedDeprecationRefs>,
 ) {
     use crate::handlers::code_action_scope::scope_kind;
     use std::path::PathBuf;
@@ -1450,13 +1721,10 @@ fn emit_null_resource_actions(
     scopes.extend([Scope::File, Scope::Module, Scope::Workspace]);
 
     let mut module_gate_cache: HashMap<PathBuf, bool> = HashMap::new();
-    // Per-doc scan cache. Workspace iteration in the bench's
-    // single-doc fixture used to walk the same body 4× (once
-    // per scope); now once. For multi-doc workspaces the
-    // savings still scale linearly with scope count.
-    //
-    // Stored value: (full edit set, full block-name list).
-    // `None` marker means "computed and gated out / empty".
+    // Per-doc scan cache. Stores block-only edits + names —
+    // ref edits come from the shared `combined_ref_cache`,
+    // which is populated by the first deprecation emit fn that
+    // walks the doc and reused by subsequent emits.
     type ScanRow = Option<(Vec<TextEdit>, Vec<String>)>;
     let mut scan_cache: HashMap<Url, ScanRow> = HashMap::new();
 
@@ -1465,7 +1733,6 @@ fn emit_null_resource_actions(
         let mut names_by_module: HashMap<PathBuf, Vec<String>> = HashMap::new();
         let mut total_blocks = 0usize;
         for_each_doc_in_scope(state, primary_uri, scope, |doc_uri, doc| {
-            // Compute-or-fetch from cache.
             if !scan_cache.contains_key(doc_uri) {
                 let row = (|| -> ScanRow {
                     let body = doc.parsed.body.as_ref()?;
@@ -1479,11 +1746,20 @@ fn emit_null_resource_actions(
                     } else if !module_supports_terraform_data(state, doc_uri) {
                         return None;
                     }
-                    let edits = scan_null_resource_to_terraform_data(body, &doc.rope);
-                    if edits.is_empty() {
+                    let block_edits = scan_null_resource_block_edits(body, &doc.rope, None);
+                    let ref_edits = null_refs_from_cache(
+                        combined_ref_cache,
+                        doc_uri,
+                        body,
+                        &doc.rope,
+                        None,
+                    );
+                    let mut all = block_edits;
+                    all.extend(ref_edits);
+                    if all.is_empty() {
                         return None;
                     }
-                    Some((edits, null_resource_names_in_body(body)))
+                    Some((all, null_resource_names_in_body(body)))
                 })();
                 scan_cache.insert(doc_uri.clone(), row);
             }
@@ -1503,9 +1779,6 @@ fn emit_null_resource_actions(
                 cached_names.len()
             };
             total_blocks += blocks;
-            // Selection scope filters names by which blocks have
-            // their label-rewrite edit in `v`; broader scopes
-            // take the cached full-doc list verbatim.
             let names_in_scope: Vec<String> = if matches!(scope, Scope::Selection { .. }) {
                 let body = match doc.parsed.body.as_ref() {
                     Some(b) => b,
@@ -3109,6 +3382,7 @@ fn emit_template_file_actions(
     primary_uri: &Url,
     selection: Option<Range>,
     actions: &mut Vec<CodeActionOrCommand>,
+    combined_ref_cache: &mut HashMap<Url, CombinedDeprecationRefs>,
 ) {
     use crate::handlers::code_action_scope::scope_kind;
     use crate::handlers::util::module_supports_templatefile;
@@ -3239,9 +3513,13 @@ fn emit_template_file_actions(
                         .body
                         .as_ref()
                         .map(|body| {
-                            let mut v = Vec::new();
-                            template_file_reference_edits(body, &doc.rope, names, &mut v);
-                            v
+                            template_refs_from_cache(
+                                combined_ref_cache,
+                                uri,
+                                body,
+                                &doc.rope,
+                                names,
+                            )
                         })
                         .unwrap_or_default();
                     ref_edits_cache.insert(cache_key.clone(), computed);
