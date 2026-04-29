@@ -1082,16 +1082,17 @@ fn visit_body_for_null_resource_refs(
     names: Option<&HashSet<String>>,
     out: &mut Vec<TextEdit>,
 ) {
-    for structure in body.iter() {
-        if let Some(attr) = structure.as_attribute() {
-            visit_expr_for_null_resource_refs(&attr.value, rope, names, out);
-        } else if let Some(block) = structure.as_block() {
-            visit_body_for_null_resource_refs(&block.body, rope, names, out);
-        }
-    }
+    walk_expressions(body, &mut |expr| {
+        emit_null_resource_traversal_edits(expr, rope, names, out);
+    });
 }
 
-fn visit_expr_for_null_resource_refs(
+/// Pattern-match `null_resource.<X>[.attr]` at a single
+/// expression node and emit the corresponding rewrite edits.
+/// Called from both the standalone null_resource ref walker
+/// AND the combined deprecation walker; the leaf logic is the
+/// same.
+fn emit_null_resource_traversal_edits(
     expr: &hcl_edit::expr::Expression,
     rope: &Rope,
     names: Option<&HashSet<String>>,
@@ -1100,162 +1101,157 @@ fn visit_expr_for_null_resource_refs(
     use hcl_edit::expr::{Expression as Ex, TraversalOperator};
     use hcl_edit::repr::Span as _;
 
-    match expr {
-        Ex::Traversal(t) => {
-            if let Ex::Variable(v) = &t.expr {
-                if v.as_str() == "null_resource" {
-                    // Pull the resource name (first GetAttr) and
-                    // confirm it passes the optional name filter
-                    // before emitting any edits.
-                    let res_name = t.operators.iter().find_map(|op| match op.value() {
-                        TraversalOperator::GetAttr(ident) => Some(ident.as_str().to_string()),
-                        _ => None,
-                    });
-                    let in_filter = match (names, res_name.as_deref()) {
-                        (None, _) => true,
-                        (Some(_), None) => false,
-                        (Some(filter), Some(n)) => filter.contains(n),
-                    };
-                    if in_filter {
-                        if let Some(span) = v.span() {
-                            if let (Ok(start), Ok(end)) = (
-                                tfls_parser::byte_offset_to_lsp_position(rope, span.start),
-                                tfls_parser::byte_offset_to_lsp_position(rope, span.end),
-                            ) {
-                                out.push(TextEdit {
-                                    range: Range { start, end },
-                                    new_text: "terraform_data".into(),
-                                });
-                            }
-                        }
-                        // The attr accessor (after the resource
-                        // name) is the *second* GetAttr.
-                        let mut idx = 0usize;
-                        for op in t.operators.iter() {
-                            if let TraversalOperator::GetAttr(ident) = op.value() {
-                                idx += 1;
-                                if idx == 2 && ident.as_str() == "triggers" {
-                                    if let Some(span) = ident.span() {
-                                        if let (Ok(start), Ok(end)) = (
-                                            tfls_parser::byte_offset_to_lsp_position(
-                                                rope, span.start,
-                                            ),
-                                            tfls_parser::byte_offset_to_lsp_position(
-                                                rope, span.end,
-                                            ),
-                                        ) {
-                                            out.push(TextEdit {
-                                                range: Range { start, end },
-                                                new_text: "triggers_replace".into(),
-                                            });
-                                        }
-                                    }
-                                    break;
-                                }
-                            }
-                        }
+    let Ex::Traversal(t) = expr else { return };
+    let Ex::Variable(v) = &t.expr else { return };
+    if v.as_str() != "null_resource" {
+        return;
+    }
+    let res_name = t.operators.iter().find_map(|op| match op.value() {
+        TraversalOperator::GetAttr(ident) => Some(ident.as_str().to_string()),
+        _ => None,
+    });
+    let in_filter = match (names, res_name.as_deref()) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(filter), Some(n)) => filter.contains(n),
+    };
+    if !in_filter {
+        return;
+    }
+    if let Some(span) = v.span() {
+        if let (Ok(start), Ok(end)) = (
+            tfls_parser::byte_offset_to_lsp_position(rope, span.start),
+            tfls_parser::byte_offset_to_lsp_position(rope, span.end),
+        ) {
+            out.push(TextEdit {
+                range: Range { start, end },
+                new_text: "terraform_data".into(),
+            });
+        }
+    }
+    // The attr accessor (after the resource name) is the
+    // *second* GetAttr.
+    let mut idx = 0usize;
+    for op in t.operators.iter() {
+        if let TraversalOperator::GetAttr(ident) = op.value() {
+            idx += 1;
+            if idx == 2 && ident.as_str() == "triggers" {
+                if let Some(span) = ident.span() {
+                    if let (Ok(start), Ok(end)) = (
+                        tfls_parser::byte_offset_to_lsp_position(rope, span.start),
+                        tfls_parser::byte_offset_to_lsp_position(rope, span.end),
+                    ) {
+                        out.push(TextEdit {
+                            range: Range { start, end },
+                            new_text: "triggers_replace".into(),
+                        });
                     }
                 }
+                break;
             }
-            visit_expr_for_null_resource_refs(&t.expr, rope, names, out);
+        }
+    }
+}
+
+/// Generic, action-agnostic recursive descent over every
+/// expression in `body`. Calls `f` exactly once per expression
+/// node (in pre-order). Each ref-rewrite walker (null_resource,
+/// template_file) wraps this with a closure that does its
+/// pattern-specific leaf check; one shared traversal lets a
+/// combined entry produce both deprecations' edits in a single
+/// pass.
+fn walk_expressions<F>(body: &Body, f: &mut F)
+where
+    F: FnMut(&hcl_edit::expr::Expression),
+{
+    for structure in body.iter() {
+        if let Some(attr) = structure.as_attribute() {
+            walk_expression(&attr.value, f);
+        } else if let Some(block) = structure.as_block() {
+            walk_expressions(&block.body, f);
+        }
+    }
+}
+
+fn walk_expression<F>(expr: &hcl_edit::expr::Expression, f: &mut F)
+where
+    F: FnMut(&hcl_edit::expr::Expression),
+{
+    use hcl_edit::expr::{Expression as Ex, TraversalOperator};
+
+    f(expr);
+    match expr {
+        Ex::Traversal(t) => {
+            walk_expression(&t.expr, f);
             for op in t.operators.iter() {
                 if let TraversalOperator::Index(e) = op.value() {
-                    visit_expr_for_null_resource_refs(e, rope, names, out);
+                    walk_expression(e, f);
                 }
             }
         }
         Ex::Array(a) => {
             for e in a.iter() {
-                visit_expr_for_null_resource_refs(e, rope, names, out);
+                walk_expression(e, f);
             }
         }
         Ex::Object(o) => {
             for (_k, v) in o.iter() {
-                visit_expr_for_null_resource_refs(v.expr(), rope, names, out);
+                walk_expression(v.expr(), f);
             }
         }
-        Ex::FuncCall(f) => {
-            for arg in f.args.iter() {
-                visit_expr_for_null_resource_refs(arg, rope, names, out);
+        Ex::FuncCall(fc) => {
+            for arg in fc.args.iter() {
+                walk_expression(arg, f);
             }
         }
-        Ex::Parenthesis(p) => visit_expr_for_null_resource_refs(p.inner(), rope, names, out),
-        Ex::UnaryOp(u) => visit_expr_for_null_resource_refs(&u.expr, rope, names, out),
+        Ex::Parenthesis(p) => walk_expression(p.inner(), f),
+        Ex::UnaryOp(u) => walk_expression(&u.expr, f),
         Ex::BinaryOp(b) => {
-            visit_expr_for_null_resource_refs(&b.lhs_expr, rope, names, out);
-            visit_expr_for_null_resource_refs(&b.rhs_expr, rope, names, out);
+            walk_expression(&b.lhs_expr, f);
+            walk_expression(&b.rhs_expr, f);
         }
         Ex::Conditional(c) => {
-            visit_expr_for_null_resource_refs(&c.cond_expr, rope, names, out);
-            visit_expr_for_null_resource_refs(&c.true_expr, rope, names, out);
-            visit_expr_for_null_resource_refs(&c.false_expr, rope, names, out);
+            walk_expression(&c.cond_expr, f);
+            walk_expression(&c.true_expr, f);
+            walk_expression(&c.false_expr, f);
         }
-        Ex::ForExpr(f) => {
-            visit_expr_for_null_resource_refs(&f.intro.collection_expr, rope, names, out);
-            if let Some(k) = f.key_expr.as_ref() {
-                visit_expr_for_null_resource_refs(k, rope, names, out);
+        Ex::ForExpr(fe) => {
+            walk_expression(&fe.intro.collection_expr, f);
+            if let Some(k) = fe.key_expr.as_ref() {
+                walk_expression(k, f);
             }
-            visit_expr_for_null_resource_refs(&f.value_expr, rope, names, out);
-            if let Some(c) = f.cond.as_ref() {
-                visit_expr_for_null_resource_refs(&c.expr, rope, names, out);
+            walk_expression(&fe.value_expr, f);
+            if let Some(c) = fe.cond.as_ref() {
+                walk_expression(&c.expr, f);
             }
         }
-        Ex::StringTemplate(t) => {
-            visit_template_for_null_resource_refs(t.iter(), rope, names, out)
-        }
-        Ex::HeredocTemplate(h) => {
-            visit_template_for_null_resource_refs(h.template.iter(), rope, names, out)
-        }
+        Ex::StringTemplate(t) => walk_template(t.iter(), f),
+        Ex::HeredocTemplate(h) => walk_template(h.template.iter(), f),
         _ => {}
     }
 }
 
-fn visit_template_for_null_resource_refs<'a, I>(
-    elements: I,
-    rope: &Rope,
-    names: Option<&HashSet<String>>,
-    out: &mut Vec<TextEdit>,
-) where
+fn walk_template<'a, I, F>(elements: I, f: &mut F)
+where
     I: IntoIterator<Item = &'a hcl_edit::template::Element>,
+    F: FnMut(&hcl_edit::expr::Expression),
 {
     use hcl_edit::template::{Directive, Element};
     for element in elements {
         match element {
             Element::Literal(_) => {}
-            Element::Interpolation(i) => {
-                visit_expr_for_null_resource_refs(&i.expr, rope, names, out)
-            }
+            Element::Interpolation(i) => walk_expression(&i.expr, f),
             Element::Directive(d) => match d.as_ref() {
                 Directive::If(i) => {
-                    visit_expr_for_null_resource_refs(&i.if_expr.cond_expr, rope, names, out);
-                    visit_template_for_null_resource_refs(
-                        i.if_expr.template.iter(),
-                        rope,
-                        names,
-                        out,
-                    );
+                    walk_expression(&i.if_expr.cond_expr, f);
+                    walk_template(i.if_expr.template.iter(), f);
                     if let Some(else_part) = i.else_expr.as_ref() {
-                        visit_template_for_null_resource_refs(
-                            else_part.template.iter(),
-                            rope,
-                            names,
-                            out,
-                        );
+                        walk_template(else_part.template.iter(), f);
                     }
                 }
-                Directive::For(f) => {
-                    visit_expr_for_null_resource_refs(
-                        &f.for_expr.collection_expr,
-                        rope,
-                        names,
-                        out,
-                    );
-                    visit_template_for_null_resource_refs(
-                        f.for_expr.template.iter(),
-                        rope,
-                        names,
-                        out,
-                    );
+                Directive::For(fe) => {
+                    walk_expression(&fe.for_expr.collection_expr, f);
+                    walk_template(fe.for_expr.template.iter(), f);
                 }
             },
         }
@@ -3001,25 +2997,17 @@ fn template_file_reference_edits(
     if names.is_empty() {
         return;
     }
-    visit_body_for_template_file_refs(body, rope, names, out);
+    walk_expressions(body, &mut |expr| {
+        emit_template_file_traversal_edits(expr, rope, names, out);
+    });
 }
 
-fn visit_body_for_template_file_refs(
-    body: &Body,
-    rope: &Rope,
-    names: &HashSet<String>,
-    out: &mut Vec<TextEdit>,
-) {
-    for structure in body.iter() {
-        if let Some(attr) = structure.as_attribute() {
-            visit_expr_for_template_file_refs(&attr.value, rope, names, out);
-        } else if let Some(block) = structure.as_block() {
-            visit_body_for_template_file_refs(&block.body, rope, names, out);
-        }
-    }
-}
-
-fn visit_expr_for_template_file_refs(
+/// Pattern-match `data.template_file.<X>.rendered` (where
+/// `X ∈ names`) and emit a single edit replacing the whole
+/// traversal with `local.<X>`. Called from both the
+/// standalone template_file ref walker AND the combined
+/// deprecation walker.
+fn emit_template_file_traversal_edits(
     expr: &hcl_edit::expr::Expression,
     rope: &Rope,
     names: &HashSet<String>,
@@ -3028,94 +3016,46 @@ fn visit_expr_for_template_file_refs(
     use hcl_edit::expr::{Expression as Ex, TraversalOperator};
     use hcl_edit::repr::Span as _;
 
-    match expr {
-        Ex::Traversal(t) => {
-            // Match `data.template_file.<X>.rendered`.
-            if let Ex::Variable(v) = &t.expr {
-                if v.as_str() == "data" {
-                    let mut idx = 0usize;
-                    let mut kind: Option<&str> = None;
-                    let mut name: Option<&str> = None;
-                    let mut rendered_seen = false;
-                    for op in t.operators.iter() {
-                        if let TraversalOperator::GetAttr(ident) = op.value() {
-                            idx += 1;
-                            match idx {
-                                1 => kind = Some(ident.as_str()),
-                                2 => name = Some(ident.as_str()),
-                                3 => rendered_seen = ident.as_str() == "rendered",
-                                _ => break,
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-                    if kind == Some("template_file")
-                        && rendered_seen
-                        && name.is_some_and(|n| names.contains(n))
-                    {
-                        // Replace the entire traversal span with `local.<name>`.
-                        if let (Some(span), Some(n)) = (t.span(), name) {
-                            if let (Ok(start), Ok(end)) = (
-                                tfls_parser::byte_offset_to_lsp_position(rope, span.start),
-                                tfls_parser::byte_offset_to_lsp_position(rope, span.end),
-                            ) {
-                                out.push(TextEdit {
-                                    range: Range { start, end },
-                                    new_text: format!("local.{n}"),
-                                });
-                                return;
-                            }
-                        }
-                    }
-                }
+    let Ex::Traversal(t) = expr else { return };
+    let Ex::Variable(v) = &t.expr else { return };
+    if v.as_str() != "data" {
+        return;
+    }
+    let mut idx = 0usize;
+    let mut kind: Option<&str> = None;
+    let mut name: Option<&str> = None;
+    let mut rendered_seen = false;
+    for op in t.operators.iter() {
+        if let TraversalOperator::GetAttr(ident) = op.value() {
+            idx += 1;
+            match idx {
+                1 => kind = Some(ident.as_str()),
+                2 => name = Some(ident.as_str()),
+                3 => rendered_seen = ident.as_str() == "rendered",
+                _ => break,
             }
-            visit_expr_for_template_file_refs(&t.expr, rope, names, out);
-            for op in t.operators.iter() {
-                if let TraversalOperator::Index(e) = op.value() {
-                    visit_expr_for_template_file_refs(e, rope, names, out);
-                }
+        } else {
+            break;
+        }
+    }
+    if kind == Some("template_file")
+        && rendered_seen
+        && name.is_some_and(|n| names.contains(n))
+    {
+        if let (Some(span), Some(n)) = (t.span(), name) {
+            if let (Ok(start), Ok(end)) = (
+                tfls_parser::byte_offset_to_lsp_position(rope, span.start),
+                tfls_parser::byte_offset_to_lsp_position(rope, span.end),
+            ) {
+                out.push(TextEdit {
+                    range: Range { start, end },
+                    new_text: format!("local.{n}"),
+                });
             }
         }
-        Ex::Array(a) => {
-            for e in a.iter() {
-                visit_expr_for_template_file_refs(e, rope, names, out);
-            }
-        }
-        Ex::Object(o) => {
-            for (_k, v) in o.iter() {
-                visit_expr_for_template_file_refs(v.expr(), rope, names, out);
-            }
-        }
-        Ex::FuncCall(f) => {
-            for arg in f.args.iter() {
-                visit_expr_for_template_file_refs(arg, rope, names, out);
-            }
-        }
-        Ex::Parenthesis(p) => visit_expr_for_template_file_refs(p.inner(), rope, names, out),
-        Ex::UnaryOp(u) => visit_expr_for_template_file_refs(&u.expr, rope, names, out),
-        Ex::BinaryOp(b) => {
-            visit_expr_for_template_file_refs(&b.lhs_expr, rope, names, out);
-            visit_expr_for_template_file_refs(&b.rhs_expr, rope, names, out);
-        }
-        Ex::Conditional(c) => {
-            visit_expr_for_template_file_refs(&c.cond_expr, rope, names, out);
-            visit_expr_for_template_file_refs(&c.true_expr, rope, names, out);
-            visit_expr_for_template_file_refs(&c.false_expr, rope, names, out);
-        }
-        Ex::ForExpr(f) => {
-            visit_expr_for_template_file_refs(&f.intro.collection_expr, rope, names, out);
-            if let Some(k) = f.key_expr.as_ref() {
-                visit_expr_for_template_file_refs(k, rope, names, out);
-            }
-            visit_expr_for_template_file_refs(&f.value_expr, rope, names, out);
-            if let Some(c) = f.cond.as_ref() {
-                visit_expr_for_template_file_refs(&c.expr, rope, names, out);
-            }
-        }
-        _ => {}
     }
 }
+
 
 /// Names already declared in any `locals { ... }` block under
 /// `module_dir`. Used to skip conversions that would otherwise
