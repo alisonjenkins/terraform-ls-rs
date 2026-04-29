@@ -209,6 +209,7 @@ Live rules:
 | Kubernetes `_v1` rename family (20 resources)    | `resource`  | kubernetes provider `>= 2.0.0`                  | **Auto-fix** via generic block-rename action    |
 | Azure VM split family (2 resources)              | `resource`  | azurerm `>= 2.40.0`                             | Diagnostic only (table)                         |
 | GCP Dataflow split                               | `resource`  | google `>= 3.45.0`                              | Diagnostic only (table)                         |
+| Vault `vault_generic_secret`                     | `resource`  | vault `>= 3.0.0`                                | Diagnostic only (KV-version-dependent target)   |
 
 Each provider family lives in its own table module
 (`crates/tfls-diag/src/deprecated_<provider>_*.rs`). Adding a
@@ -239,6 +240,16 @@ The multi-rule body walker (`deprecation_rule::diagnostics_from_table`) visits e
 Multi-scope (Selection / File / Module / Workspace), `CodeActionKind` family `source.fixAll.terraform-ls-rs.rename-deprecated-provider-types[.<scope>]`. Per-call cache keyed by `(module_dir, provider_name)` so a 26-spec table touching 2 providers does at most 2 sibling walks per module per code-action call.
 
 `null_resource → terraform_data` keeps its bespoke action (it has additional attribute-key renames `triggers → triggers_replace` that the generic rename doesn't model). Future consolidation possible if more attribute-rename cases arrive.
+
+### Action surfacing variants
+
+Every block-rename rule surfaces three ways:
+
+1. **Multi-scope source-fixAll** — `source.fixAll.terraform-ls-rs.rename-deprecated-provider-types[.scope]`. Picked up by editor source-action menus / save hooks. Selection / File / Module / Workspace.
+2. **Cursor-Instance** — `make_replace_block_at_cursor(state, uri, cursor, body, rope)`. Surfaces a single-block `Convert <from>.<name> to <to>` quickfix when the cursor sits inside a deprecated block. Name-filtered ref rewrites (other instances of the same `<from>` type stay untouched).
+3. **Diagnostic-attached lightbulb** — `make_replace_block_for_diag(state, uri, diag, body, rope)`. Wired into the per-diagnostic dispatch loop in `code_action()`. Reuses the cursor-variant block lookup with `diag.range.start` as the cursor; carries the originating diagnostic in the action's `diagnostics` field so the LSP client pairs them.
+
+null_resource and template_file actions also support all three surfacings via their own bespoke `make_X_at_cursor` / `make_X_for_diag` pairs.
 
 Per-table-module test invariants:
 - `rule_table_invariants` — every rule has a non-empty message, correct provider, valid block_kind.
@@ -282,3 +293,9 @@ Code-action handler runs many independent body scans / formats per invocation. S
 | Module-supports gate cache                | Single emit fn         | Drops on return                                  |
 
 Bench delta from baseline (`tfls-lsp/benches/handlers.rs::code_action_deprecation` at the 500-block synthetic worst-case): **70 ms → ~11 ms (-84%)**. Real-world workspaces benefit further from the cross-call format cache — repeated code-action menu opens on an unchanged doc skip the formatter entirely.
+
+Bench coverage for the freshly-added block-rename path: `code_action_block_rename` (multi-scope) + `code_action_block_rename_cursor` exercise AWS alb (Aliased) + Kubernetes pod (Manual) at 10 / 100 / 250-500 block scales. All sub-5ms baseline.
+
+### Hashing
+
+All internal per-call caches use `rustc_hash::{FxHashMap, FxHashSet}` — server-internal cache keys (Url / `&'static str` / PathBuf / String) are never untrusted user input, so the std-collection default SipHash 1-3 brings DOS resistance we don't need at the cost of ~2-3× slower lookups on short keys. The `WorkspaceEdit::changes` LSP-types-fixed field stays std `HashMap` — internal accumulators that flow into it convert at the LSP boundary via `into_iter().collect()`. `tfls-state::StateStore::documents` is a DashMap; haven't swapped to `FxBuildHasher` yet (cross-crate threading-model change, separate optimisation).

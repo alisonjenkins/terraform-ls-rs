@@ -76,6 +76,7 @@ action that performs the migration:
 | Kubernetes `_v1` rename family (20 resources) | Kubernetes provider `>= 2.0.0` | append `_v1` suffix | **Auto-fix:** rewrite labels + refs + emit COMMENTED-OUT `moved {}` scaffolding in `moved.tf` with a verify-before-uncommenting header. Schemas diverge between unversioned and `_v1` variants — user runs `terraform plan` first; if no destructive changes, uncomment the pre-written `moved` block(s); otherwise use `terraform state mv` or `terraform state rm` + `terraform import` (header explains both paths) |
 | Azure VM split family (2 resources) | azurerm `>= 2.40.0` | OS-specific `_linux_` / `_windows_` variants | Diagnostic only (semantic split, schema diverges) |
 | GCP Dataflow split | google `>= 3.45.0` | `google_dataflow_flex_template_job` | Diagnostic only |
+| Vault `vault_generic_secret` | vault `>= 3.0.0` | `vault_kv_secret_v1` / `vault_kv_secret_v2` | Diagnostic only (target depends on KV backend version) |
 
 **AWS rename family** (one consolidated module, one body walk per code-action call):
 
@@ -323,15 +324,36 @@ clients.
 
 Highlights:
 
-- **33 deprecation diagnostics live** across 4 Terraform-core
-  rules + AWS / Kubernetes / Azure / GCP provider families.
-  Each is module-aware (sibling `versions.tf` /
+- **34 deprecation diagnostics live** across 4 Terraform-core
+  rules + AWS / Kubernetes / Azure / GCP / Vault provider
+  families. Each is module-aware (sibling `versions.tf` /
   `required_providers` constraints suppress correctly) and
   scales atop a generic `DeprecationRule` framework. Adding
   another rename to a provider family is one table entry;
   adding a different-shape deprecation is ~25 lines of new
   module. Both Terraform-core and provider-version gates are
   supported.
+- **Auto-fix for 30+ deprecation rules** — multi-scope
+  (Selection / File / Module / Workspace), cursor-driven
+  Instance variant, and diagnostic-attached lightbulb
+  quickfix all surfaced through the same `BlockRenameSpec`
+  framework. Per-spec migration safety classification
+  (`Aliased` / `RequiresTerraform18` / `Manual`) governs
+  whether `moved {}` blocks emit as real Terraform syntax
+  or as commented-out scaffolding with verify-before-uncommenting
+  headers — no resource rename ever ships a silently-dangerous
+  state-migration emit.
+- **Tier-2 schema-driven catch-all** — every resource / data
+  source / attribute the provider's schema marks
+  `deprecated: true` surfaces as a WARNING automatically.
+  Suppressed on labels covered by tier-1 (richer message +
+  auto-fix). Provider-version-correct by construction (reads
+  the *installed* provider's schema).
+- **Curation tool** — `tfls-deprecation-scrape` walks an
+  initialised workspace's `.terraform/providers/` and surfaces
+  uncovered deprecation candidates worth promoting to tier-1.
+  Rust scaffolding output mode emits a draft `DeprecationRule`
+  module for any chosen type.
 - **Multi-scope code actions** — Instance / Selection / File /
   Module / Workspace, with stable `CodeActionKind` strings clients
   can filter on.
