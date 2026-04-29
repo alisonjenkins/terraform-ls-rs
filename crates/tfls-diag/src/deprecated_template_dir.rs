@@ -1,93 +1,40 @@
 //! `terraform_deprecated_template_dir` — flag uses of the
 //! `data "template_dir"` data source from the unmaintained
-//! `hashicorp/template` provider. Like its sibling
-//! `template_file`, the provider bundles a binary that doesn't
-//! exist on darwin/arm64 + several modern linux variants, so
-//! every project still using it is one toolchain upgrade away
-//! from a hard build failure.
+//! `hashicorp/template` provider. Same darwin/arm64 binary-
+//! incompat death sentence as `template_file`. Unlike its
+//! sibling, there's no 1-line built-in replacement — the
+//! migration pattern is `for_each = fileset(...) +
+//! templatefile()` over a `local_file` resource. Diagnostic-
+//! only.
 //!
-//! Unlike `template_file`, there's no 1-line built-in
-//! replacement: the canonical migration is
-//! `for_each = fileset(<dir>, "**")` + `templatefile()` per
-//! match, written manually. Diagnostic-only — no auto-fix
-//! action.
-//!
-//! Version-aware: gate matches `templatefile()`'s 0.12.0 floor
-//! (the migration pattern relies on both `templatefile()` and
-//! `fileset()`, both of which landed in 0.12).
+//! Thin wrapper over [`crate::deprecation_rule`].
 
-use hcl_edit::repr::Span;
-use hcl_edit::structure::{Body, BlockLabel};
-use lsp_types::{Diagnostic, DiagnosticSeverity};
+use hcl_edit::structure::Body;
+use lsp_types::Diagnostic;
 use ropey::Rope;
-use tfls_parser::hcl_span_to_lsp_range;
+
+use crate::deprecation_rule::{self, DeprecationRule};
+
+const RULE: DeprecationRule = DeprecationRule {
+    block_kind: "data",
+    label: "template_dir",
+    threshold: "0.12.0",
+    message: "`data \"template_dir\"` is part of the unmaintained `hashicorp/template` provider \
+              (the bundled binary is unavailable on darwin/arm64 and several modern Linux \
+              variants). Migrate to `for_each = fileset(<src_dir>, \"**\")` over a `local_file` \
+              resource calling `templatefile()` per match — Terraform 0.12+ ships both functions.",
+};
 
 pub fn deprecated_template_dir_diagnostics(body: &Body, rope: &Rope) -> Vec<Diagnostic> {
-    deprecated_template_dir_diagnostics_for_module(
-        body,
-        rope,
-        templatefile_supported(body),
-    )
+    deprecation_rule::diagnostics(&RULE, body, rope)
 }
 
-/// Module-aware variant. Caller supplies the precomputed
-/// `supports_templatefile` decision aggregated across every
-/// sibling `.tf` in the module.
 pub fn deprecated_template_dir_diagnostics_for_module(
     body: &Body,
     rope: &Rope,
     supports: bool,
 ) -> Vec<Diagnostic> {
-    if !supports {
-        return Vec::new();
-    }
-
-    let mut out = Vec::new();
-    for structure in body.iter() {
-        let Some(block) = structure.as_block() else {
-            continue;
-        };
-        if block.ident.as_str() != "data" {
-            continue;
-        }
-        let Some(label) = block.labels.first() else {
-            continue;
-        };
-        if label_str(label) != Some("template_dir") {
-            continue;
-        }
-        let Some(span) = label.span() else { continue };
-        let Ok(range) = hcl_span_to_lsp_range(rope, span) else {
-            continue;
-        };
-        out.push(Diagnostic {
-            range,
-            severity: Some(DiagnosticSeverity::WARNING),
-            source: Some("terraform-ls-rs".to_string()),
-            message: "`data \"template_dir\"` is part of the unmaintained `hashicorp/template` provider \
-                     (the bundled binary is unavailable on darwin/arm64 and several modern Linux \
-                     variants). Migrate to `for_each = fileset(<src_dir>, \"**\")` over a `local_file` \
-                     resource calling `templatefile()` per match — Terraform 0.12+ ships both functions."
-                .to_string(),
-            ..Default::default()
-        });
-    }
-    out
-}
-
-fn templatefile_supported(body: &Body) -> bool {
-    let Some(constraint) = crate::deprecated_null_resource::extract_required_version(body)
-    else {
-        return true;
-    };
-    crate::deprecated_template_file::supports_templatefile(&constraint)
-}
-
-fn label_str(label: &BlockLabel) -> Option<&str> {
-    match label {
-        BlockLabel::String(s) => Some(s.value().as_str()),
-        BlockLabel::Ident(i) => Some(i.as_str()),
-    }
+    deprecation_rule::diagnostics_for_module(&RULE, body, rope, supports)
 }
 
 #[cfg(test)]
@@ -119,8 +66,6 @@ mod tests {
 
     #[test]
     fn ignores_template_file() {
-        // Sibling deprecation lives in its own module; this one
-        // only flags `template_dir`.
         let d = diags("data \"template_file\" \"x\" { template = \"hi\" }\n");
         assert!(d.is_empty());
     }

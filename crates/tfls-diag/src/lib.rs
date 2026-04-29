@@ -7,6 +7,7 @@ pub mod deprecated_lookup;
 pub mod deprecated_null_resource;
 pub mod deprecated_template_dir;
 pub mod deprecated_template_file;
+pub mod deprecation_rule;
 pub mod documented_outputs;
 pub mod documented_variables;
 pub mod empty_list_equality;
