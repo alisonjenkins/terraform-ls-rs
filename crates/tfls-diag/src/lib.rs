@@ -5,6 +5,7 @@ pub mod deprecated_index;
 pub mod deprecated_interpolation;
 pub mod deprecated_lookup;
 pub mod deprecated_null_resource;
+pub mod deprecated_template_file;
 pub mod documented_outputs;
 pub mod documented_variables;
 pub mod empty_list_equality;
@@ -36,6 +37,10 @@ pub use deprecated_lookup::deprecated_lookup_diagnostics;
 pub use deprecated_null_resource::{
     deprecated_null_resource_diagnostics, deprecated_null_resource_diagnostics_for_module,
     extract_required_version, supports_terraform_data,
+};
+pub use deprecated_template_file::{
+    deprecated_template_file_diagnostics, deprecated_template_file_diagnostics_for_module,
+    supports_templatefile,
 };
 pub use documented_outputs::documented_outputs_diagnostics;
 pub use documented_variables::documented_variables_diagnostics;

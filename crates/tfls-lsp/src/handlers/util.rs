@@ -23,6 +23,23 @@ pub(crate) fn parent_dir(uri: &Url) -> Option<PathBuf> {
 /// Returns `true` when the module declares no constraint (we
 /// can't suppress on absence of evidence).
 pub(crate) fn module_supports_terraform_data(state: &StateStore, primary_uri: &Url) -> bool {
+    module_constraint_admits_at_least(state, primary_uri, tfls_diag::supports_terraform_data)
+}
+
+/// True when the active module's `required_version` admits any
+/// 0.12+ Terraform — the floor at which `templatefile()` exists.
+pub(crate) fn module_supports_templatefile(state: &StateStore, primary_uri: &Url) -> bool {
+    module_constraint_admits_at_least(state, primary_uri, tfls_diag::supports_templatefile)
+}
+
+/// Helper: aggregate the module's `required_version` fragments
+/// and feed them to a per-feature gate predicate. Walks every
+/// `.tf` doc in the active module dir.
+fn module_constraint_admits_at_least(
+    state: &StateStore,
+    primary_uri: &Url,
+    gate: fn(&str) -> bool,
+) -> bool {
     let Some(target_dir) = parent_dir(primary_uri) else {
         return true;
     };
@@ -44,7 +61,7 @@ pub(crate) fn module_supports_terraform_data(state: &StateStore, primary_uri: &U
     if fragments.is_empty() {
         return true;
     }
-    tfls_diag::supports_terraform_data(&fragments.join(", "))
+    gate(&fragments.join(", "))
 }
 
 /// Resolve a `module "<label>" { source = "<source>" }` reference to a

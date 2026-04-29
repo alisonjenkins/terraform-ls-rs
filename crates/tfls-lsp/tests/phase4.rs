@@ -2216,6 +2216,156 @@ async fn null_resource_action_cursor_filters_references_by_name() {
     assert_eq!(triggers_count, 1, "got: {main_edits:?}");
 }
 
+// ── data "template_file" → templatefile() ──────────────────────
+
+#[tokio::test]
+async fn template_file_action_instance_at_cursor() {
+    let u = uri("file:///fmt-tf-1/main.tf");
+    let src = concat!(
+        "data \"template_file\" \"x\" {\n",
+        "  template = \"hi ${a}\"\n",
+        "  vars = { a = \"world\" }\n",
+        "}\n",
+        "output \"o\" { value = data.template_file.x.rendered }\n",
+    );
+    let backend = fresh_backend(src, &u);
+    let actions = all_actions_for(&backend, &u).await;
+    let action = find_action(&actions, "Convert template_file.x to templatefile()");
+    let edits = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .and_then(|c| c.get(&u))
+        .expect("file edits");
+    // 1. data block deleted
+    let delete = edits.iter().find(|e| e.new_text.is_empty()).expect("delete edit");
+    assert_eq!(delete.range.start.line, 0);
+    // 2. locals appended at EOF
+    let append = edits
+        .iter()
+        .find(|e| e.new_text.contains("locals {") && e.new_text.contains("templatefile"))
+        .expect("locals append edit");
+    assert!(append.new_text.contains("\"hi ${a}\""), "template src spliced: {append:?}");
+    assert!(append.new_text.contains("{ a = \"world\" }"), "vars src spliced: {append:?}");
+    // 3. reference rewritten
+    let ref_edit = edits
+        .iter()
+        .find(|e| e.new_text == "local.x")
+        .expect("reference rewrite");
+    assert!(ref_edit.range.start.line >= 4, "ref edit on output line");
+}
+
+#[tokio::test]
+async fn template_file_action_handles_missing_vars() {
+    let u = uri("file:///fmt-tf-novars/main.tf");
+    let src = "data \"template_file\" \"x\" { template = \"hi\" }\n";
+    let backend = fresh_backend(src, &u);
+    let actions = all_actions_for(&backend, &u).await;
+    let action = find_action(&actions, "Convert 1 template_file data block to templatefile() in this file");
+    let edits = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .and_then(|c| c.get(&u))
+        .expect("file edits");
+    let append = edits
+        .iter()
+        .find(|e| e.new_text.contains("locals {"))
+        .expect("locals append");
+    // Empty vars defaults to `{}`.
+    assert!(
+        append.new_text.contains("templatefile(\"hi\", {})"),
+        "missing vars defaults to empty object: {append:?}"
+    );
+}
+
+#[tokio::test]
+async fn template_file_action_file_scope_aggregates_locals() {
+    let u = uri("file:///fmt-tf-multi/main.tf");
+    let src = concat!(
+        "data \"template_file\" \"a\" { template = \"A\" }\n",
+        "data \"template_file\" \"b\" { template = \"B\" }\n",
+    );
+    let backend = fresh_backend(src, &u);
+    let actions = all_actions_for(&backend, &u).await;
+    let action = find_action(&actions, "Convert 2 template_file data blocks to templatefile() in this file");
+    let edits = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .and_then(|c| c.get(&u))
+        .expect("file edits");
+    // Two deletes (one per block) + one combined locals append.
+    let deletes = edits.iter().filter(|e| e.new_text.is_empty()).count();
+    assert_eq!(deletes, 2);
+    let appends: Vec<&_> = edits.iter().filter(|e| e.new_text.contains("locals {")).collect();
+    assert_eq!(appends.len(), 1, "single combined locals block");
+    assert!(appends[0].new_text.contains("a = templatefile"));
+    assert!(appends[0].new_text.contains("b = templatefile"));
+}
+
+#[tokio::test]
+async fn template_file_action_module_rewrites_cross_file_refs() {
+    let main = uri("file:///fmt-tf-mod/main.tf");
+    let outputs = uri("file:///fmt-tf-mod/outputs.tf");
+    let backend = fresh_backend(
+        "data \"template_file\" \"x\" {\n  template = \"hi\"\n  vars = { a = 1 }\n}\n",
+        &main,
+    );
+    add_doc(
+        &backend,
+        &outputs,
+        "output \"o\" { value = data.template_file.x.rendered }\n",
+    );
+    let actions = all_actions_for(&backend, &main).await;
+    let action = find_action(
+        &actions,
+        "Convert 1 template_file data block to templatefile() in this module",
+    );
+    let changes = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .expect("changes");
+    // Host edits in main.tf.
+    assert!(changes.contains_key(&main));
+    // Reference rewrites in outputs.tf.
+    let outputs_edits = changes.get(&outputs).expect("ref edits in outputs.tf");
+    assert!(
+        outputs_edits.iter().any(|e| e.new_text == "local.x"),
+        "got: {outputs_edits:?}"
+    );
+}
+
+#[tokio::test]
+async fn template_file_action_suppressed_when_pre_0_12() {
+    let u = uri("file:///fmt-tf-old/main.tf");
+    let src = concat!(
+        "terraform { required_version = \"< 0.12\" }\n",
+        "data \"template_file\" \"x\" { template = \"hi\" }\n",
+    );
+    let backend = fresh_backend(src, &u);
+    let actions = all_actions_for(&backend, &u).await;
+    let any = actions.iter().any(|a| match a {
+        CodeActionOrCommand::CodeAction(ca) => ca.title.contains("templatefile()"),
+        _ => false,
+    });
+    assert!(!any, "0.12 gate must suppress; got:\n{actions:?}");
+}
+
+#[tokio::test]
+async fn template_file_action_skipped_when_none() {
+    let u = uri("file:///fmt-tf-none/main.tf");
+    let src = "data \"aws_ami\" \"x\" { most_recent = true }\n";
+    let backend = fresh_backend(src, &u);
+    let actions = all_actions_for(&backend, &u).await;
+    let any = actions.iter().any(|a| match a {
+        CodeActionOrCommand::CodeAction(ca) => ca.title.contains("template_file"),
+        _ => false,
+    });
+    assert!(!any, "no action when no template_file blocks");
+}
+
 /// Existing `moved.tf` covers `x` only; `y` still needs a
 /// moved block. Action appends to existing file (no Create op).
 #[tokio::test]

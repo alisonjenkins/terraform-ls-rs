@@ -132,6 +132,25 @@ pub async fn code_action(
         }
     }
 
+    // Cursor-driven `data "template_file"` → `templatefile()` rewrite.
+    if let Some(body) = doc.parsed.body.as_ref() {
+        if let Some(action) = make_replace_template_file_at_cursor(
+            &backend.state,
+            &uri,
+            params.range.start,
+            body,
+            &doc.rope,
+        ) {
+            let already = actions.iter().any(|a| match a {
+                CodeActionOrCommand::CodeAction(ca) => ca.title == action.title,
+                _ => false,
+            });
+            if !already {
+                actions.push(CodeActionOrCommand::CodeAction(action));
+            }
+        }
+    }
+
     // Cursor-driven `null_resource` → `terraform_data` rewrite.
     // Surfaces the Instance variant when the cursor sits inside
     // a `resource "null_resource" "X" { … }` block; broader
@@ -237,6 +256,7 @@ pub async fn code_action(
     );
 
     emit_null_resource_actions(state, &uri, selection, &mut actions);
+    emit_template_file_actions(state, &uri, selection, &mut actions);
 
     // Declare undefined variables — File + Module only (the edit
     // appends to EOF, so Workspace would scatter stubs across
@@ -2672,6 +2692,550 @@ fn placeholder_for(attr: &tfls_schema::AttributeSchema) -> &'static str {
     } else {
         "null"
     }
+}
+
+// ── data "template_file" → templatefile() ─────────────────────────
+
+/// Per-data-block conversion target.
+#[derive(Debug, Clone)]
+struct TemplateFileTarget {
+    name: String,
+    /// Range of the entire `data "template_file" "X" { ... }`
+    /// block, expanded through any trailing newline so the
+    /// deletion leaves no double-blank-line scar.
+    delete_range: Range,
+    /// Source text of the `template = ...` attribute value
+    /// expression. Required (Terraform requires it on this
+    /// data source); blocks without it are skipped (broken
+    /// syntax — no point converting).
+    template_src: String,
+    /// Source text of the `vars = ...` value, or `{}` when
+    /// absent.
+    vars_src: String,
+    /// EOF position in the host doc — where the new `local`
+    /// is appended.
+    eof: Position,
+    /// Whether the host doc needs a leading newline before the
+    /// appended `locals { }` block (file doesn't end with `\n`).
+    needs_leading_newline: bool,
+}
+
+/// Per-doc scan for `data "template_file"` conversions. Returns
+/// one [`TemplateFileTarget`] per convertible data block — the
+/// caller decides which docs / scopes to apply them in.
+fn scan_template_file_targets(rope: &Rope, body: &Body) -> Vec<TemplateFileTarget> {
+    use hcl_edit::repr::Span as _;
+
+    let mut out = Vec::new();
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
+        if block.ident.as_str() != "data" {
+            continue;
+        }
+        if block.labels.first().and_then(label_str) != Some("template_file") {
+            continue;
+        }
+        let Some(name) = block.labels.get(1).and_then(label_str) else {
+            continue;
+        };
+        let Some(block_span) = block.span() else { continue };
+
+        let template_src = match attribute_source(rope, &block.body, "template") {
+            Some(s) => s,
+            None => continue, // malformed input — skip
+        };
+        let vars_src = attribute_source(rope, &block.body, "vars")
+            .unwrap_or_else(|| "{}".to_string());
+
+        // Expand the delete range past one trailing newline so
+        // we don't leave an empty line where the block was.
+        let mut end = block_span.end;
+        let total = rope.len_bytes();
+        if end < total {
+            let next = rope.byte_slice(end..end + 1).to_string();
+            if next == "\n" {
+                end += 1;
+            }
+        }
+        let Ok(start_pos) = tfls_parser::byte_offset_to_lsp_position(rope, block_span.start)
+        else {
+            continue;
+        };
+        let Ok(end_pos) = tfls_parser::byte_offset_to_lsp_position(rope, end) else {
+            continue;
+        };
+
+        let total_bytes = rope.len_bytes();
+        let last_char = if total_bytes == 0 {
+            None
+        } else {
+            rope.byte_slice(total_bytes - 1..total_bytes)
+                .to_string()
+                .chars()
+                .next()
+        };
+        let needs_leading_newline = total_bytes > 0 && last_char != Some('\n');
+        let eof = tfls_parser::byte_offset_to_lsp_position(rope, total_bytes)
+            .unwrap_or(Position::new(0, 0));
+
+        out.push(TemplateFileTarget {
+            name: name.to_string(),
+            delete_range: Range {
+                start: start_pos,
+                end: end_pos,
+            },
+            template_src,
+            vars_src,
+            eof,
+            needs_leading_newline,
+        });
+    }
+    out
+}
+
+/// Read the source text of attribute `key`'s value expression
+/// from `rope` directly, preserving original formatting (heredocs,
+/// multi-line objects, function calls, …).
+fn attribute_source(rope: &Rope, body: &Body, key: &str) -> Option<String> {
+    use hcl_edit::repr::Span as _;
+    for sub in body.iter() {
+        let Some(attr) = sub.as_attribute() else {
+            continue;
+        };
+        if attr.key.as_str() != key {
+            continue;
+        }
+        let span = attr.value.span()?;
+        return Some(rope.byte_slice(span.start..span.end).to_string());
+    }
+    None
+}
+
+/// Build the file-level edits that turn `targets` into the
+/// equivalent `templatefile()` calls in `host_uri`. Each target
+/// emits two edits in the host doc: a delete of the data block
+/// and an EOF append of `locals { name = templatefile(...) }`.
+///
+/// Returns `(edits, names_converted)` so the caller can plumb
+/// the names through the reference-rewrite path.
+fn template_file_host_edits(targets: &[TemplateFileTarget]) -> (Vec<TextEdit>, Vec<String>) {
+    let mut edits = Vec::new();
+    let mut names = Vec::new();
+    if targets.is_empty() {
+        return (edits, names);
+    }
+
+    // Aggregate the locals into ONE appended block per host
+    // doc, keeping the file tidy. EOF + leading-newline state is
+    // identical across all targets in the same doc.
+    let eof = targets[0].eof;
+    let needs_leading_newline = targets[0].needs_leading_newline;
+
+    // 1. Deletes — one per target.
+    for t in targets {
+        edits.push(TextEdit {
+            range: t.delete_range,
+            new_text: String::new(),
+        });
+        names.push(t.name.clone());
+    }
+
+    // 2. Single appended `locals { ... }` block at EOF.
+    let mut block = String::new();
+    if needs_leading_newline {
+        block.push('\n');
+    }
+    block.push('\n');
+    block.push_str("locals {\n");
+    for t in targets {
+        block.push_str(&format!(
+            "  {} = templatefile({}, {})\n",
+            t.name,
+            t.template_src.trim(),
+            t.vars_src.trim(),
+        ));
+    }
+    block.push_str("}\n");
+    edits.push(TextEdit {
+        range: Range {
+            start: eof,
+            end: eof,
+        },
+        new_text: block,
+    });
+
+    (edits, names)
+}
+
+/// Walk `body` and emit edits that rewrite every
+/// `data.template_file.X.rendered` traversal (where `X ∈ names`)
+/// into `local.X`. The `.rendered` accessor is *required* on
+/// `data.template_file` — references that omit it are invalid
+/// Terraform anyway.
+fn template_file_reference_edits(
+    body: &Body,
+    rope: &Rope,
+    names: &HashSet<String>,
+    out: &mut Vec<TextEdit>,
+) {
+    if names.is_empty() {
+        return;
+    }
+    visit_body_for_template_file_refs(body, rope, names, out);
+}
+
+fn visit_body_for_template_file_refs(
+    body: &Body,
+    rope: &Rope,
+    names: &HashSet<String>,
+    out: &mut Vec<TextEdit>,
+) {
+    for structure in body.iter() {
+        if let Some(attr) = structure.as_attribute() {
+            visit_expr_for_template_file_refs(&attr.value, rope, names, out);
+        } else if let Some(block) = structure.as_block() {
+            visit_body_for_template_file_refs(&block.body, rope, names, out);
+        }
+    }
+}
+
+fn visit_expr_for_template_file_refs(
+    expr: &hcl_edit::expr::Expression,
+    rope: &Rope,
+    names: &HashSet<String>,
+    out: &mut Vec<TextEdit>,
+) {
+    use hcl_edit::expr::{Expression as Ex, TraversalOperator};
+    use hcl_edit::repr::Span as _;
+
+    match expr {
+        Ex::Traversal(t) => {
+            // Match `data.template_file.<X>.rendered`.
+            if let Ex::Variable(v) = &t.expr {
+                if v.as_str() == "data" {
+                    let mut idx = 0usize;
+                    let mut kind: Option<&str> = None;
+                    let mut name: Option<&str> = None;
+                    let mut rendered_seen = false;
+                    for op in t.operators.iter() {
+                        if let TraversalOperator::GetAttr(ident) = op.value() {
+                            idx += 1;
+                            match idx {
+                                1 => kind = Some(ident.as_str()),
+                                2 => name = Some(ident.as_str()),
+                                3 => rendered_seen = ident.as_str() == "rendered",
+                                _ => break,
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    if kind == Some("template_file")
+                        && rendered_seen
+                        && name.is_some_and(|n| names.contains(n))
+                    {
+                        // Replace the entire traversal span with `local.<name>`.
+                        if let (Some(span), Some(n)) = (t.span(), name) {
+                            if let (Ok(start), Ok(end)) = (
+                                tfls_parser::byte_offset_to_lsp_position(rope, span.start),
+                                tfls_parser::byte_offset_to_lsp_position(rope, span.end),
+                            ) {
+                                out.push(TextEdit {
+                                    range: Range { start, end },
+                                    new_text: format!("local.{n}"),
+                                });
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            visit_expr_for_template_file_refs(&t.expr, rope, names, out);
+            for op in t.operators.iter() {
+                if let TraversalOperator::Index(e) = op.value() {
+                    visit_expr_for_template_file_refs(e, rope, names, out);
+                }
+            }
+        }
+        Ex::Array(a) => {
+            for e in a.iter() {
+                visit_expr_for_template_file_refs(e, rope, names, out);
+            }
+        }
+        Ex::Object(o) => {
+            for (_k, v) in o.iter() {
+                visit_expr_for_template_file_refs(v.expr(), rope, names, out);
+            }
+        }
+        Ex::FuncCall(f) => {
+            for arg in f.args.iter() {
+                visit_expr_for_template_file_refs(arg, rope, names, out);
+            }
+        }
+        Ex::Parenthesis(p) => visit_expr_for_template_file_refs(p.inner(), rope, names, out),
+        Ex::UnaryOp(u) => visit_expr_for_template_file_refs(&u.expr, rope, names, out),
+        Ex::BinaryOp(b) => {
+            visit_expr_for_template_file_refs(&b.lhs_expr, rope, names, out);
+            visit_expr_for_template_file_refs(&b.rhs_expr, rope, names, out);
+        }
+        Ex::Conditional(c) => {
+            visit_expr_for_template_file_refs(&c.cond_expr, rope, names, out);
+            visit_expr_for_template_file_refs(&c.true_expr, rope, names, out);
+            visit_expr_for_template_file_refs(&c.false_expr, rope, names, out);
+        }
+        Ex::ForExpr(f) => {
+            visit_expr_for_template_file_refs(&f.intro.collection_expr, rope, names, out);
+            if let Some(k) = f.key_expr.as_ref() {
+                visit_expr_for_template_file_refs(k, rope, names, out);
+            }
+            visit_expr_for_template_file_refs(&f.value_expr, rope, names, out);
+            if let Some(c) = f.cond.as_ref() {
+                visit_expr_for_template_file_refs(&c.expr, rope, names, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Scope-aware emit for `template-file-to-templatefile`. Per
+/// scope:
+/// - collect convertible data blocks from each doc in scope
+/// - per host doc: deletes + locals append
+/// - per OTHER doc in module: reference rewrites
+///
+/// Per-module gate (templatefile is 0.12+) cached across docs.
+fn emit_template_file_actions(
+    state: &StateStore,
+    primary_uri: &Url,
+    selection: Option<Range>,
+    actions: &mut Vec<CodeActionOrCommand>,
+) {
+    use crate::handlers::code_action_scope::scope_kind;
+    use crate::handlers::util::module_supports_templatefile;
+    use std::path::PathBuf;
+
+    let mut scopes: Vec<Scope> = Vec::new();
+    if let Some(range) = selection {
+        scopes.push(Scope::Selection { range });
+    }
+    scopes.extend([Scope::File, Scope::Module, Scope::Workspace]);
+
+    let mut module_gate_cache: HashMap<PathBuf, bool> = HashMap::new();
+
+    for scope in scopes {
+        // Pass 1 — collect convertible targets per doc, gated.
+        let mut targets_by_doc: HashMap<Url, Vec<TemplateFileTarget>> = HashMap::new();
+        let mut names_by_module: HashMap<PathBuf, HashSet<String>> = HashMap::new();
+        let mut total_blocks = 0usize;
+
+        for_each_doc_in_scope(state, primary_uri, scope, |doc_uri, doc| {
+            let Some(body) = doc.parsed.body.as_ref() else {
+                return;
+            };
+            if let Some(dir) = crate::handlers::util::parent_dir(doc_uri) {
+                let supports = *module_gate_cache
+                    .entry(dir.clone())
+                    .or_insert_with(|| module_supports_templatefile(state, doc_uri));
+                if !supports {
+                    return;
+                }
+                let mut targets = scan_template_file_targets(&doc.rope, body);
+                if let Scope::Selection { range } = scope {
+                    targets.retain(|t| range_intersects(&t.delete_range, &range));
+                }
+                if targets.is_empty() {
+                    return;
+                }
+                total_blocks += targets.len();
+                let names_set: HashSet<String> =
+                    targets.iter().map(|t| t.name.clone()).collect();
+                names_by_module.entry(dir).or_default().extend(names_set);
+                targets_by_doc.insert(doc_uri.clone(), targets);
+            }
+        });
+
+        if targets_by_doc.is_empty() {
+            continue;
+        }
+
+        // Pass 2 — build per-doc edit lists.
+        let mut edits_by_uri: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+
+        // Host-doc edits.
+        for (uri, targets) in &targets_by_doc {
+            let (host_edits, _names) = template_file_host_edits(targets);
+            edits_by_uri.entry(uri.clone()).or_default().extend(host_edits);
+        }
+
+        // Reference rewrites — for every doc in each affected
+        // module, scan + emit `local.X` rewrites for the names
+        // converted in that module. We already have the gate +
+        // doc set staged.
+        for (module_dir, names) in &names_by_module {
+            for entry in state.documents.iter() {
+                let uri = entry.key();
+                let Ok(path) = uri.to_file_path() else { continue };
+                if path.parent() != Some(module_dir) {
+                    continue;
+                }
+                let doc = entry.value();
+                let Some(body) = doc.parsed.body.as_ref() else {
+                    continue;
+                };
+                let mut ref_edits = Vec::new();
+                template_file_reference_edits(body, &doc.rope, names, &mut ref_edits);
+                if let Scope::Selection { range } = scope {
+                    ref_edits.retain(|e| range_intersects(&e.range, &range));
+                }
+                if ref_edits.is_empty() {
+                    continue;
+                }
+                edits_by_uri
+                    .entry(uri.clone())
+                    .or_default()
+                    .extend(ref_edits);
+            }
+        }
+
+        if edits_by_uri.is_empty() {
+            continue;
+        }
+
+        let plural = if total_blocks == 1 { "" } else { "s" };
+        let where_ = match scope {
+            Scope::Selection { .. } => "selection",
+            Scope::File => "this file",
+            Scope::Module => "this module",
+            Scope::Workspace => "workspace",
+            Scope::Instance => continue,
+        };
+        let title = format!(
+            "Convert {total_blocks} template_file data block{plural} to templatefile() in {where_}"
+        );
+        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+            title,
+            kind: Some(scope_kind(scope, "template-file-to-templatefile")),
+            edit: Some(WorkspaceEdit {
+                changes: Some(edits_by_uri),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }));
+    }
+}
+
+/// Cursor-driven Instance variant: the user is inside a single
+/// `data "template_file" "X"` block. Convert that one block (+
+/// references to it).
+fn make_replace_template_file_at_cursor(
+    state: &StateStore,
+    uri: &Url,
+    cursor: Position,
+    body: &Body,
+    rope: &Rope,
+) -> Option<CodeAction> {
+    use crate::handlers::util::module_supports_templatefile;
+    use hcl_edit::repr::Span as _;
+
+    if !module_supports_templatefile(state, uri) {
+        return None;
+    }
+
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
+        if block.ident.as_str() != "data" {
+            continue;
+        }
+        if block.labels.first().and_then(label_str) != Some("template_file") {
+            continue;
+        }
+        let Some(span) = block.span() else { continue };
+        let Ok(range) = hcl_span_to_lsp_range(rope, span) else {
+            continue;
+        };
+        if !contains(&range, cursor) {
+            continue;
+        }
+
+        // Reuse the per-doc scan, then keep only the matching
+        // target.
+        let name = block.labels.get(1).and_then(label_str)?.to_string();
+        let mut targets = scan_template_file_targets(rope, body);
+        targets.retain(|t| t.name == name);
+        if targets.is_empty() {
+            return None;
+        }
+        let (host_edits, _) = template_file_host_edits(&targets);
+
+        // Refs: only this name, throughout the module.
+        let mut filter = HashSet::new();
+        filter.insert(name.clone());
+        let module_dir = crate::handlers::util::parent_dir(uri);
+        let mut edits_by_uri: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        edits_by_uri.insert(uri.clone(), host_edits);
+
+        if let Some(dir) = module_dir.as_deref() {
+            for entry in state.documents.iter() {
+                let other_uri = entry.key();
+                if other_uri == uri {
+                    // Same doc: rewrite refs that aren't inside
+                    // the (now-deleted) data block. The deletion
+                    // edit will swallow any refs inside the block,
+                    // but block bodies don't typically reference
+                    // themselves anyway — simple union is fine.
+                }
+                let Ok(path) = other_uri.to_file_path() else { continue };
+                if path.parent() != Some(dir) {
+                    continue;
+                }
+                let other_doc = entry.value();
+                let Some(other_body) = other_doc.parsed.body.as_ref() else {
+                    continue;
+                };
+                let mut ref_edits = Vec::new();
+                template_file_reference_edits(
+                    other_body,
+                    &other_doc.rope,
+                    &filter,
+                    &mut ref_edits,
+                );
+                if !ref_edits.is_empty() {
+                    edits_by_uri
+                        .entry(other_uri.clone())
+                        .or_default()
+                        .extend(ref_edits);
+                }
+            }
+        }
+
+        return Some(CodeAction {
+            title: format!("Convert template_file.{name} to templatefile()"),
+            kind: Some(CodeActionKind::QUICKFIX),
+            diagnostics: None,
+            edit: Some(WorkspaceEdit {
+                changes: Some(edits_by_uri),
+                ..Default::default()
+            }),
+            is_preferred: Some(true),
+            ..Default::default()
+        });
+    }
+    None
+}
+
+/// Match the `terraform_deprecated_template_file` warning so the
+/// corresponding `template_file_names_in_body`-aware quickfix
+/// can surface alongside the diag.
+#[allow(dead_code)]
+fn is_deprecated_template_file(diag: &Diagnostic) -> bool {
+    diag.severity == Some(DiagnosticSeverity::WARNING)
+        && diag
+            .message
+            .contains("`data \"template_file\"` is superseded by the built-in `templatefile()`")
 }
 
 #[cfg(test)]

@@ -17,7 +17,7 @@ use tower_lsp::lsp_types::{
 };
 
 use crate::backend::Backend;
-use crate::handlers::util::module_supports_terraform_data;
+use crate::handlers::util::{module_supports_templatefile, module_supports_terraform_data};
 
 pub async fn did_open(backend: &Backend, params: DidOpenTextDocumentParams) {
     let uri = params.text_document.uri.clone();
@@ -448,12 +448,19 @@ pub fn compute_diagnostics_with_lookup(
         // Module-aware gating: a `terraform { required_version }`
         // block typically lives in `versions.tf`, not the file we're
         // scanning, so we aggregate every sibling's constraint before
-        // deciding whether to flag `null_resource` blocks here.
+        // deciding whether to flag `null_resource` / `template_file`
+        // blocks here.
         let null_resource_supported = module_supports_terraform_data(state, uri);
         out.extend(tfls_diag::deprecated_null_resource_diagnostics_for_module(
             body,
             &doc.rope,
             null_resource_supported,
+        ));
+        let templatefile_supported = module_supports_templatefile(state, uri);
+        out.extend(tfls_diag::deprecated_template_file_diagnostics_for_module(
+            body,
+            &doc.rope,
+            templatefile_supported,
         ));
         out.extend(tfls_diag::empty_list_equality_diagnostics(body, &doc.rope));
         out.extend(tfls_diag::map_duplicate_keys_diagnostics(body, &doc.rope));
