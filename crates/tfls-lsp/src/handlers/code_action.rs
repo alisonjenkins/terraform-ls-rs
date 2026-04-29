@@ -314,13 +314,25 @@ fn emit_scoped_actions<F>(
         scopes.push(Scope::Workspace);
     }
 
+    // Per-doc scan cache. The scan callback is deterministic
+    // per (uri, doc), so each scope only differs in its
+    // post-filter (Selection range). Compute once, filter
+    // multiple times.
+    let mut scan_cache: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+
     for scope in scopes {
         let mut edits_by_uri: HashMap<Url, Vec<TextEdit>> = HashMap::new();
         let mut visited = 0usize;
         let mut total_edits = 0usize;
         for_each_doc_in_scope(state, primary_uri, scope, |doc_uri, doc| {
             visited += 1;
-            let mut v = scan(doc_uri, doc);
+            if !scan_cache.contains_key(doc_uri) {
+                scan_cache.insert(doc_uri.clone(), scan(doc_uri, doc));
+            }
+            let mut v = scan_cache
+                .get(doc_uri)
+                .cloned()
+                .unwrap_or_default();
             if let Scope::Selection { range } = scope {
                 v.retain(|e| range_intersects(&e.range, &range));
             }
@@ -1392,56 +1404,70 @@ fn emit_null_resource_actions(
     scopes.extend([Scope::File, Scope::Module, Scope::Workspace]);
 
     let mut module_gate_cache: HashMap<PathBuf, bool> = HashMap::new();
+    // Per-doc scan cache. Workspace iteration in the bench's
+    // single-doc fixture used to walk the same body 4× (once
+    // per scope); now once. For multi-doc workspaces the
+    // savings still scale linearly with scope count.
+    //
+    // Stored value: (full edit set, full block-name list).
+    // `None` marker means "computed and gated out / empty".
+    type ScanRow = Option<(Vec<TextEdit>, Vec<String>)>;
+    let mut scan_cache: HashMap<Url, ScanRow> = HashMap::new();
 
     for scope in scopes {
         let mut edits_by_uri: HashMap<Url, Vec<TextEdit>> = HashMap::new();
         let mut names_by_module: HashMap<PathBuf, Vec<String>> = HashMap::new();
         let mut total_blocks = 0usize;
         for_each_doc_in_scope(state, primary_uri, scope, |doc_uri, doc| {
-            let Some(body) = doc.parsed.body.as_ref() else {
+            // Compute-or-fetch from cache.
+            if !scan_cache.contains_key(doc_uri) {
+                let row = (|| -> ScanRow {
+                    let body = doc.parsed.body.as_ref()?;
+                    if let Some(dir) = crate::handlers::util::parent_dir(doc_uri) {
+                        let supports = *module_gate_cache
+                            .entry(dir)
+                            .or_insert_with(|| module_supports_terraform_data(state, doc_uri));
+                        if !supports {
+                            return None;
+                        }
+                    } else if !module_supports_terraform_data(state, doc_uri) {
+                        return None;
+                    }
+                    let edits = scan_null_resource_to_terraform_data(body, &doc.rope);
+                    if edits.is_empty() {
+                        return None;
+                    }
+                    Some((edits, null_resource_names_in_body(body)))
+                })();
+                scan_cache.insert(doc_uri.clone(), row);
+            }
+            let Some(Some((cached_edits, cached_names))) = scan_cache.get(doc_uri) else {
                 return;
             };
-            // Gate per the doc's *own* module — a Workspace sweep
-            // visits docs across many modules.
-            if let Some(dir) = crate::handlers::util::parent_dir(doc_uri) {
-                let supports = *module_gate_cache
-                    .entry(dir)
-                    .or_insert_with(|| module_supports_terraform_data(state, doc_uri));
-                if !supports {
-                    return;
-                }
-            } else if !module_supports_terraform_data(state, doc_uri) {
-                return;
-            }
-            let mut v = scan_null_resource_to_terraform_data(body, &doc.rope);
+            let mut v = cached_edits.clone();
             if let Scope::Selection { range } = scope {
                 v.retain(|e| range_intersects(&e.range, &range));
             }
             if v.is_empty() {
                 return;
             }
-            // Block count — for Selection scope, count only
-            // blocks that actually intersect the selection (an
-            // edit there implies the block is in range).
-            let names = null_resource_names_in_body(body);
             let blocks = if matches!(scope, Scope::Selection { .. }) {
-                // Each block contributes at least one edit (the
-                // label). Count distinct label-rewrite edits.
                 v.iter().filter(|e| e.new_text == "\"terraform_data\"").count()
             } else {
-                names.len()
+                cached_names.len()
             };
             total_blocks += blocks;
-            // Track the names this doc contributed so the per-
-            // module moved.tf builder can emit one `moved` block
-            // per converted resource. For Selection scope, the
-            // edit set was filtered to the selected range —
-            // restrict the names too so we don't emit moved
-            // blocks for resources we didn't actually rewrite.
+            // Selection scope filters names by which blocks have
+            // their label-rewrite edit in `v`; broader scopes
+            // take the cached full-doc list verbatim.
             let names_in_scope: Vec<String> = if matches!(scope, Scope::Selection { .. }) {
+                let body = match doc.parsed.body.as_ref() {
+                    Some(b) => b,
+                    None => return,
+                };
                 names_intersecting_edits(body, &v)
             } else {
-                names
+                cached_names.clone()
             };
             edits_by_uri.insert(doc_uri.clone(), v);
             if let Some(dir) = crate::handlers::util::parent_dir(doc_uri) {
@@ -3106,6 +3132,16 @@ fn emit_template_file_actions(
 
     let mut module_gate_cache: HashMap<PathBuf, bool> = HashMap::new();
     let mut module_locals_cache: HashMap<PathBuf, HashSet<String>> = HashMap::new();
+    // Per-doc scan cache (module dir + already-collision-filtered
+    // targets). One walk per doc per code_action call regardless
+    // of scope count.
+    let mut targets_cache: HashMap<Url, Option<(PathBuf, Vec<TemplateFileTarget>)>> =
+        HashMap::new();
+    // Per-(uri, sorted name set) ref-walk cache — same names
+    // across File/Module/Workspace scopes hit one walk. Names
+    // sorted so the key is canonical regardless of insertion
+    // order from the per-doc names_set.
+    let mut ref_edits_cache: HashMap<(Url, Vec<String>), Vec<TextEdit>> = HashMap::new();
 
     for scope in scopes {
         // Pass 1 — collect convertible targets per doc, gated.
@@ -3114,37 +3150,46 @@ fn emit_template_file_actions(
         let mut total_blocks = 0usize;
 
         for_each_doc_in_scope(state, primary_uri, scope, |doc_uri, doc| {
-            let Some(body) = doc.parsed.body.as_ref() else {
+            if !targets_cache.contains_key(doc_uri) {
+                let row = (|| -> Option<(PathBuf, Vec<TemplateFileTarget>)> {
+                    let body = doc.parsed.body.as_ref()?;
+                    let dir = crate::handlers::util::parent_dir(doc_uri)?;
+                    let supports = *module_gate_cache
+                        .entry(dir.clone())
+                        .or_insert_with(|| module_supports_templatefile(state, doc_uri));
+                    if !supports {
+                        return None;
+                    }
+                    let existing_locals = module_locals_cache
+                        .entry(dir.clone())
+                        .or_insert_with(|| collect_existing_local_names(state, &dir));
+                    let mut targets = scan_template_file_targets(&doc.rope, body);
+                    targets.retain(|t| !existing_locals.contains(&t.name));
+                    if targets.is_empty() {
+                        return None;
+                    }
+                    Some((dir, targets))
+                })();
+                targets_cache.insert(doc_uri.clone(), row);
+            }
+            let Some(Some((dir, cached_targets))) = targets_cache.get(doc_uri) else {
                 return;
             };
-            if let Some(dir) = crate::handlers::util::parent_dir(doc_uri) {
-                let supports = *module_gate_cache
-                    .entry(dir.clone())
-                    .or_insert_with(|| module_supports_templatefile(state, doc_uri));
-                if !supports {
-                    return;
-                }
-                let existing_locals = module_locals_cache
-                    .entry(dir.clone())
-                    .or_insert_with(|| collect_existing_local_names(state, &dir));
-                let mut targets = scan_template_file_targets(&doc.rope, body);
-                // Drop targets that would collide with an existing
-                // `local.X` — Terraform errors on duplicate local
-                // definitions, and silently emitting a broken
-                // edit set is worse than emitting nothing.
-                targets.retain(|t| !existing_locals.contains(&t.name));
-                if let Scope::Selection { range } = scope {
-                    targets.retain(|t| range_intersects(&t.delete_range, &range));
-                }
-                if targets.is_empty() {
-                    return;
-                }
-                total_blocks += targets.len();
-                let names_set: HashSet<String> =
-                    targets.iter().map(|t| t.name.clone()).collect();
-                names_by_module.entry(dir).or_default().extend(names_set);
-                targets_by_doc.insert(doc_uri.clone(), targets);
+            let mut targets = cached_targets.clone();
+            if let Scope::Selection { range } = scope {
+                targets.retain(|t| range_intersects(&t.delete_range, &range));
             }
+            if targets.is_empty() {
+                return;
+            }
+            total_blocks += targets.len();
+            let names_set: HashSet<String> =
+                targets.iter().map(|t| t.name.clone()).collect();
+            names_by_module
+                .entry(dir.clone())
+                .or_default()
+                .extend(names_set);
+            targets_by_doc.insert(doc_uri.clone(), targets);
         });
 
         if targets_by_doc.is_empty() {
@@ -3184,18 +3229,40 @@ fn emit_template_file_actions(
         // text either way; the filter just keeps the edit set
         // legal.
         for (module_dir, names) in &names_by_module {
+            // Canonical sorted-names key for this scope's
+            // converted set in this module. Re-used between
+            // scopes that converge on the same name set.
+            let mut names_key: Vec<String> = names.iter().cloned().collect();
+            names_key.sort();
+
             for entry in state.documents.iter() {
                 let uri = entry.key();
                 let Ok(path) = uri.to_file_path() else { continue };
                 if path.parent() != Some(module_dir) {
                     continue;
                 }
-                let doc = entry.value();
-                let Some(body) = doc.parsed.body.as_ref() else {
+                let cache_key = (uri.clone(), names_key.clone());
+                if !ref_edits_cache.contains_key(&cache_key) {
+                    let doc = entry.value();
+                    let computed = doc
+                        .parsed
+                        .body
+                        .as_ref()
+                        .map(|body| {
+                            let mut v = Vec::new();
+                            template_file_reference_edits(body, &doc.rope, names, &mut v);
+                            v
+                        })
+                        .unwrap_or_default();
+                    ref_edits_cache.insert(cache_key.clone(), computed);
+                }
+                let mut ref_edits = ref_edits_cache
+                    .get(&cache_key)
+                    .cloned()
+                    .unwrap_or_default();
+                if ref_edits.is_empty() {
                     continue;
-                };
-                let mut ref_edits = Vec::new();
-                template_file_reference_edits(body, &doc.rope, names, &mut ref_edits);
+                }
                 if let Some(deletes) = delete_ranges_by_uri.get(uri) {
                     ref_edits.retain(|e| {
                         !deletes.iter().any(|d| range_intersects(d, &e.range))
