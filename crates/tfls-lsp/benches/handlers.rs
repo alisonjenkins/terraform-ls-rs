@@ -11,8 +11,8 @@ use tfls_state::{DocumentState, JobQueue, StateStore};
 use tokio::runtime::Runtime;
 use tower_lsp::LspService;
 use tower_lsp::lsp_types::{
-    DocumentSymbolParams, PartialResultParams, TextDocumentIdentifier, Url,
-    WorkDoneProgressParams, WorkspaceSymbolParams,
+    CodeActionContext, CodeActionParams, DocumentSymbolParams, PartialResultParams, Position,
+    Range, TextDocumentIdentifier, Url, WorkDoneProgressParams, WorkspaceSymbolParams,
 };
 
 /// Build a realistic workspace with many symbols across many files.
@@ -120,10 +120,91 @@ fn bench_enclosing_call(c: &mut Criterion) {
     });
 }
 
+/// Populate a single .tf file in `dir` with a configurable mix of
+/// deprecated blocks + reference sites. Used to stress the per-doc
+/// scans + reference walkers in the code-action handler.
+fn populate_deprecation_workload(
+    state: &StateStore,
+    dir: &str,
+    null_resources: usize,
+    template_files: usize,
+    refs_per_block: usize,
+) -> Url {
+    let mut src = String::new();
+    src.push_str("terraform { required_version = \">= 1.5\" }\n");
+
+    // null_resource blocks + N refs each.
+    for i in 0..null_resources {
+        src.push_str(&format!(
+            "resource \"null_resource\" \"r{i}\" {{\n  triggers = {{ k = \"v{i}\" }}\n}}\n"
+        ));
+        for j in 0..refs_per_block {
+            src.push_str(&format!(
+                "output \"o_nr_{i}_{j}\" {{ value = null_resource.r{i}.triggers }}\n"
+            ));
+        }
+    }
+
+    // template_file blocks + N refs each.
+    for i in 0..template_files {
+        src.push_str(&format!(
+            "data \"template_file\" \"t{i}\" {{\n  template = \"hi ${{name}}\"\n  vars = {{ name = \"x{i}\" }}\n}}\n"
+        ));
+        for j in 0..refs_per_block {
+            src.push_str(&format!(
+                "output \"o_tf_{i}_{j}\" {{ value = data.template_file.t{i}.rendered }}\n"
+            ));
+        }
+    }
+
+    let uri = Url::parse(&format!("file:///{dir}/main.tf")).expect("url");
+    state.upsert_document(DocumentState::new(uri.clone(), &src, 1));
+    uri
+}
+
+fn bench_code_action_deprecation_pipeline(c: &mut Criterion) {
+    let rt = Runtime::new().expect("runtime");
+
+    let mut group = c.benchmark_group("code_action_deprecation");
+    // Realistic large module: 100 deprecated blocks + 5 refs each
+    // = 1k+ traversals to walk on every code-action invocation.
+    for &(label, n_each, refs_per) in &[
+        ("small/10_blocks_2_refs", 10usize, 2usize),
+        ("medium/100_blocks_5_refs", 100, 5),
+        ("large/500_blocks_5_refs", 500, 5),
+    ] {
+        let state = Arc::new(StateStore::new());
+        let uri = populate_deprecation_workload(&state, label, n_each, n_each, refs_per);
+        let jobs = Arc::new(JobQueue::new());
+        let backend = backend(Arc::clone(&state), Arc::clone(&jobs));
+
+        let params = CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            range: Range {
+                start: Position::new(2, 0),
+                end: Position::new(2, 0),
+            },
+            context: CodeActionContext::default(),
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        };
+
+        group.bench_function(label, |b| {
+            b.iter(|| {
+                rt.block_on(async {
+                    let _ = handlers::code_action::code_action(&backend, params.clone()).await;
+                });
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_workspace_symbol,
     bench_document_symbol,
-    bench_enclosing_call
+    bench_enclosing_call,
+    bench_code_action_deprecation_pipeline
 );
 criterion_main!(benches);
