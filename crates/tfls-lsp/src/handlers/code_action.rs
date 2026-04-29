@@ -3041,6 +3041,43 @@ fn visit_expr_for_template_file_refs(
     }
 }
 
+/// Names already declared in any `locals { ... }` block under
+/// `module_dir`. Used to skip conversions that would otherwise
+/// produce a "Duplicate local value definition" Terraform
+/// error: a `data "template_file" "x"` converted next to an
+/// existing `local.x` would collide.
+fn collect_existing_local_names(
+    state: &StateStore,
+    module_dir: &std::path::Path,
+) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for entry in state.documents.iter() {
+        let uri = entry.key();
+        let Ok(path) = uri.to_file_path() else { continue };
+        if path.parent() != Some(module_dir) {
+            continue;
+        }
+        let doc = entry.value();
+        let Some(body) = doc.parsed.body.as_ref() else {
+            continue;
+        };
+        for structure in body.iter() {
+            let Some(block) = structure.as_block() else {
+                continue;
+            };
+            if block.ident.as_str() != "locals" {
+                continue;
+            }
+            for sub in block.body.iter() {
+                if let Some(attr) = sub.as_attribute() {
+                    out.insert(attr.key.as_str().to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Scope-aware emit for `template-file-to-templatefile`. Per
 /// scope:
 /// - collect convertible data blocks from each doc in scope
@@ -3048,6 +3085,9 @@ fn visit_expr_for_template_file_refs(
 /// - per OTHER doc in module: reference rewrites
 ///
 /// Per-module gate (templatefile is 0.12+) cached across docs.
+/// Conversions whose name collides with an existing `local.X`
+/// in the module are skipped (Terraform forbids duplicate
+/// local definitions).
 fn emit_template_file_actions(
     state: &StateStore,
     primary_uri: &Url,
@@ -3065,6 +3105,7 @@ fn emit_template_file_actions(
     scopes.extend([Scope::File, Scope::Module, Scope::Workspace]);
 
     let mut module_gate_cache: HashMap<PathBuf, bool> = HashMap::new();
+    let mut module_locals_cache: HashMap<PathBuf, HashSet<String>> = HashMap::new();
 
     for scope in scopes {
         // Pass 1 — collect convertible targets per doc, gated.
@@ -3083,7 +3124,15 @@ fn emit_template_file_actions(
                 if !supports {
                     return;
                 }
+                let existing_locals = module_locals_cache
+                    .entry(dir.clone())
+                    .or_insert_with(|| collect_existing_local_names(state, &dir));
                 let mut targets = scan_template_file_targets(&doc.rope, body);
+                // Drop targets that would collide with an existing
+                // `local.X` — Terraform errors on duplicate local
+                // definitions, and silently emitting a broken
+                // edit set is worse than emitting nothing.
+                targets.retain(|t| !existing_locals.contains(&t.name));
                 if let Scope::Selection { range } = scope {
                     targets.retain(|t| range_intersects(&t.delete_range, &range));
                 }
@@ -3206,6 +3255,13 @@ fn make_replace_template_file_at_cursor(
         // Reuse the per-doc scan, then keep only the matching
         // target.
         let name = block.labels.get(1).and_then(label_str)?.to_string();
+        // Refuse on collision with an existing `local.<name>` —
+        // Terraform errors on duplicate local definitions.
+        if let Some(dir) = crate::handlers::util::parent_dir(uri) {
+            if collect_existing_local_names(state, &dir).contains(&name) {
+                return None;
+            }
+        }
         let mut targets = scan_template_file_targets(rope, body);
         targets.retain(|t| t.name == name);
         if targets.is_empty() {

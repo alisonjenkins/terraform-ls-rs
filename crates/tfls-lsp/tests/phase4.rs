@@ -2462,6 +2462,77 @@ async fn template_file_action_suppressed_when_pre_0_12() {
     assert!(!any, "0.12 gate must suppress; got:\n{actions:?}");
 }
 
+/// `local.x` already exists in same module → converting
+/// `data "template_file" "x"` would emit a duplicate
+/// `locals { x = ... }` block (Terraform errors). Action must
+/// SKIP that name.
+#[tokio::test]
+async fn template_file_action_skips_local_collision_same_file() {
+    let u = uri("file:///fmt-tf-coll-1/main.tf");
+    let src = concat!(
+        "locals { x = \"already-here\" }\n",
+        "data \"template_file\" \"x\" { template = \"hi\" }\n",
+    );
+    let backend = fresh_backend(src, &u);
+    let actions = all_actions_for(&backend, &u).await;
+    let any = actions.iter().any(|a| match a {
+        CodeActionOrCommand::CodeAction(ca) => ca.title.contains("templatefile()"),
+        _ => false,
+    });
+    assert!(!any, "collision must suppress action; got:\n{actions:?}");
+}
+
+/// Collision detection must walk siblings — `local.x` declared
+/// in `versions.tf` still gates conversion of `data.template_file.x`
+/// in `main.tf`.
+#[tokio::test]
+async fn template_file_action_skips_local_collision_cross_file() {
+    let main = uri("file:///fmt-tf-coll-2/main.tf");
+    let extra = uri("file:///fmt-tf-coll-2/extra.tf");
+    let backend = fresh_backend(
+        "data \"template_file\" \"x\" { template = \"hi\" }\n",
+        &main,
+    );
+    add_doc(&backend, &extra, "locals { x = \"already-here\" }\n");
+    let actions = all_actions_for(&backend, &main).await;
+    let any = actions.iter().any(|a| match a {
+        CodeActionOrCommand::CodeAction(ca) => ca.title.contains("templatefile()"),
+        _ => false,
+    });
+    assert!(!any, "cross-file collision must suppress; got:\n{actions:?}");
+}
+
+/// Only the colliding name is dropped: a 2-block file with one
+/// collision still converts the non-colliding block.
+#[tokio::test]
+async fn template_file_action_partial_skip_on_collision() {
+    let u = uri("file:///fmt-tf-coll-3/main.tf");
+    let src = concat!(
+        "locals { x = \"already-here\" }\n",
+        "data \"template_file\" \"x\" { template = \"hi\" }\n",
+        "data \"template_file\" \"y\" { template = \"world\" }\n",
+    );
+    let backend = fresh_backend(src, &u);
+    let actions = all_actions_for(&backend, &u).await;
+    // Title should reflect 1 block (y), not 2.
+    let action = find_action(
+        &actions,
+        "Convert 1 template_file data block to templatefile() in this file",
+    );
+    let edits = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .and_then(|c| c.get(&u))
+        .expect("file edits");
+    let append = edits
+        .iter()
+        .find(|e| e.new_text.contains("locals {"))
+        .expect("locals append");
+    assert!(append.new_text.contains("y = templatefile"), "y converted: {append:?}");
+    assert!(!append.new_text.contains("x = templatefile"), "x skipped: {append:?}");
+}
+
 #[tokio::test]
 async fn template_file_action_skipped_when_none() {
     let u = uri("file:///fmt-tf-none/main.tf");
