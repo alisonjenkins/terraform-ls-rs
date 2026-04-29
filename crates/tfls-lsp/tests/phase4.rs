@@ -1654,3 +1654,188 @@ async fn scope_kind_namespacing_matches_spec() {
     assert!(seen_module, "module kind emitted");
     assert!(seen_workspace, "workspace kind emitted");
 }
+
+// ── format-as-code-action ──────────────────────────────────────────
+
+#[tokio::test]
+async fn format_action_file_emits_when_unformatted() {
+    // Mis-aligned `=` should produce a "Format file" action.
+    let u = uri("file:///fmt-mod-1/main.tf");
+    let src = "resource \"x\" \"y\" {\n  ami = \"a\"\n  instance_type = \"t\"\n}\n";
+    let backend = fresh_backend(src, &u);
+
+    let actions = all_actions_for(&backend, &u).await;
+    let action = find_action(&actions, "Format file");
+    let edits = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .and_then(|c| c.get(&u))
+        .expect("file edit");
+    assert_eq!(edits.len(), 1, "single whole-file TextEdit");
+    assert!(
+        edits[0].new_text.contains("ami           = \"a\""),
+        "expected aligned output, got:\n{}",
+        edits[0].new_text
+    );
+}
+
+#[tokio::test]
+async fn format_action_file_skipped_when_clean() {
+    // Already-formatted input — Format action must NOT appear.
+    let u = uri("file:///fmt-mod-2/main.tf");
+    let src = "resource \"x\" \"y\" {\n  ami           = \"a\"\n  instance_type = \"t\"\n}\n";
+    let backend = fresh_backend(src, &u);
+
+    let actions = all_actions_for(&backend, &u).await;
+    let any_format = actions.iter().any(|a| match a {
+        CodeActionOrCommand::CodeAction(ca) => ca.title.starts_with("Format"),
+        _ => false,
+    });
+    assert!(!any_format, "no format action when buffer already formatted");
+}
+
+#[tokio::test]
+async fn format_action_module_covers_dirty_siblings_only() {
+    // Three .tf in same module: clean, dirty, dirty.
+    // Expect "Format 2 .tf files in this module" with edits
+    // covering only the two dirty URIs.
+    let a = uri("file:///fmt-mod-3/a.tf");
+    let b = uri("file:///fmt-mod-3/b.tf");
+    let c = uri("file:///fmt-mod-3/c.tf");
+    // a.tf is already idempotent under minimal style (multi-
+    // line variable block) — proves the action skips clean
+    // siblings when computing the count.
+    let backend = fresh_backend("variable \"a\" {\n  default = 1\n}\n", &a);
+    add_doc(
+        &backend,
+        &b,
+        "resource \"x\" \"y\" {\n  ami = \"a\"\n  instance_type = \"t\"\n}\n",
+    );
+    add_doc(
+        &backend,
+        &c,
+        "resource \"x\" \"z\" {\n  ami = \"a\"\n  count = 1\n}\n",
+    );
+
+    let actions = all_actions_for(&backend, &a).await;
+    let action = find_action(&actions, "Format 2 .tf files in this module");
+    let changes = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .expect("changes map");
+    assert_eq!(changes.len(), 2, "exactly the two dirty siblings");
+    assert!(!changes.contains_key(&a), "clean a.tf untouched");
+    assert!(changes.contains_key(&b), "dirty b.tf included");
+    assert!(changes.contains_key(&c), "dirty c.tf included");
+}
+
+#[tokio::test]
+async fn format_action_workspace_skips_clean_files() {
+    // Cross-dir: one dirty, one clean. Workspace count = 1.
+    let dirty = uri("file:///fmt-ws-A/main.tf");
+    let clean = uri("file:///fmt-ws-B/main.tf");
+    let backend = fresh_backend(
+        "resource \"x\" \"y\" {\n  ami = \"a\"\n  instance_type = \"t\"\n}\n",
+        &dirty,
+    );
+    add_doc(&backend, &clean, "variable \"x\" {\n  default = 1\n}\n");
+
+    let actions = all_actions_for(&backend, &dirty).await;
+    let action = find_action(&actions, "Format 1 .tf file in workspace");
+    let changes = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .unwrap();
+    assert_eq!(changes.len(), 1);
+    assert!(changes.contains_key(&dirty));
+    assert!(!changes.contains_key(&clean));
+}
+
+#[tokio::test]
+async fn format_action_selection_uses_range() {
+    // Visual selection over two unaligned attribute lines.
+    let u = uri("file:///fmt-mod-4/main.tf");
+    let src = "resource \"x\" \"y\" {\n  ami = \"a\"\n  instance_type = \"t\"\n}\n";
+    let backend = fresh_backend(src, &u);
+
+    // Select lines 1..3 (inclusive) — the two attribute lines + close.
+    let range = Range {
+        start: Position::new(1, 0),
+        end: Position::new(3, 0),
+    };
+    let actions = all_actions_for_selection(&backend, &u, range).await;
+    let action = find_action(&actions, "Format selection");
+    let edits = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .and_then(|c| c.get(&u))
+        .expect("selection edit");
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].range, range, "edit covers exactly the selection");
+}
+
+#[tokio::test]
+async fn format_action_respects_runtime_style_toggle() {
+    // Source has resources in non-alphabetical order. Default
+    // (minimal) format leaves order intact. Switch to
+    // opinionated → format-action edit reorders them.
+    use tfls_state::FormatStyle;
+    let u = uri("file:///fmt-mod-5/main.tf");
+    let src = concat!(
+        "resource \"x\" \"z\" { ami = \"z\" }\n",
+        "resource \"x\" \"a\" { ami = \"a\" }\n",
+    );
+    let backend = fresh_backend(src, &u);
+
+    // Minimal: order preserved → only alignment may change.
+    {
+        let actions = all_actions_for(&backend, &u).await;
+        if let Some(a) = actions.iter().find_map(|x| match x {
+            CodeActionOrCommand::CodeAction(ca) if ca.title == "Format file" => Some(ca),
+            _ => None,
+        }) {
+            let edits = a
+                .edit
+                .as_ref()
+                .and_then(|e| e.changes.as_ref())
+                .and_then(|c| c.get(&u))
+                .unwrap();
+            let z_pos = edits[0].new_text.find('z').unwrap();
+            let a_pos = edits[0].new_text.find("\"a\"").unwrap();
+            assert!(
+                z_pos < a_pos,
+                "minimal: z must precede a, got:\n{}",
+                edits[0].new_text
+            );
+        }
+    }
+
+    // Switch to opinionated.
+    let json: sonic_rs::Value =
+        sonic_rs::from_str(r#"{"formatStyle":"opinionated"}"#).unwrap();
+    backend.state.config.update_from_json(&json);
+    assert_eq!(
+        backend.state.config.snapshot().format_style,
+        FormatStyle::Opinionated
+    );
+
+    let actions = all_actions_for(&backend, &u).await;
+    let action = find_action(&actions, "Format file");
+    let edits = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .and_then(|c| c.get(&u))
+        .unwrap();
+    let a_pos = edits[0].new_text.find("\"a\"").unwrap();
+    let z_pos = edits[0].new_text.find("\"z\"").unwrap();
+    assert!(
+        a_pos < z_pos,
+        "opinionated: a must precede z, got:\n{}",
+        edits[0].new_text
+    );
+}

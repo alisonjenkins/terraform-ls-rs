@@ -125,7 +125,7 @@ pub async fn on_type_formatting(
     }]))
 }
 
-fn whole_document_range(rope: &Rope) -> Range {
+pub(super) fn whole_document_range(rope: &Rope) -> Range {
     let last_line = rope.len_lines().saturating_sub(1) as u32;
     let last_line_len = rope
         .get_line(last_line as usize)
@@ -137,7 +137,7 @@ fn whole_document_range(rope: &Rope) -> Range {
     }
 }
 
-fn slice_text(rope: &Rope, range: Range) -> Option<String> {
+pub(super) fn slice_text(rope: &Rope, range: Range) -> Option<String> {
     let start = lsp_position_to_byte_offset(rope, range.start).ok()?;
     let end = lsp_position_to_byte_offset(rope, range.end).ok()?;
     if end < start {

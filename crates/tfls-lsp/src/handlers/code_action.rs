@@ -215,6 +215,12 @@ pub async fn code_action(
     emit_move_outputs_actions(state, &uri, &mut actions);
     emit_move_variables_actions(state, &uri, &mut actions);
 
+    // Format the buffer / module / workspace under the active
+    // `formatStyle`. Selection variant when the user has a
+    // visual range. Skips files that are already formatted so
+    // the menu only shows actionable entries.
+    emit_format_actions(state, &uri, selection, &mut actions);
+
     if actions.is_empty() { Ok(None) } else { Ok(Some(actions)) }
 }
 
@@ -670,6 +676,128 @@ fn emit_move_variables_actions(
         is_preferred: None,
         ..Default::default()
     }));
+}
+
+/// Format a single document under the active style. Returns a
+/// whole-file `TextEdit` when the formatted output differs from
+/// the input; `None` when the doc is already formatted, the
+/// rope is empty, or the formatter rejected the source (parse
+/// error, etc).
+///
+/// Pure — no LSP-state access. Caller decides which docs to
+/// scan and which style to use.
+fn scan_format(
+    rope: &Rope,
+    style: tfls_state::FormatStyle,
+) -> Option<TextEdit> {
+    let text = rope.to_string();
+    let formatted = tfls_format::format_source(&text, style).ok()?;
+    if formatted == text {
+        return None;
+    }
+    Some(TextEdit {
+        range: crate::handlers::formatting::whole_document_range(rope),
+        new_text: formatted,
+    })
+}
+
+/// Format-as-code-action across scopes. Reads the live
+/// `format_style` once at invocation; switching mid-action
+/// would be confusing. Custom title format because the standard
+/// `scope_title` counts edits-per-item, but format always
+/// produces exactly one whole-file edit per file — so we report
+/// the count of FILES that would change, not edits.
+///
+/// Action-id is `"format"`, producing kinds:
+/// - `quickfix.terraform-ls-rs.format.selection`
+/// - `source.fixAll.terraform-ls-rs.format` (File)
+/// - `source.fixAll.terraform-ls-rs.format.module`
+/// - `source.fixAll.terraform-ls-rs.format.workspace`
+///
+/// Each scope's branch only emits an action if at least one file
+/// would actually change — keeps the menu clean on already-
+/// formatted buffers.
+fn emit_format_actions(
+    state: &StateStore,
+    primary_uri: &Url,
+    selection: Option<Range>,
+    actions: &mut Vec<CodeActionOrCommand>,
+) {
+    use crate::handlers::code_action_scope::scope_kind;
+    use crate::handlers::formatting::slice_text;
+
+    let style = state.config.snapshot().format_style;
+
+    // Selection scope — slice + format that range only.
+    if let Some(range) = selection {
+        if let Some(doc) = state.documents.get(primary_uri) {
+            if let Some(slice) = slice_text(&doc.rope, range) {
+                if let Ok(formatted) = tfls_format::format_source(&slice, style) {
+                    if formatted != slice {
+                        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+                        changes.insert(
+                            primary_uri.clone(),
+                            vec![TextEdit {
+                                range,
+                                new_text: formatted,
+                            }],
+                        );
+                        let line_count = range
+                            .end
+                            .line
+                            .saturating_sub(range.start.line)
+                            + 1;
+                        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                            title: format!("Format selection ({line_count} lines)"),
+                            kind: Some(scope_kind(Scope::Selection { range }, "format")),
+                            edit: Some(WorkspaceEdit {
+                                changes: Some(changes),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    // File / Module / Workspace — per-doc scan_format.
+    for scope in [Scope::File, Scope::Module, Scope::Workspace] {
+        let mut edits_by_uri: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        for_each_doc_in_scope(state, primary_uri, scope, |doc_uri, doc| {
+            if let Some(edit) = scan_format(&doc.rope, style) {
+                edits_by_uri.insert(doc_uri.clone(), vec![edit]);
+            }
+        });
+        if edits_by_uri.is_empty() {
+            continue;
+        }
+        let count = edits_by_uri.len();
+        let title = match scope {
+            Scope::File => "Format file".to_string(),
+            Scope::Module => format!(
+                "Format {count} .tf file{} in this module",
+                if count == 1 { "" } else { "s" }
+            ),
+            Scope::Workspace => format!(
+                "Format {count} .tf file{} in workspace",
+                if count == 1 { "" } else { "s" }
+            ),
+            // Selection / Instance handled above; for_each_doc_in_scope
+            // never yields them in this loop's iteration set.
+            _ => continue,
+        };
+        actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+            title,
+            kind: Some(scope_kind(scope, "format")),
+            edit: Some(WorkspaceEdit {
+                changes: Some(edits_by_uri),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }));
+    }
 }
 
 /// Last path segment of a `file://` URI, e.g. `"main.tf"`.
