@@ -33,6 +33,10 @@ path = "src/bin/mux_probe.rs"
 name = "tfls-code-action-profile"
 path = "src/bin/code_action_profile.rs"
 
+[[bin]]
+name = "tfls-deprecation-scrape"
+path = "src/bin/deprecation_scrape.rs"
+
 [dependencies]
 tfls-lsp.workspace = true
 tfls-state.workspace = true
@@ -40,8 +44,10 @@ tfls-walker.workspace = true
 tfls-schema.workspace = true
 tfls-provider-protocol.workspace = true
 tfls-core.workspace = true
+tfls-diag.workspace = true
 hcl-edit.workspace = true
 serde_json = "1"
+sonic-rs.workspace = true
 lsp-types.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

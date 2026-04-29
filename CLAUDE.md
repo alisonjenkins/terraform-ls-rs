@@ -85,6 +85,31 @@ After the per-session diagnostic drain, the probe also fires a `textDocument/cod
 
 Use this when investigating LSP message-routing bugs that span multiple client connections (lspmux dedupe, fanout, late-attach republish, codeAction request/response routing). Daemon stderr is captured to `<tmp>/lspmux.stderr.log` for post-mortem.
 
+### `tfls-deprecation-scrape`
+
+Discovers provider-declared deprecations in an initialised workspace's `.terraform/providers/`. Output formats: markdown report (default), JSON, or Rust-scaffold for a single block (drop into `crates/tfls-diag/src/`).
+
+Used to PRIORITISE which deprecations get a hand-written tier-1 `DeprecationRule` (rich migration message + auto-fix action). Tier 2 catches every provider-marked deprecation automatically; this tool surfaces the candidates worth promoting to tier 1.
+
+```bash
+# Markdown report of every block-level deprecation across all installed providers:
+cargo run --release --bin tfls-deprecation-scrape -- ~/work/some-tf-workspace
+
+# Single provider:
+cargo run --release --bin tfls-deprecation-scrape -- <dir> --provider aws
+
+# Long-tail attribute-level (warning: providers mark dozens per release):
+cargo run --release --bin tfls-deprecation-scrape -- <dir> --include-attributes
+
+# Scaffold a tier-1 rule for one resource — emits a draft module + wiring instructions:
+cargo run --release --bin tfls-deprecation-scrape -- <dir> --scaffold aws_s3_bucket_object > crates/tfls-diag/src/deprecated_aws_s3_bucket_object.rs
+
+# Pipe into other tools:
+cargo run --release --bin tfls-deprecation-scrape -- <dir> --format json | jq '.blocks | map(select(.already_covered | not))'
+```
+
+The markdown output groups uncovered candidates by provider, surfaces registry-doc URLs (where migration breadcrumbs typically live), and lists already-covered labels separately so curators don't duplicate work. `is_hardcoded_deprecation` from `tfls-diag` is the source of truth for the covered set.
+
 ### `tfls-code-action-profile`
 
 Standalone profile driver for the `code_action` handler. Builds a synthetic in-memory workspace (configurable via positional args), fires N code-action requests against the active doc, prints the average. Used for perf regression hunts without spinning up a real LSP client.
