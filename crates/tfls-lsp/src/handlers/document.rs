@@ -462,6 +462,11 @@ pub fn compute_diagnostics_with_lookup(
             &doc.rope,
             templatefile_supported,
         ));
+        out.extend(tfls_diag::deprecated_template_dir_diagnostics_for_module(
+            body,
+            &doc.rope,
+            templatefile_supported,
+        ));
         out.extend(tfls_diag::empty_list_equality_diagnostics(body, &doc.rope));
         out.extend(tfls_diag::map_duplicate_keys_diagnostics(body, &doc.rope));
 
