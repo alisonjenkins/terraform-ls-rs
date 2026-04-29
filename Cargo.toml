@@ -41,7 +41,7 @@ hcl-edit = "0.9"
 # HCL formatting backend (pinned to a `feat/minimal-style` rev that
 # adds `FormatStyle::Minimal` upstream — switch to a tag once the PR
 # merges + release-please cuts a tagged release).
-tf-format = { git = "https://github.com/alisonjenkins/tf-format", rev = "4a8abffcfe644b30a8251a268e6fa19191372358" }
+tf-format = { git = "https://github.com/alisonjenkins/tf-format", rev = "3d67d19ba26711dc01abf49bbbb0a8d1c0d97351" }
 
 # Text buffers
 ropey = "1.6"
