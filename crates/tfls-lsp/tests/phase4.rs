@@ -3134,6 +3134,73 @@ async fn block_rename_cursor_variant_emits_commented_for_manual() {
     assert!(body.contains("# moved {"));
 }
 
+/// LSP client sends a code-action request with the
+/// deprecation diagnostic in `params.context.diagnostics` —
+/// e.g. user clicked the WARNING squiggle's lightbulb. The
+/// rename quickfix should surface AND carry the originating
+/// diagnostic in its `diagnostics` field so the client pairs
+/// them in the menu.
+#[tokio::test]
+async fn block_rename_diag_attached_quickfix_carries_diagnostic() {
+    let u = uri("file:///fmt-diag-alb/main.tf");
+    let src = "resource \"aws_alb\" \"web\" {\n  name = \"web\"\n}\n";
+    let backend = fresh_backend(src, &u);
+
+    use tower_lsp::lsp_types::*;
+    // Synthesise a diagnostic the server would have produced
+    // and pass it through `params.context.diagnostics`.
+    let diag = Diagnostic {
+        range: Range {
+            start: Position::new(0, 9),
+            end: Position::new(0, 18), // covers `"aws_alb"`
+        },
+        severity: Some(DiagnosticSeverity::WARNING),
+        source: Some("terraform-ls-rs".into()),
+        message: "`aws_alb` is a backward-compatibility alias for `aws_lb` (AWS provider 1.7+)..."
+            .into(),
+        ..Default::default()
+    };
+    let params = CodeActionParams {
+        text_document: TextDocumentIdentifier { uri: u.clone() },
+        range: diag.range,
+        context: CodeActionContext {
+            diagnostics: vec![diag.clone()],
+            only: None,
+            trigger_kind: None,
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+    let actions = tower_lsp::LanguageServer::code_action(&backend, params)
+        .await
+        .expect("code_action ok")
+        .unwrap_or_default();
+
+    // Find the diag-attached quickfix (must carry our diag).
+    let action = actions
+        .iter()
+        .find_map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca)
+                if ca.title == "Convert aws_alb.web to aws_lb"
+                    && ca
+                        .diagnostics
+                        .as_ref()
+                        .map(|ds| ds.iter().any(|d| d.message == diag.message))
+                        .unwrap_or(false) =>
+            {
+                Some(ca)
+            }
+            _ => None,
+        })
+        .expect("diag-attached quickfix not found");
+
+    assert_eq!(action.kind, Some(CodeActionKind::QUICKFIX));
+    assert_eq!(action.is_preferred, Some(true));
+    let attached = action.diagnostics.as_ref().expect("diagnostics field set");
+    assert_eq!(attached.len(), 1);
+    assert!(attached[0].message.contains("aws_alb"));
+}
+
 /// No quickfix when cursor is outside any deprecated block.
 #[tokio::test]
 async fn block_rename_cursor_variant_no_action_outside_block() {

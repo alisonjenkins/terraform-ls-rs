@@ -205,6 +205,26 @@ fn resolved_to(spec: &BlockRenameSpec) -> String {
     }
 }
 
+/// Diagnostic-attached Instance variant. Used when the LSP
+/// client sends a code-action request with the deprecation
+/// diagnostic in `params.context.diagnostics` — e.g. the user
+/// clicked the WARNING squiggle's lightbulb. Reuses the
+/// cursor-variant block lookup (the diag's range start IS
+/// where the user is focused) and attaches the originating
+/// diagnostic to the returned action so the client can pair
+/// them in the lightbulb menu.
+pub fn make_replace_block_for_diag(
+    state: &StateStore,
+    uri: &Url,
+    diag: &lsp_types::Diagnostic,
+    body: &Body,
+    rope: &Rope,
+) -> Option<CodeAction> {
+    let mut action = make_replace_block_at_cursor(state, uri, diag.range.start, body, rope)?;
+    action.diagnostics = Some(vec![diag.clone()]);
+    Some(action)
+}
+
 /// Cursor-driven Instance variant. Surfaces a single-block
 /// `Convert <from>.<name> to <to>` quickfix when the cursor
 /// sits inside a deprecated `<from>` block whose spec is

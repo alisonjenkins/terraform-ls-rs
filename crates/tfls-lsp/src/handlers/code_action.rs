@@ -89,6 +89,21 @@ pub async fn code_action(
                 {
                     actions.push(CodeActionOrCommand::CodeAction(action));
                 }
+            } else if let Some(action) =
+                crate::handlers::code_action_block_rename::make_replace_block_for_diag(
+                    &backend.state,
+                    &uri,
+                    diag,
+                    body,
+                    &doc.rope,
+                )
+            {
+                // Generic block-rename family (AWS / Kubernetes
+                // renames). Returns `None` for diagnostics not
+                // pointing at a deprecated rename block, so we
+                // don't need a separate matcher predicate — the
+                // cursor-based block lookup is the matcher.
+                actions.push(CodeActionOrCommand::CodeAction(action));
             }
         }
     }
