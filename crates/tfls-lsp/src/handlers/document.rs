@@ -507,6 +507,12 @@ pub fn compute_diagnostics_with_lookup(
             &doc.rope,
             &provider_rule_filter(&google_constraint),
         ));
+        let vault_constraint = module_constraint_for_provider(state, uri, "vault");
+        out.extend(tfls_diag::vault_blocks_diagnostics_for_module(
+            body,
+            &doc.rope,
+            &provider_rule_filter(&vault_constraint),
+        ));
         out.extend(tfls_diag::empty_list_equality_diagnostics(body, &doc.rope));
         out.extend(tfls_diag::map_duplicate_keys_diagnostics(body, &doc.rope));
 

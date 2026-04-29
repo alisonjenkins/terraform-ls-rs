@@ -71,6 +71,9 @@ pub const HARDCODED_DEPRECATION_LABELS: &[(&str, &str)] = &[
     // GCP (google) block deprecations —
     // `deprecated_google_blocks.rs`.
     ("resource", "google_dataflow_job"),
+    // Vault block deprecations —
+    // `deprecated_vault_blocks.rs`.
+    ("resource", "vault_generic_secret"),
 ];
 
 /// True when `(block_kind, label)` is covered by a hardcoded

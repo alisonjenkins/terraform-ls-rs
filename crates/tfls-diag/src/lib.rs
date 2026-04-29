@@ -12,6 +12,7 @@ pub mod deprecated_null_data_source;
 pub mod deprecated_null_resource;
 pub mod deprecated_template_dir;
 pub mod deprecated_template_file;
+pub mod deprecated_vault_blocks;
 pub mod deprecation_rule;
 pub mod documented_outputs;
 pub mod documented_variables;
@@ -71,6 +72,9 @@ pub use deprecated_template_dir::{
 pub use deprecated_template_file::{
     deprecated_template_file_diagnostics, deprecated_template_file_diagnostics_for_module,
     supports_templatefile,
+};
+pub use deprecated_vault_blocks::{
+    VAULT_BLOCK_DEPRECATIONS, vault_blocks_diagnostics, vault_blocks_diagnostics_for_module,
 };
 pub use documented_outputs::documented_outputs_diagnostics;
 pub use documented_variables::documented_variables_diagnostics;
