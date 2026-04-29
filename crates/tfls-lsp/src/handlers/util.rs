@@ -32,6 +32,16 @@ pub(crate) fn module_supports_templatefile(state: &StateStore, primary_uri: &Url
     module_constraint_admits_at_least(state, primary_uri, tfls_diag::supports_templatefile)
 }
 
+/// True when the active module's `required_version` admits any
+/// 0.10+ Terraform — the floor at which `locals { ... }` blocks
+/// exist (the canonical replacement for `data "null_data_source"`).
+pub(crate) fn module_supports_locals_replacement(
+    state: &StateStore,
+    primary_uri: &Url,
+) -> bool {
+    module_constraint_admits_at_least(state, primary_uri, tfls_diag::supports_locals_replacement)
+}
+
 /// Helper: aggregate the module's `required_version` fragments
 /// and feed them to a per-feature gate predicate. Walks every
 /// `.tf` doc in the active module dir.

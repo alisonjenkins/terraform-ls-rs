@@ -1230,9 +1230,16 @@ fn emit_null_resource_traversal_edits(
 /// edits) become two rows sharing a name. Flat layout — no
 /// inner `Vec` per match — keeps allocation overhead low when
 /// the cache holds thousands of hits.
+///
+/// `name` is `Arc<str>`: multi-edit rewrites and same-name
+/// recurrences (e.g. five outputs all referencing
+/// `null_resource.X.triggers`) share a single allocation
+/// rather than cloning the String per hit. Filter checks
+/// (`set.contains(&*hit.name)`) only see `&str`, so the
+/// `Arc<str>` is invisible at the use site.
 #[derive(Debug, Clone)]
 struct RefHit {
-    name: String,
+    name: std::sync::Arc<str>,
     edit: TextEdit,
 }
 
@@ -1277,8 +1284,8 @@ fn push_null_resource_hits(
     if v.as_str() != "null_resource" {
         return;
     }
-    let name = match t.operators.iter().find_map(|op| match op.value() {
-        TraversalOperator::GetAttr(ident) => Some(ident.as_str().to_string()),
+    let name: std::sync::Arc<str> = match t.operators.iter().find_map(|op| match op.value() {
+        TraversalOperator::GetAttr(ident) => Some(std::sync::Arc::<str>::from(ident.as_str())),
         _ => None,
     }) {
         Some(n) => n,
@@ -1290,7 +1297,7 @@ fn push_null_resource_hits(
             tfls_parser::byte_offset_to_lsp_position(rope, span.end),
         ) {
             out.push(RefHit {
-                name: name.clone(),
+                name: std::sync::Arc::clone(&name),
                 edit: TextEdit {
                     range: Range { start, end },
                     new_text: "terraform_data".into(),
@@ -1309,7 +1316,7 @@ fn push_null_resource_hits(
                         tfls_parser::byte_offset_to_lsp_position(rope, span.end),
                     ) {
                         out.push(RefHit {
-                            name: name.clone(),
+                            name: std::sync::Arc::clone(&name),
                             edit: TextEdit {
                                 range: Range { start, end },
                                 new_text: "triggers_replace".into(),
@@ -1367,7 +1374,7 @@ fn push_template_file_hit(
         return;
     };
     out.push(RefHit {
-        name: n.to_string(),
+        name: std::sync::Arc::<str>::from(n),
         edit: TextEdit {
             range: Range { start, end },
             new_text: format!("local.{n}"),
@@ -1417,7 +1424,7 @@ fn flatten_filtered(
         None => hits.iter().map(|h| h.edit.clone()).collect(),
         Some(set) => hits
             .iter()
-            .filter(|h| set.contains(&h.name))
+            .filter(|h| set.contains(h.name.as_ref()))
             .map(|h| h.edit.clone())
             .collect(),
     }

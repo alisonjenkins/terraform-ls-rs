@@ -4,6 +4,7 @@ pub mod comment_syntax;
 pub mod deprecated_index;
 pub mod deprecated_interpolation;
 pub mod deprecated_lookup;
+pub mod deprecated_null_data_source;
 pub mod deprecated_null_resource;
 pub mod deprecated_template_dir;
 pub mod deprecated_template_file;
@@ -36,6 +37,10 @@ pub use comment_syntax::comment_syntax_diagnostics;
 pub use deprecated_index::deprecated_index_diagnostics;
 pub use deprecated_interpolation::deprecated_interpolation_diagnostics;
 pub use deprecated_lookup::deprecated_lookup_diagnostics;
+pub use deprecated_null_data_source::{
+    deprecated_null_data_source_diagnostics,
+    deprecated_null_data_source_diagnostics_for_module, supports_locals_replacement,
+};
 pub use deprecated_null_resource::{
     deprecated_null_resource_diagnostics, deprecated_null_resource_diagnostics_for_module,
     extract_required_version, supports_terraform_data,
