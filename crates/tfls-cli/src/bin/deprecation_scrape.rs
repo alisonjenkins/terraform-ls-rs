@@ -63,6 +63,14 @@ struct Cli {
     #[arg(long)]
     attributes_only: bool,
 
+    /// Filter to deprecations NOT already covered by a tier-1
+    /// `DeprecationRule` (per `tfls_diag::is_hardcoded_deprecation`).
+    /// Directly answers "what should I tier-1 next?" — drops the
+    /// already-covered noise so curators only see candidates
+    /// worth attention.
+    #[arg(long)]
+    uncovered_only: bool,
+
     /// Output format.
     #[arg(long, value_enum, default_value = "markdown")]
     format: Format,
@@ -175,14 +183,23 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         schemas.provider_schemas.len()
     );
 
-    let (blocks, attributes) = collect_deprecations(&schemas, cli.provider.as_deref());
+    let (mut blocks, attributes) = collect_deprecations(&schemas, cli.provider.as_deref());
 
+    let total_blocks = blocks.len();
+    let covered_blocks = blocks.iter().filter(|b| b.already_covered).count();
     eprintln!(
-        "# found {} deprecated blocks ({} already covered by tier-1) + {} deprecated attributes",
-        blocks.len(),
-        blocks.iter().filter(|b| b.already_covered).count(),
+        "# found {total_blocks} deprecated blocks ({covered_blocks} already covered by tier-1) + {} deprecated attributes",
         attributes.len()
     );
+
+    if cli.uncovered_only {
+        blocks.retain(|b| !b.already_covered);
+        eprintln!(
+            "# --uncovered-only: filtered to {} block candidate{}",
+            blocks.len(),
+            if blocks.len() == 1 { "" } else { "s" }
+        );
+    }
 
     if let Some(target) = cli.scaffold.as_deref() {
         let Some(b) = blocks.iter().find(|b| b.type_name == target) else {

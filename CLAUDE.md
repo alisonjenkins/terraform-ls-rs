@@ -106,6 +106,9 @@ cargo run --release --bin tfls-deprecation-scrape -- <dir> --scaffold aws_s3_buc
 
 # Pipe into other tools:
 cargo run --release --bin tfls-deprecation-scrape -- <dir> --format json | jq '.blocks | map(select(.already_covered | not))'
+
+# Curation shortcut: just show candidates not yet covered by tier-1 (no jq):
+cargo run --release --bin tfls-deprecation-scrape -- <dir> --uncovered-only
 ```
 
 The markdown output groups uncovered candidates by provider, surfaces registry-doc URLs (where migration breadcrumbs typically live), and lists already-covered labels separately so curators don't duplicate work. `is_hardcoded_deprecation` from `tfls-diag` is the source of truth for the covered set.
