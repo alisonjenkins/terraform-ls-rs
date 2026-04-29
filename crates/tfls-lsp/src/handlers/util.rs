@@ -42,36 +42,23 @@ pub(crate) fn module_supports_locals_replacement(
     module_constraint_admits_at_least(state, primary_uri, tfls_diag::supports_locals_replacement)
 }
 
-/// True when the active module's
-/// `terraform { required_providers { aws = ... } }` constraint
-/// admits AWS provider 1.7+ (the version that introduced
-/// `aws_lb`, the canonical name for what was renamed from
-/// `aws_alb`). Provider-version gates work like terraform-version
-/// gates but pull the constraint string from a different place.
-pub(crate) fn module_supports_aws_lb(state: &StateStore, primary_uri: &Url) -> bool {
-    module_provider_constraint_admits_at_least(
-        state,
-        primary_uri,
-        "aws",
-        tfls_diag::supports_aws_lb,
-    )
-}
-
-/// Helper: aggregate the module's
-/// `required_providers.<name>.version` fragments and feed them
-/// to a per-rule gate predicate. Walks every `.tf` doc in the
-/// active module dir; returns `true` when the module declares
-/// no constraint for the provider (absence of evidence —
-/// can't suppress).
-fn module_provider_constraint_admits_at_least(
+/// Aggregate the active module's
+/// `terraform { required_providers { <provider_name> = ... } }`
+/// constraint fragments across every sibling `.tf` doc and
+/// return the joined string (HCL constraint AND syntax). Used
+/// by multi-rule emit paths that test multiple thresholds
+/// against the same provider's constraint — caller pulls the
+/// constraint once, then dispatches per rule.
+///
+/// Returns `None` when no constraint is declared in the
+/// module — caller should treat that as "every rule fires"
+/// (absence of evidence; can't suppress).
+pub(crate) fn module_constraint_for_provider(
     state: &StateStore,
     primary_uri: &Url,
     provider_name: &str,
-    gate: fn(&str) -> bool,
-) -> bool {
-    let Some(target_dir) = parent_dir(primary_uri) else {
-        return true;
-    };
+) -> Option<String> {
+    let target_dir = parent_dir(primary_uri)?;
     let mut fragments: Vec<String> = Vec::new();
     for entry in state.documents.iter() {
         let uri = entry.key();
@@ -88,9 +75,10 @@ fn module_provider_constraint_admits_at_least(
         }
     }
     if fragments.is_empty() {
-        return true;
+        None
+    } else {
+        Some(fragments.join(", "))
     }
-    gate(&fragments.join(", "))
 }
 
 /// Helper: aggregate the module's `required_version` fragments

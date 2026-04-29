@@ -71,7 +71,18 @@ action that performs the migration:
 | `data "template_file"` | Terraform `>= 0.12.0` | `templatefile()` function | Hoist to `local`, rewrite `data.template_file.X.rendered` → `local.X` references, unwrap `template = file("path")` to `templatefile("path", ...)`, skip on local-name collision |
 | `data "template_dir"` | Terraform `>= 0.12.0` | `for_each = fileset(...) + templatefile()` | Diagnostic only (migration project-specific) |
 | `data "null_data_source"` | Terraform `>= 0.10.0` | `locals { }` block | Diagnostic only |
-| `resource "aws_alb"` | AWS provider `>= 1.7.0` | `resource "aws_lb"` | Diagnostic only (rename + ref rewrite trivial; auto-fix held back to surface subtle schema drift) |
+| AWS rename family | AWS provider `>= 1.7.0` (or `>= 4.0.0` for s3 object) | see below | Diagnostic only (rename + ref rewrite mechanical; auto-fix held back to surface subtle schema drift between v1/v2 names) |
+
+**AWS rename family** (one consolidated module, one body walk per code-action call):
+
+| From | To |
+|------|----|
+| `aws_alb` | `aws_lb` |
+| `aws_alb_listener` | `aws_lb_listener` |
+| `aws_alb_listener_rule` | `aws_lb_listener_rule` |
+| `aws_alb_target_group` | `aws_lb_target_group` |
+| `aws_alb_target_group_attachment` | `aws_lb_target_group_attachment` |
+| `aws_s3_bucket_object` | `aws_s3_object` |
 
 Gates come in two flavours: `terraform { required_version }`
 (Terraform-core deprecations) and
@@ -302,12 +313,17 @@ clients.
 
 Highlights:
 
-- **5 deprecation diagnostics live** — `null_resource`,
-  `template_file`, `template_dir`, `null_data_source`, `aws_alb`.
+- **10 deprecation diagnostics live** — `null_resource`,
+  `template_file`, `template_dir`, `null_data_source`, plus the
+  AWS rename family (`aws_alb`, `aws_alb_listener`,
+  `aws_alb_listener_rule`, `aws_alb_target_group`,
+  `aws_alb_target_group_attachment`, `aws_s3_bucket_object`).
   Each is module-aware (sibling `versions.tf` /
   `required_providers` constraints suppress correctly), each
-  scaled atop a generic `DeprecationRule` framework so adding a
-  sixth is ~25 lines of config. Both Terraform-core and
+  scaled atop a generic `DeprecationRule` framework. Adding
+  another rename to the AWS family is one entry in
+  `AWS_TYPE_RENAMES`; adding a different-shape deprecation is
+  ~25 lines of new module. Both Terraform-core and
   provider-version gates supported.
 - **Multi-scope code actions** — Instance / Selection / File /
   Module / Workspace, with stable `CodeActionKind` strings clients

@@ -33,7 +33,15 @@ pub const HARDCODED_DEPRECATION_LABELS: &[(&str, &str)] = &[
     ("data", "template_file"),
     ("data", "template_dir"),
     ("data", "null_data_source"),
+    // AWS rename family — see `deprecated_aws_renames.rs`.
+    // The `every_aws_rename_is_hardcoded_listed` test in that
+    // module catches missing entries when new rules are added.
     ("resource", "aws_alb"),
+    ("resource", "aws_alb_listener"),
+    ("resource", "aws_alb_listener_rule"),
+    ("resource", "aws_alb_target_group"),
+    ("resource", "aws_alb_target_group_attachment"),
+    ("resource", "aws_s3_bucket_object"),
 ];
 
 /// True when `(block_kind, label)` is covered by a hardcoded
@@ -137,6 +145,68 @@ pub fn diagnostics_for_module(
         if label_str(label) != Some(rule.label) {
             continue;
         }
+        let Some(span) = label.span() else { continue };
+        let Ok(range) = hcl_span_to_lsp_range(rope, span) else {
+            continue;
+        };
+        out.push(Diagnostic {
+            range,
+            severity: Some(DiagnosticSeverity::WARNING),
+            source: Some("terraform-ls-rs".to_string()),
+            message: rule.message.to_string(),
+            ..Default::default()
+        });
+    }
+    out
+}
+
+/// Multi-rule body walk. Visits every top-level
+/// `resource` / `data` block once and emits a diagnostic for
+/// every rule in `rules` whose `(block_kind, label)` matches
+/// AND whose gate currently admits the replacement (per
+/// `rule_supported`).
+///
+/// One walk regardless of rule count — so a provider with
+/// dozens of renames pays O(blocks) total, not
+/// O(blocks × rules). The `rule_supported` callback lets the
+/// LSP layer pre-cache module-aggregated constraint decisions
+/// (each rule's gate evaluation is otherwise cheap but the
+/// `required_providers` extraction would re-walk siblings per
+/// rule without caching upstream).
+pub fn diagnostics_from_table(
+    body: &Body,
+    rope: &Rope,
+    rules: &[DeprecationRule],
+    rule_supported: &dyn Fn(&DeprecationRule) -> bool,
+) -> Vec<Diagnostic> {
+    use std::collections::HashMap;
+    // Index by (block_kind, label) so each block only does one
+    // lookup. `&str` keys borrow from the static rule strings —
+    // zero allocation per call.
+    let mut by_key: HashMap<(&str, &str), &DeprecationRule> = HashMap::new();
+    for rule in rules {
+        if !rule_supported(rule) {
+            continue;
+        }
+        by_key.insert((rule.block_kind, rule.label), rule);
+    }
+    if by_key.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
+        let kind = block.ident.as_str();
+        let Some(label) = block.labels.first() else {
+            continue;
+        };
+        let label_text = label_str(label).unwrap_or("");
+        let Some(rule) = by_key.get(&(kind, label_text)) else {
+            continue;
+        };
         let Some(span) = label.span() else { continue };
         let Ok(range) = hcl_span_to_lsp_range(rope, span) else {
             continue;

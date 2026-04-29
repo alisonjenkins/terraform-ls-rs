@@ -199,13 +199,16 @@ Title format produced by `scope_title` (`"<verb> N <item-label>s in <where>"`):
 
 Live rules:
 
-| Rule                            | Block kind  | Gate                                            | Action                                          |
-|---------------------------------|-------------|-------------------------------------------------|-------------------------------------------------|
-| `null_resource`                 | `resource`  | Terraform `>= 1.4.0`                            | Convert to `terraform_data` (+ moved.tf)        |
-| `template_file`                 | `data`      | Terraform `>= 0.12.0`                           | Convert to `local` calling `templatefile()`     |
-| `template_dir`                  | `data`      | Terraform `>= 0.12.0`                           | Diagnostic only (migration project-specific)    |
-| `null_data_source`              | `data`      | Terraform `>= 0.10.0`                           | Diagnostic only (replacement: `locals { }`)     |
-| `aws_alb`                       | `resource`  | AWS provider `>= 1.7.0`                         | Diagnostic only (use `aws_lb`; schema drift)    |
+| Rule                                  | Block kind  | Gate                                            | Action                                          |
+|---------------------------------------|-------------|-------------------------------------------------|-------------------------------------------------|
+| `null_resource`                       | `resource`  | Terraform `>= 1.4.0`                            | Convert to `terraform_data` (+ moved.tf)        |
+| `template_file`                       | `data`      | Terraform `>= 0.12.0`                           | Convert to `local` calling `templatefile()`     |
+| `template_dir`                        | `data`      | Terraform `>= 0.12.0`                           | Diagnostic only (migration project-specific)    |
+| `null_data_source`                    | `data`      | Terraform `>= 0.10.0`                           | Diagnostic only (replacement: `locals { }`)     |
+| `aws_alb` family (5 resources)        | `resource`  | AWS provider `>= 1.7.0`                         | Diagnostic only (consolidated table)            |
+| `aws_s3_bucket_object`                | `resource`  | AWS provider `>= 4.0.0`                         | Diagnostic only (use `aws_s3_object`)           |
+
+The AWS rename family lives in `crates/tfls-diag/src/deprecated_aws_renames.rs` as a single `AWS_TYPE_RENAMES: &[DeprecationRule]` table — adding another rename rule = one table entry + one `HARDCODED_DEPRECATION_LABELS` entry, no new module. The multi-rule body walker (`deprecation_rule::diagnostics_from_table`) visits each block ONCE regardless of rule count, so a rule table with N entries pays O(blocks) total, not O(blocks × rules). Per-rule support tested in-loop via the caller's `rule_supported` closure.
 
 Two gate flavours, set on the rule's `gate: Gate` field:
 

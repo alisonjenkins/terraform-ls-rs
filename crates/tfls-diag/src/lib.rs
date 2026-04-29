@@ -4,7 +4,7 @@ pub mod comment_syntax;
 pub mod deprecated_index;
 pub mod deprecated_interpolation;
 pub mod deprecated_lookup;
-pub mod deprecated_aws_alb;
+pub mod deprecated_aws_renames;
 pub mod deprecated_null_data_source;
 pub mod deprecated_null_resource;
 pub mod deprecated_template_dir;
@@ -38,8 +38,8 @@ pub use comment_syntax::comment_syntax_diagnostics;
 pub use deprecated_index::deprecated_index_diagnostics;
 pub use deprecated_interpolation::deprecated_interpolation_diagnostics;
 pub use deprecated_lookup::deprecated_lookup_diagnostics;
-pub use deprecated_aws_alb::{
-    deprecated_aws_alb_diagnostics, deprecated_aws_alb_diagnostics_for_module, supports_aws_lb,
+pub use deprecated_aws_renames::{
+    AWS_TYPE_RENAMES, aws_renames_diagnostics, aws_renames_diagnostics_for_module,
 };
 pub use deprecated_null_data_source::{
     deprecated_null_data_source_diagnostics,

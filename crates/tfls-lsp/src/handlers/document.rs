@@ -18,8 +18,8 @@ use tower_lsp::lsp_types::{
 
 use crate::backend::Backend;
 use crate::handlers::util::{
-    module_supports_aws_lb, module_supports_locals_replacement, module_supports_templatefile,
-    module_supports_terraform_data,
+    module_constraint_for_provider, module_supports_locals_replacement,
+    module_supports_templatefile, module_supports_terraform_data,
 };
 
 pub async fn did_open(backend: &Backend, params: DidOpenTextDocumentParams) {
@@ -476,13 +476,19 @@ pub fn compute_diagnostics_with_lookup(
             &doc.rope,
             locals_supported,
         ));
-        // Provider-version-gated rule: AWS provider 1.7+ ships
-        // `aws_lb` as the canonical name for `aws_alb`.
-        let aws_lb_supported = module_supports_aws_lb(state, uri);
-        out.extend(tfls_diag::deprecated_aws_alb_diagnostics_for_module(
+        // Provider-version-gated AWS renames family. Module-
+        // aggregated `required_providers.aws.version` is pulled
+        // once, then each rule's threshold is checked against it
+        // — single multi-rule body walk, scales linearly in
+        // rule count without re-walking siblings per rule.
+        let aws_constraint = module_constraint_for_provider(state, uri, "aws");
+        out.extend(tfls_diag::aws_renames_diagnostics_for_module(
             body,
             &doc.rope,
-            aws_lb_supported,
+            &|rule| match aws_constraint.as_deref() {
+                None => true,
+                Some(c) => tfls_diag::deprecation_rule::supports(rule, c),
+            },
         ));
         out.extend(tfls_diag::empty_list_equality_diagnostics(body, &doc.rope));
         out.extend(tfls_diag::map_duplicate_keys_diagnostics(body, &doc.rope));

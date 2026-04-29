@@ -586,13 +586,12 @@ mod tests {
                     "registry.terraform.io/hashicorp/aws": {
                         "provider": { "version": 0, "block": {} },
                         "resource_schemas": {
-                            "aws_s3_bucket_object": {
+                            "aws_legacy_thing": {
                                 "version": 0,
                                 "block": {
                                     "deprecated": true,
                                     "attributes": {
-                                        "bucket": { "type": "string", "required": true },
-                                        "key":    { "type": "string", "required": true }
+                                        "name": { "type": "string", "required": true }
                                     }
                                 }
                             },
@@ -638,9 +637,11 @@ mod tests {
     #[test]
     fn schema_deprecated_block_emits_warning() {
         let schemas = schemas_with_deprecated_blocks();
-        let src = r#"resource "aws_s3_bucket_object" "x" {
-          bucket = "b"
-          key    = "k"
+        // `aws_legacy_thing` is a synthetic schema-deprecated
+        // type that is NOT in `HARDCODED_DEPRECATION_LABELS`,
+        // so the tier-2 path must fire.
+        let src = r#"resource "aws_legacy_thing" "x" {
+          name = "n"
         }"#;
         let d = diags_with(&schemas, src);
         let dep = d
@@ -648,8 +649,8 @@ mod tests {
             .find(|d| d.message.contains("deprecated by its provider"))
             .expect("schema-driven block deprecation diagnostic");
         assert_eq!(dep.severity, Some(DiagnosticSeverity::WARNING));
-        assert!(dep.message.contains("aws_s3_bucket_object"), "got: {}", dep.message);
-        // Squiggle on the label literal — line 0, around char 9 ("aws_s3...").
+        assert!(dep.message.contains("aws_legacy_thing"), "got: {}", dep.message);
+        // Squiggle on the label literal — line 0.
         assert_eq!(dep.range.start.line, 0);
     }
 
