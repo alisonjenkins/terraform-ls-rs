@@ -39,7 +39,7 @@ lsp-types = "0.94"
 hcl-edit = "0.9"
 
 # HCL formatting backend.
-tf-format = { git = "https://github.com/alisonjenkins/tf-format", tag = "v0.3.0" }
+tf-format = { git = "https://github.com/alisonjenkins/tf-format", tag = "v0.4.1" }
 
 # Text buffers
 ropey = "1.6"
