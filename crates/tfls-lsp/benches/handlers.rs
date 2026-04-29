@@ -275,12 +275,147 @@ fn bench_code_action_deprecation_pipeline(c: &mut Criterion) {
     group.finish();
 }
 
+/// Synthetic workspace exercising the block-rename path:
+///   - `aws_alb` resources (Aliased migration kind → real moved.tf)
+///   - `kubernetes_pod` resources (Manual migration kind → commented scaffolding)
+///   - References per block to drive the ref-rewrite scan
+///   - Cross-doc structure: half the blocks in `main.tf`, half in
+///     `extras.tf` so the multi-scope path's per-doc cache is
+///     actually exercised.
+fn populate_block_rename_workload(
+    state: &StateStore,
+    dir: &str,
+    n_aws: usize,
+    n_k8s: usize,
+    refs_per_block: usize,
+) -> (Url, Url) {
+    let mut main_src = String::new();
+    main_src.push_str("terraform {\n  required_providers {\n");
+    main_src.push_str("    aws = \"~> 5.0\"\n");
+    main_src.push_str("    kubernetes = \"~> 2.20\"\n");
+    main_src.push_str("  }\n}\n");
+
+    for i in 0..n_aws {
+        main_src.push_str(&format!(
+            "resource \"aws_alb\" \"alb{i}\" {{\n  name = \"alb{i}\"\n}}\n"
+        ));
+        for j in 0..refs_per_block {
+            main_src.push_str(&format!(
+                "output \"o_alb_{i}_{j}\" {{ value = aws_alb.alb{i}.arn }}\n"
+            ));
+        }
+    }
+
+    let mut extras_src = String::new();
+    for i in 0..n_k8s {
+        extras_src.push_str(&format!(
+            "resource \"kubernetes_pod\" \"p{i}\" {{\n  metadata {{\n    name = \"p{i}\"\n  }}\n}}\n"
+        ));
+        for j in 0..refs_per_block {
+            extras_src.push_str(&format!(
+                "output \"o_pod_{i}_{j}\" {{ value = kubernetes_pod.p{i}.metadata }}\n"
+            ));
+        }
+    }
+
+    let main_uri = Url::parse(&format!("file:///{dir}/main.tf")).expect("url");
+    let extras_uri = Url::parse(&format!("file:///{dir}/extras.tf")).expect("url");
+    state.upsert_document(DocumentState::new(main_uri.clone(), &main_src, 1));
+    state.upsert_document(DocumentState::new(extras_uri.clone(), &extras_src, 1));
+    (main_uri, extras_uri)
+}
+
+fn bench_code_action_block_rename(c: &mut Criterion) {
+    let rt = Runtime::new().expect("runtime");
+
+    let mut group = c.benchmark_group("code_action_block_rename");
+    // Mix of Aliased (aws_alb) + Manual (kubernetes_pod) so both
+    // moved.tf code paths run. Cross-doc fixture (main.tf +
+    // extras.tf) so the per-doc scan cache is non-trivial.
+    for &(label, n_aws, n_k8s, refs_per) in &[
+        ("small/10_each_2_refs", 10usize, 10usize, 2usize),
+        ("medium/100_each_5_refs", 100, 100, 5),
+        ("large/250_each_5_refs", 250, 250, 5),
+    ] {
+        let state = Arc::new(StateStore::new());
+        let (main_uri, _extras_uri) =
+            populate_block_rename_workload(&state, label, n_aws, n_k8s, refs_per);
+        let jobs = Arc::new(JobQueue::new());
+        let backend = backend(Arc::clone(&state), Arc::clone(&jobs));
+
+        let params = CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: main_uri },
+            range: Range {
+                start: Position::new(2, 0),
+                end: Position::new(2, 0),
+            },
+            context: CodeActionContext::default(),
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        };
+
+        group.bench_function(label, |b| {
+            b.iter(|| {
+                rt.block_on(async {
+                    let _ = handlers::code_action::code_action(&backend, params.clone()).await;
+                });
+            });
+        });
+    }
+    group.finish();
+}
+
+/// Cursor variant: cursor inside an `aws_alb` block. Exercises
+/// the diag-attached / cursor path's name-filtered ref rewrite,
+/// which has a different perf profile from the multi-scope
+/// emit (single-block lookup + per-doc walk for name capture).
+fn bench_code_action_block_rename_cursor(c: &mut Criterion) {
+    let rt = Runtime::new().expect("runtime");
+
+    let mut group = c.benchmark_group("code_action_block_rename_cursor");
+    for &(label, n_aws, refs_per) in &[
+        ("small/10_blocks_2_refs", 10usize, 2usize),
+        ("medium/100_blocks_5_refs", 100, 5),
+        ("large/500_blocks_5_refs", 500, 5),
+    ] {
+        let state = Arc::new(StateStore::new());
+        let (main_uri, _) = populate_block_rename_workload(&state, label, n_aws, 0, refs_per);
+        let jobs = Arc::new(JobQueue::new());
+        let backend = backend(Arc::clone(&state), Arc::clone(&jobs));
+
+        // Cursor on the first `aws_alb` block label.
+        let params = CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: main_uri },
+            range: Range {
+                // Line 5 = first resource block's header (after
+                // the 5-line `terraform {}` preamble).
+                start: Position::new(5, 12),
+                end: Position::new(5, 12),
+            },
+            context: CodeActionContext::default(),
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        };
+
+        group.bench_function(label, |b| {
+            b.iter(|| {
+                rt.block_on(async {
+                    let _ = handlers::code_action::code_action(&backend, params.clone()).await;
+                });
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_workspace_symbol,
     bench_document_symbol,
     bench_enclosing_call,
     bench_code_action_deprecation_pipeline,
-    bench_code_action_isolated
+    bench_code_action_isolated,
+    bench_code_action_block_rename,
+    bench_code_action_block_rename_cursor
 );
 criterion_main!(benches);
