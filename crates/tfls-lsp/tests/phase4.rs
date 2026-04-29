@@ -2748,12 +2748,11 @@ async fn aws_s3_bucket_object_rename_uses_4_0_threshold() {
 /// Kubernetes `_v1` renames are flagged `StateMigration::Manual`
 /// — schemas diverge, `MoveResourceState` support is per-
 /// resource per provider version. Action rewrites label + refs
-/// but does NOT auto-emit a `moved` block. State migration is
-/// the user's responsibility (verify with `terraform plan`,
-/// hand-author a `moved` block after testing, or
-/// `terraform state mv`).
+/// AND emits commented-out `moved` scaffolding in `moved.tf`
+/// with a verify-before-uncommenting header explaining the
+/// `terraform state mv` / `terraform import` path.
 #[tokio::test]
-async fn kubernetes_pod_rename_action_emits_label_rewrite_without_moved() {
+async fn kubernetes_pod_rename_action_emits_commented_moved_with_header() {
     let u = uri("file:///fmt-k8s-pod/main.tf");
     let src = concat!(
         "resource \"kubernetes_pod\" \"p\" {\n  metadata {\n    name = \"p\"\n  }\n}\n",
@@ -2768,29 +2767,51 @@ async fn kubernetes_pod_rename_action_emits_label_rewrite_without_moved() {
     let edits = doc_change_edits(action);
     let main_edits = edits.get(&u).expect("main.tf edits");
 
+    assert!(main_edits.iter().any(|e| e.new_text == "\"kubernetes_pod_v1\""));
+    assert!(main_edits.iter().any(|e| e.new_text == "kubernetes_pod_v1"));
+
+    // moved.tf IS created — but with commented scaffolding,
+    // not an active `moved {}` block.
+    let moved = uri("file:///fmt-k8s-pod/moved.tf");
+    assert!(has_create_file(action, &moved));
+    let moved_text = edits
+        .get(&moved)
+        .expect("moved.tf edits")
+        .iter()
+        .map(|e| e.new_text.clone())
+        .collect::<String>();
+
+    // Header explaining manual verification.
     assert!(
-        main_edits.iter().any(|e| e.new_text == "\"kubernetes_pod_v1\""),
-        "k8s _v1 block label rewrite missing; got {main_edits:?}"
+        moved_text.contains("VERIFY BEFORE UNCOMMENTING"),
+        "header missing; got {moved_text:?}"
     );
     assert!(
-        main_edits.iter().any(|e| e.new_text == "kubernetes_pod_v1"),
-        "k8s _v1 ref head rewrite missing; got {main_edits:?}"
+        moved_text.contains("terraform plan"),
+        "verification instruction missing; got {moved_text:?}"
+    );
+    assert!(
+        moved_text.contains("terraform state mv")
+            || moved_text.contains("terraform import"),
+        "alternative migration path instruction missing; got {moved_text:?}"
     );
 
-    let moved = uri("file:///fmt-k8s-pod/moved.tf");
+    // Commented `moved` block, NOT a real one.
     assert!(
-        !has_create_file(action, &moved),
-        "moved.tf must NOT be auto-created for Manual migration kind"
+        moved_text.contains("# moved {")
+            && moved_text.contains("#   from = kubernetes_pod.p")
+            && moved_text.contains("#   to   = kubernetes_pod_v1.p"),
+        "commented moved scaffolding missing; got {moved_text:?}"
     );
     assert!(
-        !edits.contains_key(&moved),
-        "no moved.tf edits for Manual kind; got: {:?}",
-        edits.keys().collect::<Vec<_>>()
+        !moved_text.contains("\nmoved {")
+            && !moved_text.starts_with("moved {"),
+        "must NOT emit an active `moved {{ }}` block for Manual kind; got {moved_text:?}"
     );
 }
 
 #[tokio::test]
-async fn kubernetes_rename_action_handles_multiple_kinds_without_moved() {
+async fn kubernetes_rename_action_handles_multiple_kinds_with_commented_moved() {
     let u = uri("file:///fmt-k8s-multi/main.tf");
     let src = concat!(
         "resource \"kubernetes_pod\" \"a\" {\n  metadata {\n    name = \"a\"\n  }\n}\n",
@@ -2804,26 +2825,41 @@ async fn kubernetes_rename_action_handles_multiple_kinds_without_moved() {
         "Rename 3 deprecated provider types in this file",
     );
     let edits = doc_change_edits(action);
-    let main_edits = edits.get(&u).expect("main.tf edits");
-
-    assert!(main_edits.iter().any(|e| e.new_text == "\"kubernetes_pod_v1\""));
-    assert!(main_edits.iter().any(|e| e.new_text == "\"kubernetes_deployment_v1\""));
-    assert!(main_edits.iter().any(|e| e.new_text == "\"kubernetes_service_v1\""));
 
     let moved = uri("file:///fmt-k8s-multi/moved.tf");
-    assert!(
-        !has_create_file(action, &moved),
-        "Manual migration kind: moved.tf must not be auto-emitted"
-    );
+    assert!(has_create_file(action, &moved));
+    let moved_text = edits
+        .get(&moved)
+        .expect("moved.tf edits")
+        .iter()
+        .map(|e| e.new_text.clone())
+        .collect::<String>();
+
+    // All three commented blocks present.
+    for (from, to, name) in [
+        ("kubernetes_pod", "kubernetes_pod_v1", "a"),
+        ("kubernetes_deployment", "kubernetes_deployment_v1", "b"),
+        ("kubernetes_service", "kubernetes_service_v1", "c"),
+    ] {
+        assert!(
+            moved_text.contains(&format!("#   from = {from}.{name}")),
+            "missing commented from for {name}; got {moved_text:?}"
+        );
+        assert!(
+            moved_text.contains(&format!("#   to   = {to}.{name}")),
+            "missing commented to for {name}; got {moved_text:?}"
+        );
+    }
+    // Header appears once (not per block).
+    let header_count = moved_text.matches("VERIFY BEFORE UNCOMMENTING").count();
+    assert_eq!(header_count, 1, "header must appear exactly once");
 }
 
-/// `aws_s3_bucket_object` → `aws_s3_object` is
-/// `RequiresTerraform18` — cross-type `moved` needs CLI 1.8+.
-/// Without a `required_version` constraint admitting 1.8+ we
-/// can't safely emit; rewrite the labels + refs and leave the
-/// state migration to the user.
+/// `aws_s3_bucket_object` without 1.8 pin → commented scaffolding
+/// pointing the user at `required_version` bump or manual
+/// `terraform state mv`. Different header from the manual case.
 #[tokio::test]
-async fn aws_s3_bucket_object_action_skips_moved_without_terraform_18_pin() {
+async fn aws_s3_bucket_object_without_terraform_18_emits_commented_with_18_hint() {
     let u = uri("file:///fmt-aws-s3-no18/main.tf");
     let src = concat!(
         "terraform {\n  required_providers {\n    aws = \"~> 5.0\"\n  }\n}\n",
@@ -2836,13 +2872,22 @@ async fn aws_s3_bucket_object_action_skips_moved_without_terraform_18_pin() {
         "Rename 1 deprecated provider type in this file",
     );
     let edits = doc_change_edits(action);
-    // Label rewrite still fires.
-    let main_edits = edits.get(&u).expect("main.tf edits");
-    assert!(main_edits.iter().any(|e| e.new_text == "\"aws_s3_object\""));
-    // moved.tf NOT created — terraform_version constraint
-    // doesn't promise 1.8+.
     let moved = uri("file:///fmt-aws-s3-no18/moved.tf");
-    assert!(!has_create_file(action, &moved));
+    let moved_text = edits
+        .get(&moved)
+        .expect("moved.tf edits")
+        .iter()
+        .map(|e| e.new_text.clone())
+        .collect::<String>();
+    assert!(
+        moved_text.contains("REQUIRES TERRAFORM 1.8"),
+        "1.8 header missing; got {moved_text:?}"
+    );
+    assert!(
+        moved_text.contains("# moved {")
+            && moved_text.contains("#   from = aws_s3_bucket_object.x"),
+        "commented scaffolding missing; got {moved_text:?}"
+    );
 }
 
 #[tokio::test]

@@ -235,9 +235,12 @@ pub fn emit_block_rename_actions(
     for scope in scopes {
         // Per-scope: collect (uri, edits) + (module_dir, name list per spec).
         let mut edits_by_uri: HashMap<Url, Vec<TextEdit>> = HashMap::new();
-        // Per-module per-spec converted-name lists, used by the
-        // moved.tf builder. Key: (module_dir, spec_index).
-        let mut renames_by_module: HashMap<PathBuf, Vec<(usize, String)>> = HashMap::new();
+        // Per-module per-spec converted entries for the
+        // moved.tf builder. Tuple: (spec_index, name, pending_kind).
+        // PendingKind partitions into real `moved` blocks vs
+        // commented-out scaffolding the user vets manually.
+        let mut renames_by_module: HashMap<PathBuf, Vec<(usize, String, PendingKind)>> =
+            HashMap::new();
         let mut total_blocks = 0usize;
 
         for_each_doc_in_scope(state, primary_uri, scope, |doc_uri, doc| {
@@ -274,13 +277,16 @@ pub fn emit_block_rename_actions(
                 return;
             }
 
-            // Track converted (spec_index, name) for moved.tf —
-            // ONLY when the spec's state-migration kind is
-            // safe to emit. `Manual` skipped entirely
-            // (auto-emitted `moved` would be wrong). `RequiresTerraform18`
-            // gated by the module's aggregated `required_version`
-            // admitting 1.8+; below that, cross-type `moved` is
-            // CLI-side-unsupported and would error.
+            // Classify each converted block by safety: real
+            // `moved` blocks for Aliased / Terraform-18-admitted
+            // RequiresTerraform18; commented-out `moved` blocks
+            // (with a verify-before-uncommenting header) for
+            // Manual and not-yet-eligible RequiresTerraform18.
+            // The commented form gives users a breadcrumb to the
+            // exact `moved {}` syntax they can adopt after
+            // verifying with `terraform plan` — much friendlier
+            // than silently leaving them to author it from
+            // scratch.
             let module_admits_terraform_1_8 =
                 module_admits_terraform_at_least(state, &module_dir, "1.8.0");
             for (idx, name, _edit) in &blocks {
@@ -290,18 +296,23 @@ pub fn emit_block_rename_actions(
                 if !spec.is_resource() {
                     continue;
                 }
-                let safe = match spec.state_migration {
-                    StateMigration::Aliased => true,
-                    StateMigration::RequiresTerraform18 => module_admits_terraform_1_8,
-                    StateMigration::Manual => false,
+                let pending_kind = match spec.state_migration {
+                    StateMigration::Aliased => PendingKind::Real,
+                    StateMigration::RequiresTerraform18 => {
+                        if module_admits_terraform_1_8 {
+                            PendingKind::Real
+                        } else {
+                            PendingKind::Commented(CommentReason::NeedsTerraform18)
+                        }
+                    }
+                    StateMigration::Manual => {
+                        PendingKind::Commented(CommentReason::ManualMigration)
+                    }
                 };
-                if !safe {
-                    continue;
-                }
                 renames_by_module
                     .entry(module_dir.clone())
                     .or_default()
-                    .push((*idx, name.clone()));
+                    .push((*idx, name.clone(), pending_kind));
             }
             total_blocks += blocks.len();
 
@@ -571,55 +582,101 @@ fn scan_ref_rewrites(
     out
 }
 
-/// Build the WorkspaceEdit incl. moved.tf operations. Mirrors
-/// the null_resource action's pattern but parametrised over
-/// the spec table.
+/// Build the WorkspaceEdit incl. moved.tf operations. Splits
+/// converted entries into real `moved {}` blocks (safe to
+/// auto-emit) and commented-out scaffolding (user must verify
+/// before uncommenting).
 fn build_workspace_edit(
     state: &StateStore,
     rewrites: HashMap<Url, Vec<TextEdit>>,
-    renames_by_module: HashMap<PathBuf, Vec<(usize, String)>>,
+    renames_by_module: HashMap<PathBuf, Vec<(usize, String, PendingKind)>>,
 ) -> WorkspaceEdit {
     let mut ops: Vec<DocumentChangeOperation> = Vec::new();
 
-    // Per-module moved.tf builder.
     for (module_dir, mut entries) in renames_by_module {
-        // Dedupe by (spec_index, name).
-        entries.sort();
-        entries.dedup();
-        // Drop entries already covered by an existing `moved`
-        // block in any sibling — keeps re-runs idempotent.
-        let existing = collect_existing_moved_pairs(state, &module_dir);
-        let to_add: Vec<(usize, String)> = entries
-            .into_iter()
-            .filter(|(idx, name)| {
-                let spec = match ALL_BLOCK_RENAMES.get(*idx) {
-                    Some(s) => s,
-                    None => return false,
-                };
-                let to = resolved_to(spec);
-                !existing.contains(&(spec.from.to_string(), to, name.clone()))
-            })
-            .collect();
-        if to_add.is_empty() {
-            continue;
-        }
+        // Sort + dedup by (spec_idx, name) — kind is derived
+        // from the spec table so duplicates would collide on
+        // kind anyway.
+        entries.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+        entries.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+
+        // Idempotency: existing real `moved` blocks (parsed)
+        // for the real-emit path; raw moved.tf text for the
+        // commented-emit path so we can do a substring search
+        // for already-present comment scaffolding.
+        let existing_real = collect_existing_moved_pairs(state, &module_dir);
+        let existing_text = read_existing_moved_tf_text(state, &module_dir);
 
         let target_path = module_dir.join("moved.tf");
         let Ok(target_url) = Url::from_file_path(&target_path) else {
             continue;
         };
 
-        let mut body_text = String::new();
-        for (idx, name) in &to_add {
+        // Partition entries by pending kind.
+        let mut real_blocks = String::new();
+        let mut commented_18: Vec<(String, String, String)> = Vec::new(); // (from_type, to_type, name)
+        let mut commented_manual: Vec<(String, String, String)> = Vec::new();
+
+        for (idx, name, kind) in &entries {
             let spec = match ALL_BLOCK_RENAMES.get(*idx) {
                 Some(s) => s,
                 None => continue,
             };
-            let to = resolved_to(spec);
-            body_text.push_str(&format!(
-                "moved {{\n  from = {}.{name}\n  to   = {to}.{name}\n}}\n",
-                spec.from
-            ));
+            let from_type = spec.from.to_string();
+            let to_type = resolved_to(spec);
+            match kind {
+                PendingKind::Real => {
+                    if existing_real.contains(&(
+                        from_type.clone(),
+                        to_type.clone(),
+                        name.clone(),
+                    )) {
+                        continue;
+                    }
+                    real_blocks.push_str(&format!(
+                        "moved {{\n  from = {from_type}.{name}\n  to   = {to_type}.{name}\n}}\n"
+                    ));
+                }
+                PendingKind::Commented(reason) => {
+                    // Substring-based dedup: does the existing
+                    // moved.tf already contain `# moved {` with
+                    // this exact `from = <type>.<name>` line?
+                    let needle = format!("from = {from_type}.{name}");
+                    if existing_text.contains(&needle) {
+                        continue;
+                    }
+                    let triple = (from_type, to_type, name.clone());
+                    match reason {
+                        CommentReason::NeedsTerraform18 => commented_18.push(triple),
+                        CommentReason::ManualMigration => commented_manual.push(triple),
+                    }
+                }
+            }
+        }
+
+        if real_blocks.is_empty() && commented_18.is_empty() && commented_manual.is_empty() {
+            continue;
+        }
+
+        // Compose the appended text. Real blocks first
+        // (uncontroversial), then commented sections with
+        // explanatory headers.
+        let mut body_text = String::new();
+        body_text.push_str(&real_blocks);
+
+        if !commented_manual.is_empty() {
+            body_text.push_str(&commented_manual_header());
+            for (from_t, to_t, name) in &commented_manual {
+                body_text.push_str(&format_commented_moved(from_t, to_t, name));
+                body_text.push('\n');
+            }
+        }
+        if !commented_18.is_empty() {
+            body_text.push_str(&commented_18_header());
+            for (from_t, to_t, name) in &commented_18 {
+                body_text.push_str(&format_commented_moved(from_t, to_t, name));
+                body_text.push('\n');
+            }
         }
 
         let strategy = resolve_target_strategy(state, &target_url, &target_path);
@@ -678,7 +735,6 @@ fn build_workspace_edit(
         }
     }
 
-    // Append rewrite edits.
     for (uri, edits) in rewrites {
         ops.push(DocumentChangeOperation::Edit(TextDocumentEdit {
             text_document: OptionalVersionedTextDocumentIdentifier { uri, version: None },
@@ -690,6 +746,67 @@ fn build_workspace_edit(
         document_changes: Some(DocumentChanges::Operations(ops)),
         ..Default::default()
     }
+}
+
+fn commented_manual_header() -> String {
+    "\n# AUTO-GENERATED — VERIFY BEFORE UNCOMMENTING\n\
+     # The renamed resource type(s) below have schema differences between the old and\n\
+     # new names (or `MoveResourceState` support varies per provider version).\n\
+     # tfls-rs cannot guarantee the in-place state migration is safe.\n\
+     #\n\
+     # Run `terraform plan` first. Then choose the right path:\n\
+     #   - If plan shows no destructive changes → uncomment the matching block(s)\n\
+     #     below to migrate state in place.\n\
+     #   - If plan shows destroy + recreate → DO NOT uncomment. Instead either:\n\
+     #       * `terraform state mv <old.address> <new.address>` per resource\n\
+     #         (preserves state when schemas align), OR\n\
+     #       * remove from state (`terraform state rm <old.address>`) and\n\
+     #         `terraform import <new.address> <provider-specific-id>` after the\n\
+     #         old resource is fully gone.\n\
+     #   - For Kubernetes resources specifically, the import id is usually\n\
+     #     `<namespace>/<name>` (or just `<name>` for cluster-scoped resources).\n\
+     #     See the registry docs for the new resource for exact import syntax.\n\n"
+        .to_string()
+}
+
+fn commented_18_header() -> String {
+    "\n# CROSS-TYPE `moved` — REQUIRES TERRAFORM 1.8+\n\
+     # The renames below are between *different* resource types and need\n\
+     # Terraform CLI 1.8 (released April 2024) to apply via `moved`. Module's\n\
+     # current `required_version` constraint doesn't admit 1.8+, so the\n\
+     # blocks are commented out.\n\
+     #\n\
+     # To migrate:\n\
+     #   1. Bump `required_version` in your `terraform { }` block to admit 1.8+,\n\
+     #      then uncomment the matching block(s) below, OR\n\
+     #   2. Migrate manually with `terraform state mv` per resource (works on\n\
+     #      any Terraform version — the new resource must have an identical\n\
+     #      schema, which is the case for these renames).\n\n"
+        .to_string()
+}
+
+fn format_commented_moved(from_type: &str, to_type: &str, name: &str) -> String {
+    format!(
+        "# moved {{\n#   from = {from_type}.{name}\n#   to   = {to_type}.{name}\n# }}\n"
+    )
+}
+
+/// Read the raw text of the module's `moved.tf` (loaded
+/// document, on-disk file, or empty if neither exists). Used by
+/// the commented-block dedup — we substring-search rather than
+/// HCL-parse since comments are invisible to the parser.
+fn read_existing_moved_tf_text(
+    state: &StateStore,
+    module_dir: &std::path::Path,
+) -> String {
+    let target_path = module_dir.join("moved.tf");
+    let Ok(target_url) = Url::from_file_path(&target_path) else {
+        return String::new();
+    };
+    if let Some(doc) = state.documents.get(&target_url) {
+        return doc.rope.to_string();
+    }
+    std::fs::read_to_string(&target_path).unwrap_or_default()
 }
 
 /// `(from_type, to_type, name)` triples already covered by
@@ -781,6 +898,36 @@ fn spec_index(spec: &BlockRenameSpec) -> usize {
         .iter()
         .position(|s| std::ptr::eq(s, spec))
         .unwrap_or(0)
+}
+
+/// How a single converted block should be represented in the
+/// generated `moved.tf`. Real entries are valid `moved {}`
+/// blocks Terraform applies. Commented entries are HCL
+/// comments — Terraform ignores them, but the user sees the
+/// exact `moved {}` syntax to uncomment after verifying the
+/// migration is safe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingKind {
+    Real,
+    Commented(CommentReason),
+}
+
+/// Why a `moved` entry was emitted as a comment instead of a
+/// real block — drives which header explains the situation in
+/// `moved.tf`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommentReason {
+    /// Cross-type `moved` requires Terraform CLI 1.8+; module
+    /// constraint doesn't admit it. User can either upgrade
+    /// their `required_version` or migrate state manually
+    /// (`terraform state mv` / `terraform import`).
+    NeedsTerraform18,
+    /// Schema differences between the renamed types. The
+    /// `MoveResourceState` path may or may not exist for this
+    /// resource at the user's provider version. User must
+    /// verify via `terraform plan` and choose the right path
+    /// (uncomment, or use `terraform state mv` / `import`).
+    ManualMigration,
 }
 
 /// Mirror of the strategy enum used by `code_action.rs` —

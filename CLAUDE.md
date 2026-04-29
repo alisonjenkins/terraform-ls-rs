@@ -225,12 +225,16 @@ The multi-rule body walker (`deprecation_rule::diagnostics_from_table`) visits e
 
 1. **Block label rewrite** — `"<from>"` → `"<to>"` on the matching `<block_kind> "<from>" "X"` block.
 2. **Reference rewrite** — every `<from>.X[.attr]` traversal in the body gets its head ident swapped for `<to>` (schemas are identical between the two types, so attribute paths stay the same).
-3. **`moved` block emit** — per-spec safety classification (`StateMigration` enum on `BlockRenameSpec`):
-   - `Aliased`: `<from>` and `<to>` are registered as the same resource in provider source (e.g. AWS alb family — both names register `ResourceLb()`). `moved` is safe on any Terraform version. **Emit unconditionally.**
-   - `RequiresTerraform18`: distinct resources sharing a `MoveResourceState` migration path (e.g. `aws_s3_bucket_object` → `aws_s3_object`). Cross-type `moved` requires Terraform CLI 1.8+. **Emit only when module's `required_version` admits 1.8+.**
-   - `Manual`: schemas diverge or `MoveResourceState` support unverified (e.g. Kubernetes `_v1` family). **Never auto-emit.** Action rewrites labels + refs; user verifies migration via `terraform plan` and hand-authors a `moved` block (or `terraform state mv`) if needed.
+3. **`moved` block emit** — per-spec safety classification (`StateMigration` enum on `BlockRenameSpec`) with three behaviours:
+   - `Aliased` (AWS alb family): real `moved {}` blocks emitted unconditionally. `<from>` and `<to>` register the same resource in provider source so state addresses are interchangeable.
+   - `RequiresTerraform18` (`aws_s3_bucket_object` → `aws_s3_object`): real `moved {}` emitted ONLY when module's `required_version` admits Terraform 1.8+. Otherwise, **commented-out** `moved` scaffolding emitted with a "REQUIRES TERRAFORM 1.8+" header pointing at either bumping `required_version` or running `terraform state mv` manually.
+   - `Manual` (Kubernetes `_v1` family): **commented-out** `moved` scaffolding emitted with a "VERIFY BEFORE UNCOMMENTING" header explaining the user must `terraform plan` first, and giving the `terraform state mv` / `terraform state rm` + `terraform import` paths if `plan` shows destructive changes.
 
-   Idempotency holds across all three: re-runs skip names already covered by an existing `moved` block in the module.
+   The commented form gives users the exact `moved {}` syntax pre-written — they uncomment after verification, or follow the alternative-migration breadcrumbs. Beats silently leaving them to author it from scratch.
+
+   Idempotency:
+   - Real `moved {}` blocks: HCL-parse existing `moved` blocks across the module, skip names already covered.
+   - Commented `moved {}` blocks: text-search existing `moved.tf` for `from = <type>.<name>` substring, skip duplicates.
 
 Multi-scope (Selection / File / Module / Workspace), `CodeActionKind` family `source.fixAll.terraform-ls-rs.rename-deprecated-provider-types[.<scope>]`. Per-call cache keyed by `(module_dir, provider_name)` so a 26-spec table touching 2 providers does at most 2 sibling walks per module per code-action call.
 
