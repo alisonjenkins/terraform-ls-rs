@@ -57,13 +57,48 @@ pub struct BlockRenameSpec {
     pub to: &'static str,
     pub gate_provider: &'static str,
     pub gate_threshold: &'static str,
+    /// How safe `moved { from = <from>.X to = <to>.X }` is to
+    /// emit. Wrong answer here is dangerous: a `moved` block
+    /// pointing at a destination Terraform can't reach
+    /// produces "no matching resource" errors at plan time, or
+    /// worse, silently destroys + recreates the resource if
+    /// the user dismisses the error.
+    pub state_migration: StateMigration,
+}
+
+/// What we know about cross-type state migration safety for
+/// this rename. Drives whether `build_workspace_edit` emits a
+/// `moved` block alongside the type-name rewrite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateMigration {
+    /// `<from>` and `<to>` are registered as ALIASES in the
+    /// provider source — both names resolve to the same
+    /// underlying resource implementation, so state already
+    /// points at the same object. Safe to emit `moved` on any
+    /// Terraform version. Example: `aws_alb` and `aws_lb` both
+    /// register `ResourceLb()` in the AWS provider.
+    Aliased,
+    /// `<from>` and `<to>` are *different* resources sharing a
+    /// migration path through the provider's
+    /// `MoveResourceState` implementation. Requires Terraform
+    /// 1.8+ (cross-type `moved` support landed in CLI 1.8) AND
+    /// provider support. Module's `required_version` must
+    /// admit 1.8+ before emit; otherwise skip.
+    RequiresTerraform18,
+    /// Migration safety unknown or known to need user
+    /// verification (schema differs between `from` and `to`,
+    /// `MoveResourceState` not implemented, etc.). DO NOT
+    /// emit a `moved` block automatically; the action rewrites
+    /// labels + references but leaves state migration to the
+    /// user (`terraform state mv` or hand-authored `moved`
+    /// after `terraform plan` review).
+    Manual,
 }
 
 impl BlockRenameSpec {
-    /// `true` for `resource` specs (state-bearing — needs
-    /// `moved` block for safe migration). `false` for `data`
-    /// specs and unrecognised block kinds.
-    fn emits_moved_block(&self) -> bool {
+    /// `true` for `resource` specs (state-bearing — `moved`
+    /// only meaningful for resources, not data sources).
+    fn is_resource(&self) -> bool {
         self.block_kind == "resource"
     }
 }
@@ -75,52 +110,36 @@ impl BlockRenameSpec {
 /// them here. Keep in sync with `tfls_diag::AWS_TYPE_RENAMES`
 /// and `tfls_diag::KUBERNETES_TYPE_RENAMES`.
 const ALL_BLOCK_RENAMES: &[BlockRenameSpec] = &[
-    // AWS rename family — see `tfls_diag::AWS_TYPE_RENAMES`.
-    BlockRenameSpec {
-        block_kind: "resource",
-        from: "aws_alb",
-        to: "aws_lb",
-        gate_provider: "aws",
-        gate_threshold: "1.7.0",
-    },
-    BlockRenameSpec {
-        block_kind: "resource",
-        from: "aws_alb_listener",
-        to: "aws_lb_listener",
-        gate_provider: "aws",
-        gate_threshold: "1.7.0",
-    },
-    BlockRenameSpec {
-        block_kind: "resource",
-        from: "aws_alb_listener_rule",
-        to: "aws_lb_listener_rule",
-        gate_provider: "aws",
-        gate_threshold: "1.7.0",
-    },
-    BlockRenameSpec {
-        block_kind: "resource",
-        from: "aws_alb_target_group",
-        to: "aws_lb_target_group",
-        gate_provider: "aws",
-        gate_threshold: "1.7.0",
-    },
-    BlockRenameSpec {
-        block_kind: "resource",
-        from: "aws_alb_target_group_attachment",
-        to: "aws_lb_target_group_attachment",
-        gate_provider: "aws",
-        gate_threshold: "1.7.0",
-    },
+    // AWS `aws_alb*` family — see `tfls_diag::AWS_TYPE_RENAMES`.
+    // Both names register the same `ResourceLb()` in the AWS
+    // provider source — true aliases, state addresses are
+    // interchangeable. Safe to emit `moved` unconditionally.
+    aws_aliased("aws_alb", "aws_lb"),
+    aws_aliased("aws_alb_listener", "aws_lb_listener"),
+    aws_aliased("aws_alb_listener_rule", "aws_lb_listener_rule"),
+    aws_aliased("aws_alb_target_group", "aws_lb_target_group"),
+    aws_aliased("aws_alb_target_group_attachment", "aws_lb_target_group_attachment"),
+    // `aws_s3_bucket_object` → `aws_s3_object` is NOT an alias
+    // — they're distinct resources with diverging defaults
+    // (`force_destroy`, lifecycle alignment with the v4 S3
+    // split). Cross-type `moved` requires Terraform 1.8+ AND
+    // the AWS provider's `MoveResourceState` (4.x+).
     BlockRenameSpec {
         block_kind: "resource",
         from: "aws_s3_bucket_object",
         to: "aws_s3_object",
         gate_provider: "aws",
         gate_threshold: "4.0.0",
+        state_migration: StateMigration::RequiresTerraform18,
     },
-    // Kubernetes _v1 rename family — see
-    // `tfls_diag::KUBERNETES_TYPE_RENAMES`. Threshold = 2.0
-    // for all entries.
+    // Kubernetes `_v1` rename family — see
+    // `tfls_diag::KUBERNETES_TYPE_RENAMES`. The non-versioned
+    // resources predate the explicit-API-version naming
+    // convention; the `_v1` variants have schema *differences*
+    // (HPA metric APIs, RBAC field shape, ingress backend
+    // wrapping, etc.). `MoveResourceState` support is per-
+    // resource and per-provider-version. Emit Manual until
+    // we have schema-driven safety verification.
     k8s_v1("kubernetes_pod"),
     k8s_v1("kubernetes_deployment"),
     k8s_v1("kubernetes_service"),
@@ -143,20 +162,32 @@ const ALL_BLOCK_RENAMES: &[BlockRenameSpec] = &[
     k8s_v1("kubernetes_horizontal_pod_autoscaler"),
 ];
 
-/// `kubernetes_X` → `kubernetes_X_v1` shorthand. Can't use
-/// `format!` in a const context, but the destination name is
-/// recoverable at runtime by appending `_v1` to `from` — we
-/// stash a static literal pointer instead and rely on a
-/// `to_for(spec)` accessor that materialises the v1 name once.
+/// `aws_X` ↔ `aws_lb_*` true-alias spec helper.
+const fn aws_aliased(from: &'static str, to: &'static str) -> BlockRenameSpec {
+    BlockRenameSpec {
+        block_kind: "resource",
+        from,
+        to,
+        gate_provider: "aws",
+        gate_threshold: "1.7.0",
+        state_migration: StateMigration::Aliased,
+    }
+}
+
+/// `kubernetes_X` → `kubernetes_X_v1` shorthand. Can't
+/// `format!` in a const context — destination is recovered
+/// via `resolved_to` at runtime (appends `_v1`). All k8s
+/// renames default to `Manual` state migration: schemas
+/// diverge between unversioned and `_v1` variants and
+/// `MoveResourceState` support varies per provider version.
 const fn k8s_v1(from: &'static str) -> BlockRenameSpec {
     BlockRenameSpec {
         block_kind: "resource",
         from,
-        // `to` is computed dynamically — sentinel empty string
-        // marks the kubernetes-v1 family; `resolved_to` reads it.
         to: "",
         gate_provider: "kubernetes",
         gate_threshold: "2.0.0",
+        state_migration: StateMigration::Manual,
     }
 }
 
@@ -243,17 +274,34 @@ pub fn emit_block_rename_actions(
                 return;
             }
 
-            // Track converted (spec_index, name) for moved.tf.
+            // Track converted (spec_index, name) for moved.tf —
+            // ONLY when the spec's state-migration kind is
+            // safe to emit. `Manual` skipped entirely
+            // (auto-emitted `moved` would be wrong). `RequiresTerraform18`
+            // gated by the module's aggregated `required_version`
+            // admitting 1.8+; below that, cross-type `moved` is
+            // CLI-side-unsupported and would error.
+            let module_admits_terraform_1_8 =
+                module_admits_terraform_at_least(state, &module_dir, "1.8.0");
             for (idx, name, _edit) in &blocks {
-                if let Some(spec) = ALL_BLOCK_RENAMES.get(*idx) {
-                    if !spec.emits_moved_block() {
-                        continue;
-                    }
-                    renames_by_module
-                        .entry(module_dir.clone())
-                        .or_default()
-                        .push((*idx, name.clone()));
+                let Some(spec) = ALL_BLOCK_RENAMES.get(*idx) else {
+                    continue;
+                };
+                if !spec.is_resource() {
+                    continue;
                 }
+                let safe = match spec.state_migration {
+                    StateMigration::Aliased => true,
+                    StateMigration::RequiresTerraform18 => module_admits_terraform_1_8,
+                    StateMigration::Manual => false,
+                };
+                if !safe {
+                    continue;
+                }
+                renames_by_module
+                    .entry(module_dir.clone())
+                    .or_default()
+                    .push((*idx, name.clone()));
             }
             total_blocks += blocks.len();
 
@@ -341,6 +389,51 @@ fn compute_supported_specs(
         supported[i] = admits;
     }
     supported
+}
+
+/// True when the module's aggregated `terraform { required_version }`
+/// admits a Terraform CLI version at or above `floor`. Used by
+/// `RequiresTerraform18` to gate cross-type `moved` emission —
+/// `moved` between *different* resource types needs CLI 1.8+
+/// regardless of provider support, so we must not emit
+/// otherwise.
+fn module_admits_terraform_at_least(
+    state: &StateStore,
+    module_dir: &std::path::Path,
+    floor: &str,
+) -> bool {
+    let mut fragments: Vec<String> = Vec::new();
+    for entry in state.documents.iter() {
+        let uri = entry.key();
+        let Ok(path) = uri.to_file_path() else { continue };
+        if path.parent() != Some(module_dir) {
+            continue;
+        }
+        let doc = entry.value();
+        let Some(body) = doc.parsed.body.as_ref() else {
+            continue;
+        };
+        if let Some(s) = tfls_diag::extract_required_version(body) {
+            fragments.push(s);
+        }
+    }
+    if fragments.is_empty() {
+        // Absence of evidence — be conservative and DO NOT
+        // assume the user is on 1.8+. Without a constraint we
+        // can't promise the cross-type `moved` will work, so
+        // skip the auto-emit.
+        return false;
+    }
+    let joined = fragments.join(", ");
+    let parsed = tfls_core::version_constraint::parse(&joined);
+    if parsed.constraints.is_empty() {
+        return false;
+    }
+    let Some(min) = tfls_core::version_constraint::min_admitted_version(&parsed.constraints)
+    else {
+        return false;
+    };
+    tfls_core::version_constraint::version_at_least(min, floor)
 }
 
 /// Module-aware constraint extraction by directory. Mirrors
@@ -791,15 +884,59 @@ mod tests {
         }
     }
 
-    /// Resource specs emit `moved` blocks; data specs don't.
+    /// Every spec is a `resource` (data sources don't have
+    /// state to migrate; that family would warrant its own
+    /// data-rename action with no `moved` emit).
     #[test]
-    fn moved_block_emit_correlates_with_block_kind() {
+    fn every_spec_is_a_resource() {
         for spec in ALL_BLOCK_RENAMES {
-            assert_eq!(
-                spec.emits_moved_block(),
-                spec.block_kind == "resource",
-                "spec {spec:?}",
-            );
+            assert_eq!(spec.block_kind, "resource", "spec {spec:?}");
+            assert!(spec.is_resource(), "spec {spec:?}");
+        }
+    }
+
+    /// AWS alb family must be `Aliased` (true aliases in the
+    /// AWS provider source — same `ResourceLb()` for both
+    /// names, state addresses interchangeable).
+    #[test]
+    fn aws_alb_family_is_aliased() {
+        for spec in ALL_BLOCK_RENAMES {
+            if spec.from.starts_with("aws_alb") {
+                assert_eq!(
+                    spec.state_migration,
+                    StateMigration::Aliased,
+                    "aws_alb family must be Aliased; got {spec:?}",
+                );
+            }
+        }
+    }
+
+    /// Cross-type AWS rename (`aws_s3_bucket_object` →
+    /// `aws_s3_object`) is `RequiresTerraform18` — needs CLI
+    /// 1.8+ for cross-type `moved`.
+    #[test]
+    fn aws_s3_bucket_object_requires_terraform_18() {
+        let spec = ALL_BLOCK_RENAMES
+            .iter()
+            .find(|s| s.from == "aws_s3_bucket_object")
+            .expect("spec present");
+        assert_eq!(spec.state_migration, StateMigration::RequiresTerraform18);
+    }
+
+    /// Kubernetes `_v1` renames default to `Manual` — schemas
+    /// diverge between unversioned and `_v1` variants and
+    /// `MoveResourceState` support is per-resource per
+    /// provider version. Don't auto-emit `moved` for these.
+    #[test]
+    fn kubernetes_renames_are_manual() {
+        for spec in ALL_BLOCK_RENAMES {
+            if spec.from.starts_with("kubernetes_") {
+                assert_eq!(
+                    spec.state_migration,
+                    StateMigration::Manual,
+                    "kubernetes rename must be Manual; got {spec:?}",
+                );
+            }
         }
     }
 }

@@ -2745,8 +2745,15 @@ async fn aws_s3_bucket_object_rename_uses_4_0_threshold() {
 
 // ── Kubernetes _v1 rename family auto-fix ─────────────────────
 
+/// Kubernetes `_v1` renames are flagged `StateMigration::Manual`
+/// — schemas diverge, `MoveResourceState` support is per-
+/// resource per provider version. Action rewrites label + refs
+/// but does NOT auto-emit a `moved` block. State migration is
+/// the user's responsibility (verify with `terraform plan`,
+/// hand-author a `moved` block after testing, or
+/// `terraform state mv`).
 #[tokio::test]
-async fn kubernetes_pod_rename_action_emits_label_rewrite() {
+async fn kubernetes_pod_rename_action_emits_label_rewrite_without_moved() {
     let u = uri("file:///fmt-k8s-pod/main.tf");
     let src = concat!(
         "resource \"kubernetes_pod\" \"p\" {\n  metadata {\n    name = \"p\"\n  }\n}\n",
@@ -2771,11 +2778,19 @@ async fn kubernetes_pod_rename_action_emits_label_rewrite() {
     );
 
     let moved = uri("file:///fmt-k8s-pod/moved.tf");
-    assert!(has_create_file(action, &moved), "moved.tf created");
+    assert!(
+        !has_create_file(action, &moved),
+        "moved.tf must NOT be auto-created for Manual migration kind"
+    );
+    assert!(
+        !edits.contains_key(&moved),
+        "no moved.tf edits for Manual kind; got: {:?}",
+        edits.keys().collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]
-async fn kubernetes_rename_action_handles_multiple_kinds() {
+async fn kubernetes_rename_action_handles_multiple_kinds_without_moved() {
     let u = uri("file:///fmt-k8s-multi/main.tf");
     let src = concat!(
         "resource \"kubernetes_pod\" \"a\" {\n  metadata {\n    name = \"a\"\n  }\n}\n",
@@ -2796,16 +2811,70 @@ async fn kubernetes_rename_action_handles_multiple_kinds() {
     assert!(main_edits.iter().any(|e| e.new_text == "\"kubernetes_service_v1\""));
 
     let moved = uri("file:///fmt-k8s-multi/moved.tf");
+    assert!(
+        !has_create_file(action, &moved),
+        "Manual migration kind: moved.tf must not be auto-emitted"
+    );
+}
+
+/// `aws_s3_bucket_object` → `aws_s3_object` is
+/// `RequiresTerraform18` — cross-type `moved` needs CLI 1.8+.
+/// Without a `required_version` constraint admitting 1.8+ we
+/// can't safely emit; rewrite the labels + refs and leave the
+/// state migration to the user.
+#[tokio::test]
+async fn aws_s3_bucket_object_action_skips_moved_without_terraform_18_pin() {
+    let u = uri("file:///fmt-aws-s3-no18/main.tf");
+    let src = concat!(
+        "terraform {\n  required_providers {\n    aws = \"~> 5.0\"\n  }\n}\n",
+        "resource \"aws_s3_bucket_object\" \"x\" {\n  bucket = \"b\"\n  key = \"k\"\n}\n",
+    );
+    let backend = fresh_backend(src, &u);
+    let actions = all_actions_for(&backend, &u).await;
+    let action = find_action(
+        &actions,
+        "Rename 1 deprecated provider type in this file",
+    );
+    let edits = doc_change_edits(action);
+    // Label rewrite still fires.
+    let main_edits = edits.get(&u).expect("main.tf edits");
+    assert!(main_edits.iter().any(|e| e.new_text == "\"aws_s3_object\""));
+    // moved.tf NOT created — terraform_version constraint
+    // doesn't promise 1.8+.
+    let moved = uri("file:///fmt-aws-s3-no18/moved.tf");
+    assert!(!has_create_file(action, &moved));
+}
+
+#[tokio::test]
+async fn aws_s3_bucket_object_action_emits_moved_when_terraform_18_admitted() {
+    let u = uri("file:///fmt-aws-s3-18/main.tf");
+    let src = concat!(
+        "terraform {\n",
+        "  required_version = \">= 1.8\"\n",
+        "  required_providers {\n    aws = \"~> 5.0\"\n  }\n",
+        "}\n",
+        "resource \"aws_s3_bucket_object\" \"x\" {\n  bucket = \"b\"\n  key = \"k\"\n}\n",
+    );
+    let backend = fresh_backend(src, &u);
+    let actions = all_actions_for(&backend, &u).await;
+    let action = find_action(
+        &actions,
+        "Rename 1 deprecated provider type in this file",
+    );
+    let edits = doc_change_edits(action);
+    let moved = uri("file:///fmt-aws-s3-18/moved.tf");
+    assert!(
+        has_create_file(action, &moved),
+        "terraform 1.8+ admitted ⇒ cross-type moved is safe to emit"
+    );
     let moved_body = edits
         .get(&moved)
         .expect("moved.tf edits")
         .iter()
         .map(|e| e.new_text.clone())
         .collect::<String>();
-    assert!(moved_body.contains("from = kubernetes_pod.a"));
-    assert!(moved_body.contains("to   = kubernetes_pod_v1.a"));
-    assert!(moved_body.contains("from = kubernetes_deployment.b"));
-    assert!(moved_body.contains("to   = kubernetes_deployment_v1.b"));
+    assert!(moved_body.contains("from = aws_s3_bucket_object.x"));
+    assert!(moved_body.contains("to   = aws_s3_object.x"));
 }
 
 #[tokio::test]
