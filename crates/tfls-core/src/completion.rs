@@ -121,6 +121,25 @@ pub enum CompletionContext {
     /// Cursor is after `module.` — expect a module name.
     ModuleRef,
 
+    /// Cursor is after `each.` — expect `key` or `value` (the two
+    /// fields the `each` namespace exposes inside a `for_each`
+    /// resource/data/module body).
+    EachRef,
+
+    /// Cursor is after `count.` — expect `index` (the only field
+    /// the `count` namespace exposes inside a `count`-iterated
+    /// resource/data/module body).
+    CountRef,
+
+    /// Cursor is after `path.` — expect one of `module`, `root`,
+    /// `cwd`. These are the three filesystem-path accessors
+    /// Terraform exposes globally.
+    PathRef,
+
+    /// Cursor is after `terraform.` — expect `workspace`. The
+    /// only field the `terraform` namespace exposes.
+    TerraformNamespaceRef,
+
     /// Cursor is after `var.NAME.` (and possibly more `.field` steps)
     /// — expect a field on a variable's object type.
     VariableAttrRef { path: Vec<String> },
@@ -646,6 +665,18 @@ fn reference_prefix_context(before: &str) -> Option<CompletionContext> {
     }
     if trimmed.ends_with("module.") {
         return Some(CompletionContext::ModuleRef);
+    }
+    if trimmed.ends_with("each.") {
+        return Some(CompletionContext::EachRef);
+    }
+    if trimmed.ends_with("count.") {
+        return Some(CompletionContext::CountRef);
+    }
+    if trimmed.ends_with("path.") {
+        return Some(CompletionContext::PathRef);
+    }
+    if trimmed.ends_with("terraform.") {
+        return Some(CompletionContext::TerraformNamespaceRef);
     }
     // Multi-segment traversal (TYPE.NAME., data.TYPE.NAME., var.foo.bar.).
     let prefix = trimmed.strip_suffix('.')?;
@@ -1313,6 +1344,155 @@ mod tests {
     fn function_call_in_interpolation() {
         let src = "resource \"x\" \"y\" {\n  value = \"${";
         assert_eq!(at_end(src), CompletionContext::FunctionCall);
+    }
+
+    // ---------------------------------------------------------------
+    // Probe tests for completion-inside-interpolation gaps.
+    // Surfaces what currently works vs not so the fix can target the
+    // real regressions rather than reinventing infrastructure.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn interp_var_dot() {
+        let src = "output \"x\" {\n  value = \"${var.";
+        assert_eq!(at_end(src), CompletionContext::VariableRef);
+    }
+
+    #[test]
+    fn interp_local_dot() {
+        let src = "output \"x\" {\n  value = \"${local.";
+        assert_eq!(at_end(src), CompletionContext::LocalRef);
+    }
+
+    #[test]
+    fn interp_module_dot() {
+        let src = "output \"x\" {\n  value = \"${module.";
+        assert_eq!(at_end(src), CompletionContext::ModuleRef);
+    }
+
+    #[test]
+    fn interp_data_dot() {
+        let src = "output \"x\" {\n  value = \"${data.aws_ami.";
+        assert_eq!(
+            at_end(src),
+            CompletionContext::DataSourceRef {
+                resource_type: "aws_ami".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn interp_resource_attr() {
+        let src = "output \"x\" {\n  value = \"${aws_instance.web.";
+        assert_eq!(
+            at_end(src),
+            CompletionContext::ResourceAttr {
+                resource_type: "aws_instance".into(),
+                name: "web".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn interp_partial_var_name() {
+        let src = "output \"x\" {\n  value = \"${var.fo";
+        assert_eq!(at_end(src), CompletionContext::VariableRef);
+    }
+
+    #[test]
+    fn interp_after_literal_prefix() {
+        let src = "output \"x\" {\n  value = \"prefix-${var.";
+        assert_eq!(at_end(src), CompletionContext::VariableRef);
+    }
+
+    #[test]
+    fn interp_function_name_partial() {
+        // `${us` should classify as FunctionCall so completion can
+        // suggest `upper`, `urlencode`, etc.
+        let src = "output \"x\" {\n  value = \"${us";
+        assert_eq!(at_end(src), CompletionContext::FunctionCall);
+    }
+
+    #[test]
+    fn interp_inside_nested_func_call() {
+        let src = "output \"x\" {\n  value = \"${upper(var.";
+        assert_eq!(at_end(src), CompletionContext::VariableRef);
+    }
+
+    #[test]
+    fn cursor_in_literal_text_after_close_brace() {
+        // Cursor in literal text AFTER a closed `${...}` interpolation.
+        // Should NOT trigger ref completion.
+        let src = "output \"x\" {\n  value = \"${var.foo}-suffix";
+        // Whatever this is — just confirm it's not VariableRef.
+        let ctx = at_end(src);
+        assert_ne!(ctx, CompletionContext::VariableRef);
+        assert_ne!(ctx, CompletionContext::LocalRef);
+    }
+
+    #[test]
+    fn interp_in_heredoc_var() {
+        let src = "output \"x\" {\n  value = <<EOT\n${var.";
+        assert_eq!(at_end(src), CompletionContext::VariableRef);
+    }
+
+    #[test]
+    fn interp_each_value() {
+        let src = "resource \"aws_instance\" \"x\" {\n  for_each = toset([\"a\"])\n  tags = {\n    Name = \"${each.";
+        assert_eq!(at_end(src), CompletionContext::EachRef);
+    }
+
+    #[test]
+    fn interp_path_module() {
+        let src = "output \"x\" {\n  value = \"${path.";
+        assert_eq!(at_end(src), CompletionContext::PathRef);
+    }
+
+    #[test]
+    fn count_index_in_resource_body() {
+        let src = "resource \"aws_instance\" \"x\" {\n  count = 3\n  tags = {\n    Name = \"node-${count.";
+        assert_eq!(at_end(src), CompletionContext::CountRef);
+    }
+
+    #[test]
+    fn interp_conditional_expr() {
+        let src = "output \"x\" {\n  value = \"${var.flag ? var.";
+        assert_eq!(at_end(src), CompletionContext::VariableRef);
+    }
+
+    #[test]
+    fn interp_inside_function_call() {
+        let src = "output \"x\" {\n  value = \"${format(\"%s\", var.";
+        assert_eq!(at_end(src), CompletionContext::VariableRef);
+    }
+
+    #[test]
+    fn interp_nested_paren_func() {
+        let src = "output \"x\" {\n  value = \"${upper(lower(var.";
+        assert_eq!(at_end(src), CompletionContext::VariableRef);
+    }
+
+    #[test]
+    fn interp_double_quoted_string_inside() {
+        // String literal inside interpolation — common when
+        // calling functions like `format("%s", ...)`. The
+        // `"%s"` confuses naive unterminated-quote tracking.
+        let src = "output \"x\" {\n  value = \"${format(\"%s\", local.";
+        assert_eq!(at_end(src), CompletionContext::LocalRef);
+    }
+
+    #[test]
+    fn bare_each_dot_in_attribute_value() {
+        // `each.` outside an interpolation — direct attribute
+        // value, common in for_each contexts.
+        let src = "resource \"aws_instance\" \"x\" {\n  for_each = toset([\"a\"])\n  ami = each.";
+        assert_eq!(at_end(src), CompletionContext::EachRef);
+    }
+
+    #[test]
+    fn bare_path_dot() {
+        let src = "output \"x\" {\n  value = path.";
+        assert_eq!(at_end(src), CompletionContext::PathRef);
     }
 
     #[test]

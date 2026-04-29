@@ -141,6 +141,10 @@ pub async fn completion(
         CompletionContext::ModuleRef => {
             module_symbol_items(backend, &uri, SymbolField::Modules, CompletionItemKind::MODULE)
         }
+        CompletionContext::EachRef => each_namespace_items(),
+        CompletionContext::CountRef => count_namespace_items(),
+        CompletionContext::PathRef => path_namespace_items(),
+        CompletionContext::TerraformNamespaceRef => terraform_namespace_items(),
         CompletionContext::VariableAttrRef { path } => variable_attr_items(backend, &uri, &path),
         CompletionContext::ResourceRef { resource_type } => {
             resource_name_items(backend, &uri, &resource_type, /*data=*/ false)
@@ -1735,6 +1739,73 @@ enum SymbolField {
     Variables,
     Locals,
     Modules,
+}
+
+/// `each.<...>` namespace completion. Surfaces inside any
+/// resource/data/module body that uses `for_each`. Two fixed
+/// fields per Terraform spec.
+fn each_namespace_items() -> Vec<CompletionItem> {
+    vec![
+        builtin_namespace_item(
+            "key",
+            "The map key (or set member) of the current `for_each` iteration. \
+             Always a string.",
+        ),
+        builtin_namespace_item(
+            "value",
+            "The value associated with the current `for_each` iteration's key. \
+             Type depends on the `for_each` collection.",
+        ),
+    ]
+}
+
+/// `count.<...>` namespace completion. Surfaces inside any
+/// resource/data/module body that uses `count`. One fixed field.
+fn count_namespace_items() -> Vec<CompletionItem> {
+    vec![builtin_namespace_item(
+        "index",
+        "The 0-based index of the current `count`-iterated instance.",
+    )]
+}
+
+/// `path.<...>` namespace completion. Three fixed filesystem-path
+/// accessors Terraform exposes globally.
+fn path_namespace_items() -> Vec<CompletionItem> {
+    vec![
+        builtin_namespace_item(
+            "module",
+            "Filesystem path of the module where the expression is placed.",
+        ),
+        builtin_namespace_item(
+            "root",
+            "Filesystem path of the root module of the configuration.",
+        ),
+        builtin_namespace_item(
+            "cwd",
+            "Filesystem path of the directory where Terraform was invoked.",
+        ),
+    ]
+}
+
+/// `terraform.<...>` namespace completion. The only field is
+/// `workspace`.
+fn terraform_namespace_items() -> Vec<CompletionItem> {
+    vec![builtin_namespace_item(
+        "workspace",
+        "Name of the currently active Terraform workspace.",
+    )]
+}
+
+fn builtin_namespace_item(label: &str, doc: &str) -> CompletionItem {
+    CompletionItem {
+        label: label.to_string(),
+        kind: Some(CompletionItemKind::PROPERTY),
+        documentation: Some(Documentation::MarkupContent(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: doc.to_string(),
+        })),
+        ..Default::default()
+    }
 }
 
 /// Gather a sorted, de-duplicated list of names from every `.tf` file

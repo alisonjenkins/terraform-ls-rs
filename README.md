@@ -367,14 +367,29 @@ Highlights:
 - **Module-aware indexing** — walks up from opened files to find the
   nearest `.terraform/providers/` directory.
 
+Completion shape coverage:
+
+- Reference prefixes — `var.`, `local.`, `module.`, `data.`,
+  `<resource_type>.`, plus the built-in namespaces `each.`,
+  `count.`, `path.`, `terraform.`. All work in bare expression
+  position AND inside `${ ... }` string-template interpolations
+  (`%{ if var.X }` template directives also classify cleanly).
+- Function-name completion — bare expression position +
+  inside interpolations, including nested calls
+  (`upper(lower(var.X))`).
+- Schema-driven attributes / values — provider schemas drive
+  attribute completion at every drill-down level.
+
 Not yet implemented (future work):
 
-- Completion inside string-interpolation templates
 - Provider-defined function completion (hover + signature help work,
-  but no completion context for function names)
-- More provider-version-gated deprecations (`aws_s3_bucket_object` →
-  `aws_s3_object`, `aws_alb_target_group` → `aws_lb_target_group`,
-  …). Framework now supports the gate kind; pull requests welcome.
+  but no completion context for function names like `provider::aws::trim_prefix(...)`).
+- `self.` namespace inside provisioner blocks — currently classifies
+  as a generic resource ref. Real `self` resolution needs the
+  enclosing-resource schema lookup.
+- More provider-version-gated deprecations. Framework supports
+  the gate kind; the `tfls-deprecation-scrape --uncovered-only`
+  binary surfaces candidates from real workspaces.
 
 ## License
 
