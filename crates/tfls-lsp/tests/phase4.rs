@@ -2462,6 +2462,65 @@ async fn template_file_action_suppressed_when_pre_0_12() {
     assert!(!any, "0.12 gate must suppress; got:\n{actions:?}");
 }
 
+/// `data "template_file" "x" { vars = data.template_file.y.rendered }`
+/// — vars references *another* `template_file`. The action
+/// emits a DELETE covering x AND a `local.y` rewrite inside
+/// y's reference. Naive emit produces two overlapping edits;
+/// LSP rejects overlap. Filter must drop the inner ref since
+/// the delete subsumes it (both x and y get converted; the
+/// ref inside x's vars is moot — that whole vars block is
+/// being thrown away with the data block).
+#[tokio::test]
+async fn template_file_action_filters_overlapping_ref_in_deleted_vars() {
+    let u = uri("file:///fmt-tf-overlap/main.tf");
+    let src = concat!(
+        "data \"template_file\" \"y\" {\n  template = \"hi ${name}\"\n}\n",
+        "data \"template_file\" \"x\" {\n",
+        "  template = \"goodbye\"\n",
+        "  vars = { msg = data.template_file.y.rendered }\n",
+        "}\n",
+    );
+    let backend = fresh_backend(src, &u);
+    let actions = all_actions_for(&backend, &u).await;
+    let action = find_action(
+        &actions,
+        "Convert 2 template_file data blocks to templatefile() in this file",
+    );
+    let edits = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .and_then(|c| c.get(&u))
+        .expect("file edits");
+
+    // No two edits in the same file may overlap. If the bug is
+    // present, a `local.y` ref edit lives inside the `data "x"`
+    // delete range — overlap.
+    for (i, a) in edits.iter().enumerate() {
+        for b in edits.iter().skip(i + 1) {
+            let a_start = (a.range.start.line, a.range.start.character);
+            let a_end = (a.range.end.line, a.range.end.character);
+            let b_start = (b.range.start.line, b.range.start.character);
+            let b_end = (b.range.end.line, b.range.end.character);
+            let disjoint = a_end <= b_start || b_end <= a_start;
+            assert!(
+                disjoint,
+                "edits overlap: {a:?} vs {b:?}\nall edits:\n{edits:#?}"
+            );
+        }
+    }
+
+    // Both data blocks should still be deleted + locals appended.
+    let deletes = edits.iter().filter(|e| e.new_text.is_empty()).count();
+    assert_eq!(deletes, 2, "both blocks deleted");
+    let append = edits
+        .iter()
+        .find(|e| e.new_text.contains("locals {"))
+        .expect("locals append");
+    assert!(append.new_text.contains("y = templatefile"));
+    assert!(append.new_text.contains("x = templatefile"));
+}
+
 /// `local.x` already exists in same module → converting
 /// `data "template_file" "x"` would emit a duplicate
 /// `locals { x = ... }` block (Terraform errors). Action must

@@ -3160,10 +3160,29 @@ fn emit_template_file_actions(
             edits_by_uri.entry(uri.clone()).or_default().extend(host_edits);
         }
 
+        // Per-doc delete ranges (for filtering refs that fall
+        // inside soon-to-be-deleted blocks — LSP rejects
+        // overlapping edits). Empty for docs that contribute no
+        // host edits (refs-only sweep).
+        let delete_ranges_by_uri: HashMap<Url, Vec<Range>> = targets_by_doc
+            .iter()
+            .map(|(uri, targets)| {
+                (
+                    uri.clone(),
+                    targets.iter().map(|t| t.delete_range).collect(),
+                )
+            })
+            .collect();
+
         // Reference rewrites — for every doc in each affected
         // module, scan + emit `local.X` rewrites for the names
-        // converted in that module. We already have the gate +
-        // doc set staged.
+        // converted in that module. Filter out rewrites that
+        // overlap a pending delete in the same doc — for example
+        // `data.template_file.X { vars = data.template_file.Y.rendered }`
+        // would otherwise emit a `local.Y` rewrite *inside* the
+        // delete range of X. The deletion swallows the original
+        // text either way; the filter just keeps the edit set
+        // legal.
         for (module_dir, names) in &names_by_module {
             for entry in state.documents.iter() {
                 let uri = entry.key();
@@ -3177,6 +3196,11 @@ fn emit_template_file_actions(
                 };
                 let mut ref_edits = Vec::new();
                 template_file_reference_edits(body, &doc.rope, names, &mut ref_edits);
+                if let Some(deletes) = delete_ranges_by_uri.get(uri) {
+                    ref_edits.retain(|e| {
+                        !deletes.iter().any(|d| range_intersects(d, &e.range))
+                    });
+                }
                 if let Scope::Selection { range } = scope {
                     ref_edits.retain(|e| range_intersects(&e.range, &range));
                 }
@@ -3268,6 +3292,11 @@ fn make_replace_template_file_at_cursor(
             return None;
         }
         let (host_edits, _) = template_file_host_edits(&targets);
+        // Capture delete ranges for this doc so refs that fall
+        // inside the deleted block (e.g. self-reference in
+        // vars) get filtered — LSP rejects overlapping edits.
+        let host_delete_ranges: Vec<Range> =
+            targets.iter().map(|t| t.delete_range).collect();
 
         // Refs: only this name, throughout the module.
         let mut filter = HashSet::new();
@@ -3279,13 +3308,6 @@ fn make_replace_template_file_at_cursor(
         if let Some(dir) = module_dir.as_deref() {
             for entry in state.documents.iter() {
                 let other_uri = entry.key();
-                if other_uri == uri {
-                    // Same doc: rewrite refs that aren't inside
-                    // the (now-deleted) data block. The deletion
-                    // edit will swallow any refs inside the block,
-                    // but block bodies don't typically reference
-                    // themselves anyway — simple union is fine.
-                }
                 let Ok(path) = other_uri.to_file_path() else { continue };
                 if path.parent() != Some(dir) {
                     continue;
@@ -3301,6 +3323,17 @@ fn make_replace_template_file_at_cursor(
                     &filter,
                     &mut ref_edits,
                 );
+                // Filter out ref edits inside the host doc's
+                // pending delete range — overlap would corrupt
+                // the LSP edit set. Only relevant for the host
+                // doc itself.
+                if other_uri == uri {
+                    ref_edits.retain(|e| {
+                        !host_delete_ranges
+                            .iter()
+                            .any(|d| range_intersects(d, &e.range))
+                    });
+                }
                 if !ref_edits.is_empty() {
                     edits_by_uri
                         .entry(other_uri.clone())
