@@ -115,7 +115,7 @@ pub const AWS_TYPE_RENAMES: &[DeprecationRule] = &[
 /// across the full rule table.
 pub fn aws_renames_diagnostics(body: &Body, rope: &Rope) -> Vec<Diagnostic> {
     deprecation_rule::diagnostics_from_table(body, rope, AWS_TYPE_RENAMES, &|rule| {
-        body_supports_rule(rule, body)
+        deprecation_rule::body_supports_rule(rule, body)
     })
 }
 
@@ -129,20 +129,6 @@ pub fn aws_renames_diagnostics_for_module(
     rule_supported: &dyn Fn(&DeprecationRule) -> bool,
 ) -> Vec<Diagnostic> {
     deprecation_rule::diagnostics_from_table(body, rope, AWS_TYPE_RENAMES, rule_supported)
-}
-
-/// Body-only support test — used by the convenience entry.
-/// Multi-file modules should prefer the `_for_module` variant
-/// since `required_providers` typically lives in `versions.tf`.
-fn body_supports_rule(rule: &DeprecationRule, body: &Body) -> bool {
-    let constraint = match &rule.gate {
-        Gate::TerraformVersion { .. } => deprecation_rule::extract_required_version(body),
-        Gate::ProviderVersion { provider, .. } => {
-            deprecation_rule::extract_required_provider_version(body, provider)
-        }
-    };
-    let Some(c) = constraint else { return true };
-    deprecation_rule::supports(rule, &c)
 }
 
 #[cfg(test)]

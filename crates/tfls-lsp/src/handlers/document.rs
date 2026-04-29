@@ -476,19 +476,36 @@ pub fn compute_diagnostics_with_lookup(
             &doc.rope,
             locals_supported,
         ));
-        // Provider-version-gated AWS renames family. Module-
-        // aggregated `required_providers.aws.version` is pulled
-        // once, then each rule's threshold is checked against it
-        // — single multi-rule body walk, scales linearly in
-        // rule count without re-walking siblings per rule.
+        // Provider-version-gated rule tables. Per provider:
+        // pull module-aggregated `required_providers.<name>.version`
+        // once, build a `rule_supported` closure that tests each
+        // rule's threshold against that single string, dispatch
+        // through the multi-rule body walker. Pattern repeats
+        // per provider — captured by `run_provider_table` below.
         let aws_constraint = module_constraint_for_provider(state, uri, "aws");
         out.extend(tfls_diag::aws_renames_diagnostics_for_module(
             body,
             &doc.rope,
-            &|rule| match aws_constraint.as_deref() {
-                None => true,
-                Some(c) => tfls_diag::deprecation_rule::supports(rule, c),
-            },
+            &provider_rule_filter(&aws_constraint),
+        ));
+        let kubernetes_constraint =
+            module_constraint_for_provider(state, uri, "kubernetes");
+        out.extend(tfls_diag::kubernetes_renames_diagnostics_for_module(
+            body,
+            &doc.rope,
+            &provider_rule_filter(&kubernetes_constraint),
+        ));
+        let azurerm_constraint = module_constraint_for_provider(state, uri, "azurerm");
+        out.extend(tfls_diag::azurerm_blocks_diagnostics_for_module(
+            body,
+            &doc.rope,
+            &provider_rule_filter(&azurerm_constraint),
+        ));
+        let google_constraint = module_constraint_for_provider(state, uri, "google");
+        out.extend(tfls_diag::google_blocks_diagnostics_for_module(
+            body,
+            &doc.rope,
+            &provider_rule_filter(&google_constraint),
         ));
         out.extend(tfls_diag::empty_list_equality_diagnostics(body, &doc.rope));
         out.extend(tfls_diag::map_duplicate_keys_diagnostics(body, &doc.rope));
@@ -604,6 +621,19 @@ impl tfls_diag::VersionCacheLookup for OnDiskVersionCache {
                 }
             }
         }
+    }
+}
+
+/// Build a `rule_supported` closure for a provider table from
+/// its module-aggregated constraint string. Caller threads
+/// the result into `<provider>_diagnostics_for_module`.
+/// `None` constraint ⇒ every rule fires (absence of evidence).
+fn provider_rule_filter(
+    constraint: &Option<String>,
+) -> impl Fn(&tfls_diag::deprecation_rule::DeprecationRule) -> bool + '_ {
+    move |rule| match constraint.as_deref() {
+        None => true,
+        Some(c) => tfls_diag::deprecation_rule::supports(rule, c),
     }
 }
 

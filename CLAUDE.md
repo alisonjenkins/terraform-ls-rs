@@ -199,16 +199,29 @@ Title format produced by `scope_title` (`"<verb> N <item-label>s in <where>"`):
 
 Live rules:
 
-| Rule                                  | Block kind  | Gate                                            | Action                                          |
-|---------------------------------------|-------------|-------------------------------------------------|-------------------------------------------------|
-| `null_resource`                       | `resource`  | Terraform `>= 1.4.0`                            | Convert to `terraform_data` (+ moved.tf)        |
-| `template_file`                       | `data`      | Terraform `>= 0.12.0`                           | Convert to `local` calling `templatefile()`     |
-| `template_dir`                        | `data`      | Terraform `>= 0.12.0`                           | Diagnostic only (migration project-specific)    |
-| `null_data_source`                    | `data`      | Terraform `>= 0.10.0`                           | Diagnostic only (replacement: `locals { }`)     |
-| `aws_alb` family (5 resources)        | `resource`  | AWS provider `>= 1.7.0`                         | Diagnostic only (consolidated table)            |
-| `aws_s3_bucket_object`                | `resource`  | AWS provider `>= 4.0.0`                         | Diagnostic only (use `aws_s3_object`)           |
+| Rule / family                                    | Block kind  | Gate                                            | Action                                          |
+|--------------------------------------------------|-------------|-------------------------------------------------|-------------------------------------------------|
+| `null_resource`                                  | `resource`  | Terraform `>= 1.4.0`                            | Convert to `terraform_data` (+ moved.tf)        |
+| `template_file`                                  | `data`      | Terraform `>= 0.12.0`                           | Convert to `local` calling `templatefile()`     |
+| `template_dir`                                   | `data`      | Terraform `>= 0.12.0`                           | Diagnostic only                                 |
+| `null_data_source`                               | `data`      | Terraform `>= 0.10.0`                           | Diagnostic only                                 |
+| AWS rename family (6 resources)                  | `resource`  | AWS provider `>= 1.7.0` / `>= 4.0.0` (s3 object)| Diagnostic only (table)                         |
+| Kubernetes `_v1` rename family (20 resources)    | `resource`  | kubernetes provider `>= 2.0.0`                  | Diagnostic only (table)                         |
+| Azure VM split family (2 resources)              | `resource`  | azurerm `>= 2.40.0`                             | Diagnostic only (table)                         |
+| GCP Dataflow split                               | `resource`  | google `>= 3.45.0`                              | Diagnostic only (table)                         |
 
-The AWS rename family lives in `crates/tfls-diag/src/deprecated_aws_renames.rs` as a single `AWS_TYPE_RENAMES: &[DeprecationRule]` table — adding another rename rule = one table entry + one `HARDCODED_DEPRECATION_LABELS` entry, no new module. The multi-rule body walker (`deprecation_rule::diagnostics_from_table`) visits each block ONCE regardless of rule count, so a rule table with N entries pays O(blocks) total, not O(blocks × rules). Per-rule support tested in-loop via the caller's `rule_supported` closure.
+Each provider family lives in its own table module
+(`crates/tfls-diag/src/deprecated_<provider>_*.rs`). Adding a
+new rule to a family = one table entry + one
+`HARDCODED_DEPRECATION_LABELS` entry, no new module.
+
+The multi-rule body walker (`deprecation_rule::diagnostics_from_table`) visits each block ONCE regardless of rule count — `(block_kind, label)` HashMap lookup per block, single body iteration. So a table with N entries pays O(blocks) total, not O(blocks × rules). Per-rule gate evaluation runs through the caller's `rule_supported` closure, which the LSP layer wires via `provider_rule_filter(constraint)` (one provider-version constraint extracted per module per code-action call, regardless of how many rules in the table use that provider).
+
+`deprecation_rule::body_supports_rule(rule, body)` is the body-only fallback; `module_constraint_for_provider(state, primary_uri, name)` is the LSP-layer module-aware path. Each provider module provides `<provider>_diagnostics` (body-only convenience) + `<provider>_diagnostics_for_module` (closure-driven, used by `compute_diagnostics_with_lookup`).
+
+Per-table-module test invariants:
+- `rule_table_invariants` — every rule has a non-empty message, correct provider, valid block_kind.
+- `every_*_is_hardcoded_listed` — every label appears in `HARDCODED_DEPRECATION_LABELS` so the schema-driven tier-2 path doesn't double-fire.
 
 Two gate flavours, set on the rule's `gate: Gate` field:
 

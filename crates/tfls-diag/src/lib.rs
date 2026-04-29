@@ -5,6 +5,9 @@ pub mod deprecated_index;
 pub mod deprecated_interpolation;
 pub mod deprecated_lookup;
 pub mod deprecated_aws_renames;
+pub mod deprecated_azurerm_blocks;
+pub mod deprecated_google_blocks;
+pub mod deprecated_kubernetes_renames;
 pub mod deprecated_null_data_source;
 pub mod deprecated_null_resource;
 pub mod deprecated_template_dir;
@@ -40,6 +43,16 @@ pub use deprecated_interpolation::deprecated_interpolation_diagnostics;
 pub use deprecated_lookup::deprecated_lookup_diagnostics;
 pub use deprecated_aws_renames::{
     AWS_TYPE_RENAMES, aws_renames_diagnostics, aws_renames_diagnostics_for_module,
+};
+pub use deprecated_azurerm_blocks::{
+    AZURERM_BLOCK_DEPRECATIONS, azurerm_blocks_diagnostics, azurerm_blocks_diagnostics_for_module,
+};
+pub use deprecated_google_blocks::{
+    GOOGLE_BLOCK_DEPRECATIONS, google_blocks_diagnostics, google_blocks_diagnostics_for_module,
+};
+pub use deprecated_kubernetes_renames::{
+    KUBERNETES_TYPE_RENAMES, kubernetes_renames_diagnostics,
+    kubernetes_renames_diagnostics_for_module,
 };
 pub use deprecated_null_data_source::{
     deprecated_null_data_source_diagnostics,

@@ -65,13 +65,16 @@ constraint (a constraint in `versions.tf` correctly suppresses warnings
 on its sibling files). Each deprecation pairs with a multi-scope code
 action that performs the migration:
 
-| Deprecation | Gate | Replacement | Auto-fix |
-|-------------|------|-------------|----------|
+| Deprecation family | Gate | Replacement | Auto-fix |
+|--------------------|------|-------------|----------|
 | `resource "null_resource"` | Terraform `>= 1.4.0` | `resource "terraform_data"` | Convert block + rewrite `null_resource.X.triggers` references workspace-wide + emit `moved { }` blocks to `moved.tf` for zero-downtime state migration |
 | `data "template_file"` | Terraform `>= 0.12.0` | `templatefile()` function | Hoist to `local`, rewrite `data.template_file.X.rendered` → `local.X` references, unwrap `template = file("path")` to `templatefile("path", ...)`, skip on local-name collision |
 | `data "template_dir"` | Terraform `>= 0.12.0` | `for_each = fileset(...) + templatefile()` | Diagnostic only (migration project-specific) |
 | `data "null_data_source"` | Terraform `>= 0.10.0` | `locals { }` block | Diagnostic only |
-| AWS rename family | AWS provider `>= 1.7.0` (or `>= 4.0.0` for s3 object) | see below | Diagnostic only (rename + ref rewrite mechanical; auto-fix held back to surface subtle schema drift between v1/v2 names) |
+| AWS rename family (6 resources) | AWS provider `>= 1.7.0` (or `>= 4.0.0` for s3 object) | see below | Diagnostic only |
+| Kubernetes `_v1` rename family (20 resources) | Kubernetes provider `>= 2.0.0` | append `_v1` suffix | Diagnostic only |
+| Azure VM split family (2 resources) | azurerm `>= 2.40.0` | OS-specific `_linux_` / `_windows_` variants | Diagnostic only (semantic split, schema diverges) |
+| GCP Dataflow split | google `>= 3.45.0` | `google_dataflow_flex_template_job` | Diagnostic only |
 
 **AWS rename family** (one consolidated module, one body walk per code-action call):
 
@@ -83,6 +86,12 @@ action that performs the migration:
 | `aws_alb_target_group` | `aws_lb_target_group` |
 | `aws_alb_target_group_attachment` | `aws_lb_target_group_attachment` |
 | `aws_s3_bucket_object` | `aws_s3_object` |
+
+**Kubernetes `_v1` rename family** — `kubernetes_pod`, `kubernetes_deployment`, `kubernetes_service`, `kubernetes_namespace`, `kubernetes_config_map`, `kubernetes_secret`, `kubernetes_role`, `kubernetes_role_binding`, `kubernetes_cluster_role`, `kubernetes_cluster_role_binding`, `kubernetes_persistent_volume`, `kubernetes_persistent_volume_claim`, `kubernetes_service_account`, `kubernetes_stateful_set`, `kubernetes_daemonset`, `kubernetes_job`, `kubernetes_cron_job`, `kubernetes_network_policy`, `kubernetes_ingress`, `kubernetes_horizontal_pod_autoscaler` — all migrate by appending `_v1`.
+
+**Azure split family** — `azurerm_virtual_machine` and `azurerm_virtual_machine_scale_set` each split into `_linux_` + `_windows_` variants (azurerm 2.40+).
+
+**GCP block deprecations** — `google_dataflow_job` → `google_dataflow_flex_template_job` (google 3.45+).
 
 Gates come in two flavours: `terraform { required_version }`
 (Terraform-core deprecations) and
@@ -313,18 +322,15 @@ clients.
 
 Highlights:
 
-- **10 deprecation diagnostics live** — `null_resource`,
-  `template_file`, `template_dir`, `null_data_source`, plus the
-  AWS rename family (`aws_alb`, `aws_alb_listener`,
-  `aws_alb_listener_rule`, `aws_alb_target_group`,
-  `aws_alb_target_group_attachment`, `aws_s3_bucket_object`).
+- **33 deprecation diagnostics live** across 4 Terraform-core
+  rules + AWS / Kubernetes / Azure / GCP provider families.
   Each is module-aware (sibling `versions.tf` /
-  `required_providers` constraints suppress correctly), each
-  scaled atop a generic `DeprecationRule` framework. Adding
-  another rename to the AWS family is one entry in
-  `AWS_TYPE_RENAMES`; adding a different-shape deprecation is
-  ~25 lines of new module. Both Terraform-core and
-  provider-version gates supported.
+  `required_providers` constraints suppress correctly) and
+  scales atop a generic `DeprecationRule` framework. Adding
+  another rename to a provider family is one table entry;
+  adding a different-shape deprecation is ~25 lines of new
+  module. Both Terraform-core and provider-version gates are
+  supported.
 - **Multi-scope code actions** — Instance / Selection / File /
   Module / Workspace, with stable `CodeActionKind` strings clients
   can filter on.

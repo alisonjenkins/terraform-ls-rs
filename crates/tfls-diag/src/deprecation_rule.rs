@@ -34,14 +34,43 @@ pub const HARDCODED_DEPRECATION_LABELS: &[(&str, &str)] = &[
     ("data", "template_dir"),
     ("data", "null_data_source"),
     // AWS rename family — see `deprecated_aws_renames.rs`.
-    // The `every_aws_rename_is_hardcoded_listed` test in that
-    // module catches missing entries when new rules are added.
+    // Each module has an `every_*_is_hardcoded_listed` test
+    // that fails when this list drifts from the rule table.
     ("resource", "aws_alb"),
     ("resource", "aws_alb_listener"),
     ("resource", "aws_alb_listener_rule"),
     ("resource", "aws_alb_target_group"),
     ("resource", "aws_alb_target_group_attachment"),
     ("resource", "aws_s3_bucket_object"),
+    // Kubernetes `_v1` rename family —
+    // `deprecated_kubernetes_renames.rs`.
+    ("resource", "kubernetes_pod"),
+    ("resource", "kubernetes_deployment"),
+    ("resource", "kubernetes_service"),
+    ("resource", "kubernetes_namespace"),
+    ("resource", "kubernetes_config_map"),
+    ("resource", "kubernetes_secret"),
+    ("resource", "kubernetes_role"),
+    ("resource", "kubernetes_role_binding"),
+    ("resource", "kubernetes_cluster_role"),
+    ("resource", "kubernetes_cluster_role_binding"),
+    ("resource", "kubernetes_persistent_volume"),
+    ("resource", "kubernetes_persistent_volume_claim"),
+    ("resource", "kubernetes_service_account"),
+    ("resource", "kubernetes_stateful_set"),
+    ("resource", "kubernetes_daemonset"),
+    ("resource", "kubernetes_job"),
+    ("resource", "kubernetes_cron_job"),
+    ("resource", "kubernetes_network_policy"),
+    ("resource", "kubernetes_ingress"),
+    ("resource", "kubernetes_horizontal_pod_autoscaler"),
+    // Azure (azurerm) split deprecations —
+    // `deprecated_azurerm_blocks.rs`.
+    ("resource", "azurerm_virtual_machine"),
+    ("resource", "azurerm_virtual_machine_scale_set"),
+    // GCP (google) block deprecations —
+    // `deprecated_google_blocks.rs`.
+    ("resource", "google_dataflow_job"),
 ];
 
 /// True when `(block_kind, label)` is covered by a hardcoded
@@ -220,6 +249,24 @@ pub fn diagnostics_from_table(
         });
     }
     out
+}
+
+/// Body-only support test: pulls the rule's relevant
+/// constraint string from `body` (per `gate` kind), returns
+/// `true` when the rule's threshold is admitted. Used by
+/// per-provider table modules' convenience entry points.
+/// Multi-file modules should prefer the LSP layer's
+/// module-aggregated path since constraints typically live in
+/// `versions.tf`, not the file the user is editing.
+pub fn body_supports_rule(rule: &DeprecationRule, body: &Body) -> bool {
+    let constraint = match &rule.gate {
+        Gate::TerraformVersion { .. } => extract_required_version(body),
+        Gate::ProviderVersion { provider, .. } => {
+            extract_required_provider_version(body, provider)
+        }
+    };
+    let Some(c) = constraint else { return true };
+    supports(rule, &c)
 }
 
 /// True when `constraint` admits a version at or above the
