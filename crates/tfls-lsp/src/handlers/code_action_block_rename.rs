@@ -226,11 +226,37 @@ pub fn emit_block_rename_actions(
     let mut provider_constraint_cache: HashMap<(PathBuf, &'static str), Option<String>> =
         HashMap::new();
 
-    // Group specs by `from` for fast block-walk lookup.
-    let by_from: HashMap<(&'static str, &'static str), &BlockRenameSpec> = ALL_BLOCK_RENAMES
+    // Two indices over the spec table (built once per call):
+    // - `by_kind_label` for block-label scans (`<block_kind> "<from>"`)
+    // - `by_from` for reference-traversal scans (head ident only)
+    // Both store `(spec_index, &spec)` so callers can walk a body
+    // once with O(1) lookup per match instead of linear-scanning
+    // the 26-spec table per traversal.
+    let by_kind_label: HashMap<(&'static str, &'static str), (usize, &BlockRenameSpec)> =
+        ALL_BLOCK_RENAMES
+            .iter()
+            .enumerate()
+            .map(|(i, s)| ((s.block_kind, s.from), (i, s)))
+            .collect();
+    let by_from: HashMap<&'static str, (usize, &BlockRenameSpec)> = ALL_BLOCK_RENAMES
         .iter()
-        .map(|s| ((s.block_kind, s.from), s))
+        .enumerate()
+        .map(|(i, s)| (s.from, (i, s)))
         .collect();
+
+    // Per-call per-doc scan cache. Each scope iteration used to
+    // re-walk the same body four times; with this cache the
+    // walks happen once per doc per code-action call regardless
+    // of scope count. Stores raw (block-rewrite triples,
+    // ref-rewrite pairs) so per-scope filtering (selection
+    // range, etc.) runs against cached output without re-walking.
+    let mut scan_cache: HashMap<
+        Url,
+        (
+            Vec<(usize, String, TextEdit)>,
+            Vec<(usize, TextEdit)>,
+        ),
+    > = HashMap::new();
 
     for scope in scopes {
         // Per-scope: collect (uri, edits) + (module_dir, name list per spec).
@@ -260,13 +286,25 @@ pub fn emit_block_rename_actions(
                 &mut provider_constraint_cache,
             );
 
-            // 1. Block label rewrites + name collection.
-            // Returns `(spec_index, name, edit)` so the moved.tf
-            // builder can pair each rewrite with its block name
-            // without re-walking the body.
-            let mut blocks = scan_block_rewrites(body, &doc.rope, &by_from, &supported);
-            // 2. Reference rewrites.
-            let refs = scan_ref_rewrites(body, &doc.rope, &supported);
+            // 1+2. Compute (or fetch from cache) the per-doc
+            // block + ref scans. `supported` is module-derived
+            // and stable across scopes for a given doc, so the
+            // cache key is the URI alone.
+            if !scan_cache.contains_key(doc_uri) {
+                let blocks = scan_block_rewrites(
+                    body,
+                    &doc.rope,
+                    &by_kind_label,
+                    &supported,
+                );
+                let refs = scan_ref_rewrites(body, &doc.rope, &by_from, &supported);
+                scan_cache.insert(doc_uri.clone(), (blocks, refs));
+            }
+            let Some((cached_blocks, cached_refs)) = scan_cache.get(doc_uri) else {
+                return;
+            };
+            let mut blocks = cached_blocks.clone();
+            let refs = cached_refs.clone();
 
             // Selection scope filter.
             if let Scope::Selection { range } = scope {
@@ -486,7 +524,7 @@ fn module_constraint_for_provider_dir(
 fn scan_block_rewrites(
     body: &Body,
     rope: &Rope,
-    by_from: &HashMap<(&'static str, &'static str), &BlockRenameSpec>,
+    by_kind_label: &HashMap<(&'static str, &'static str), (usize, &BlockRenameSpec)>,
     supported: &[bool],
 ) -> Vec<(usize, String, TextEdit)> {
     use hcl_edit::repr::Span as _;
@@ -503,10 +541,9 @@ fn scan_block_rewrites(
         let Some(label_text) = label_str(label) else {
             continue;
         };
-        let Some(spec) = by_from.get(&(kind, label_text)) else {
+        let Some(&(idx, spec)) = by_kind_label.get(&(kind, label_text)) else {
             continue;
         };
-        let idx = spec_index(spec);
         if !supported[idx] {
             continue;
         }
@@ -537,6 +574,7 @@ fn scan_block_rewrites(
 fn scan_ref_rewrites(
     body: &Body,
     rope: &Rope,
+    by_from: &HashMap<&'static str, (usize, &BlockRenameSpec)>,
     supported: &[bool],
 ) -> Vec<(usize, TextEdit)> {
     let mut out: Vec<(usize, TextEdit)> = Vec::new();
@@ -544,14 +582,9 @@ fn scan_ref_rewrites(
         let Expression::Traversal(t) = expr else { return };
         let Expression::Variable(v) = &t.expr else { return };
         let head = v.as_str();
-        // Find a spec whose `from` matches the head.
-        let Some((idx, spec)) = ALL_BLOCK_RENAMES
-            .iter()
-            .enumerate()
-            .find(|(_, s)| s.from == head)
-        else {
-            return;
-        };
+        // O(1) lookup vs the previous linear scan over the
+        // 26-spec table per traversal.
+        let Some(&(idx, spec)) = by_from.get(head) else { return };
         if !supported[idx] {
             return;
         }
@@ -891,13 +924,6 @@ fn label_str(label: &BlockLabel) -> Option<&str> {
         BlockLabel::String(s) => Some(s.value().as_str()),
         BlockLabel::Ident(i) => Some(i.as_str()),
     }
-}
-
-fn spec_index(spec: &BlockRenameSpec) -> usize {
-    ALL_BLOCK_RENAMES
-        .iter()
-        .position(|s| std::ptr::eq(s, spec))
-        .unwrap_or(0)
 }
 
 /// How a single converted block should be represented in the
