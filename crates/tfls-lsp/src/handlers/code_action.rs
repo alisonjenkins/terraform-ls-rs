@@ -901,14 +901,25 @@ fn scan_blocks_of_kind(body: &Body, rope: &Rope, kind: &str) -> Vec<(Range, Stri
 ///   `"terraform_data"` (preserving the surrounding quotes).
 /// - For each `triggers` attribute inside the block, replace
 ///   the key with `triggers_replace`.
-///
-/// `null_resource` had only `id` + `triggers` attributes;
-/// `terraform_data` covers both (`id` + `triggers_replace`,
-/// plus `input` / `output`). Cross-file references like
-/// `null_resource.X.triggers` will be flagged by tfls's
-/// existing undefined-attribute diagnostic after the rewrite —
-/// out of scope here.
+/// - Rewrite every `null_resource.X[.attr]` reference in the
+///   body — head ident becomes `terraform_data`, `.triggers`
+///   becomes `.triggers_replace`. Other attributes (`id`, …)
+///   stay untouched.
 fn scan_null_resource_to_terraform_data(body: &Body, rope: &Rope) -> Vec<TextEdit> {
+    scan_null_resource_to_terraform_data_for(body, rope, None)
+}
+
+/// Like [`scan_null_resource_to_terraform_data`] but limited to
+/// resources whose name (`labels.get(1)`) is in `names`. Used
+/// by the cursor / diag-attached Instance variants so a single-
+/// block conversion doesn't drag references to *other*
+/// `null_resource` blocks (which the user hasn't converted yet)
+/// into its edit set.
+fn scan_null_resource_to_terraform_data_for(
+    body: &Body,
+    rope: &Rope,
+    names: Option<&HashSet<String>>,
+) -> Vec<TextEdit> {
     use hcl_edit::repr::Span as _;
 
     let mut out = Vec::new();
@@ -924,6 +935,12 @@ fn scan_null_resource_to_terraform_data(body: &Body, rope: &Rope) -> Vec<TextEdi
         };
         if label_str(label) != Some("null_resource") {
             continue;
+        }
+        if let Some(filter) = names {
+            let block_name = block.labels.get(1).and_then(label_str).unwrap_or("");
+            if !filter.contains(block_name) {
+                continue;
+            }
         }
 
         // 1. Block label rewrite.
@@ -960,7 +977,207 @@ fn scan_null_resource_to_terraform_data(body: &Body, rope: &Rope) -> Vec<TextEdi
             }
         }
     }
+
+    // 3. Reference rewriting — every `null_resource.X[.attr]`
+    // traversal in the body becomes `terraform_data.X[.attr]`,
+    // with `.triggers` upgraded to `.triggers_replace`. Skips
+    // `null_resource.X.id` and other attrs that survive on
+    // `terraform_data` unchanged. Walks the entire body so it
+    // catches references inside `locals`, `output`, attribute
+    // values, dynamic blocks, templates, etc.
+    visit_body_for_null_resource_refs(body, rope, names, &mut out);
+
     out
+}
+
+/// Recursively walk `body`, emitting reference-rewrite edits for
+/// every `null_resource.<X>[.attr]` traversal encountered. When
+/// `names` is `Some`, only references to those names are
+/// rewritten (Instance-variant filter).
+fn visit_body_for_null_resource_refs(
+    body: &Body,
+    rope: &Rope,
+    names: Option<&HashSet<String>>,
+    out: &mut Vec<TextEdit>,
+) {
+    for structure in body.iter() {
+        if let Some(attr) = structure.as_attribute() {
+            visit_expr_for_null_resource_refs(&attr.value, rope, names, out);
+        } else if let Some(block) = structure.as_block() {
+            visit_body_for_null_resource_refs(&block.body, rope, names, out);
+        }
+    }
+}
+
+fn visit_expr_for_null_resource_refs(
+    expr: &hcl_edit::expr::Expression,
+    rope: &Rope,
+    names: Option<&HashSet<String>>,
+    out: &mut Vec<TextEdit>,
+) {
+    use hcl_edit::expr::{Expression as Ex, TraversalOperator};
+    use hcl_edit::repr::Span as _;
+
+    match expr {
+        Ex::Traversal(t) => {
+            if let Ex::Variable(v) = &t.expr {
+                if v.as_str() == "null_resource" {
+                    // Pull the resource name (first GetAttr) and
+                    // confirm it passes the optional name filter
+                    // before emitting any edits.
+                    let res_name = t.operators.iter().find_map(|op| match op.value() {
+                        TraversalOperator::GetAttr(ident) => Some(ident.as_str().to_string()),
+                        _ => None,
+                    });
+                    let in_filter = match (names, res_name.as_deref()) {
+                        (None, _) => true,
+                        (Some(_), None) => false,
+                        (Some(filter), Some(n)) => filter.contains(n),
+                    };
+                    if in_filter {
+                        if let Some(span) = v.span() {
+                            if let (Ok(start), Ok(end)) = (
+                                tfls_parser::byte_offset_to_lsp_position(rope, span.start),
+                                tfls_parser::byte_offset_to_lsp_position(rope, span.end),
+                            ) {
+                                out.push(TextEdit {
+                                    range: Range { start, end },
+                                    new_text: "terraform_data".into(),
+                                });
+                            }
+                        }
+                        // The attr accessor (after the resource
+                        // name) is the *second* GetAttr.
+                        let mut idx = 0usize;
+                        for op in t.operators.iter() {
+                            if let TraversalOperator::GetAttr(ident) = op.value() {
+                                idx += 1;
+                                if idx == 2 && ident.as_str() == "triggers" {
+                                    if let Some(span) = ident.span() {
+                                        if let (Ok(start), Ok(end)) = (
+                                            tfls_parser::byte_offset_to_lsp_position(
+                                                rope, span.start,
+                                            ),
+                                            tfls_parser::byte_offset_to_lsp_position(
+                                                rope, span.end,
+                                            ),
+                                        ) {
+                                            out.push(TextEdit {
+                                                range: Range { start, end },
+                                                new_text: "triggers_replace".into(),
+                                            });
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            visit_expr_for_null_resource_refs(&t.expr, rope, names, out);
+            for op in t.operators.iter() {
+                if let TraversalOperator::Index(e) = op.value() {
+                    visit_expr_for_null_resource_refs(e, rope, names, out);
+                }
+            }
+        }
+        Ex::Array(a) => {
+            for e in a.iter() {
+                visit_expr_for_null_resource_refs(e, rope, names, out);
+            }
+        }
+        Ex::Object(o) => {
+            for (_k, v) in o.iter() {
+                visit_expr_for_null_resource_refs(v.expr(), rope, names, out);
+            }
+        }
+        Ex::FuncCall(f) => {
+            for arg in f.args.iter() {
+                visit_expr_for_null_resource_refs(arg, rope, names, out);
+            }
+        }
+        Ex::Parenthesis(p) => visit_expr_for_null_resource_refs(p.inner(), rope, names, out),
+        Ex::UnaryOp(u) => visit_expr_for_null_resource_refs(&u.expr, rope, names, out),
+        Ex::BinaryOp(b) => {
+            visit_expr_for_null_resource_refs(&b.lhs_expr, rope, names, out);
+            visit_expr_for_null_resource_refs(&b.rhs_expr, rope, names, out);
+        }
+        Ex::Conditional(c) => {
+            visit_expr_for_null_resource_refs(&c.cond_expr, rope, names, out);
+            visit_expr_for_null_resource_refs(&c.true_expr, rope, names, out);
+            visit_expr_for_null_resource_refs(&c.false_expr, rope, names, out);
+        }
+        Ex::ForExpr(f) => {
+            visit_expr_for_null_resource_refs(&f.intro.collection_expr, rope, names, out);
+            if let Some(k) = f.key_expr.as_ref() {
+                visit_expr_for_null_resource_refs(k, rope, names, out);
+            }
+            visit_expr_for_null_resource_refs(&f.value_expr, rope, names, out);
+            if let Some(c) = f.cond.as_ref() {
+                visit_expr_for_null_resource_refs(&c.expr, rope, names, out);
+            }
+        }
+        Ex::StringTemplate(t) => {
+            visit_template_for_null_resource_refs(t.iter(), rope, names, out)
+        }
+        Ex::HeredocTemplate(h) => {
+            visit_template_for_null_resource_refs(h.template.iter(), rope, names, out)
+        }
+        _ => {}
+    }
+}
+
+fn visit_template_for_null_resource_refs<'a, I>(
+    elements: I,
+    rope: &Rope,
+    names: Option<&HashSet<String>>,
+    out: &mut Vec<TextEdit>,
+) where
+    I: IntoIterator<Item = &'a hcl_edit::template::Element>,
+{
+    use hcl_edit::template::{Directive, Element};
+    for element in elements {
+        match element {
+            Element::Literal(_) => {}
+            Element::Interpolation(i) => {
+                visit_expr_for_null_resource_refs(&i.expr, rope, names, out)
+            }
+            Element::Directive(d) => match d.as_ref() {
+                Directive::If(i) => {
+                    visit_expr_for_null_resource_refs(&i.if_expr.cond_expr, rope, names, out);
+                    visit_template_for_null_resource_refs(
+                        i.if_expr.template.iter(),
+                        rope,
+                        names,
+                        out,
+                    );
+                    if let Some(else_part) = i.else_expr.as_ref() {
+                        visit_template_for_null_resource_refs(
+                            else_part.template.iter(),
+                            rope,
+                            names,
+                            out,
+                        );
+                    }
+                }
+                Directive::For(f) => {
+                    visit_expr_for_null_resource_refs(
+                        &f.for_expr.collection_expr,
+                        rope,
+                        names,
+                        out,
+                    );
+                    visit_template_for_null_resource_refs(
+                        f.for_expr.template.iter(),
+                        rope,
+                        names,
+                        out,
+                    );
+                }
+            },
+        }
+    }
 }
 
 /// Diag-attached Instance variant: builds the
@@ -998,18 +1215,13 @@ fn make_replace_null_resource_for_diag(
         if label_range.start != diag.range.start {
             continue;
         }
-        let Some(block_span) = block.span() else { continue };
-        let Ok(block_range) = hcl_span_to_lsp_range(rope, block_span) else {
-            continue;
-        };
-        let edits: Vec<TextEdit> = scan_null_resource_to_terraform_data(body, rope)
-            .into_iter()
-            .filter(|e| range_intersects(&e.range, &block_range))
-            .collect();
+        let name = block.labels.get(1).and_then(label_str).unwrap_or("?");
+        let mut filter = HashSet::new();
+        filter.insert(name.to_string());
+        let edits = scan_null_resource_to_terraform_data_for(body, rope, Some(&filter));
         if edits.is_empty() {
             return None;
         }
-        let name = block.labels.get(1).and_then(label_str).unwrap_or("?");
         let mut rewrites: HashMap<Url, Vec<TextEdit>> = HashMap::new();
         rewrites.insert(uri.clone(), edits);
         let mut names_by_module: HashMap<std::path::PathBuf, Vec<String>> = HashMap::new();
@@ -1458,19 +1670,17 @@ fn make_replace_null_resource_at_cursor(
             continue;
         }
 
-        // Filter the per-doc scan's output to edits inside this
-        // block. Cheaper than re-implementing the per-block
-        // logic and guaranteed to stay in sync with the
-        // multi-scope path.
-        let edits: Vec<TextEdit> = scan_null_resource_to_terraform_data(body, rope)
-            .into_iter()
-            .filter(|e| range_intersects(&e.range, &range))
-            .collect();
+        let name = block.labels.get(1).and_then(label_str).unwrap_or("?");
+        let mut filter = HashSet::new();
+        filter.insert(name.to_string());
+        // Name-filtered scan: only edits for THIS block + its
+        // own references; any other `null_resource.Y` blocks
+        // and references to them stay untouched.
+        let edits = scan_null_resource_to_terraform_data_for(body, rope, Some(&filter));
         if edits.is_empty() {
             return None;
         }
 
-        let name = block.labels.get(1).and_then(label_str).unwrap_or("?");
         let mut rewrites: HashMap<Url, Vec<TextEdit>> = HashMap::new();
         rewrites.insert(uri.clone(), edits);
         let mut names_by_module: HashMap<std::path::PathBuf, Vec<String>> = HashMap::new();

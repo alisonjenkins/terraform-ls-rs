@@ -2140,6 +2140,82 @@ async fn null_resource_action_idempotent_when_moved_present() {
     );
 }
 
+/// File-scope rewrite: a `null_resource` block plus an
+/// `output` referencing `null_resource.x.triggers` and a
+/// `local` referencing `null_resource.x.id`. After the action:
+/// triggers → triggers_replace; id stays put; head ident
+/// `null_resource` becomes `terraform_data` everywhere.
+#[tokio::test]
+async fn null_resource_action_rewrites_references() {
+    let u = uri("file:///fmt-nrt-refs/main.tf");
+    let src = concat!(
+        "resource \"null_resource\" \"x\" { triggers = { foo = \"bar\" } }\n",
+        "output \"o\" { value = null_resource.x.triggers }\n",
+        "locals { id = null_resource.x.id }\n",
+    );
+    let backend = fresh_backend(src, &u);
+    let actions = all_actions_for(&backend, &u).await;
+    let action = find_action(&actions, "Convert 1 null_resource block in this file");
+    let edits = doc_change_edits(action);
+    let main_edits = edits.get(&u).expect("main edits");
+    let head_count = main_edits.iter().filter(|e| e.new_text == "terraform_data").count();
+    let triggers_count = main_edits.iter().filter(|e| e.new_text == "triggers_replace").count();
+    // Three head rewrites: output ref, locals ref, ... actually
+    // the resource block label uses `"terraform_data"` (with
+    // quotes). Plain `terraform_data` token should appear at
+    // the two reference sites only.
+    assert_eq!(head_count, 2, "got edits: {main_edits:?}");
+    // Two `triggers_replace` edits: the attribute rename inside
+    // the block AND the `.triggers` accessor in the output ref.
+    // The `.id` accessor in locals stays untouched.
+    assert_eq!(triggers_count, 2, "got edits: {main_edits:?}");
+    // Spot-check that `null_resource.x.id` is NOT rewritten via
+    // a phantom edit on the `id` token.
+    assert!(
+        !main_edits.iter().any(|e| e.new_text == "id_something_unexpected"),
+        "no spurious id rewrites"
+    );
+}
+
+/// Cursor variant: convert one of two `null_resource` blocks.
+/// Only this block's edits + references to its name should
+/// land — the other block (and refs to it) stay untouched.
+#[tokio::test]
+async fn null_resource_action_cursor_filters_references_by_name() {
+    let u = uri("file:///fmt-nrt-cursor-filter/main.tf");
+    let src = concat!(
+        "resource \"null_resource\" \"x\" {}\n",
+        "resource \"null_resource\" \"y\" {}\n",
+        "output \"ox\" { value = null_resource.x.triggers }\n",
+        "output \"oy\" { value = null_resource.y.triggers }\n",
+    );
+    let backend = fresh_backend(src, &u);
+    // Position the cursor inside the `x` block (line 0).
+    let params = tower_lsp::lsp_types::CodeActionParams {
+        text_document: tower_lsp::lsp_types::TextDocumentIdentifier { uri: u.clone() },
+        range: tower_lsp::lsp_types::Range {
+            start: tower_lsp::lsp_types::Position::new(0, 25),
+            end: tower_lsp::lsp_types::Position::new(0, 25),
+        },
+        context: Default::default(),
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+    let actions = tower_lsp::LanguageServer::code_action(&backend, params)
+        .await
+        .expect("ok")
+        .unwrap_or_default();
+    let action = find_action(&actions, "Convert null_resource.x to terraform_data");
+    let edits = doc_change_edits(action);
+    let main_edits = edits.get(&u).expect("main edits");
+    // Exactly ONE `null_resource` head reference rewritten (the
+    // one in `output "ox"`); `output "oy"` should be untouched.
+    let head_count = main_edits.iter().filter(|e| e.new_text == "terraform_data").count();
+    assert_eq!(head_count, 1, "expected only x's reference rewritten; got: {main_edits:?}");
+    let triggers_count = main_edits.iter().filter(|e| e.new_text == "triggers_replace").count();
+    assert_eq!(triggers_count, 1, "got: {main_edits:?}");
+}
+
 /// Existing `moved.tf` covers `x` only; `y` still needs a
 /// moved block. Action appends to existing file (no Create op).
 #[tokio::test]
