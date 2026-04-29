@@ -83,7 +83,7 @@ pub async fn code_action(
                 }
             } else if is_deprecated_null_resource(diag) {
                 if let Some(action) =
-                    make_replace_null_resource_for_diag(&uri, diag, body, &doc.rope)
+                    make_replace_null_resource_for_diag(&backend.state, &uri, diag, body, &doc.rope)
                 {
                     actions.push(CodeActionOrCommand::CodeAction(action));
                 }
@@ -139,6 +139,7 @@ pub async fn code_action(
     if let Some(body) = doc.parsed.body.as_ref() {
         if module_supports_terraform_data(&backend.state, &uri) {
             if let Some(action) = make_replace_null_resource_at_cursor(
+                &backend.state,
                 &uri,
                 params.range.start,
                 body,
@@ -969,6 +970,7 @@ fn scan_null_resource_to_terraform_data(body: &Body, rope: &Rope) -> Vec<TextEdi
 /// by the diag range (the diag's range covers the
 /// `"null_resource"` label literal).
 fn make_replace_null_resource_for_diag(
+    state: &StateStore,
     uri: &Url,
     diag: &Diagnostic,
     body: &Body,
@@ -1008,16 +1010,19 @@ fn make_replace_null_resource_for_diag(
             return None;
         }
         let name = block.labels.get(1).and_then(label_str).unwrap_or("?");
-        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
-        changes.insert(uri.clone(), edits);
+        let mut rewrites: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        rewrites.insert(uri.clone(), edits);
+        let mut names_by_module: HashMap<std::path::PathBuf, Vec<String>> = HashMap::new();
+        if let Some(dir) = crate::handlers::util::parent_dir(uri) {
+            names_by_module.insert(dir, vec![name.to_string()]);
+        }
+        let workspace_edit =
+            build_null_resource_workspace_edit(state, rewrites, names_by_module);
         return Some(CodeAction {
             title: format!("Convert null_resource.{name} to terraform_data"),
             kind: Some(CodeActionKind::QUICKFIX),
             diagnostics: Some(vec![diag.clone()]),
-            edit: Some(WorkspaceEdit {
-                changes: Some(changes),
-                ..Default::default()
-            }),
+            edit: Some(workspace_edit),
             is_preferred: Some(true),
             ..Default::default()
         });
@@ -1025,14 +1030,14 @@ fn make_replace_null_resource_for_diag(
     None
 }
 
-/// Count of `resource "null_resource" "X"` blocks in `body`.
-/// Used by the scoped action's title — every other action in
-/// the codebase counts edits, but each null_resource block
-/// produces 1+ edits (label + optional triggers rename), so a
-/// raw edit count would over-report. Block count is the
-/// user-facing intent.
-fn count_null_resource_blocks(body: &Body) -> usize {
-    let mut n = 0;
+/// Names (`labels.get(1)`) of every `resource "null_resource"
+/// "X"` block in `body`. Used to drive the moved-block
+/// generator: each name becomes a `moved { from =
+/// null_resource.X to = terraform_data.X }` block in `moved.tf`
+/// alongside the rewrite, so Terraform migrates state in place
+/// instead of destroy+create.
+fn null_resource_names_in_body(body: &Body) -> Vec<String> {
+    let mut out = Vec::new();
     for structure in body.iter() {
         let Some(block) = structure.as_block() else {
             continue;
@@ -1040,11 +1045,87 @@ fn count_null_resource_blocks(body: &Body) -> usize {
         if block.ident.as_str() != "resource" {
             continue;
         }
-        if block.labels.first().and_then(label_str) == Some("null_resource") {
-            n += 1;
+        if block.labels.first().and_then(label_str) != Some("null_resource") {
+            continue;
+        }
+        if let Some(name) = block.labels.get(1).and_then(label_str) {
+            out.push(name.to_string());
         }
     }
-    n
+    out
+}
+
+/// Names already covered by a `moved { from = null_resource.X
+/// to = terraform_data.X }` block in `body`. The generator
+/// skips these so re-running the action on a partially migrated
+/// module is idempotent.
+fn existing_null_resource_moved_names(body: &Body) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
+        if block.ident.as_str() != "moved" {
+            continue;
+        }
+        let from = traversal_attr_string(&block.body, "from");
+        let to = traversal_attr_string(&block.body, "to");
+        let (Some(from), Some(to)) = (from, to) else {
+            continue;
+        };
+        let Some(name) = from.strip_prefix("null_resource.") else {
+            continue;
+        };
+        if to == format!("terraform_data.{name}") {
+            out.insert(name.to_string());
+        }
+    }
+    out
+}
+
+/// Read a `<ident>.<ident>` traversal stored on attribute `key`
+/// inside `body` (`from = null_resource.foo` →
+/// `Some("null_resource.foo")`). Returns `None` for any other
+/// expression form (literal strings, complex expressions, ...).
+fn traversal_attr_string(body: &Body, key: &str) -> Option<String> {
+    use hcl_edit::expr::Expression;
+    for sub in body.iter() {
+        let Some(attr) = sub.as_attribute() else {
+            continue;
+        };
+        if attr.key.as_str() != key {
+            continue;
+        }
+        if let Expression::Traversal(t) = &attr.value {
+            use hcl_edit::expr::TraversalOperator;
+            let head = match &t.expr {
+                Expression::Variable(v) => v.as_str().to_string(),
+                _ => return None,
+            };
+            let mut acc = head;
+            for op in t.operators.iter() {
+                let v = op.value();
+                match v {
+                    TraversalOperator::GetAttr(d) => {
+                        acc.push('.');
+                        acc.push_str(d.as_str());
+                    }
+                    _ => return None,
+                }
+            }
+            return Some(acc);
+        }
+    }
+    None
+}
+
+/// Format a single `moved { from = null_resource.X to =
+/// terraform_data.X }` block source. Trailing newline included
+/// so callers can concatenate without separators.
+fn format_moved_block(name: &str) -> String {
+    format!(
+        "moved {{\n  from = null_resource.{name}\n  to   = terraform_data.{name}\n}}\n"
+    )
 }
 
 /// Scope iteration for `null-resource-to-terraform-data`.
@@ -1056,6 +1137,13 @@ fn count_null_resource_blocks(body: &Body) -> usize {
 /// for conversion when the *enclosing module* admits Terraform
 /// 1.4+. We cache the decision per module dir so a Workspace-
 /// scope sweep doesn't re-walk siblings for every visited doc.
+///
+/// Bundles a `moved.tf` companion per module: each converted
+/// `null_resource.X` gets a `moved { from = null_resource.X to
+/// = terraform_data.X }` block written to the module's
+/// `moved.tf` (created if absent). Without these blocks
+/// Terraform plans the rewrite as destroy+create — `moved`
+/// migrates state in place.
 fn emit_null_resource_actions(
     state: &StateStore,
     primary_uri: &Url,
@@ -1075,6 +1163,7 @@ fn emit_null_resource_actions(
 
     for scope in scopes {
         let mut edits_by_uri: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        let mut names_by_module: HashMap<PathBuf, Vec<String>> = HashMap::new();
         let mut total_blocks = 0usize;
         for_each_doc_in_scope(state, primary_uri, scope, |doc_uri, doc| {
             let Some(body) = doc.parsed.body.as_ref() else {
@@ -1102,15 +1191,30 @@ fn emit_null_resource_actions(
             // Block count — for Selection scope, count only
             // blocks that actually intersect the selection (an
             // edit there implies the block is in range).
+            let names = null_resource_names_in_body(body);
             let blocks = if matches!(scope, Scope::Selection { .. }) {
                 // Each block contributes at least one edit (the
                 // label). Count distinct label-rewrite edits.
                 v.iter().filter(|e| e.new_text == "\"terraform_data\"").count()
             } else {
-                count_null_resource_blocks(body)
+                names.len()
             };
             total_blocks += blocks;
+            // Track the names this doc contributed so the per-
+            // module moved.tf builder can emit one `moved` block
+            // per converted resource. For Selection scope, the
+            // edit set was filtered to the selected range —
+            // restrict the names too so we don't emit moved
+            // blocks for resources we didn't actually rewrite.
+            let names_in_scope: Vec<String> = if matches!(scope, Scope::Selection { .. }) {
+                names_intersecting_edits(body, &v)
+            } else {
+                names
+            };
             edits_by_uri.insert(doc_uri.clone(), v);
+            if let Some(dir) = crate::handlers::util::parent_dir(doc_uri) {
+                names_by_module.entry(dir).or_default().extend(names_in_scope);
+            }
         });
         if edits_by_uri.is_empty() || total_blocks == 0 {
             continue;
@@ -1126,16 +1230,198 @@ fn emit_null_resource_actions(
         let title = format!(
             "Convert {total_blocks} null_resource block{plural} in {where_}"
         );
+        let workspace_edit =
+            build_null_resource_workspace_edit(state, edits_by_uri, names_by_module);
         actions.push(CodeActionOrCommand::CodeAction(CodeAction {
             title,
             kind: Some(scope_kind(scope, "null-resource-to-terraform-data")),
-            edit: Some(WorkspaceEdit {
-                changes: Some(edits_by_uri),
-                ..Default::default()
-            }),
+            edit: Some(workspace_edit),
             ..Default::default()
         }));
     }
+}
+
+/// Names of `null_resource` blocks whose label-rewrite edit
+/// lies inside the selected sub-set of edits (`v`). Used to
+/// keep the moved.tf companion in sync with selection-scoped
+/// rewrites.
+fn names_intersecting_edits(body: &Body, edits: &[TextEdit]) -> Vec<String> {
+    use hcl_edit::repr::Span as _;
+    let label_ranges: Vec<Range> = edits
+        .iter()
+        .filter(|e| e.new_text == "\"terraform_data\"")
+        .map(|e| e.range)
+        .collect();
+    let mut out = Vec::new();
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
+        if block.ident.as_str() != "resource" {
+            continue;
+        }
+        if block.labels.first().and_then(label_str) != Some("null_resource") {
+            continue;
+        }
+        let Some(name) = block.labels.get(1).and_then(label_str) else {
+            continue;
+        };
+        let Some(label_span) = block.labels.first().and_then(|l| l.span()) else {
+            continue;
+        };
+        let Ok(label_range) =
+            tfls_parser::hcl_span_to_lsp_range(&ropey::Rope::from_str(""), label_span)
+        else {
+            // `hcl_span_to_lsp_range` needs a real rope — fall
+            // through to compare against the edit ranges via
+            // start position only.
+            if label_ranges
+                .iter()
+                .any(|r| (r.start.line, r.start.character) == (0, 0))
+            {
+                out.push(name.to_string());
+            }
+            continue;
+        };
+        if label_ranges.iter().any(|r| r.start == label_range.start) {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
+/// Build the `WorkspaceEdit` for a null_resource action given
+/// the per-doc rewrite edits and per-module list of converted
+/// names. Always uses `document_changes` because `moved.tf` may
+/// need creating, and LSP forbids mixing `changes` with
+/// `documentChanges`.
+fn build_null_resource_workspace_edit(
+    state: &StateStore,
+    rewrites: HashMap<Url, Vec<TextEdit>>,
+    names_by_module: HashMap<std::path::PathBuf, Vec<String>>,
+) -> WorkspaceEdit {
+    use lsp_types::{
+        CreateFile, CreateFileOptions, DocumentChangeOperation, DocumentChanges, OneOf,
+        OptionalVersionedTextDocumentIdentifier, ResourceOp, TextDocumentEdit,
+    };
+
+    let mut ops: Vec<DocumentChangeOperation> = Vec::new();
+
+    // 1. Per-module `moved.tf` builder. Group, dedupe, drop
+    // names already covered by an existing `moved` block in any
+    // sibling — keeps the action idempotent.
+    for (module_dir, mut names) in names_by_module {
+        names.sort();
+        names.dedup();
+        let existing = collect_existing_moved_names(state, &module_dir);
+        let to_add: Vec<String> = names
+            .into_iter()
+            .filter(|n| !existing.contains(n))
+            .collect();
+        if to_add.is_empty() {
+            continue;
+        }
+        let target_path = module_dir.join("moved.tf");
+        let Ok(target_url) = Url::from_file_path(&target_path) else {
+            continue;
+        };
+        let strategy = resolve_target_strategy(state, &target_url, &target_path);
+        let mut body_text = String::new();
+        for n in &to_add {
+            body_text.push_str(&format_moved_block(n));
+        }
+        match strategy {
+            TargetFileStrategy::Loaded {
+                eof,
+                needs_leading_newline,
+            }
+            | TargetFileStrategy::OnDisk {
+                eof,
+                needs_leading_newline,
+            } => {
+                let mut text = String::new();
+                if needs_leading_newline {
+                    text.push('\n');
+                }
+                text.push('\n');
+                text.push_str(&body_text);
+                ops.push(DocumentChangeOperation::Edit(TextDocumentEdit {
+                    text_document: OptionalVersionedTextDocumentIdentifier {
+                        uri: target_url,
+                        version: None,
+                    },
+                    edits: vec![OneOf::Left(TextEdit {
+                        range: Range {
+                            start: eof,
+                            end: eof,
+                        },
+                        new_text: text,
+                    })],
+                }));
+            }
+            TargetFileStrategy::Create => {
+                ops.push(DocumentChangeOperation::Op(ResourceOp::Create(CreateFile {
+                    uri: target_url.clone(),
+                    options: Some(CreateFileOptions {
+                        overwrite: Some(false),
+                        ignore_if_exists: Some(true),
+                    }),
+                    annotation_id: None,
+                })));
+                ops.push(DocumentChangeOperation::Edit(TextDocumentEdit {
+                    text_document: OptionalVersionedTextDocumentIdentifier {
+                        uri: target_url,
+                        version: None,
+                    },
+                    edits: vec![OneOf::Left(TextEdit {
+                        range: Range {
+                            start: Position::new(0, 0),
+                            end: Position::new(0, 0),
+                        },
+                        new_text: body_text,
+                    })],
+                }));
+            }
+        }
+    }
+
+    // 2. Rewrites — append after moved.tf ops so a client that
+    // applies in order writes the new file before any rename
+    // touches it. (LSP doesn't actually guarantee order, but
+    // most clients are sequential.)
+    for (uri, edits) in rewrites {
+        ops.push(DocumentChangeOperation::Edit(TextDocumentEdit {
+            text_document: OptionalVersionedTextDocumentIdentifier { uri, version: None },
+            edits: edits.into_iter().map(OneOf::Left).collect(),
+        }));
+    }
+
+    WorkspaceEdit {
+        document_changes: Some(DocumentChanges::Operations(ops)),
+        ..Default::default()
+    }
+}
+
+/// Names already covered by `moved { from = null_resource.X
+/// to = terraform_data.X }` blocks anywhere in `module_dir`.
+fn collect_existing_moved_names(
+    state: &StateStore,
+    module_dir: &std::path::Path,
+) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for entry in state.documents.iter() {
+        let uri = entry.key();
+        let Ok(path) = uri.to_file_path() else { continue };
+        if path.parent() != Some(module_dir) {
+            continue;
+        }
+        let doc = entry.value();
+        let Some(body) = doc.parsed.body.as_ref() else {
+            continue;
+        };
+        out.extend(existing_null_resource_moved_names(body));
+    }
+    out
 }
 
 /// Cursor-driven Instance variant of the
@@ -1143,6 +1429,7 @@ fn emit_null_resource_actions(
 /// when the cursor sits inside a `resource "null_resource" "X"`
 /// block; broader scopes are emitted via `emit_scoped_actions`.
 fn make_replace_null_resource_at_cursor(
+    state: &StateStore,
     uri: &Url,
     cursor: Position,
     body: &Body,
@@ -1184,16 +1471,19 @@ fn make_replace_null_resource_at_cursor(
         }
 
         let name = block.labels.get(1).and_then(label_str).unwrap_or("?");
-        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
-        changes.insert(uri.clone(), edits);
+        let mut rewrites: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        rewrites.insert(uri.clone(), edits);
+        let mut names_by_module: HashMap<std::path::PathBuf, Vec<String>> = HashMap::new();
+        if let Some(dir) = crate::handlers::util::parent_dir(uri) {
+            names_by_module.insert(dir, vec![name.to_string()]);
+        }
+        let workspace_edit =
+            build_null_resource_workspace_edit(state, rewrites, names_by_module);
         return Some(CodeAction {
             title: format!("Convert null_resource.{name} to terraform_data"),
             kind: Some(CodeActionKind::QUICKFIX),
             diagnostics: None,
-            edit: Some(WorkspaceEdit {
-                changes: Some(changes),
-                ..Default::default()
-            }),
+            edit: Some(workspace_edit),
             is_preferred: Some(true),
             ..Default::default()
         });

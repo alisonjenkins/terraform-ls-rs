@@ -1203,6 +1203,57 @@ fn find_action<'a>(
         .unwrap_or_else(|| panic!("no action with prefix {title_prefix:?}"))
 }
 
+/// Flatten an action's `document_changes` into `{ uri: Vec<TextEdit> }`.
+/// Useful for actions that may emit `CreateFile` ops (e.g. the
+/// `null_resource → terraform_data` action with `moved.tf`).
+fn doc_change_edits(
+    action: &tower_lsp::lsp_types::CodeAction,
+) -> std::collections::HashMap<Url, Vec<tower_lsp::lsp_types::TextEdit>> {
+    use tower_lsp::lsp_types::{DocumentChangeOperation, DocumentChanges, OneOf};
+    let mut out: std::collections::HashMap<Url, Vec<tower_lsp::lsp_types::TextEdit>> =
+        std::collections::HashMap::new();
+    let dc = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.document_changes.as_ref())
+        .expect("documentChanges");
+    let DocumentChanges::Operations(ops) = dc else {
+        panic!("expected Operations");
+    };
+    for op in ops {
+        if let DocumentChangeOperation::Edit(te) = op {
+            for e in &te.edits {
+                if let OneOf::Left(edit) = e {
+                    out.entry(te.text_document.uri.clone())
+                        .or_default()
+                        .push(edit.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// True when `action` includes a `CreateFile` op for `target`.
+fn has_create_file(
+    action: &tower_lsp::lsp_types::CodeAction,
+    target: &Url,
+) -> bool {
+    use tower_lsp::lsp_types::{
+        DocumentChangeOperation, DocumentChanges, ResourceOp,
+    };
+    let Some(dc) = action.edit.as_ref().and_then(|e| e.document_changes.as_ref()) else {
+        return false;
+    };
+    let DocumentChanges::Operations(ops) = dc else {
+        return false;
+    };
+    ops.iter().any(|op| match op {
+        DocumentChangeOperation::Op(ResourceOp::Create(c)) => &c.uri == target,
+        _ => false,
+    })
+}
+
 #[tokio::test]
 async fn scope_unwrap_interpolation_module_covers_all_files() {
     // Three .tf files in /mod, each with a single deprecated
@@ -1851,16 +1902,19 @@ async fn null_resource_action_instance_at_cursor() {
     // Cursor anywhere inside the block.
     let actions = all_actions_for(&backend, &u).await;
     let action = find_action(&actions, "Convert null_resource.x to terraform_data");
-    let edits = action
-        .edit
-        .as_ref()
-        .and_then(|e| e.changes.as_ref())
-        .and_then(|c| c.get(&u))
-        .expect("file edit");
+    let edits = doc_change_edits(action);
+    let main_edits = edits.get(&u).expect("file edit");
     assert!(
-        edits.iter().any(|e| e.new_text == "\"terraform_data\""),
-        "expected label rewrite, got:\n{edits:?}"
+        main_edits.iter().any(|e| e.new_text == "\"terraform_data\""),
+        "expected label rewrite, got:\n{main_edits:?}"
     );
+    // moved.tf companion: created with one moved block.
+    let moved = uri("file:///fmt-nrt-1/moved.tf");
+    assert!(has_create_file(action, &moved), "moved.tf created");
+    let moved_text = edits.get(&moved).expect("moved.tf edit");
+    let body = moved_text.iter().map(|e| e.new_text.clone()).collect::<String>();
+    assert!(body.contains("from = null_resource.x"), "moved body: {body}");
+    assert!(body.contains("to   = terraform_data.x"), "moved body: {body}");
 }
 
 #[tokio::test]
@@ -1871,19 +1925,15 @@ async fn null_resource_action_renames_triggers_attribute() {
 
     let actions = all_actions_for(&backend, &u).await;
     let action = find_action(&actions, "Convert 1 null_resource block in this file");
-    let edits = action
-        .edit
-        .as_ref()
-        .and_then(|e| e.changes.as_ref())
-        .and_then(|c| c.get(&u))
-        .expect("file edit");
+    let edits = doc_change_edits(action);
+    let main_edits = edits.get(&u).expect("file edit");
     assert!(
-        edits.iter().any(|e| e.new_text == "\"terraform_data\""),
+        main_edits.iter().any(|e| e.new_text == "\"terraform_data\""),
         "label rewrite missing"
     );
     assert!(
-        edits.iter().any(|e| e.new_text == "triggers_replace"),
-        "triggers rename missing; got:\n{edits:?}"
+        main_edits.iter().any(|e| e.new_text == "triggers_replace"),
+        "triggers rename missing; got:\n{main_edits:?}"
     );
 }
 
@@ -1896,13 +1946,15 @@ async fn null_resource_action_module_covers_siblings() {
 
     let actions = all_actions_for(&backend, &a).await;
     let action = find_action(&actions, "Convert 2 null_resource blocks in this module");
-    let changes = action
-        .edit
-        .as_ref()
-        .and_then(|e| e.changes.as_ref())
-        .expect("changes map");
-    assert!(changes.contains_key(&a));
-    assert!(changes.contains_key(&b));
+    let edits = doc_change_edits(action);
+    assert!(edits.contains_key(&a));
+    assert!(edits.contains_key(&b));
+    let moved = uri("file:///fmt-nrt-3/moved.tf");
+    assert!(has_create_file(action, &moved), "single moved.tf for module");
+    let body = edits.get(&moved).expect("moved.tf edit").iter()
+        .map(|e| e.new_text.clone()).collect::<String>();
+    assert!(body.contains("null_resource.a"), "moved body: {body}");
+    assert!(body.contains("null_resource.b"), "moved body: {body}");
 }
 
 #[tokio::test]
@@ -1951,12 +2003,15 @@ async fn null_resource_action_workspace_covers_unrelated_dirs() {
     add_doc(&backend, &b, "resource \"null_resource\" \"b\" {}\n");
     let actions = all_actions_for(&backend, &a).await;
     let action = find_action(&actions, "Convert 2 null_resource blocks in workspace");
-    let changes = action
-        .edit
-        .as_ref()
-        .and_then(|e| e.changes.as_ref())
-        .expect("changes map");
-    assert_eq!(changes.len(), 2);
+    let edits = doc_change_edits(action);
+    assert!(edits.contains_key(&a), "rewrite for A");
+    assert!(edits.contains_key(&b), "rewrite for B");
+    // Each module gets its own moved.tf — workspace sweep
+    // groups by directory.
+    let moved_a = uri("file:///fmt-nrt-A/moved.tf");
+    let moved_b = uri("file:///fmt-nrt-B/moved.tf");
+    assert!(has_create_file(action, &moved_a), "A moved.tf created");
+    assert!(has_create_file(action, &moved_b), "B moved.tf created");
 }
 
 /// `required_version` lives in a sibling `versions.tf` (not the
@@ -2048,11 +2103,70 @@ async fn null_resource_action_workspace_gates_per_module() {
     );
     let actions = all_actions_for(&backend, &a_main).await;
     let action = find_action(&actions, "Convert 1 null_resource block in workspace");
-    let changes = action
-        .edit
-        .as_ref()
-        .and_then(|e| e.changes.as_ref())
-        .expect("changes map");
-    assert!(changes.contains_key(&a_main), "A edited");
-    assert!(!changes.contains_key(&b_main), "B gated out by its own versions.tf");
+    let edits = doc_change_edits(action);
+    assert!(edits.contains_key(&a_main), "A edited");
+    assert!(!edits.contains_key(&b_main), "B gated out by its own versions.tf");
+    // moved.tf only for A's module.
+    let moved_a = uri("file:///fmt-nrt-W-A/moved.tf");
+    let moved_b = uri("file:///fmt-nrt-W-B/moved.tf");
+    assert!(has_create_file(action, &moved_a), "A moved.tf created");
+    assert!(!has_create_file(action, &moved_b), "B not migrated");
+}
+
+/// Existing `moved.tf` already covers `null_resource.x` →
+/// `terraform_data.x`. Re-running the action must NOT add a
+/// duplicate moved block, and must NOT re-create the file.
+#[tokio::test]
+async fn null_resource_action_idempotent_when_moved_present() {
+    let main = uri("file:///fmt-nrt-idem/main.tf");
+    let moved = uri("file:///fmt-nrt-idem/moved.tf");
+    let backend = fresh_backend("resource \"null_resource\" \"x\" {}\n", &main);
+    add_doc(
+        &backend,
+        &moved,
+        "moved {\n  from = null_resource.x\n  to   = terraform_data.x\n}\n",
+    );
+    let actions = all_actions_for(&backend, &main).await;
+    let action = find_action(&actions, "Convert 1 null_resource block in this file");
+    let edits = doc_change_edits(action);
+    assert!(edits.contains_key(&main), "rewrite still happens");
+    assert!(
+        !has_create_file(action, &moved),
+        "moved.tf must not be re-created"
+    );
+    assert!(
+        edits.get(&moved).map(|v| v.is_empty()).unwrap_or(true),
+        "no append when moved block already covers the name"
+    );
+}
+
+/// Existing `moved.tf` covers `x` only; `y` still needs a
+/// moved block. Action appends to existing file (no Create op).
+#[tokio::test]
+async fn null_resource_action_appends_to_existing_moved_tf() {
+    let main = uri("file:///fmt-nrt-app/main.tf");
+    let moved = uri("file:///fmt-nrt-app/moved.tf");
+    let backend = fresh_backend(
+        "resource \"null_resource\" \"x\" {}\nresource \"null_resource\" \"y\" {}\n",
+        &main,
+    );
+    add_doc(
+        &backend,
+        &moved,
+        "moved {\n  from = null_resource.x\n  to   = terraform_data.x\n}\n",
+    );
+    let actions = all_actions_for(&backend, &main).await;
+    let action = find_action(&actions, "Convert 2 null_resource blocks in this file");
+    let edits = doc_change_edits(action);
+    assert!(
+        !has_create_file(action, &moved),
+        "must not re-create existing moved.tf"
+    );
+    let body = edits.get(&moved).expect("moved.tf append").iter()
+        .map(|e| e.new_text.clone()).collect::<String>();
+    assert!(body.contains("null_resource.y"), "y appended; got {body:?}");
+    assert!(
+        !body.contains("null_resource.x"),
+        "x NOT re-appended (already covered); got {body:?}"
+    );
 }
