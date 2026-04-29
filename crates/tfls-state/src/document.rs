@@ -1,7 +1,9 @@
 //! Per-document state: rope buffer, parsed AST, version, diagnostics,
 //! symbol table, references.
 
-use lsp_types::{TextDocumentContentChangeEvent, Url};
+use std::sync::Mutex;
+
+use lsp_types::{TextDocumentContentChangeEvent, TextEdit, Url};
 use ropey::Rope;
 use tfls_core::SymbolTable;
 use tfls_parser::{
@@ -10,6 +12,27 @@ use tfls_parser::{
 };
 
 use crate::error::StateError;
+
+/// Cached output of a previous `format_source` pass on the
+/// document's rope. Keyed by document `version` (LSP-tracked,
+/// monotonic per change) + format-style marker. Invalidated by
+/// `apply_change` clearing the slot. Lets the LSP code-action
+/// handler skip the O(file size) format pass when nothing has
+/// changed since the last invocation.
+#[derive(Debug, Clone)]
+pub struct FormatCacheEntry {
+    /// `DocumentState::version` snapshot the cached edit
+    /// belongs to. Mismatch ⇒ rope changed ⇒ cache stale.
+    pub version: i32,
+    /// Format style the output was produced under. Different
+    /// styles produce different formatted output, so the cache
+    /// must invalidate when the user toggles style at runtime.
+    pub style_marker: u8,
+    /// `Some(edit)` — formatter changed the source; apply
+    /// `edit` to format. `None` — source already formatted; no
+    /// edit needed.
+    pub edit: Option<TextEdit>,
+}
 
 /// Mutable state for a single open document.
 ///
@@ -24,6 +47,14 @@ pub struct DocumentState {
     pub parsed: ParsedFile,
     pub symbols: SymbolTable,
     pub references: Vec<Reference>,
+    /// Last format-source pass result. `Mutex` because the LSP
+    /// handlers see a shared `&DocumentState` (DashMap shard
+    /// guard) but may need to populate the cache on first
+    /// call. Cleared whenever the rope changes — see
+    /// `apply_change` and `reparse`. `Option<FormatCacheEntry>`
+    /// inside: `None` = never computed, `Some(entry)` = match
+    /// against `entry.content_hash` + `entry.style_marker`.
+    pub format_cache: Mutex<Option<FormatCacheEntry>>,
 }
 
 impl DocumentState {
@@ -38,6 +69,7 @@ impl DocumentState {
             parsed,
             symbols,
             references,
+            format_cache: Mutex::new(None),
         }
     }
 
@@ -71,6 +103,7 @@ impl DocumentState {
             parsed,
             symbols,
             references,
+            format_cache: Mutex::new(None),
         }
     }
 
@@ -101,6 +134,10 @@ impl DocumentState {
             None => {
                 self.rope = Rope::from_str(&change.text);
             }
+        }
+        // Rope changed — any cached format result is stale.
+        if let Ok(mut guard) = self.format_cache.lock() {
+            *guard = None;
         }
         Ok(())
     }

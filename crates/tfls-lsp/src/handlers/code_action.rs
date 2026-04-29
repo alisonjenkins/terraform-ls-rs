@@ -766,6 +766,39 @@ fn scan_format(
     })
 }
 
+/// Cross-call wrapper around `scan_format`. Reads / writes the
+/// document's own `format_cache` slot, invalidated on every
+/// `apply_change` / `reparse`. Cache key is
+/// `(DocumentState::version, FormatStyle::marker)` — a doc
+/// edit bumps the version, a runtime style toggle bumps the
+/// marker, both make stale entries miss.
+///
+/// Falls back to a fresh `scan_format` call when the cache
+/// mutex is poisoned (lock failure is rare and recovery is
+/// cheap — just don't bypass the formatter).
+fn scan_format_cached(
+    doc: &DocumentState,
+    style: tfls_state::FormatStyle,
+) -> Option<TextEdit> {
+    let style_marker = style.marker();
+    if let Ok(guard) = doc.format_cache.lock() {
+        if let Some(entry) = guard.as_ref() {
+            if entry.version == doc.version && entry.style_marker == style_marker {
+                return entry.edit.clone();
+            }
+        }
+    }
+    let edit = scan_format(&doc.rope, style);
+    if let Ok(mut guard) = doc.format_cache.lock() {
+        *guard = Some(tfls_state::FormatCacheEntry {
+            version: doc.version,
+            style_marker,
+            edit: edit.clone(),
+        });
+    }
+    edit
+}
+
 /// Format-as-code-action across scopes. Reads the live
 /// `format_style` once at invocation; switching mid-action
 /// would be confusing. Custom title format because the standard
@@ -827,24 +860,27 @@ fn emit_format_actions(
         }
     }
 
-    // File / Module / Workspace — per-doc scan_format.
+    // File / Module / Workspace — per-doc scan_format with
+    // two layers of caching:
     //
-    // Cache per-doc format output across scopes. Each scope used
-    // to invoke `scan_format` (full formatter pass over the doc)
-    // independently — for the common single-doc workspace shape
-    // that's 3× redundant formats per code_action call. With
-    // tf-format's output being O(file size) the cost compounds
-    // sharply on big modules. Cache stores `None` for "tried &
-    // matched original" (skipped) vs `Some(edit)` for "format
-    // produces a diff".
-    let mut format_cache: HashMap<Url, Option<TextEdit>> = HashMap::new();
+    // 1. Per-call: identical doc visited under multiple scopes
+    //    (File / Module / Workspace) used to format 3× — now
+    //    once.
+    //
+    // 2. Cross-call: the doc's own `format_cache` field
+    //    persists across `code_action` invocations, keyed by
+    //    `(version, style_marker)`. Invalidated on
+    //    `apply_change` / `reparse`. Repeated code-action menu
+    //    opens on an unchanged doc skip the formatter
+    //    entirely.
+    let mut intra_call_cache: HashMap<Url, Option<TextEdit>> = HashMap::new();
 
     for scope in [Scope::File, Scope::Module, Scope::Workspace] {
         let mut edits_by_uri: HashMap<Url, Vec<TextEdit>> = HashMap::new();
         for_each_doc_in_scope(state, primary_uri, scope, |doc_uri, doc| {
-            let cached = format_cache
+            let cached = intra_call_cache
                 .entry(doc_uri.clone())
-                .or_insert_with(|| scan_format(&doc.rope, style));
+                .or_insert_with(|| scan_format_cached(doc, style));
             if let Some(edit) = cached.clone() {
                 edits_by_uri.insert(doc_uri.clone(), vec![edit]);
             }

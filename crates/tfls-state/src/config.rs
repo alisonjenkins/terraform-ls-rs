@@ -27,6 +27,17 @@ impl FormatStyle {
             _ => None,
         }
     }
+
+    /// Stable single-byte tag used as a cache-invalidation key
+    /// (e.g. `DocumentState::format_cache`). Two enum variants
+    /// → 0 / 1; adding a new variant requires choosing a fresh
+    /// tag here so existing cached entries don't collide.
+    pub fn marker(self) -> u8 {
+        match self {
+            FormatStyle::Minimal => 0,
+            FormatStyle::Opinionated => 1,
+        }
+    }
 }
 
 /// All tunable runtime settings in one place. Clone is cheap —

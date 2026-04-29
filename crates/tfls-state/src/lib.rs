@@ -13,7 +13,7 @@ pub mod lookup;
 pub mod store;
 
 pub use config::{Config, ConfigCell, FormatStyle};
-pub use document::DocumentState;
+pub use document::{DocumentState, FormatCacheEntry};
 pub use error::StateError;
 pub use index_cache::IndexCache;
 pub use jobs::{Job, JobQueue, Priority};
