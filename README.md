@@ -371,22 +371,29 @@ Completion shape coverage:
 
 - Reference prefixes — `var.`, `local.`, `module.`, `data.`,
   `<resource_type>.`, plus the built-in namespaces `each.`,
-  `count.`, `path.`, `terraform.`. All work in bare expression
-  position AND inside `${ ... }` string-template interpolations
-  (`%{ if var.X }` template directives also classify cleanly).
+  `count.`, `path.`, `terraform.`, and `self.` (inside
+  `provisioner` / `connection` blocks under a resource — the
+  enclosing-resource schema drives attribute candidates). All
+  work in bare expression position AND inside `${ ... }`
+  string-template interpolations (`%{ if var.X }` template
+  directives also classify cleanly). Heredoc bodies (`<<EOT`,
+  `<<-EOT`) work the same as quoted strings — `${self.|}`
+  inside a `user_data = <<EOT` resolves correctly.
 - Function-name completion — bare expression position +
   inside interpolations, including nested calls
   (`upper(lower(var.X))`).
+- Provider-defined function completion (Terraform 1.8+) —
+  `provider::|` lights up the set of providers that have
+  installed function libraries; `provider::aws::|` filters
+  to that provider's functions. Hover + signatureHelp also
+  resolve `provider::aws::trim_prefix(...)` calls to the
+  fully-qualified key the indexer stored
+  (`provider::hashicorp::aws::trim_prefix`).
 - Schema-driven attributes / values — provider schemas drive
   attribute completion at every drill-down level.
 
 Not yet implemented (future work):
 
-- Provider-defined function completion (hover + signature help work,
-  but no completion context for function names like `provider::aws::trim_prefix(...)`).
-- `self.` namespace inside provisioner blocks — currently classifies
-  as a generic resource ref. Real `self` resolution needs the
-  enclosing-resource schema lookup.
 - More provider-version-gated deprecations. Framework supports
   the gate kind; the `tfls-deprecation-scrape --uncovered-only`
   binary surfaces candidates from real workspaces.

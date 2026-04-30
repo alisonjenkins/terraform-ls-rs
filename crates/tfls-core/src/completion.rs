@@ -1062,10 +1062,15 @@ fn ignored_brace_positions(src: &str) -> Vec<bool> {
                     i += 1;
                     continue;
                 }
-                if let Some((tag, indented, after)) = parse_heredoc_opener(bytes, i) {
-                    stack.push(Frame::Heredoc { tag, indented });
-                    i = after;
-                    continue;
+                // Heredoc opener is `<<`. Cheap byte-check before the
+                // structured parse so the common case (no `<<`) stays
+                // a single comparison per byte.
+                if b == b'<' {
+                    if let Some((tag, indented, after)) = parse_heredoc_opener(bytes, i) {
+                        stack.push(Frame::Heredoc { tag, indented });
+                        i = after;
+                        continue;
+                    }
                 }
                 i += 1;
             }
