@@ -77,7 +77,7 @@ clap = { version = "4", features = ["derive"] }
 flate2 = "1"
 
 # Benchmarking
-criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 # Internal crates
 tfls-core = { path = "crates/tfls-core" }
