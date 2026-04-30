@@ -1036,21 +1036,20 @@ fn enclosing_resource_type(before: &str) -> Option<String> {
 
 /// Forward pre-pass over `src` returning a per-byte mask where
 /// `mask[i] == true` means the byte at `i` is inside string-literal
-/// content or part of a `${...}` / `%{...}` interpolation marker, and
-/// should NOT be treated as a block-structural brace by the RTL
-/// walker. Handles nested string-in-interp-in-string-in-interp; bails
-/// gracefully on unclosed strings/interpolations (the trailing region
-/// stays masked as in-string, which is what we want mid-edit).
+/// content (regular `"..."` or heredoc body) or part of a `${...}` /
+/// `%{...}` interpolation marker, and should NOT be treated as a
+/// block-structural brace by the RTL walker. Handles nested
+/// string-in-interp-in-string-in-interp and heredocs (`<<TAG ... TAG`,
+/// `<<-TAG ... TAG`); bails gracefully on unclosed strings /
+/// interpolations / heredocs (the trailing region stays masked as
+/// in-string, which is what we want mid-edit).
 fn ignored_brace_positions(src: &str) -> Vec<bool> {
     let bytes = src.as_bytes();
     let mut mask = vec![false; bytes.len()];
-    // Stack frames track the active context. A `String` frame means
-    // bytes are string-literal content unless we open an interpolation.
-    // An `Interp { depth }` frame means we're inside `${...}` or
-    // `%{...}`, counting `{` / `}` to find its end.
     enum Frame {
         String,
         Interp { depth: u32 },
+        Heredoc { tag: Vec<u8>, indented: bool },
     }
     let mut stack: Vec<Frame> = Vec::new();
     let mut i = 0;
@@ -1060,6 +1059,13 @@ fn ignored_brace_positions(src: &str) -> Vec<bool> {
             None => {
                 if b == b'"' {
                     stack.push(Frame::String);
+                    i += 1;
+                    continue;
+                }
+                if let Some((tag, indented, after)) = parse_heredoc_opener(bytes, i) {
+                    stack.push(Frame::Heredoc { tag, indented });
+                    i = after;
+                    continue;
                 }
                 i += 1;
             }
@@ -1071,6 +1077,26 @@ fn ignored_brace_positions(src: &str) -> Vec<bool> {
                 if b == b'"' {
                     stack.pop();
                     i += 1;
+                    continue;
+                }
+                if (b == b'$' || b == b'%')
+                    && i + 1 < bytes.len()
+                    && bytes[i + 1] == b'{'
+                {
+                    mask[i + 1] = true;
+                    stack.push(Frame::Interp { depth: 1 });
+                    i += 2;
+                    continue;
+                }
+                if b == b'{' || b == b'}' {
+                    mask[i] = true;
+                }
+                i += 1;
+            }
+            Some(Frame::Heredoc { tag, indented }) => {
+                if let Some(after) = match_heredoc_closer(bytes, i, tag, *indented) {
+                    stack.pop();
+                    i = after;
                     continue;
                 }
                 if (b == b'$' || b == b'%')
@@ -1113,6 +1139,96 @@ fn ignored_brace_positions(src: &str) -> Vec<bool> {
         }
     }
     mask
+}
+
+/// If `bytes[i..]` starts with a heredoc opener (`<<TAG\n` or
+/// `<<-TAG\n`), return `(tag, indented, position-after-newline)`.
+/// The tag must be a bare identifier (`[A-Za-z_][A-Za-z0-9_]*`).
+fn parse_heredoc_opener(bytes: &[u8], i: usize) -> Option<(Vec<u8>, bool, usize)> {
+    if i + 1 >= bytes.len() || bytes[i] != b'<' || bytes[i + 1] != b'<' {
+        return None;
+    }
+    let mut j = i + 2;
+    let indented = bytes.get(j).copied() == Some(b'-');
+    if indented {
+        j += 1;
+    }
+    let tag_start = j;
+    while j < bytes.len() {
+        let c = bytes[j];
+        if c.is_ascii_alphanumeric() || c == b'_' {
+            j += 1;
+            continue;
+        }
+        break;
+    }
+    if j == tag_start {
+        return None;
+    }
+    let tag = bytes[tag_start..j].to_vec();
+    // Skip trailing whitespace on the opener line, then the newline.
+    while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+        j += 1;
+    }
+    if j >= bytes.len() {
+        return Some((tag, indented, j));
+    }
+    if bytes[j] == b'\n' {
+        return Some((tag, indented, j + 1));
+    }
+    if bytes[j] == b'\r' {
+        j += 1;
+        if j < bytes.len() && bytes[j] == b'\n' {
+            j += 1;
+        }
+        return Some((tag, indented, j));
+    }
+    None
+}
+
+/// If `bytes[i..]` is at the start of a line that contains exactly
+/// the closing tag (optionally indented when `indented == true`)
+/// followed by end-of-line/EOF, return the position right after the
+/// terminating newline.
+fn match_heredoc_closer(
+    bytes: &[u8],
+    i: usize,
+    tag: &[u8],
+    indented: bool,
+) -> Option<usize> {
+    if i > 0 && bytes[i - 1] != b'\n' {
+        return None;
+    }
+    let mut j = i;
+    if indented {
+        while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+            j += 1;
+        }
+    }
+    if j + tag.len() > bytes.len() {
+        return None;
+    }
+    if &bytes[j..j + tag.len()] != tag {
+        return None;
+    }
+    let mut k = j + tag.len();
+    while k < bytes.len() && (bytes[k] == b' ' || bytes[k] == b'\t') {
+        k += 1;
+    }
+    if k >= bytes.len() {
+        return Some(k);
+    }
+    if bytes[k] == b'\n' {
+        return Some(k + 1);
+    }
+    if bytes[k] == b'\r' {
+        let next = k + 1;
+        if next < bytes.len() && bytes[next] == b'\n' {
+            return Some(next + 1);
+        }
+        return Some(next);
+    }
+    None
 }
 
 fn enclosing_block_context(before: &str) -> Option<CompletionContext> {
@@ -1705,6 +1821,61 @@ mod tests {
             CompletionContext::SelfRef {
                 resource_type: "aws_instance".into(),
             }
+        );
+    }
+
+    #[test]
+    fn self_dot_inside_heredoc_interpolation() {
+        // Heredoc body contains a `${self.|}` interpolation.
+        // The walker has to skip past the heredoc body (and the
+        // `${` interp marker) to find the enclosing resource.
+        let src = concat!(
+            "resource \"aws_instance\" \"web\" {\n",
+            "  user_data = <<EOT\n",
+            "echo ${self.",
+        );
+        assert_eq!(
+            at_end(src),
+            CompletionContext::SelfRef {
+                resource_type: "aws_instance".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn each_dot_inside_indented_heredoc() {
+        let src = concat!(
+            "resource \"aws_instance\" \"web\" {\n",
+            "  for_each = toset([\"a\"])\n",
+            "  user_data = <<-EOT\n",
+            "    name = ${each.",
+        );
+        assert_eq!(at_end(src), CompletionContext::EachRef);
+    }
+
+    #[test]
+    fn block_after_closed_heredoc_classifies_normally() {
+        // Closing tag terminates the heredoc; a subsequent
+        // `validation {` block opener should still be detected.
+        let src = concat!(
+            "variable \"x\" {\n",
+            "  default = <<EOT\n",
+            "literal { contents } here\n",
+            "EOT\n",
+            "  validation {\n",
+            "    condition = ",
+        );
+        // Inside `validation {` body, no resource — falls through
+        // to FunctionCall via expression_context. Important: the
+        // raw `{` inside the heredoc body must NOT be treated as
+        // a block opener that confuses the walk.
+        let ctx = at_end(src);
+        assert!(
+            matches!(
+                ctx,
+                CompletionContext::FunctionCall | CompletionContext::Unknown
+            ),
+            "got: {ctx:?}"
         );
     }
 
