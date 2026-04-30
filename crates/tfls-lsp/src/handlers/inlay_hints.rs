@@ -321,16 +321,12 @@ fn compose_label(
         .find(|(v, _)| satisfies_all(constraints, v));
 
     match latest_matching {
-        Some((v, date)) if *v == latest_overall => {
-            // Exact latest — check staleness by date if we have it.
-            if let Some(age) = age_days(date.as_deref()) {
-                if stale_days > 0 && age > stale_days as i64 {
-                    return Some(format!(
-                        "✓ {v}   ⚠ {}",
-                        humanise_age(age)
-                    ));
-                }
-            }
+        Some((v, _)) if *v == latest_overall => {
+            // Pinned IS the latest available — no upgrade path. Skip
+            // the age warning even if the registry's newest release
+            // is older than `stale_days`: the user has nothing to do
+            // about it. Show `✓ <ver>` so the "I'm up to date" signal
+            // still surfaces.
             Some(format!("✓ {v}"))
         }
         Some((v, date)) => {
@@ -870,5 +866,48 @@ mod tests {
             "file:///m/main.tf",
         );
         assert!(hints.is_empty(), "got: {hints:?}");
+    }
+
+    // --- compose_label staleness suppression -------------------------
+
+    fn entry(v: &str, days_old: i64) -> (String, Option<String>) {
+        // Synthesise an ISO date `days_old` days before today so
+        // `age_days` returns approximately the requested age.
+        let today = now_as_unix_day();
+        let target = today - days_old;
+        // Convert back to (Y, M, D) via a coarse approximation —
+        // enough for the test, doesn't need to round-trip exactly.
+        let years = target / 365;
+        let leftover = target % 365;
+        let month = (leftover / 30).clamp(0, 11) + 1;
+        let day = (leftover % 30).clamp(0, 27) + 1;
+        let y = 1970 + years as i32;
+        (
+            v.to_string(),
+            Some(format!("{y:04}-{:02}-{:02}T00:00:00Z", month, day)),
+        )
+    }
+
+    #[test]
+    fn compose_label_suppresses_age_when_no_newer_version_exists() {
+        // Pinned == latest_overall (no upgrade path). Even if pinned
+        // is older than `stale_days`, we must NOT emit `⚠ Xy old`:
+        // the user can't act on it.
+        let constraints = tfls_core::version_constraint::parse("3.7.2").constraints;
+        let entries = vec![entry("3.7.2", 400)];
+        let label = compose_label(&constraints, &entries, 30).expect("label");
+        assert_eq!(label, "✓ 3.7.2", "got: {label}");
+    }
+
+    #[test]
+    fn compose_label_keeps_age_when_newer_version_exists() {
+        // Newer version available + pinned is old → keep the age
+        // warning so user sees the urgency of the upgrade.
+        let constraints = tfls_core::version_constraint::parse("3.7.2").constraints;
+        let entries = vec![entry("3.8.1", 30), entry("3.7.2", 400)];
+        let label = compose_label(&constraints, &entries, 30).expect("label");
+        assert!(label.starts_with("→ 3.8.1"), "got: {label}");
+        assert!(label.contains("pinned: 3.7.2"), "got: {label}");
+        assert!(label.contains("old"), "got: {label}");
     }
 }
