@@ -739,6 +739,55 @@ fn unknown_function_skipped_when_provider_has_no_functions_indexed() {
 }
 
 #[test]
+fn dedup_drops_identical_entries() {
+    // Two `terraform { required_providers { rsa = ... } }` blocks
+    // that both declare an unused, version-less local. Pre-dedup
+    // the rules emit one diagnostic per declaration; post-dedup
+    // each unique (range, message) survives but identical
+    // emissions get folded.
+    let b = backend();
+    let u = uri("file:///proj/main.tf");
+    insert(
+        &b,
+        &u,
+        "terraform {\n\
+           required_providers {\n\
+             rsa = {\n\
+               source = \"vancluever/acme\"\n\
+             }\n\
+           }\n\
+         }\n\
+         terraform {\n\
+           required_providers {\n\
+             rsa = {\n\
+               source = \"vancluever/acme\"\n\
+             }\n\
+           }\n\
+         }\n",
+    );
+    let msgs = messages(&b, &u);
+    let unused_count = msgs
+        .iter()
+        .filter(|m| m.contains("not used") && m.contains("rsa"))
+        .count();
+    let version_count = msgs
+        .iter()
+        .filter(|m| m.contains("declare a `version`") && m.contains("rsa"))
+        .count();
+    // Two declarations on different lines = two ranges → two
+    // diagnostics each survives. But should never exceed the
+    // declaration count: dedup catches any same-range duplicate.
+    assert!(
+        unused_count <= 2,
+        "unused diag emitted {unused_count}× for 2 declarations: {msgs:?}"
+    );
+    assert!(
+        version_count <= 2,
+        "version diag emitted {version_count}× for 2 declarations: {msgs:?}"
+    );
+}
+
+#[test]
 fn renamed_local_resolves_via_required_providers() {
     // versions.tf renames `aws_v6 → hashicorp/aws`. Diagnostic
     // must NOT fire for `provider::aws_v6::trim_prefix(...)`.

@@ -558,6 +558,46 @@ pub fn compute_diagnostics_with_lookup(
         }
     }
 
+    // Defensive dedup: same (range, severity, source, message)
+    // tuple is by definition the same diagnostic. Some emission
+    // sites can fire twice in pathological cases (e.g. peer-walk
+    // hitting the active doc once via the active loop and once
+    // via the iter_peers loop when state hasn't synced — rare,
+    // but observed in the wild). A user who has two `terraform {
+    // required_providers { rsa = ... } }` blocks at *different*
+    // line offsets will still see two diagnostics: ranges differ,
+    // dedup leaves both.
+    {
+        use rustc_hash::FxHashSet;
+        type DedupKey = (
+            (u32, u32, u32, u32),
+            Option<String>,
+            String,
+            String,
+        );
+        let pre = out.len();
+        let mut seen: FxHashSet<DedupKey> = FxHashSet::default();
+        out.retain(|d| {
+            let r = (
+                d.range.start.line,
+                d.range.start.character,
+                d.range.end.line,
+                d.range.end.character,
+            );
+            let sev = d.severity.map(|s| format!("{s:?}"));
+            let src = d.source.clone().unwrap_or_default();
+            seen.insert((r, sev, src, d.message.clone()))
+        });
+        if out.len() != pre {
+            tracing::debug!(
+                uri = %uri,
+                dropped = pre - out.len(),
+                kept = out.len(),
+                "compute_diagnostics: dedup'd identical entries",
+            );
+        }
+    }
+
     out
 }
 
