@@ -114,12 +114,103 @@ pub async fn workspace_symbol(
             out: &mut results,
         };
         doc.symbols.for_each_symbol(&mut m);
+        // Provider-defined function calls (Terraform 1.8+).
+        // Surfaced via a text scan so workspace search can hit
+        // `provider::aws::trim_prefix` — these calls aren't part
+        // of the symbol table (they're expression-position
+        // function calls, not declarations), but matching them
+        // gives the user a workspace-wide grep affordance.
+        collect_provider_function_calls(
+            doc_entry.key(),
+            doc,
+            &query,
+            &mut results,
+        );
     }
 
     if results.is_empty() {
         Ok(None)
     } else {
         Ok(Some(results))
+    }
+}
+
+#[allow(deprecated)]
+fn collect_provider_function_calls(
+    uri: &lsp_types::Url,
+    doc: &tfls_state::DocumentState,
+    query: &str,
+    out: &mut Vec<SymbolInformation>,
+) {
+    let text = doc.rope.to_string();
+    let bytes = text.as_bytes();
+    let needle = b"provider::";
+    let mut search_from = 0usize;
+    while search_from + needle.len() <= bytes.len() {
+        let Some(rel) = bytes[search_from..]
+            .windows(needle.len())
+            .position(|w| w == needle)
+        else {
+            break;
+        };
+        let kw_start = search_from + rel;
+        if kw_start > 0 {
+            let prev = bytes[kw_start - 1];
+            if prev.is_ascii_alphanumeric() || prev == b'_' {
+                search_from = kw_start + needle.len();
+                continue;
+            }
+        }
+        let mut p = kw_start + needle.len();
+        let local_start = p;
+        while p < bytes.len() && (bytes[p].is_ascii_alphanumeric() || bytes[p] == b'_') {
+            p += 1;
+        }
+        if p == local_start
+            || p + 1 >= bytes.len()
+            || bytes[p] != b':'
+            || bytes[p + 1] != b':'
+        {
+            search_from = p;
+            continue;
+        }
+        let fn_start = p + 2;
+        let mut q = fn_start;
+        while q < bytes.len() && (bytes[q].is_ascii_alphanumeric() || bytes[q] == b'_') {
+            q += 1;
+        }
+        if q == fn_start {
+            search_from = q;
+            continue;
+        }
+        let mut r = q;
+        while r < bytes.len() && (bytes[r] == b' ' || bytes[r] == b'\t') {
+            r += 1;
+        }
+        if r >= bytes.len() || bytes[r] != b'(' {
+            search_from = q;
+            continue;
+        }
+        let name = &text[kw_start..q];
+        if matches_query(name, query) {
+            if let (Ok(start), Ok(end)) = (
+                tfls_parser::byte_offset_to_lsp_position(&doc.rope, kw_start),
+                tfls_parser::byte_offset_to_lsp_position(&doc.rope, q),
+            ) {
+                out.push(SymbolInformation {
+                    name: name.to_string(),
+                    kind: lsp_types::SymbolKind::FUNCTION,
+                    tags: None,
+                    deprecated: None,
+                    location: lsp_types::Location {
+                        uri: uri.clone(),
+                        range: lsp_types::Range { start, end },
+                    },
+                    container_name: None,
+                });
+            }
+        }
+        search_from = q;
     }
 }
 

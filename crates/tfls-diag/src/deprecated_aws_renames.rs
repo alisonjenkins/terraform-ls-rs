@@ -108,6 +108,38 @@ pub const AWS_TYPE_RENAMES: &[DeprecationRule] = &[
                   the rest of the v4 S3 split. Migration: rename the resource type and update \
                   references.",
     },
+    DeprecationRule {
+        block_kind: "data",
+        label: "aws_s3_bucket_object",
+        gate: Gate::ProviderVersion {
+            provider: "aws",
+            threshold: "4.0.0",
+        },
+        message: "`data \"aws_s3_bucket_object\"` is superseded by `data \"aws_s3_object\"` \
+                  (AWS provider 4.0+) — same migration as the resource rename.",
+    },
+    DeprecationRule {
+        block_kind: "data",
+        label: "aws_s3_bucket_objects",
+        gate: Gate::ProviderVersion {
+            provider: "aws",
+            threshold: "4.0.0",
+        },
+        message: "`data \"aws_s3_bucket_objects\"` is superseded by `data \"aws_s3_objects\"` \
+                  (AWS provider 4.0+).",
+    },
+    DeprecationRule {
+        block_kind: "resource",
+        label: "aws_kinesis_analytics_application",
+        gate: Gate::ProviderVersion {
+            provider: "aws",
+            threshold: "5.0.0",
+        },
+        message: "`aws_kinesis_analytics_application` (Kinesis Data Analytics for SQL) is \
+                  superseded by `aws_kinesisanalyticsv2_application` (the v2 / Apache Flink \
+                  control plane). The two resources are NOT state-compatible; running side-by-\
+                  side is the supported migration path.",
+    },
 ];
 
 /// Body-only entry point. Computes the per-rule support flag

@@ -42,6 +42,9 @@ pub const HARDCODED_DEPRECATION_LABELS: &[(&str, &str)] = &[
     ("resource", "aws_alb_target_group"),
     ("resource", "aws_alb_target_group_attachment"),
     ("resource", "aws_s3_bucket_object"),
+    ("data", "aws_s3_bucket_object"),
+    ("data", "aws_s3_bucket_objects"),
+    ("resource", "aws_kinesis_analytics_application"),
     // Kubernetes `_v1` rename family —
     // `deprecated_kubernetes_renames.rs`.
     ("resource", "kubernetes_pod"),

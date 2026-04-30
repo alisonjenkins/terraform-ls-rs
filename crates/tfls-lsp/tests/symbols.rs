@@ -192,3 +192,38 @@ async fn workspace_symbol_returns_none_when_nothing_matches() {
     .expect("ok");
     assert!(resp.is_none());
 }
+
+#[tokio::test]
+async fn workspace_symbol_finds_provider_function_calls() {
+    let u = uri("file:///proj/main.tf");
+    let backend = backend_with_doc(
+        &u,
+        "output \"x\" {\n  value = provider::aws::trim_prefix(\"foo\")\n}\n\
+         output \"y\" {\n  value = provider::aws::arn_parse(\"bar\")\n}\n",
+    );
+    let resp = tfls_lsp::handlers::symbols::workspace_symbol(
+        &backend,
+        WorkspaceSymbolParams {
+            query: "trim".to_string(),
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        },
+    )
+    .await
+    .expect("ok")
+    .expect("some");
+
+    let names: Vec<String> = resp.iter().map(|s| s.name.clone()).collect();
+    assert!(
+        names
+            .iter()
+            .any(|n| n == "provider::aws::trim_prefix"),
+        "got: {names:?}"
+    );
+    assert!(
+        !names
+            .iter()
+            .any(|n| n == "provider::aws::arn_parse"),
+        "non-matching call leaked: {names:?}"
+    );
+}

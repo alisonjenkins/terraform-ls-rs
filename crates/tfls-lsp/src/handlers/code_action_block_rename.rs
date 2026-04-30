@@ -133,6 +133,40 @@ const ALL_BLOCK_RENAMES: &[BlockRenameSpec] = &[
         gate_threshold: "4.0.0",
         state_migration: StateMigration::RequiresTerraform18,
     },
+    // `data "aws_s3_bucket_object"` / `aws_s3_bucket_objects`
+    // are pure read-only data sources — no state to migrate.
+    // The auto-fix is just a label rewrite + ref rename, no
+    // moved.tf needed. Reuse `Manual` since the runtime guard
+    // ("verify before applying") is a sensible default for any
+    // data-source rename.
+    BlockRenameSpec {
+        block_kind: "data",
+        from: "aws_s3_bucket_object",
+        to: "aws_s3_object",
+        gate_provider: "aws",
+        gate_threshold: "4.0.0",
+        state_migration: StateMigration::Manual,
+    },
+    BlockRenameSpec {
+        block_kind: "data",
+        from: "aws_s3_bucket_objects",
+        to: "aws_s3_objects",
+        gate_provider: "aws",
+        gate_threshold: "4.0.0",
+        state_migration: StateMigration::Manual,
+    },
+    // `aws_kinesis_analytics_application` (SQL) → `_v2` (Apache
+    // Flink). The two resources are NOT state-compatible —
+    // separate provider implementations, separate AWS APIs. No
+    // `moved` block helps. Manual scaffolding only.
+    BlockRenameSpec {
+        block_kind: "resource",
+        from: "aws_kinesis_analytics_application",
+        to: "aws_kinesisanalyticsv2_application",
+        gate_provider: "aws",
+        gate_threshold: "5.0.0",
+        state_migration: StateMigration::Manual,
+    },
     // Kubernetes `_v1` rename family — see
     // `tfls_diag::KUBERNETES_TYPE_RENAMES`. The non-versioned
     // resources predate the explicit-API-version naming
@@ -1246,10 +1280,12 @@ mod tests {
     /// state to migrate; that family would warrant its own
     /// data-rename action with no `moved` emit).
     #[test]
-    fn every_spec_is_a_resource() {
+    fn every_spec_kind_is_resource_or_data() {
         for spec in ALL_BLOCK_RENAMES {
-            assert_eq!(spec.block_kind, "resource", "spec {spec:?}");
-            assert!(spec.is_resource(), "spec {spec:?}");
+            assert!(
+                matches!(spec.block_kind, "resource" | "data"),
+                "spec {spec:?}"
+            );
         }
     }
 
