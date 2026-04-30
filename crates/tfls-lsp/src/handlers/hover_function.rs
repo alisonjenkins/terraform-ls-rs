@@ -17,7 +17,9 @@ use tfls_parser::lsp_position_to_byte_offset;
 use tfls_schema::FunctionSignature;
 use tfls_state::{DocumentState, StateStore};
 
-use crate::handlers::signature_help::{enclosing_call, identifier_at, type_label};
+use crate::handlers::signature_help::{
+    enclosing_call, identifier_at, qualified_name_ending_at, resolve_function, type_label,
+};
 
 pub fn function_hover(state: &StateStore, doc: &DocumentState, pos: Position) -> Option<Hover> {
     let offset = lsp_position_to_byte_offset(&doc.rope, pos).ok()?;
@@ -42,19 +44,23 @@ fn lookup_at_cursor(
     offset: usize,
 ) -> Option<(String, Arc<FunctionSignature>)> {
     // Case 1: cursor is on an identifier followed (possibly after whitespace)
-    // by `(`. Treat the identifier as a function name.
-    if let Some((name, range)) = identifier_at(text, offset) {
+    // by `(`. Treat the identifier as a function name. Walk back over
+    // `provider::<local>::` if present so qualified provider-defined
+    // function calls resolve.
+    if let Some((_, range)) = identifier_at(text, offset) {
         if followed_by_open_paren(text, range.end) {
-            if let Some(sig) = state.functions.get(&name).map(|s| s.clone()) {
-                return Some((name, sig));
+            if let Some(name) = qualified_name_ending_at(text, range.end) {
+                if let Some((resolved, sig)) = resolve_function(state, &name) {
+                    return Some((resolved, sig));
+                }
             }
         }
     }
 
     // Case 2: cursor is inside the argument list of an unclosed call.
     let (name, _arg_idx) = enclosing_call(text, offset)?;
-    let sig = state.functions.get(&name).map(|s| s.clone())?;
-    Some((name, sig))
+    let (resolved, sig) = resolve_function(state, &name)?;
+    Some((resolved, sig))
 }
 
 /// True if `text[from..]` starts with a `(`, skipping ASCII whitespace.

@@ -116,3 +116,42 @@ async fn returns_none_for_unknown_function() {
     .expect("ok");
     assert!(help.is_none());
 }
+
+#[tokio::test]
+async fn provider_defined_function_resolves_qualified_signature() {
+    let u = uri("file:///pf.tf");
+    let src = "output \"x\" { value = provider::aws::trim_prefix(";
+    let backend = backend_with_doc(&u, src).await;
+    // Inject a fake provider-defined function under the namespaced
+    // form the indexer would store.
+    backend.state.merge_functions(vec![(
+        "provider::hashicorp::aws::trim_prefix".to_string(),
+        tfls_schema::FunctionSignature {
+            description: Some("AWS trim_prefix.".into()),
+            return_type: sonic_rs::json!("string"),
+            parameters: vec![tfls_schema::FunctionParameter {
+                name: "input".into(),
+                description: None,
+                r#type: sonic_rs::json!("string"),
+                is_nullable: false,
+            }],
+            variadic_parameter: None,
+        },
+    )]);
+
+    let help = tfls_lsp::handlers::signature_help::signature_help(
+        &backend,
+        params(&u, Position::new(0, src.len() as u32)),
+    )
+    .await
+    .expect("ok")
+    .expect("help");
+    assert_eq!(help.signatures.len(), 1);
+    assert!(
+        help.signatures[0]
+            .label
+            .starts_with("provider::hashicorp::aws::trim_prefix("),
+        "label: {}",
+        help.signatures[0].label
+    );
+}

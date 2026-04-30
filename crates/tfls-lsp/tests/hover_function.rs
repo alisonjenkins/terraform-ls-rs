@@ -130,6 +130,63 @@ async fn hover_on_plain_identifier_is_not_a_function_hover() {
     assert!(md.contains("variable"), "expected symbol hover: {md}");
 }
 
+fn install_fake_provider_function(backend: &Backend) {
+    let funcs = vec![(
+        "provider::hashicorp::aws::trim_prefix".to_string(),
+        tfls_schema::FunctionSignature {
+            description: Some("AWS-provided trim_prefix.".into()),
+            return_type: sonic_rs::json!("string"),
+            parameters: vec![tfls_schema::FunctionParameter {
+                name: "input".into(),
+                description: None,
+                r#type: sonic_rs::json!("string"),
+                is_nullable: false,
+            }],
+            variadic_parameter: None,
+        },
+    )];
+    backend.state.merge_functions(funcs);
+}
+
+#[tokio::test]
+async fn hover_on_provider_function_name_resolves_qualified() {
+    let u = uri("file:///pf.tf");
+    let src = "output \"x\" { value = provider::aws::trim_prefix(\"foo\") }\n";
+    let b = backend_with(src, &u);
+    install_fake_provider_function(&b);
+
+    // Cursor on `trim_prefix`.
+    let col = src.find("trim_prefix").unwrap() as u32 + 2;
+    let md = hover_markdown(&b, &u, Position::new(0, col))
+        .await
+        .expect("some hover");
+    assert!(
+        md.contains("provider::hashicorp::aws::trim_prefix"),
+        "expected qualified name in hover: {md}"
+    );
+    assert!(md.contains("AWS-provided"), "expected description: {md}");
+}
+
+#[tokio::test]
+async fn hover_inside_provider_function_args_finds_function() {
+    let u = uri("file:///pf2.tf");
+    // No string args so the RTL walker doesn't get distracted by
+    // a stray `"` between the cursor and the call's `(`.
+    let src = "output \"x\" { value = provider::aws::trim_prefix(123) }\n";
+    let b = backend_with(src, &u);
+    install_fake_provider_function(&b);
+
+    // Cursor right after `(` — clearly inside the arg list.
+    let col = src.find("123").unwrap() as u32;
+    let md = hover_markdown(&b, &u, Position::new(0, col))
+        .await
+        .expect("some hover");
+    assert!(
+        md.contains("provider::hashicorp::aws::trim_prefix"),
+        "expected qualified name from arg-list resolution: {md}"
+    );
+}
+
 #[tokio::test]
 async fn function_hover_on_unknown_function_returns_none() {
     // Direct probe of `function_hover` (bypasses the fallback chain in

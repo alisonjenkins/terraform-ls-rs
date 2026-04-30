@@ -36,11 +36,11 @@ pub async fn signature_help(
         return Ok(None);
     };
 
-    let Some(sig) = backend.state.functions.get(&name).map(|s| s.clone()) else {
+    let Some((resolved_name, sig)) = resolve_function(&backend.state, &name) else {
         return Ok(None);
     };
 
-    Ok(Some(render_signature(&name, &sig, arg_index)))
+    Ok(Some(render_signature(&resolved_name, &sig, arg_index)))
 }
 
 /// Inspect `text[..offset]` to find the innermost `ident(` whose
@@ -80,7 +80,7 @@ pub fn enclosing_call(text: &str, offset: usize) -> Option<(String, usize)> {
             b'}' => depth_brace += 1,
             b'(' => {
                 if depth_paren == 0 && depth_bracket == 0 && depth_brace == 0 {
-                    let name = identifier_ending_at(before, i)?;
+                    let name = qualified_name_ending_at(before, i)?;
                     return Some((name, commas));
                 }
                 depth_paren -= 1;
@@ -114,6 +114,68 @@ pub(crate) fn identifier_ending_at(text: &str, end: usize) -> Option<String> {
     } else {
         text.get(start..end).map(str::to_string)
     }
+}
+
+/// Scan backward from `end` to recover a function name, including the
+/// Terraform 1.8+ `provider::<local>::<fn>` qualified form. Returns
+/// either:
+///
+/// - bare `<fn>` for built-in functions (`format`, `length`, …);
+/// - `provider::<local>::<fn>` when the identifier is preceded by
+///   `::<local>::provider`;
+/// - `None` if `end` doesn't sit immediately after an identifier.
+pub(crate) fn qualified_name_ending_at(text: &str, end: usize) -> Option<String> {
+    let fn_name = identifier_ending_at(text, end)?;
+    let bytes = text.as_bytes();
+    let fn_start = end - fn_name.len();
+    // Need exactly two preceding bytes of `::`.
+    if fn_start < 2 || &bytes[fn_start - 2..fn_start] != b"::" {
+        return Some(fn_name);
+    }
+    let local_end = fn_start - 2;
+    let local = identifier_ending_at(text, local_end)?;
+    let local_start = local_end - local.len();
+    // Need preceding `provider::` literal — i.e. ten bytes ending in
+    // `provider::`.
+    if local_start < 10 || &bytes[local_start - 10..local_start] != b"provider::" {
+        return Some(fn_name);
+    }
+    let kw_start = local_start - 10;
+    // Make sure `provider` itself isn't the tail of a longer ident.
+    if kw_start > 0 {
+        let prev = bytes[kw_start - 1];
+        if prev.is_ascii_alphanumeric() || prev == b'_' {
+            return Some(fn_name);
+        }
+    }
+    Some(format!("provider::{local}::{fn_name}"))
+}
+
+/// Look up a possibly-qualified function name in `state.functions`,
+/// falling back to a suffix scan when `name` is shaped like
+/// `provider::<local>::<fn>`. The fallback handles the namespace gap:
+/// the user types `provider::aws::trim_prefix` but the indexer
+/// stored it as `provider::hashicorp::aws::trim_prefix`.
+pub(crate) fn resolve_function(
+    state: &tfls_state::StateStore,
+    name: &str,
+) -> Option<(String, std::sync::Arc<FunctionSignature>)> {
+    if let Some(sig) = state.functions.get(name).map(|s| s.clone()) {
+        return Some((name.to_string(), sig));
+    }
+    if !name.starts_with("provider::") {
+        return None;
+    }
+    // Suffix-match `::<local>::<fn>` against the qualified keys
+    // `provider::<ns>::<local>::<fn>`. Take the first match — multiple
+    // namespaces shipping the same local + function name is
+    // pathological and not worth modelling.
+    let needle = name.trim_start_matches("provider");
+    state
+        .functions
+        .iter()
+        .find(|e| e.key().ends_with(needle) && e.key().starts_with("provider::"))
+        .map(|e| (e.key().clone(), e.value().clone()))
 }
 
 /// Identifier surrounding `offset` — walks forward AND backward from the
