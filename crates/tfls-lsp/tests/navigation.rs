@@ -869,3 +869,79 @@ async fn goto_def_on_module_input_resolved_via_modules_json() {
     assert_eq!(loc.uri, child_u, "should resolve through modules.json");
     assert_eq!(loc.range.start.line, 0);
 }
+
+#[tokio::test]
+async fn goto_def_on_provider_function_jumps_to_required_providers_entry() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+
+    let (service, _socket) = LspService::new(Backend::new);
+    let inner = service.inner();
+    let backend = Backend::with_shared_state(
+        inner.client.clone(),
+        inner.state.clone(),
+        inner.jobs.clone(),
+    );
+
+    let versions_u = upsert_file(
+        &backend,
+        &root.join("versions.tf"),
+        "terraform {\n  required_providers {\n    aws_v6 = {\n      source = \"hashicorp/aws\"\n    }\n  }\n}\n",
+    );
+    let main_path = root.join("main.tf");
+    let main_src = "output \"x\" {\n  value = provider::aws_v6::trim_prefix(\"foo\")\n}\n";
+    let main_u = upsert_file(&backend, &main_path, main_src);
+
+    // Cursor on `trim_prefix` (after `aws_v6::`).
+    // line 1 col after `provider::aws_v6::` = 18 chars → col 26 (`  value = ` is 10).
+    let col = (main_src.lines().nth(1).unwrap().find("trim_prefix").unwrap() + 2) as u32;
+    let loc = single_location(goto_def_at(&backend, &main_u, Position::new(1, col)).await);
+    assert_eq!(loc.uri, versions_u);
+    assert_eq!(loc.range.start.line, 2, "should land on `aws_v6 = {{` line");
+}
+
+#[tokio::test]
+async fn references_provider_function_finds_workspace_calls() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+
+    let (service, _socket) = LspService::new(Backend::new);
+    let inner = service.inner();
+    let backend = Backend::with_shared_state(
+        inner.client.clone(),
+        inner.state.clone(),
+        inner.jobs.clone(),
+    );
+
+    upsert_file(
+        &backend,
+        &root.join("versions.tf"),
+        "terraform {\n  required_providers {\n    aws = {\n      source = \"hashicorp/aws\"\n    }\n  }\n}\n",
+    );
+    let a_src = "output \"a\" {\n  value = provider::aws::trim_prefix(\"foo\")\n}\n";
+    let a_u = upsert_file(&backend, &root.join("a.tf"), a_src);
+    let b_src = "output \"b\" {\n  value = provider::aws::trim_prefix(\"bar\")\n}\n";
+    let b_u = upsert_file(&backend, &root.join("b.tf"), b_src);
+
+    let col = (a_src.lines().nth(1).unwrap().find("trim_prefix").unwrap() + 2) as u32;
+    let resp = tfls_lsp::handlers::navigation::references(
+        &backend,
+        ReferenceParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: a_u.clone() },
+                position: Position::new(1, col),
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context: ReferenceContext {
+                include_declaration: false,
+            },
+        },
+    )
+    .await
+    .expect("ok")
+    .expect("references");
+    let uris: std::collections::HashSet<&Url> = resp.iter().map(|l| &l.uri).collect();
+    assert!(uris.contains(&a_u), "missing a.tf: {resp:?}");
+    assert!(uris.contains(&b_u), "missing b.tf: {resp:?}");
+}

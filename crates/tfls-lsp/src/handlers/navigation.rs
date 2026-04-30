@@ -51,6 +51,12 @@ pub async fn goto_definition(
         if let Some(loc) = module_output_goto_at(&backend.state, doc.value(), &uri, pos) {
             return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
         }
+        // Provider-defined function (Terraform 1.8+):
+        // `provider::LOCAL::fn(...)` — navigate to LOCAL's
+        // `required_providers` declaration.
+        if let Some(loc) = provider_function_goto_at(&backend.state, doc.value(), &uri, pos) {
+            return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
+        }
     }
 
     let key = match backend.state.documents.get(&uri) {
@@ -345,12 +351,296 @@ fn find_module_output_segment_in_expr(
     }
 }
 
+/// Goto-def for a cursor on `provider::LOCAL::fn(...)`. Navigates
+/// to the `LOCAL = { ... }` attribute in `terraform { required_providers
+/// { ... } }`, scanning the active doc and every peer `.tf` in the
+/// same module dir (the block typically lives in `versions.tf`).
+fn provider_function_goto_at(
+    state: &tfls_state::StateStore,
+    doc: &DocumentState,
+    uri: &Url,
+    pos: Position,
+) -> Option<Location> {
+    use crate::handlers::signature_help::qualified_name_ending_at;
+    let offset = lsp_position_to_byte_offset(&doc.rope, pos).ok()?;
+    let text = doc.rope.to_string();
+
+    // Identify a qualified provider-fn name surrounding the cursor
+    // — handles cursor-on-name and cursor-just-after-name cases.
+    let bytes = text.as_bytes();
+    let mut end = offset;
+    while end < bytes.len()
+        && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
+    {
+        end += 1;
+    }
+    let name = qualified_name_ending_at(&text, end)?;
+    let mut parts = name.split("::");
+    if parts.next()? != "provider" {
+        return None;
+    }
+    let local = parts.next()?.to_string();
+    parts.next()?; // skip fn name
+    if parts.next().is_some() {
+        return None;
+    }
+
+    // Search for a `LOCAL = ...` attribute inside `terraform {
+    // required_providers { ... } }` across the module dir.
+    if let Some(loc) = required_providers_attr_location(doc, uri, &local) {
+        return Some(loc);
+    }
+    let target_dir = parent_dir(uri)?;
+    for entry in state.documents.iter() {
+        let other_uri = entry.key();
+        if other_uri == uri {
+            continue;
+        }
+        let Ok(path) = other_uri.to_file_path() else {
+            continue;
+        };
+        if path.parent() != Some(target_dir.as_path()) {
+            continue;
+        }
+        let other_doc = entry.value();
+        if let Some(loc) = required_providers_attr_location(other_doc, other_uri, &local) {
+            return Some(loc);
+        }
+    }
+    None
+}
+
+/// Workspace-wide find-references for a provider-defined function
+/// call. Cursor on `provider::LOCAL::fn(...)` finds every other
+/// call to the SAME `<provider_name>::<fn>` across the workspace,
+/// re-resolving each doc's own `required_providers` to its local
+/// alias (so `provider::aws::trim_prefix` and
+/// `provider::aws_v6::trim_prefix` in different modules count as
+/// references to the same provider function).
+///
+/// Returns `Some(empty_vec)` when the cursor IS on a provider fn
+/// but no other calls exist; `None` when the cursor isn't on one
+/// (so the caller falls through to the key-based path).
+fn provider_function_references_at(
+    state: &tfls_state::StateStore,
+    doc: &DocumentState,
+    uri: &Url,
+    pos: Position,
+) -> Option<Vec<Location>> {
+    use crate::handlers::signature_help::qualified_name_ending_at;
+    let offset = lsp_position_to_byte_offset(&doc.rope, pos).ok()?;
+    let text = doc.rope.to_string();
+    let bytes = text.as_bytes();
+    let mut end = offset;
+    while end < bytes.len()
+        && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
+    {
+        end += 1;
+    }
+    let name = qualified_name_ending_at(&text, end)?;
+    let mut parts = name.split("::");
+    if parts.next()? != "provider" {
+        return None;
+    }
+    let cursor_local = parts.next()?.to_string();
+    let fn_name = parts.next()?.to_string();
+    if parts.next().is_some() {
+        return None;
+    }
+
+    // Resolve cursor_local → provider name via the same workspace
+    // walk completion uses.
+    let provider_name = lookup_local_in_workspace(state, uri, &cursor_local)
+        .unwrap_or_else(|| cursor_local.clone());
+
+    let mut out: Vec<Location> = Vec::new();
+    for entry in state.documents.iter() {
+        let doc_uri = entry.key();
+        let other = entry.value();
+        // For each doc, figure out which local maps to our
+        // provider_name — that's what we're searching for in this
+        // doc's source. Default to the cursor's local if nothing
+        // matches (covers the convention case).
+        let local_in_other = lookup_provider_local(state, doc_uri, &provider_name)
+            .unwrap_or_else(|| cursor_local.clone());
+        let needle = format!("provider::{local_in_other}::{fn_name}");
+        let other_text = other.rope.to_string();
+        let mut search_from = 0;
+        while let Some(rel) = other_text[search_from..].find(&needle) {
+            let abs_start = search_from + rel;
+            let abs_end = abs_start + needle.len();
+            // Identifier-boundary check on both sides.
+            let bytes = other_text.as_bytes();
+            let prev_ok = abs_start == 0 || {
+                let p = bytes[abs_start - 1];
+                !(p.is_ascii_alphanumeric() || p == b'_' || p == b':')
+            };
+            let next_ok = abs_end >= bytes.len() || {
+                let n = bytes[abs_end];
+                !(n.is_ascii_alphanumeric() || n == b'_' || n == b':')
+            };
+            if prev_ok && next_ok {
+                if let (Ok(s), Ok(e)) = (
+                    tfls_parser::byte_offset_to_lsp_position(&other.rope, abs_start),
+                    tfls_parser::byte_offset_to_lsp_position(&other.rope, abs_end),
+                ) {
+                    out.push(Location {
+                        uri: doc_uri.clone(),
+                        range: lsp_types::Range { start: s, end: e },
+                    });
+                }
+            }
+            search_from = abs_end;
+        }
+    }
+    Some(out)
+}
+
+/// Walk active doc + peers in same module dir to resolve `local`
+/// to a provider name via `required_providers`.
+fn lookup_local_in_workspace(
+    state: &tfls_state::StateStore,
+    uri: &Url,
+    local: &str,
+) -> Option<String> {
+    if let Some(doc) = state.documents.get(uri) {
+        if let Some(body) = doc.parsed.body.as_ref() {
+            if let Some(name) =
+                crate::handlers::completion::required_providers_local_to_name_pub(body, local)
+            {
+                return Some(name);
+            }
+        }
+    }
+    let target_dir = parent_dir(uri)?;
+    for entry in state.documents.iter() {
+        let other_uri = entry.key();
+        if other_uri == uri {
+            continue;
+        }
+        let Ok(path) = other_uri.to_file_path() else {
+            continue;
+        };
+        if path.parent() != Some(target_dir.as_path()) {
+            continue;
+        }
+        let doc = entry.value();
+        let Some(body) = doc.parsed.body.as_ref() else {
+            continue;
+        };
+        if let Some(name) =
+            crate::handlers::completion::required_providers_local_to_name_pub(body, local)
+        {
+            return Some(name);
+        }
+    }
+    None
+}
+
+/// Reverse: walk active doc + peers to find which local maps to
+/// `provider_name`. Returns `None` if not found.
+fn lookup_provider_local(
+    state: &tfls_state::StateStore,
+    uri: &Url,
+    provider_name: &str,
+) -> Option<String> {
+    let probe = |body: &hcl_edit::structure::Body| -> Option<String> {
+        for structure in body.iter() {
+            let block = structure.as_block()?;
+            if block.ident.as_str() != "terraform" { continue }
+            for inner in block.body.iter() {
+                let Some(rp_block) = inner.as_block() else { continue };
+                if rp_block.ident.as_str() != "required_providers" { continue }
+                for entry in rp_block.body.iter() {
+                    let Some(attr) = entry.as_attribute() else { continue };
+                    let local = attr.key.as_str().to_string();
+                    if let Some(name) = crate::handlers::completion::required_providers_local_to_name_pub(body, &local) {
+                        if name == provider_name {
+                            return Some(local);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    };
+    if let Some(doc) = state.documents.get(uri) {
+        if let Some(body) = doc.parsed.body.as_ref() {
+            if let Some(local) = probe(body) {
+                return Some(local);
+            }
+        }
+    }
+    let target_dir = parent_dir(uri)?;
+    for entry in state.documents.iter() {
+        let other_uri = entry.key();
+        let Ok(path) = other_uri.to_file_path() else { continue };
+        if path.parent() != Some(target_dir.as_path()) { continue }
+        let doc = entry.value();
+        let Some(body) = doc.parsed.body.as_ref() else { continue };
+        if let Some(local) = probe(body) {
+            return Some(local);
+        }
+    }
+    None
+}
+
+fn required_providers_attr_location(
+    doc: &DocumentState,
+    uri: &Url,
+    local: &str,
+) -> Option<Location> {
+    use hcl_edit::repr::Span as _;
+    let body = doc.parsed.body.as_ref()?;
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else { continue };
+        if block.ident.as_str() != "terraform" {
+            continue;
+        }
+        for inner in block.body.iter() {
+            let Some(rp_block) = inner.as_block() else { continue };
+            if rp_block.ident.as_str() != "required_providers" {
+                continue;
+            }
+            for entry in rp_block.body.iter() {
+                let Some(attr) = entry.as_attribute() else { continue };
+                if attr.key.as_str() != local {
+                    continue;
+                }
+                let span = attr.key.span()?;
+                let start = tfls_parser::byte_offset_to_lsp_position(&doc.rope, span.start)
+                    .ok()?;
+                let end = tfls_parser::byte_offset_to_lsp_position(&doc.rope, span.end)
+                    .ok()?;
+                return Some(Location {
+                    uri: uri.clone(),
+                    range: lsp_types::Range { start, end },
+                });
+            }
+        }
+    }
+    None
+}
+
 pub async fn references(
     backend: &Backend,
     params: ReferenceParams,
 ) -> jsonrpc::Result<Option<Vec<Location>>> {
     let pos = params.text_document_position.position;
     let uri = params.text_document_position.text_document.uri;
+
+    // Provider-defined function (Terraform 1.8+) — handled BEFORE
+    // the symbol-key lookup since these aren't tracked as symbols.
+    if let Some(doc) = backend.state.documents.get(&uri) {
+        if let Some(refs) =
+            provider_function_references_at(&backend.state, doc.value(), &uri, pos)
+        {
+            if refs.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(refs));
+        }
+    }
 
     // Key lookup — works whether the cursor is on a definition or a reference.
     let key = match backend.state.documents.get(&uri) {
