@@ -25,7 +25,7 @@ pub fn function_hover(state: &StateStore, doc: &DocumentState, pos: Position) ->
     let offset = lsp_position_to_byte_offset(&doc.rope, pos).ok()?;
     let text = doc.rope.to_string();
 
-    if let Some(sig) = lookup_at_cursor(state, &text, offset) {
+    if let Some(sig) = lookup_at_cursor(state, &doc.uri, &text, offset) {
         return Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
@@ -40,6 +40,7 @@ pub fn function_hover(state: &StateStore, doc: &DocumentState, pos: Position) ->
 /// Look up the function the cursor is on or inside. Returns `(name, sig)`.
 fn lookup_at_cursor(
     state: &StateStore,
+    uri: &lsp_types::Url,
     text: &str,
     offset: usize,
 ) -> Option<(String, Arc<FunctionSignature>)> {
@@ -50,7 +51,7 @@ fn lookup_at_cursor(
     if let Some((_, range)) = identifier_at(text, offset) {
         if followed_by_open_paren(text, range.end) {
             if let Some(name) = qualified_name_ending_at(text, range.end) {
-                if let Some((resolved, sig)) = resolve_function(state, &name) {
+                if let Some((resolved, sig)) = resolve_function(state, Some(uri), &name) {
                     return Some((resolved, sig));
                 }
             }
@@ -59,7 +60,7 @@ fn lookup_at_cursor(
 
     // Case 2: cursor is inside the argument list of an unclosed call.
     let (name, _arg_idx) = enclosing_call(text, offset)?;
-    let (resolved, sig) = resolve_function(state, &name)?;
+    let (resolved, sig) = resolve_function(state, Some(uri), &name)?;
     Some((resolved, sig))
 }
 

@@ -2754,6 +2754,81 @@ async fn provider_function_namespace_lists_provider_local_names() {
     assert_eq!(aws_count, 1);
 }
 
+/// Insert a peer `versions.tf` in the same dir as `main_uri` that
+/// renames the AWS provider local from `aws` to `aws_v6`. Mirrors the
+/// real-world layout where `required_providers` lives in its own file.
+fn add_versions_tf_with_aws_alias(backend: &Backend, main_uri: &Url) {
+    let dir = main_uri
+        .to_file_path()
+        .expect("file uri")
+        .parent()
+        .expect("parent")
+        .to_path_buf();
+    let versions = dir.join("versions.tf");
+    let versions_uri = Url::from_file_path(&versions).expect("url");
+    let body = "terraform {\n  required_providers {\n    aws_v6 = {\n      source  = \"hashicorp/aws\"\n      version = \"~> 4.0\"\n    }\n  }\n}\n";
+    backend
+        .state
+        .upsert_document(tfls_state::DocumentState::new(versions_uri, body, 1));
+}
+
+#[tokio::test]
+async fn provider_function_name_resolves_renamed_local() {
+    // versions.tf renames the provider via required_providers:
+    //   `aws_v6 = { source = "hashicorp/aws" }`
+    // User types `provider::aws_v6::|` in main.tf. Completion must
+    // resolve `aws_v6` → `aws` (via peer-file walk) and surface aws
+    // functions, not nothing.
+    let u = uri("file:///dir/main.tf");
+    let lines = ["output \"x\" {", "  value = provider::aws_v6::", "}"];
+    let src = format!("{}\n", lines.join("\n"));
+    let backend = fresh_backend(&src, &u);
+    add_versions_tf_with_aws_alias(&backend, &u);
+    install_fake_provider_functions(&backend);
+    let target_line: u32 = 1;
+    let target_col = lines[1].len() as u32;
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(target_line, target_col)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(
+        ls.contains(&"trim_prefix".to_string()),
+        "expected aws fns under aws_v6 alias, got: {ls:?}"
+    );
+    assert!(
+        !ls.contains(&"manifest_decode".to_string()),
+        "kubernetes fns leaked into aws_v6 alias: {ls:?}"
+    );
+}
+
+#[tokio::test]
+async fn provider_function_namespace_uses_renamed_local() {
+    // Namespace selector should display `aws_v6` (sourced from
+    // versions.tf), not `aws`.
+    let u = uri("file:///dir/main.tf");
+    let lines = ["output \"x\" {", "  value = provider::", "}"];
+    let src = format!("{}\n", lines.join("\n"));
+    let backend = fresh_backend(&src, &u);
+    add_versions_tf_with_aws_alias(&backend, &u);
+    install_fake_provider_functions(&backend);
+    let target_line: u32 = 1;
+    let target_col = lines[1].len() as u32;
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(target_line, target_col)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"aws_v6".to_string()), "got: {ls:?}");
+    assert!(!ls.contains(&"aws".to_string()), "stale aws label: {ls:?}");
+}
+
 #[tokio::test]
 async fn provider_function_name_lists_only_that_providers_functions() {
     let u = uri("file:///pf.tf");

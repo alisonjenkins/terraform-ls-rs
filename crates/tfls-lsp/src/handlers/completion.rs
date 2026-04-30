@@ -181,10 +181,10 @@ pub async fn completion(
         } => attribute_value_items(backend, &resource_type, &attr_name),
         CompletionContext::FunctionCall => function_name_items(backend),
         CompletionContext::ProviderFunctionNamespace => {
-            provider_function_namespace_items(backend)
+            provider_function_namespace_items(backend, &uri)
         }
         CompletionContext::ProviderFunctionName { provider_local } => {
-            provider_function_name_items(backend, &provider_local)
+            provider_function_name_items(backend, &uri, &provider_local)
         }
         CompletionContext::TerraformBlockBody => {
             let filter = compute_body_filter(doc.parsed.body.as_ref(), offset);
@@ -1652,15 +1652,28 @@ fn function_name_items(backend: &Backend) -> Vec<CompletionItem> {
 /// at least one function. Functions are stored in
 /// `state.functions` under their fully-qualified name
 /// `provider::<ns>::<name>::<fn>`; we project out the third
-/// segment (`<name>`) which is also the conventional local name.
-fn provider_function_namespace_items(backend: &Backend) -> Vec<CompletionItem> {
-    use std::collections::BTreeSet;
+/// segment (`<name>`) and remap it through the doc's
+/// `required_providers { LOCAL = { source = "ns/name" } }` block
+/// so renamed providers (`aws_v6 = { source = "hashicorp/aws" }`)
+/// surface under the user-visible local name `aws_v6`, not the
+/// provider's underlying name `aws`.
+fn provider_function_namespace_items(backend: &Backend, uri: &Url) -> Vec<CompletionItem> {
+    use std::collections::{BTreeSet, HashMap};
+    // Reverse map: provider-name → local-name. Built once per call;
+    // skipped if the doc has no `required_providers` block (every
+    // local is then assumed to equal its provider name).
+    let provider_to_local: HashMap<String, String> = name_to_local_map(backend, uri);
     let mut locals: BTreeSet<String> = BTreeSet::new();
     for entry in backend.state.functions.iter() {
-        let name = entry.key();
-        if let Some(local) = qualified_function_local_name(name) {
-            locals.insert(local.to_string());
-        }
+        let qualified = entry.key();
+        let Some(provider_name) = qualified_function_local_name(qualified) else {
+            continue;
+        };
+        let local = provider_to_local
+            .get(provider_name)
+            .cloned()
+            .unwrap_or_else(|| provider_name.to_string());
+        locals.insert(local);
     }
     locals
         .into_iter()
@@ -1675,11 +1688,15 @@ fn provider_function_namespace_items(backend: &Backend) -> Vec<CompletionItem> {
 }
 
 /// `provider::<local>::|` → function names exposed by that provider.
-/// Match by the third segment of the qualified key.
+/// Resolve `<local>` through `required_providers` to the actual
+/// provider name (default: identity), then filter the function map
+/// by third segment.
 fn provider_function_name_items(
     backend: &Backend,
+    uri: &Url,
     provider_local: &str,
 ) -> Vec<CompletionItem> {
+    let provider_name = local_to_provider_name(backend, uri, provider_local);
     let mut items: Vec<CompletionItem> = backend
         .state
         .functions
@@ -1687,7 +1704,7 @@ fn provider_function_name_items(
         .filter_map(|entry| {
             let qualified = entry.key();
             let local = qualified_function_local_name(qualified)?;
-            if local != provider_local {
+            if local != provider_name {
                 return None;
             }
             let fn_name = qualified_function_short_name(qualified)?.to_string();
@@ -1710,6 +1727,228 @@ fn provider_function_name_items(
         .collect();
     items.sort_by(|a, b| a.label.cmp(&b.label));
     items
+}
+
+/// Resolve a local provider name (`aws_v6`) to the underlying
+/// provider name (`aws`) by consulting `terraform { required_providers
+/// { LOCAL = { source = "ns/name" } } }`. Falls back to the local name
+/// itself when no override is present.
+///
+/// Walks the active doc first, then every peer `.tf` doc in the same
+/// directory — `required_providers` typically lives in `versions.tf`
+/// while the user is editing a different file. The active doc may
+/// also have a parse error mid-edit (cursor in the middle of an
+/// unfinished `provider::LOCAL::` expression), in which case the
+/// peer walk is the ONLY way to resolve.
+fn local_to_provider_name(backend: &Backend, uri: &Url, local: &str) -> String {
+    if let Some(doc) = backend.state.documents.get(uri) {
+        if let Some(body) = doc.parsed.body.as_ref() {
+            if let Some(name) = required_providers_local_to_name(body, local) {
+                return name;
+            }
+        }
+    }
+    if let Some(target_dir) = super::util::parent_dir(uri) {
+        for entry in backend.state.documents.iter() {
+            let other_uri = entry.key();
+            if other_uri == uri {
+                continue;
+            }
+            let Ok(path) = other_uri.to_file_path() else {
+                continue;
+            };
+            if path.parent() != Some(target_dir.as_path()) {
+                continue;
+            }
+            let doc = entry.value();
+            let Some(body) = doc.parsed.body.as_ref() else {
+                continue;
+            };
+            if let Some(name) = required_providers_local_to_name(body, local) {
+                return name;
+            }
+        }
+    }
+    local.to_string()
+}
+
+/// Build a reverse `provider-name → local-name` map from the doc's
+/// `required_providers` (and peer `.tf` files in the same dir, since
+/// `required_providers` typically lives in `versions.tf`). Entries
+/// without an explicit `source` map `LOCAL → LOCAL`.
+fn name_to_local_map(
+    backend: &Backend,
+    uri: &Url,
+) -> std::collections::HashMap<String, String> {
+    use std::collections::HashMap;
+    let mut out: HashMap<String, String> = HashMap::new();
+    if let Some(doc) = backend.state.documents.get(uri) {
+        if let Some(body) = doc.parsed.body.as_ref() {
+            for (k, v) in required_providers_name_to_local(body) {
+                out.entry(k).or_insert(v);
+            }
+        }
+    }
+    if let Some(target_dir) = super::util::parent_dir(uri) {
+        for entry in backend.state.documents.iter() {
+            let other_uri = entry.key();
+            if other_uri == uri {
+                continue;
+            }
+            let Ok(path) = other_uri.to_file_path() else {
+                continue;
+            };
+            if path.parent() != Some(target_dir.as_path()) {
+                continue;
+            }
+            let doc = entry.value();
+            let Some(body) = doc.parsed.body.as_ref() else {
+                continue;
+            };
+            for (k, v) in required_providers_name_to_local(body) {
+                out.entry(k).or_insert(v);
+            }
+        }
+    }
+    out
+}
+
+/// Pub re-export so handlers in sibling modules (signature_help)
+/// can resolve a local provider name without duplicating the body
+/// walk.
+pub fn required_providers_local_to_name_pub(
+    body: &hcl_edit::structure::Body,
+    local: &str,
+) -> Option<String> {
+    required_providers_local_to_name(body, local)
+}
+
+/// Walk `terraform { required_providers { ... } }` and return the
+/// provider name for `local`. Long form `LOCAL = { source = "ns/name" }`
+/// returns `name`; short form `LOCAL = "version"` returns
+/// `LOCAL` (HashiCorp registry default).
+fn required_providers_local_to_name(
+    body: &hcl_edit::structure::Body,
+    local: &str,
+) -> Option<String> {
+    use hcl_edit::expr::Expression;
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else { continue };
+        if block.ident.as_str() != "terraform" {
+            continue;
+        }
+        for inner in block.body.iter() {
+            let Some(rp_block) = inner.as_block() else { continue };
+            if rp_block.ident.as_str() != "required_providers" {
+                continue;
+            }
+            for entry in rp_block.body.iter() {
+                let Some(attr) = entry.as_attribute() else { continue };
+                if attr.key.as_str() != local {
+                    continue;
+                }
+                // Long form: `LOCAL = { source = "...", ... }`.
+                if let Expression::Object(obj) = &attr.value {
+                    for (key, value) in obj.iter() {
+                        if let Some(k) = object_key_as_str(key) {
+                            if k == "source" {
+                                if let Some(s) = expr_literal_string(value.expr()) {
+                                    return parse_source_provider_name(&s)
+                                        .or_else(|| Some(local.to_string()));
+                                }
+                            }
+                        }
+                    }
+                }
+                // Short form (`LOCAL = "~> X"`) or missing source —
+                // the provider name is the local name.
+                return Some(local.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Walk `terraform { required_providers { ... } }` and return a map
+/// `provider-name → local-name`.
+fn required_providers_name_to_local(
+    body: &hcl_edit::structure::Body,
+) -> std::collections::HashMap<String, String> {
+    use hcl_edit::expr::Expression;
+    use std::collections::HashMap;
+    let mut out = HashMap::new();
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else { continue };
+        if block.ident.as_str() != "terraform" {
+            continue;
+        }
+        for inner in block.body.iter() {
+            let Some(rp_block) = inner.as_block() else { continue };
+            if rp_block.ident.as_str() != "required_providers" {
+                continue;
+            }
+            for entry in rp_block.body.iter() {
+                let Some(attr) = entry.as_attribute() else { continue };
+                let local = attr.key.as_str().to_string();
+                let mut name: Option<String> = None;
+                if let Expression::Object(obj) = &attr.value {
+                    for (key, value) in obj.iter() {
+                        if let Some(k) = object_key_as_str(key) {
+                            if k == "source" {
+                                if let Some(s) = expr_literal_string(value.expr()) {
+                                    name = parse_source_provider_name(&s);
+                                }
+                            }
+                        }
+                    }
+                }
+                let resolved = name.unwrap_or_else(|| local.clone());
+                out.insert(resolved, local);
+            }
+        }
+    }
+    out
+}
+
+fn object_key_as_str(key: &hcl_edit::expr::ObjectKey) -> Option<&str> {
+    use hcl_edit::expr::ObjectKey;
+    match key {
+        ObjectKey::Ident(i) => Some(i.as_str()),
+        ObjectKey::Expression(hcl_edit::expr::Expression::String(s)) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+fn expr_literal_string(expr: &hcl_edit::expr::Expression) -> Option<String> {
+    use hcl_edit::expr::Expression;
+    match expr {
+        Expression::String(s) => Some(s.as_str().to_string()),
+        Expression::StringTemplate(t) => {
+            let mut collected = String::new();
+            for element in t.iter() {
+                match element {
+                    hcl_edit::template::Element::Literal(lit) => {
+                        collected.push_str(lit.as_str())
+                    }
+                    _ => return None,
+                }
+            }
+            Some(collected)
+        }
+        _ => None,
+    }
+}
+
+/// Extract the provider name from a `required_providers` source
+/// string. Accepts both short (`hashicorp/aws`) and long
+/// (`registry.terraform.io/hashicorp/aws`) forms; the trailing
+/// segment is always the provider name.
+fn parse_source_provider_name(src: &str) -> Option<String> {
+    let last = src.rsplit('/').next()?;
+    if last.is_empty() {
+        return None;
+    }
+    Some(last.to_string())
 }
 
 /// Project the local-name segment out of a qualified function key
@@ -2376,6 +2615,62 @@ mod compute_index_replace_range_tests {
     }
 }
 
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod required_providers_resolver_tests {
+    use super::*;
+
+    fn parse_body(src: &str) -> hcl_edit::structure::Body {
+        src.parse().expect("parse")
+    }
+
+    #[test]
+    fn resolves_long_form_source() {
+        let src = "terraform {\n  required_providers {\n    aws_v6 = {\n      source = \"hashicorp/aws\"\n    }\n  }\n}\n";
+        let body = parse_body(src);
+        assert_eq!(
+            required_providers_local_to_name(&body, "aws_v6"),
+            Some("aws".to_string())
+        );
+    }
+
+    #[test]
+    fn resolves_long_form_with_full_hostname() {
+        let src = "terraform {\n  required_providers {\n    aws_v6 = {\n      source = \"registry.terraform.io/hashicorp/aws\"\n    }\n  }\n}\n";
+        let body = parse_body(src);
+        assert_eq!(
+            required_providers_local_to_name(&body, "aws_v6"),
+            Some("aws".to_string())
+        );
+    }
+
+    #[test]
+    fn falls_back_to_local_for_short_form() {
+        let src = "terraform {\n  required_providers {\n    aws = \"~> 4.0\"\n  }\n}\n";
+        let body = parse_body(src);
+        assert_eq!(
+            required_providers_local_to_name(&body, "aws"),
+            Some("aws".to_string())
+        );
+    }
+
+    #[test]
+    fn unknown_local_returns_none() {
+        let src = "terraform {\n  required_providers {\n    aws = \"~> 4.0\"\n  }\n}\n";
+        let body = parse_body(src);
+        assert_eq!(required_providers_local_to_name(&body, "kubernetes"), None);
+    }
+
+    #[test]
+    fn name_to_local_inverts() {
+        let src = "terraform {\n  required_providers {\n    aws_v6 = {\n      source = \"hashicorp/aws\"\n    }\n    k8s = {\n      source = \"hashicorp/kubernetes\"\n    }\n  }\n}\n";
+        let body = parse_body(src);
+        let m = required_providers_name_to_local(&body);
+        assert_eq!(m.get("aws"), Some(&"aws_v6".to_string()));
+        assert_eq!(m.get("kubernetes"), Some(&"k8s".to_string()));
+    }
+}
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

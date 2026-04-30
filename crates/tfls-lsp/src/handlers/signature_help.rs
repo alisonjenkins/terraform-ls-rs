@@ -36,7 +36,7 @@ pub async fn signature_help(
         return Ok(None);
     };
 
-    let Some((resolved_name, sig)) = resolve_function(&backend.state, &name) else {
+    let Some((resolved_name, sig)) = resolve_function(&backend.state, Some(&uri), &name) else {
         return Ok(None);
     };
 
@@ -155,9 +155,13 @@ pub(crate) fn qualified_name_ending_at(text: &str, end: usize) -> Option<String>
 /// falling back to a suffix scan when `name` is shaped like
 /// `provider::<local>::<fn>`. The fallback handles the namespace gap:
 /// the user types `provider::aws::trim_prefix` but the indexer
-/// stored it as `provider::hashicorp::aws::trim_prefix`.
+/// stored it as `provider::hashicorp::aws::trim_prefix`. When `uri`
+/// is supplied, the caller's doc is also consulted for a
+/// `terraform { required_providers { LOCAL = { source = "ns/name" }
+/// } }` entry that remaps `<local>` to a different provider name.
 pub(crate) fn resolve_function(
     state: &tfls_state::StateStore,
+    uri: Option<&lsp_types::Url>,
     name: &str,
 ) -> Option<(String, std::sync::Arc<FunctionSignature>)> {
     if let Some(sig) = state.functions.get(name).map(|s| s.clone()) {
@@ -165,6 +169,25 @@ pub(crate) fn resolve_function(
     }
     if !name.starts_with("provider::") {
         return None;
+    }
+    // Try required_providers-rewritten form first when we have a doc:
+    // `provider::<local>::<fn>` → `provider::<provider_name>::<fn>`.
+    if let Some(uri) = uri {
+        if let Some(rewritten) = rewrite_provider_local(state, uri, name) {
+            // Direct exact match after rewrite (rare — would need
+            // namespace too) then suffix-scan as the last resort.
+            if let Some(sig) = state.functions.get(&rewritten).map(|s| s.clone()) {
+                return Some((rewritten, sig));
+            }
+            let needle = rewritten.trim_start_matches("provider");
+            if let Some(hit) = state
+                .functions
+                .iter()
+                .find(|e| e.key().ends_with(needle) && e.key().starts_with("provider::"))
+            {
+                return Some((hit.key().clone(), hit.value().clone()));
+            }
+        }
     }
     // Suffix-match `::<local>::<fn>` against the qualified keys
     // `provider::<ns>::<local>::<fn>`. Take the first match — multiple
@@ -176,6 +199,69 @@ pub(crate) fn resolve_function(
         .iter()
         .find(|e| e.key().ends_with(needle) && e.key().starts_with("provider::"))
         .map(|e| (e.key().clone(), e.value().clone()))
+}
+
+/// Rewrite `provider::<local>::<fn>` to `provider::<provider_name>::<fn>`
+/// using `required_providers` from the active doc OR any peer `.tf`
+/// in the same dir. Returns `None` if the local is unmapped.
+fn rewrite_provider_local(
+    state: &tfls_state::StateStore,
+    uri: &lsp_types::Url,
+    name: &str,
+) -> Option<String> {
+    let mut parts = name.split("::");
+    if parts.next()? != "provider" {
+        return None;
+    }
+    let local = parts.next()?;
+    let fn_name = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let provider_name = lookup_local_in_workspace(state, uri, local)?;
+    if provider_name == local {
+        return None;
+    }
+    Some(format!("provider::{provider_name}::{fn_name}"))
+}
+
+fn lookup_local_in_workspace(
+    state: &tfls_state::StateStore,
+    uri: &lsp_types::Url,
+    local: &str,
+) -> Option<String> {
+    if let Some(doc) = state.documents.get(uri) {
+        if let Some(body) = doc.parsed.body.as_ref() {
+            if let Some(name) =
+                crate::handlers::completion::required_providers_local_to_name_pub(body, local)
+            {
+                return Some(name);
+            }
+        }
+    }
+    let target_dir = crate::handlers::util::parent_dir(uri)?;
+    for entry in state.documents.iter() {
+        let other_uri = entry.key();
+        if other_uri == uri {
+            continue;
+        }
+        let Ok(path) = other_uri.to_file_path() else {
+            continue;
+        };
+        if path.parent() != Some(target_dir.as_path()) {
+            continue;
+        }
+        let doc = entry.value();
+        let Some(body) = doc.parsed.body.as_ref() else {
+            continue;
+        };
+        if let Some(name) =
+            crate::handlers::completion::required_providers_local_to_name_pub(body, local)
+        {
+            return Some(name);
+        }
+    }
+    None
 }
 
 /// Identifier surrounding `offset` — walks forward AND backward from the
