@@ -818,6 +818,7 @@ impl tfls_diag::ModuleGraphLookup for ModuleGraphAdapter<'_> {
                 }
             }
             collect_provider_locals(body, &mut used);
+            collect_provider_function_locals(&doc.rope.to_string(), &mut used);
         }
         used
     }
@@ -1074,6 +1075,65 @@ fn collect_provider_locals(
             }
             _ => {}
         }
+    }
+}
+
+/// Scan source text for `provider::<local>::<fn>(` Terraform 1.8+
+/// provider-defined function calls, adding each LOCAL to `out`.
+/// Pure text scan — body walking won't cut it because the AST
+/// represents these as opaque traversals/calls inside expression
+/// values, and a fully recursive expression walk is overkill for
+/// what's a simple textual pattern.
+pub(crate) fn collect_provider_function_locals(
+    text: &str,
+    out: &mut std::collections::HashSet<String>,
+) {
+    let bytes = text.as_bytes();
+    let needle = b"provider::";
+    let mut search_from = 0usize;
+    while search_from + needle.len() <= bytes.len() {
+        let Some(rel) = bytes[search_from..]
+            .windows(needle.len())
+            .position(|w| w == needle)
+        else {
+            break;
+        };
+        let kw_start = search_from + rel;
+        if kw_start > 0 {
+            let prev = bytes[kw_start - 1];
+            if prev.is_ascii_alphanumeric() || prev == b'_' {
+                search_from = kw_start + needle.len();
+                continue;
+            }
+        }
+        let mut p = kw_start + needle.len();
+        let local_start = p;
+        while p < bytes.len() && (bytes[p].is_ascii_alphanumeric() || bytes[p] == b'_') {
+            p += 1;
+        }
+        if p == local_start {
+            search_from = p;
+            continue;
+        }
+        // Need a `::<ident>(` shape to confirm this is a call, not
+        // some other `provider::X` construct.
+        if p + 2 < bytes.len() && bytes[p] == b':' && bytes[p + 1] == b':' {
+            let mut q = p + 2;
+            while q < bytes.len() && (bytes[q].is_ascii_alphanumeric() || bytes[q] == b'_') {
+                q += 1;
+            }
+            // Skip optional whitespace then check for `(`.
+            let mut r = q;
+            while r < bytes.len() && (bytes[r] == b' ' || bytes[r] == b'\t') {
+                r += 1;
+            }
+            if r < bytes.len() && bytes[r] == b'(' {
+                if let Some(s) = text.get(local_start..p) {
+                    out.insert(s.to_string());
+                }
+            }
+        }
+        search_from = p;
     }
 }
 

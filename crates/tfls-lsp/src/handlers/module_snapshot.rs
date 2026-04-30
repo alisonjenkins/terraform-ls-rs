@@ -148,6 +148,14 @@ impl ModuleSnapshot {
                     _ => {}
                 }
             }
+            // Provider-defined function calls (`provider::<local>::<fn>(...)`)
+            // count as "used" too — otherwise renaming a provider local
+            // and using it only via this 1.8+ syntax would trip
+            // unused-required-providers.
+            crate::handlers::document::collect_provider_function_locals(
+                &doc.rope.to_string(),
+                &mut used_provider_locals,
+            );
         }
 
         terraform_uri_candidates.sort();
