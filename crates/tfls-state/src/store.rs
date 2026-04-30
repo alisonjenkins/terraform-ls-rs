@@ -8,8 +8,17 @@
 
 use std::sync::Arc;
 
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use lsp_types::Url;
+use rustc_hash::FxBuildHasher;
+
+/// DashMap aliased to use [`FxBuildHasher`]. We don't need
+/// HashDoS resistance for these internal indexes — every key is
+/// produced by the server itself (URIs / symbol names / provider
+/// addresses we parsed) so the speed-up from FxHash dominates.
+type FxDashMap<K, V> = DashMap<K, V, FxBuildHasher>;
+/// Same rationale for the open-doc URI set.
+type FxDashSet<K> = DashSet<K, FxBuildHasher>;
 use tfls_core::variable_type::{Primitive, SchemaLookup, VariableType};
 use tfls_core::{ProviderAddress, SymbolKind, SymbolLocation};
 use tfls_parser::ReferenceKind;
@@ -62,16 +71,16 @@ pub enum DirScanState {
 
 #[derive(Debug, Default)]
 pub struct StateStore {
-    pub documents: DashMap<Url, DocumentState>,
-    pub definitions_by_name: DashMap<SymbolKey, Vec<SymbolLocation>>,
-    pub references_by_name: DashMap<SymbolKey, Vec<SymbolLocation>>,
+    pub documents: FxDashMap<Url, DocumentState>,
+    pub definitions_by_name: FxDashMap<SymbolKey, Vec<SymbolLocation>>,
+    pub references_by_name: FxDashMap<SymbolKey, Vec<SymbolLocation>>,
     /// Provider schemas keyed by [`ProviderAddress`]. Stored as [`Arc`]
     /// so completion/hover handlers can share the data without
     /// cloning the (possibly multi-megabyte) schema contents.
-    pub schemas: DashMap<ProviderAddress, Arc<ProviderSchema>>,
+    pub schemas: FxDashMap<ProviderAddress, Arc<ProviderSchema>>,
     /// Built-in function signatures keyed by function name. Shared as
     /// [`Arc`] so signatureHelp doesn't clone descriptions on each lookup.
-    pub functions: DashMap<String, Arc<FunctionSignature>>,
+    pub functions: FxDashMap<String, Arc<FunctionSignature>>,
     /// Runtime configuration updated via `workspace/didChangeConfiguration`.
     pub config: crate::config::ConfigCell,
     /// Directories tracked by the background scanner. Each entry
@@ -84,7 +93,7 @@ pub struct StateStore {
     /// resolvable" — should gate on `Completed`; consumers that just
     /// need dedupe of scan enqueues — e.g. "don't re-queue this dir"
     /// — check for presence regardless of state.
-    pub dir_scans: dashmap::DashMap<std::path::PathBuf, DirScanState>,
+    pub dir_scans: FxDashMap<std::path::PathBuf, DirScanState>,
 
     /// Terraform init-root directories (containing a `.terraform/providers/`
     /// subtree) we have fetched schemas from, keyed on the mtime of
@@ -94,7 +103,7 @@ pub struct StateStore {
     /// added a new provider mid-session would never see its schema
     /// load for the rest of the server's lifetime.
     pub fetched_schema_dirs:
-        dashmap::DashMap<std::path::PathBuf, std::time::SystemTime>,
+        FxDashMap<std::path::PathBuf, std::time::SystemTime>,
 
     /// Set to `true` during `initialize` when the client advertises
     /// support for pull-based diagnostics
@@ -122,7 +131,7 @@ pub struct StateStore {
     /// matching `didClose` yet). Used to distinguish "client will
     /// pull this" (open) from "client will only see this via push"
     /// (unopened workspace files surfaced by bulk scan).
-    pub open_docs: dashmap::DashSet<Url>,
+    pub open_docs: FxDashSet<Url>,
 
     /// Per-target-module-dir cache of variable types inferred from
     /// values flowing INTO the module:
@@ -141,7 +150,7 @@ pub struct StateStore {
     /// multiple call sites / env-specific tfvars files. Values
     /// that resolve to `Any` are filtered out at insertion time.
     pub assigned_variable_types:
-        dashmap::DashMap<std::path::PathBuf, std::collections::HashMap<String, Vec<tfls_core::variable_type::VariableType>>>,
+        FxDashMap<std::path::PathBuf, std::collections::HashMap<String, Vec<tfls_core::variable_type::VariableType>>>,
 }
 
 impl StateStore {

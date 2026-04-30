@@ -61,11 +61,16 @@ pub async fn document_link(
 
 /// Find the [`ProviderAddress`] whose schema `Arc` equals the one we
 /// looked up. Compares by pointer identity to avoid cloning the whole
-/// schema.
-fn find_provider_address(
-    schemas: &dashmap::DashMap<ProviderAddress, std::sync::Arc<tfls_schema::ProviderSchema>>,
+/// schema. Generic over the DashMap hasher so the caller can pass
+/// either a default-hashed map (tests) or the FxHash-backed map used
+/// in [`StateStore`](crate::backend::Backend) at runtime.
+fn find_provider_address<S>(
+    schemas: &dashmap::DashMap<ProviderAddress, std::sync::Arc<tfls_schema::ProviderSchema>, S>,
     needle: &std::sync::Arc<tfls_schema::ProviderSchema>,
-) -> Option<ProviderAddress> {
+) -> Option<ProviderAddress>
+where
+    S: std::hash::BuildHasher + Clone,
+{
     schemas
         .iter()
         .find(|e| std::sync::Arc::ptr_eq(e.value(), needle))

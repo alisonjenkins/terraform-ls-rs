@@ -2807,6 +2807,7 @@ dependencies = [
  "dashmap 6.1.0",
  "lsp-types",
  "ropey",
+ "rustc-hash",
  "serde",
  "serde_json",
  "sonic-rs",
