@@ -140,6 +140,12 @@ pub enum CompletionContext {
     /// only field the `terraform` namespace exposes.
     TerraformNamespaceRef,
 
+    /// Cursor is after `self.` inside a `provisioner` /
+    /// `connection` block nested inside a resource block.
+    /// `resource_type` is the enclosing resource's type so the
+    /// dispatcher can resolve schema attributes.
+    SelfRef { resource_type: String },
+
     /// Cursor is after `var.NAME.` (and possibly more `.field` steps)
     /// — expect a field on a variable's object type.
     VariableAttrRef { path: Vec<String> },
@@ -179,6 +185,14 @@ pub enum CompletionContext {
     /// Cursor is in an expression context where a function call could
     /// start — offer function names.
     FunctionCall,
+
+    /// Cursor is after `provider::` — expect a provider local name
+    /// (Terraform 1.8+ provider-defined function call syntax).
+    ProviderFunctionNamespace,
+
+    /// Cursor is after `provider::<local>::` — expect a function name
+    /// exposed by that provider (Terraform 1.8+).
+    ProviderFunctionName { provider_local: String },
 
     /// Cursor is inside a **nested** built-in block — something like
     /// `validation` inside `variable`, `precondition` inside `output`,
@@ -652,10 +666,52 @@ fn classify_block_header_from(before: &str) -> Option<(String, String)> {
     None
 }
 
+/// Detects provider-defined function syntax (Terraform 1.8+). Two
+/// shapes light up completion:
+///   - `provider::|`           → namespace (provider local names)
+///   - `provider::<local>::|`  → function names from that provider
+///
+/// `trimmed` must already have the partial identifier the user is
+/// typing stripped — we anchor on the trailing `::` boundary.
+fn provider_function_prefix_context(trimmed: &str) -> Option<CompletionContext> {
+    let head = trimmed.strip_suffix("::")?;
+    let is_ident_byte = |c: char| c.is_alphanumeric() || c == '_';
+    if let Some(before_kw) = head.strip_suffix("provider") {
+        // `provider::` namespace selector. Make sure `provider`
+        // isn't the tail of a longer identifier.
+        if !before_kw.ends_with(is_ident_byte) {
+            return Some(CompletionContext::ProviderFunctionNamespace);
+        }
+    }
+    // `provider::<local>::` function selector. Walk back over the
+    // local-name identifier, then verify the `provider::` prefix.
+    let local_end = head.len();
+    let local_start = head
+        .rfind(|c: char| !is_ident_byte(c))
+        .map_or(0, |i| i + 1);
+    if local_start == local_end {
+        return None;
+    }
+    let local = &head[local_start..local_end];
+    let before_local = &head[..local_start];
+    let before_kw = before_local.strip_suffix("provider::")?;
+    if before_kw.ends_with(is_ident_byte) {
+        return None;
+    }
+    Some(CompletionContext::ProviderFunctionName {
+        provider_local: local.to_string(),
+    })
+}
+
 fn reference_prefix_context(before: &str) -> Option<CompletionContext> {
     // Drop the partial identifier the user is still typing, so we look
     // at segments *before* the cursor identifier.
     let trimmed = before.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_');
+    // Provider-defined function call (Terraform 1.8+):
+    //   `provider::<local>::<fn>(args)`
+    if let Some(ctx) = provider_function_prefix_context(trimmed) {
+        return Some(ctx);
+    }
     // Fast-path: short single-segment refs (unchanged historical behaviour).
     if trimmed.ends_with("var.") {
         return Some(CompletionContext::VariableRef);
@@ -677,6 +733,17 @@ fn reference_prefix_context(before: &str) -> Option<CompletionContext> {
     }
     if trimmed.ends_with("terraform.") {
         return Some(CompletionContext::TerraformNamespaceRef);
+    }
+    if trimmed.ends_with("self.") {
+        // `self` is only valid inside provisioner / connection
+        // blocks under a resource. Walk back to find the
+        // enclosing resource and capture its type.
+        if let Some(resource_type) = enclosing_resource_type(before) {
+            return Some(CompletionContext::SelfRef { resource_type });
+        }
+        // `self.` outside a resource — not valid Terraform; fall
+        // through to the catch-all so the user doesn't see a
+        // misleading completion menu.
     }
     // Multi-segment traversal (TYPE.NAME., data.TYPE.NAME., var.foo.bar.).
     let prefix = trimmed.strip_suffix('.')?;
@@ -943,6 +1010,111 @@ fn label_index_at_cursor(line: &str) -> Option<usize> {
     if in_label { Some(label_idx) } else { None }
 }
 
+/// Walk back through enclosing blocks looking for a top-level
+/// `resource "<type>" "<name>"` block; return the type if
+/// found. Used by `self.` namespace completion since `self`
+/// only resolves inside provisioner / connection blocks
+/// nested under a resource.
+fn enclosing_resource_type(before: &str) -> Option<String> {
+    match enclosing_block_context(before)? {
+        // Direct: cursor is right inside a resource body
+        // (unusual for `self.` but still valid as a fallback).
+        CompletionContext::ResourceBody { resource_type } => Some(resource_type),
+        // Nested case: cursor is inside `provisioner` /
+        // `connection` etc. The `path` walks outer-first so
+        // `path[0]` is the resource block.
+        CompletionContext::BuiltinNestedBody { path } => path.first().and_then(|step| {
+            if step.keyword == "resource" {
+                step.label.clone()
+            } else {
+                None
+            }
+        }),
+        _ => None,
+    }
+}
+
+/// Forward pre-pass over `src` returning a per-byte mask where
+/// `mask[i] == true` means the byte at `i` is inside string-literal
+/// content or part of a `${...}` / `%{...}` interpolation marker, and
+/// should NOT be treated as a block-structural brace by the RTL
+/// walker. Handles nested string-in-interp-in-string-in-interp; bails
+/// gracefully on unclosed strings/interpolations (the trailing region
+/// stays masked as in-string, which is what we want mid-edit).
+fn ignored_brace_positions(src: &str) -> Vec<bool> {
+    let bytes = src.as_bytes();
+    let mut mask = vec![false; bytes.len()];
+    // Stack frames track the active context. A `String` frame means
+    // bytes are string-literal content unless we open an interpolation.
+    // An `Interp { depth }` frame means we're inside `${...}` or
+    // `%{...}`, counting `{` / `}` to find its end.
+    enum Frame {
+        String,
+        Interp { depth: u32 },
+    }
+    let mut stack: Vec<Frame> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match stack.last_mut() {
+            None => {
+                if b == b'"' {
+                    stack.push(Frame::String);
+                }
+                i += 1;
+            }
+            Some(Frame::String) => {
+                if b == b'\\' && i + 1 < bytes.len() {
+                    i += 2;
+                    continue;
+                }
+                if b == b'"' {
+                    stack.pop();
+                    i += 1;
+                    continue;
+                }
+                if (b == b'$' || b == b'%')
+                    && i + 1 < bytes.len()
+                    && bytes[i + 1] == b'{'
+                {
+                    mask[i + 1] = true;
+                    stack.push(Frame::Interp { depth: 1 });
+                    i += 2;
+                    continue;
+                }
+                if b == b'{' || b == b'}' {
+                    mask[i] = true;
+                }
+                i += 1;
+            }
+            Some(Frame::Interp { depth }) => {
+                if b == b'"' {
+                    stack.push(Frame::String);
+                    i += 1;
+                    continue;
+                }
+                if b == b'{' {
+                    *depth += 1;
+                    mask[i] = true;
+                    i += 1;
+                    continue;
+                }
+                if b == b'}' {
+                    *depth -= 1;
+                    mask[i] = true;
+                    if *depth == 0 {
+                        stack.pop();
+                    }
+                    i += 1;
+                    continue;
+                }
+                i += 1;
+            }
+        }
+    }
+    mask
+}
+
 fn enclosing_block_context(before: &str) -> Option<CompletionContext> {
     // Walk braces from right-to-left to find the nearest unclosed `{`.
     // When we pass an unclosed `{` that's a *nested* block opener (e.g.
@@ -967,12 +1139,21 @@ fn enclosing_block_context(before: &str) -> Option<CompletionContext> {
     // a built-in nested block (currently only `lifecycle`), fall
     // back to the existing top-level context so the provider-schema
     // dispatch still runs.
+    //
+    // String-literal and `${...}` interpolation interiors hold braces
+    // that are *not* block-structural (object exprs, format strings,
+    // unbalanced mid-edit interpolations like `"echo ${self.`). The
+    // pre-pass marks those positions so the RTL walk ignores them.
+    let ignored = ignored_brace_positions(before);
     let mut path_reversed: Vec<BlockStep> = Vec::new();
     let mut depth: i32 = 0;
     let bytes = before.as_bytes();
     let mut i = bytes.len();
     while i > 0 {
         i -= 1;
+        if ignored[i] {
+            continue;
+        }
         match bytes[i] {
             b'}' => depth += 1,
             b'{' => {
@@ -1493,6 +1674,114 @@ mod tests {
     fn bare_path_dot() {
         let src = "output \"x\" {\n  value = path.";
         assert_eq!(at_end(src), CompletionContext::PathRef);
+    }
+
+    #[test]
+    fn self_dot_inside_provisioner() {
+        let src = concat!(
+            "resource \"aws_instance\" \"web\" {\n",
+            "  ami = \"ami-1\"\n",
+            "  provisioner \"local-exec\" {\n",
+            "    command = \"echo ${self.",
+        );
+        assert_eq!(
+            at_end(src),
+            CompletionContext::SelfRef {
+                resource_type: "aws_instance".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn self_dot_inside_connection_block() {
+        let src = concat!(
+            "resource \"aws_instance\" \"web\" {\n",
+            "  ami = \"ami-1\"\n",
+            "  connection {\n",
+            "    host = self.",
+        );
+        assert_eq!(
+            at_end(src),
+            CompletionContext::SelfRef {
+                resource_type: "aws_instance".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn self_dot_outside_resource_falls_through() {
+        let src = "output \"x\" {\n  value = self.";
+        // `self` outside a resource isn't valid Terraform;
+        // shouldn't surface SelfRef. Should fall through to
+        // FunctionCall (catch-all) or similar.
+        let ctx = at_end(src);
+        assert!(
+            !matches!(ctx, CompletionContext::SelfRef { .. }),
+            "got: {ctx:?}"
+        );
+    }
+
+    #[test]
+    fn provider_function_namespace_top_level() {
+        let src = "output \"x\" {\n  value = provider::";
+        assert_eq!(at_end(src), CompletionContext::ProviderFunctionNamespace);
+    }
+
+    #[test]
+    fn provider_function_namespace_partial() {
+        // Cursor mid-typing the local name — still namespace context
+        // (the partial identifier gets stripped before matching).
+        let src = "output \"x\" {\n  value = provider::aw";
+        assert_eq!(at_end(src), CompletionContext::ProviderFunctionNamespace);
+    }
+
+    #[test]
+    fn provider_function_name_after_local() {
+        let src = "output \"x\" {\n  value = provider::aws::";
+        assert_eq!(
+            at_end(src),
+            CompletionContext::ProviderFunctionName {
+                provider_local: "aws".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn provider_function_name_partial_after_local() {
+        let src = "output \"x\" {\n  value = provider::aws::trim_pre";
+        assert_eq!(
+            at_end(src),
+            CompletionContext::ProviderFunctionName {
+                provider_local: "aws".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn provider_function_inside_interpolation() {
+        let src = "output \"x\" {\n  value = \"${provider::aws::";
+        assert_eq!(
+            at_end(src),
+            CompletionContext::ProviderFunctionName {
+                provider_local: "aws".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn provider_function_does_not_trigger_on_random_double_colon() {
+        // `myvar::foo::` shouldn't trigger — not preceded by literal
+        // `provider::`.
+        let src = "output \"x\" {\n  value = myvar::foo::";
+        let ctx = at_end(src);
+        assert!(
+            !matches!(
+                ctx,
+                CompletionContext::ProviderFunctionNamespace
+                    | CompletionContext::ProviderFunctionName { .. }
+            ),
+            "got: {ctx:?}"
+        );
     }
 
     #[test]

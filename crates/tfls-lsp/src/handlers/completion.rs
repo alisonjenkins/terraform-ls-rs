@@ -145,6 +145,12 @@ pub async fn completion(
         CompletionContext::CountRef => count_namespace_items(),
         CompletionContext::PathRef => path_namespace_items(),
         CompletionContext::TerraformNamespaceRef => terraform_namespace_items(),
+        CompletionContext::SelfRef { resource_type } => {
+            // `self` resolves to the enclosing resource — same
+            // attribute set as `<resource_type>.<name>.` would
+            // produce. Reuse the resource_attr_items helper.
+            resource_attr_items(backend, &resource_type, /*data=*/ false)
+        }
         CompletionContext::VariableAttrRef { path } => variable_attr_items(backend, &uri, &path),
         CompletionContext::ResourceRef { resource_type } => {
             resource_name_items(backend, &uri, &resource_type, /*data=*/ false)
@@ -174,6 +180,12 @@ pub async fn completion(
             attr_name,
         } => attribute_value_items(backend, &resource_type, &attr_name),
         CompletionContext::FunctionCall => function_name_items(backend),
+        CompletionContext::ProviderFunctionNamespace => {
+            provider_function_namespace_items(backend)
+        }
+        CompletionContext::ProviderFunctionName { provider_local } => {
+            provider_function_name_items(backend, &provider_local)
+        }
         CompletionContext::TerraformBlockBody => {
             let filter = compute_body_filter(doc.parsed.body.as_ref(), offset);
             builtin_body_items(builtin_blocks::TERRAFORM_BLOCK, &filter)
@@ -1633,6 +1645,104 @@ fn function_name_items(backend: &Backend) -> Vec<CompletionItem> {
         .collect();
     items.sort_by(|a, b| a.label.cmp(&b.label));
     items
+}
+
+/// Provider-defined function completion (Terraform 1.8+):
+/// `provider::|` → set of distinct local provider names that have
+/// at least one function. Functions are stored in
+/// `state.functions` under their fully-qualified name
+/// `provider::<ns>::<name>::<fn>`; we project out the third
+/// segment (`<name>`) which is also the conventional local name.
+fn provider_function_namespace_items(backend: &Backend) -> Vec<CompletionItem> {
+    use std::collections::BTreeSet;
+    let mut locals: BTreeSet<String> = BTreeSet::new();
+    for entry in backend.state.functions.iter() {
+        let name = entry.key();
+        if let Some(local) = qualified_function_local_name(name) {
+            locals.insert(local.to_string());
+        }
+    }
+    locals
+        .into_iter()
+        .map(|local| CompletionItem {
+            label: local.clone(),
+            kind: Some(CompletionItemKind::MODULE),
+            detail: Some("provider".to_string()),
+            insert_text: Some(format!("{local}::")),
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// `provider::<local>::|` → function names exposed by that provider.
+/// Match by the third segment of the qualified key.
+fn provider_function_name_items(
+    backend: &Backend,
+    provider_local: &str,
+) -> Vec<CompletionItem> {
+    let mut items: Vec<CompletionItem> = backend
+        .state
+        .functions
+        .iter()
+        .filter_map(|entry| {
+            let qualified = entry.key();
+            let local = qualified_function_local_name(qualified)?;
+            if local != provider_local {
+                return None;
+            }
+            let fn_name = qualified_function_short_name(qualified)?.to_string();
+            let sig = entry.value();
+            Some(CompletionItem {
+                label: fn_name.clone(),
+                kind: Some(CompletionItemKind::FUNCTION),
+                detail: Some(sig.label(qualified)),
+                documentation: sig.description.as_ref().map(|d| {
+                    Documentation::MarkupContent(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: d.clone(),
+                    })
+                }),
+                insert_text: Some(format!("{fn_name}(${{1}})$0")),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                ..Default::default()
+            })
+        })
+        .collect();
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    items
+}
+
+/// Project the local-name segment out of a qualified function key
+/// `provider::<ns>::<name>::<fn>`. Returns `None` for keys that
+/// don't fit the expected four-segment shape.
+fn qualified_function_local_name(qualified: &str) -> Option<&str> {
+    let mut parts = qualified.split("::");
+    if parts.next()? != "provider" {
+        return None;
+    }
+    parts.next()?;
+    let local = parts.next()?;
+    let _fn = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(local)
+}
+
+/// Project the function-name segment out of a qualified function
+/// key `provider::<ns>::<name>::<fn>`.
+fn qualified_function_short_name(qualified: &str) -> Option<&str> {
+    let mut parts = qualified.split("::");
+    if parts.next()? != "provider" {
+        return None;
+    }
+    parts.next()?;
+    parts.next()?;
+    let fn_name = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(fn_name)
 }
 
 /// Context-aware value completions: suggest matching resources, data

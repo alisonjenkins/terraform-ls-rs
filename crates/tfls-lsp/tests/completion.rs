@@ -2699,3 +2699,83 @@ async fn output_body_value_inserts_only_value() {
         "value completion must insert only `value`; got {insert:?}"
     );
 }
+
+fn fake_function_signature() -> tfls_schema::FunctionSignature {
+    tfls_schema::FunctionSignature {
+        description: Some("Test function".into()),
+        return_type: sonic_rs::json!("string"),
+        parameters: vec![tfls_schema::FunctionParameter {
+            name: "input".into(),
+            description: None,
+            r#type: sonic_rs::json!("string"),
+            is_nullable: false,
+        }],
+        variadic_parameter: None,
+    }
+}
+
+fn install_fake_provider_functions(backend: &Backend) {
+    let funcs = vec![
+        (
+            "provider::hashicorp::aws::trim_prefix".to_string(),
+            fake_function_signature(),
+        ),
+        (
+            "provider::hashicorp::aws::arn_parse".to_string(),
+            fake_function_signature(),
+        ),
+        (
+            "provider::hashicorp::kubernetes::manifest_decode".to_string(),
+            fake_function_signature(),
+        ),
+    ];
+    backend.state.merge_functions(funcs);
+}
+
+#[tokio::test]
+async fn provider_function_namespace_lists_provider_local_names() {
+    let u = uri("file:///pf.tf");
+    let src = "output \"x\" {\n  value = provider::\n}\n";
+    let backend = fresh_backend(src, &u);
+    install_fake_provider_functions(&backend);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(1, "  value = provider::".len() as u32)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"aws".to_string()), "got: {ls:?}");
+    assert!(ls.contains(&"kubernetes".to_string()), "got: {ls:?}");
+    // Distinct: only one entry per provider local even though aws
+    // had two functions.
+    let aws_count = ls.iter().filter(|l| *l == "aws").count();
+    assert_eq!(aws_count, 1);
+}
+
+#[tokio::test]
+async fn provider_function_name_lists_only_that_providers_functions() {
+    let u = uri("file:///pf.tf");
+    let src = "output \"x\" {\n  value = provider::aws::\n}\n";
+    let backend = fresh_backend(src, &u);
+    install_fake_provider_functions(&backend);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(
+            &u,
+            Position::new(1, "  value = provider::aws::".len() as u32),
+        ),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"trim_prefix".to_string()), "got: {ls:?}");
+    assert!(ls.contains(&"arn_parse".to_string()), "got: {ls:?}");
+    // kubernetes function must NOT show up under aws.
+    assert!(
+        !ls.contains(&"manifest_decode".to_string()),
+        "leaked kubernetes func into aws list: {ls:?}"
+    );
+}
