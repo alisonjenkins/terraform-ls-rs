@@ -355,38 +355,22 @@ fn find_module_output_segment_in_expr(
 /// to the `LOCAL = { ... }` attribute in `terraform { required_providers
 /// { ... } }`, scanning the active doc and every peer `.tf` in the
 /// same module dir (the block typically lives in `versions.tf`).
+///
+/// Cursor positions handled:
+///  - on `fn` (the function-name segment) — extracts LOCAL via the
+///    qualified-name walker.
+///  - on `LOCAL` (the alias segment) — extracts LOCAL directly via
+///    the `provider_local_at_cursor` walker.
 fn provider_function_goto_at(
     state: &tfls_state::StateStore,
     doc: &DocumentState,
     uri: &Url,
     pos: Position,
 ) -> Option<Location> {
-    use crate::handlers::signature_help::qualified_name_ending_at;
     let offset = lsp_position_to_byte_offset(&doc.rope, pos).ok()?;
     let text = doc.rope.to_string();
+    let local = extract_provider_local_under_cursor(&text, offset)?;
 
-    // Identify a qualified provider-fn name surrounding the cursor
-    // — handles cursor-on-name and cursor-just-after-name cases.
-    let bytes = text.as_bytes();
-    let mut end = offset;
-    while end < bytes.len()
-        && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
-    {
-        end += 1;
-    }
-    let name = qualified_name_ending_at(&text, end)?;
-    let mut parts = name.split("::");
-    if parts.next()? != "provider" {
-        return None;
-    }
-    let local = parts.next()?.to_string();
-    parts.next()?; // skip fn name
-    if parts.next().is_some() {
-        return None;
-    }
-
-    // Search for a `LOCAL = ...` attribute inside `terraform {
-    // required_providers { ... } }` across the module dir.
     if let Some(loc) = required_providers_attr_location(doc, uri, &local) {
         return Some(loc);
     }
@@ -408,6 +392,53 @@ fn provider_function_goto_at(
         }
     }
     None
+}
+
+/// Pull the LOCAL alias out of `provider::LOCAL::fn` no matter
+/// which segment the cursor sits on.
+pub(crate) fn extract_provider_local_under_cursor(text: &str, offset: usize) -> Option<String> {
+    use crate::handlers::signature_help::qualified_name_ending_at;
+    let bytes = text.as_bytes();
+    // Extend to ident boundary so cursor-mid-name works.
+    let mut end = offset;
+    while end < bytes.len()
+        && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
+    {
+        end += 1;
+    }
+    // Path 1: cursor on the fn segment — qualified name walks back
+    // over `provider::<local>::<fn>` in full.
+    if let Some(name) = qualified_name_ending_at(text, end) {
+        let mut parts = name.split("::");
+        if parts.next() == Some("provider") {
+            if let Some(local) = parts.next() {
+                if parts.next().is_some() && parts.next().is_none() {
+                    return Some(local.to_string());
+                }
+            }
+        }
+    }
+    // Path 2: cursor on the LOCAL segment — preceded by literal
+    // `provider::`, optionally followed by `::<ident>`.
+    let mut start = end;
+    while start > 0
+        && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_')
+    {
+        start -= 1;
+    }
+    if start == end {
+        return None;
+    }
+    if start < 10 || &bytes[start - 10..start] != b"provider::" {
+        return None;
+    }
+    if start > 10 {
+        let prev = bytes[start - 11];
+        if prev.is_ascii_alphanumeric() || prev == b'_' {
+            return None;
+        }
+    }
+    Some(text[start..end].to_string())
 }
 
 /// Workspace-wide find-references for a provider-defined function
@@ -585,6 +616,161 @@ fn lookup_provider_local(
     None
 }
 
+/// Hover over the LOCAL segment of `provider::LOCAL::fn(...)`. Pulls
+/// `LOCAL`'s `source` and `version` from `required_providers` (across
+/// the active doc and peer `.tf` files in the same module dir) and
+/// renders a small markdown card.
+fn provider_local_hover(
+    state: &tfls_state::StateStore,
+    doc: &DocumentState,
+    uri: &Url,
+    pos: Position,
+) -> Option<Hover> {
+    let offset = lsp_position_to_byte_offset(&doc.rope, pos).ok()?;
+    let text = doc.rope.to_string();
+    let bytes = text.as_bytes();
+    // Cursor must be on the LOCAL segment specifically — NOT the fn
+    // segment (function_hover already handles that). Detect by
+    // requiring an immediate `provider::` prefix and either EOF/non-
+    // ident or `::` boundary right after.
+    let mut start = offset;
+    while start > 0
+        && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_')
+    {
+        start -= 1;
+    }
+    let mut end = offset;
+    while end < bytes.len()
+        && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
+    {
+        end += 1;
+    }
+    if start == end {
+        return None;
+    }
+    if start < 10 || &bytes[start - 10..start] != b"provider::" {
+        return None;
+    }
+    if start > 10 {
+        let prev = bytes[start - 11];
+        if prev.is_ascii_alphanumeric() || prev == b'_' {
+            return None;
+        }
+    }
+    let local = &text[start..end];
+    let info = lookup_provider_info(state, uri, local)?;
+    let mut value = format!("**provider local** `{local}`\n\n");
+    if let Some(s) = info.source {
+        value.push_str(&format!("Source: `{s}`\n\n"));
+    }
+    if let Some(v) = info.version {
+        value.push_str(&format!("Version: `{v}`\n"));
+    }
+    let start_pos = tfls_parser::byte_offset_to_lsp_position(&doc.rope, start).ok()?;
+    let end_pos = tfls_parser::byte_offset_to_lsp_position(&doc.rope, end).ok()?;
+    Some(Hover {
+        contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value,
+        }),
+        range: Some(lsp_types::Range {
+            start: start_pos,
+            end: end_pos,
+        }),
+    })
+}
+
+#[derive(Default)]
+struct ProviderInfo {
+    source: Option<String>,
+    version: Option<String>,
+}
+
+fn lookup_provider_info(
+    state: &tfls_state::StateStore,
+    uri: &Url,
+    local: &str,
+) -> Option<ProviderInfo> {
+    if let Some(doc) = state.documents.get(uri) {
+        if let Some(body) = doc.parsed.body.as_ref() {
+            if let Some(info) = scan_provider_info(body, local) {
+                return Some(info);
+            }
+        }
+    }
+    let target_dir = parent_dir(uri)?;
+    for entry in state.documents.iter() {
+        let other_uri = entry.key();
+        if other_uri == uri {
+            continue;
+        }
+        let Ok(path) = other_uri.to_file_path() else {
+            continue;
+        };
+        if path.parent() != Some(target_dir.as_path()) {
+            continue;
+        }
+        let doc = entry.value();
+        let Some(body) = doc.parsed.body.as_ref() else {
+            continue;
+        };
+        if let Some(info) = scan_provider_info(body, local) {
+            return Some(info);
+        }
+    }
+    None
+}
+
+fn scan_provider_info(
+    body: &hcl_edit::structure::Body,
+    local: &str,
+) -> Option<ProviderInfo> {
+    use hcl_edit::expr::Expression;
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else { continue };
+        if block.ident.as_str() != "terraform" { continue }
+        for inner in block.body.iter() {
+            let Some(rp_block) = inner.as_block() else { continue };
+            if rp_block.ident.as_str() != "required_providers" { continue }
+            for entry in rp_block.body.iter() {
+                let Some(attr) = entry.as_attribute() else { continue };
+                if attr.key.as_str() != local { continue }
+                let mut info = ProviderInfo::default();
+                match &attr.value {
+                    Expression::Object(obj) => {
+                        for (key, value) in obj.iter() {
+                            let key_str = match key {
+                                hcl_edit::expr::ObjectKey::Ident(i) => Some(i.as_str()),
+                                hcl_edit::expr::ObjectKey::Expression(
+                                    Expression::String(s),
+                                ) => Some(s.as_str()),
+                                _ => None,
+                            };
+                            let Some(k) = key_str else { continue };
+                            let lit = match value.expr() {
+                                Expression::String(s) => Some(s.as_str().to_string()),
+                                _ => None,
+                            };
+                            match (k, lit) {
+                                ("source", Some(s)) => info.source = Some(s),
+                                ("version", Some(v)) => info.version = Some(v),
+                                _ => {}
+                            }
+                        }
+                    }
+                    Expression::String(s) => {
+                        // Short form: `aws = "~> 4.0"` is just a version.
+                        info.version = Some(s.as_str().to_string());
+                    }
+                    _ => {}
+                }
+                return Some(info);
+            }
+        }
+    }
+    None
+}
+
 fn required_providers_attr_location(
     doc: &DocumentState,
     uri: &Url,
@@ -733,6 +919,14 @@ pub async fn hover(backend: &Backend, params: HoverParams) -> jsonrpc::Result<Op
     if let Some(hover) =
         hover_module_input::module_overview_hover(&backend.state, &doc, &uri, pos)
     {
+        return Ok(Some(hover));
+    }
+
+    // Cursor on the LOCAL segment of `provider::LOCAL::fn(...)` —
+    // render a provider-overview card sourced from
+    // `required_providers`. Tried BEFORE function-hover so the LOCAL
+    // segment isn't accidentally treated as a function name.
+    if let Some(hover) = provider_local_hover(&backend.state, &doc, &uri, pos) {
         return Ok(Some(hover));
     }
 

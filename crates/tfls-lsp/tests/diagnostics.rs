@@ -634,3 +634,132 @@ fn flags_unknown_top_level_key_in_tf_json() {
         "expected unknown-top-level-key error: {msgs:?}"
     );
 }
+
+fn install_aws_trim_prefix(b: &Backend) {
+    b.state.merge_functions(vec![(
+        "provider::hashicorp::aws::trim_prefix".to_string(),
+        tfls_schema::FunctionSignature {
+            description: None,
+            return_type: sonic_rs::json!("string"),
+            parameters: vec![],
+            variadic_parameter: None,
+        },
+    )]);
+}
+
+#[test]
+fn unknown_provider_local_flagged_as_error() {
+    let b = backend();
+    install_aws_trim_prefix(&b);
+    let u = uri("file:///proj/main.tf");
+    insert(
+        &b,
+        &u,
+        "output \"x\" { value = provider::nope::trim_prefix(\"a\") }\n",
+    );
+    let msgs = messages(&b, &u);
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("Unknown provider local") && m.contains("nope")),
+        "expected unknown-local error: {msgs:?}"
+    );
+}
+
+#[test]
+fn unknown_function_flagged_as_warning() {
+    let b = backend();
+    install_aws_trim_prefix(&b);
+    let v_uri = uri("file:///proj/versions.tf");
+    insert(
+        &b,
+        &v_uri,
+        "terraform {\n  required_providers {\n    aws = {\n      source = \"hashicorp/aws\"\n    }\n  }\n}\n",
+    );
+    let u = uri("file:///proj/main.tf");
+    insert(
+        &b,
+        &u,
+        "output \"x\" { value = provider::aws::no_such_fn(\"a\") }\n",
+    );
+    let msgs = messages(&b, &u);
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("aws") && m.contains("no_such_fn")),
+        "expected unknown-function warning: {msgs:?}"
+    );
+}
+
+#[test]
+fn known_provider_function_emits_no_diagnostic() {
+    let b = backend();
+    install_aws_trim_prefix(&b);
+    let v_uri = uri("file:///proj/versions.tf");
+    insert(
+        &b,
+        &v_uri,
+        "terraform {\n  required_providers {\n    aws = {\n      source = \"hashicorp/aws\"\n    }\n  }\n}\n",
+    );
+    let u = uri("file:///proj/main.tf");
+    insert(
+        &b,
+        &u,
+        "output \"x\" { value = provider::aws::trim_prefix(\"a\") }\n",
+    );
+    let msgs = messages(&b, &u);
+    assert!(
+        !msgs.iter()
+            .any(|m| m.contains("provider") && m.contains("aws") && m.contains("trim_prefix")),
+        "false positive on known fn: {msgs:?}"
+    );
+}
+
+#[test]
+fn unknown_function_skipped_when_provider_has_no_functions_indexed() {
+    // No `state.functions` entry for `aws` at all → unknown-fn
+    // diagnostic is suppressed (probably means schema fetch hasn't
+    // completed yet, not a real typo).
+    let b = backend();
+    let v_uri = uri("file:///proj/versions.tf");
+    insert(
+        &b,
+        &v_uri,
+        "terraform {\n  required_providers {\n    aws = {\n      source = \"hashicorp/aws\"\n    }\n  }\n}\n",
+    );
+    let u = uri("file:///proj/main.tf");
+    insert(
+        &b,
+        &u,
+        "output \"x\" { value = provider::aws::trim_prefix(\"a\") }\n",
+    );
+    let msgs = messages(&b, &u);
+    assert!(
+        !msgs.iter().any(|m| m.contains("trim_prefix")),
+        "should not flag when no functions indexed: {msgs:?}"
+    );
+}
+
+#[test]
+fn renamed_local_resolves_via_required_providers() {
+    // versions.tf renames `aws_v6 → hashicorp/aws`. Diagnostic
+    // must NOT fire for `provider::aws_v6::trim_prefix(...)`.
+    let b = backend();
+    install_aws_trim_prefix(&b);
+    let v_uri = uri("file:///proj/versions.tf");
+    insert(
+        &b,
+        &v_uri,
+        "terraform {\n  required_providers {\n    aws_v6 = {\n      source = \"hashicorp/aws\"\n    }\n  }\n}\n",
+    );
+    let u = uri("file:///proj/main.tf");
+    insert(
+        &b,
+        &u,
+        "output \"x\" { value = provider::aws_v6::trim_prefix(\"a\") }\n",
+    );
+    let msgs = messages(&b, &u);
+    assert!(
+        !msgs.iter()
+            .any(|m| m.contains("trim_prefix") || m.contains("aws_v6")),
+        "alias should resolve cleanly: {msgs:?}"
+    );
+}

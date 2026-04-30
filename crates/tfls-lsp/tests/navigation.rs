@@ -901,6 +901,80 @@ async fn goto_def_on_provider_function_jumps_to_required_providers_entry() {
 }
 
 #[tokio::test]
+async fn goto_def_on_provider_local_segment_jumps_to_required_providers() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+
+    let (service, _socket) = LspService::new(Backend::new);
+    let inner = service.inner();
+    let backend = Backend::with_shared_state(
+        inner.client.clone(),
+        inner.state.clone(),
+        inner.jobs.clone(),
+    );
+
+    let versions_u = upsert_file(
+        &backend,
+        &root.join("versions.tf"),
+        "terraform {\n  required_providers {\n    aws_v6 = {\n      source = \"hashicorp/aws\"\n    }\n  }\n}\n",
+    );
+    let main_path = root.join("main.tf");
+    let main_src = "output \"x\" {\n  value = provider::aws_v6::trim_prefix(\"foo\")\n}\n";
+    let main_u = upsert_file(&backend, &main_path, main_src);
+
+    // Cursor on `aws_v6` (the LOCAL segment) — column inside `aws_v6`.
+    let col = (main_src.lines().nth(1).unwrap().find("aws_v6").unwrap() + 2) as u32;
+    let loc = single_location(goto_def_at(&backend, &main_u, Position::new(1, col)).await);
+    assert_eq!(loc.uri, versions_u);
+    assert_eq!(loc.range.start.line, 2, "should land on `aws_v6 = {{` line");
+}
+
+#[tokio::test]
+async fn hover_on_provider_local_shows_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+
+    let (service, _socket) = LspService::new(Backend::new);
+    let inner = service.inner();
+    let backend = Backend::with_shared_state(
+        inner.client.clone(),
+        inner.state.clone(),
+        inner.jobs.clone(),
+    );
+
+    upsert_file(
+        &backend,
+        &root.join("versions.tf"),
+        "terraform {\n  required_providers {\n    aws_v6 = {\n      source  = \"hashicorp/aws\"\n      version = \"~> 4.0\"\n    }\n  }\n}\n",
+    );
+    let main_path = root.join("main.tf");
+    let main_src = "output \"x\" {\n  value = provider::aws_v6::trim_prefix(\"foo\")\n}\n";
+    let main_u = upsert_file(&backend, &main_path, main_src);
+
+    let col = (main_src.lines().nth(1).unwrap().find("aws_v6").unwrap() + 2) as u32;
+    let resp = tfls_lsp::handlers::navigation::hover(
+        &backend,
+        HoverParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: main_u.clone() },
+                position: Position::new(1, col),
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        },
+    )
+    .await
+    .expect("ok")
+    .expect("hover");
+    let md = match resp.contents {
+        tower_lsp::lsp_types::HoverContents::Markup(m) => m.value,
+        other => panic!("expected markup, got {other:?}"),
+    };
+    assert!(md.contains("aws_v6"), "missing local: {md}");
+    assert!(md.contains("hashicorp/aws"), "missing source: {md}");
+    assert!(md.contains("~> 4.0"), "missing version: {md}");
+}
+
+#[tokio::test]
 async fn references_provider_function_finds_workspace_calls() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();

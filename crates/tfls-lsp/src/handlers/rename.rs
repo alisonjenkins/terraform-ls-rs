@@ -35,6 +35,12 @@ pub async fn prepare_rename(
     let Some(doc) = backend.state.documents.get(&uri) else {
         return Ok(None);
     };
+    // Provider-defined function alias rename:
+    //   `provider::aws_v6::|fn(...)` → cursor on `aws_v6` segment
+    //   produces a workspace-wide rename of the alias.
+    if let Some(resp) = prepare_rename_provider_local(&doc, params.position) {
+        return Ok(Some(resp));
+    }
     let Some(target) = find_symbol_at_cursor(&doc, params.position) else {
         return Ok(None);
     };
@@ -63,6 +69,21 @@ pub async fn rename(
 ) -> jsonrpc::Result<Option<WorkspaceEdit>> {
     let uri = params.text_document_position.text_document.uri;
     let new_name = params.new_name;
+
+    // Provider local alias rename — workspace-wide. Tried BEFORE
+    // the symbol-rename path so the `aws_v6` segment isn't
+    // accidentally treated as a regular identifier.
+    if let Some(doc) = backend.state.documents.get(&uri) {
+        if let Some(edit) = rename_provider_local(
+            &backend.state,
+            &uri,
+            &doc,
+            params.text_document_position.position,
+            &new_name,
+        ) {
+            return Ok(Some(edit));
+        }
+    }
 
     let key = {
         let Some(doc) = backend.state.documents.get(&uri) else {
@@ -238,6 +259,239 @@ fn is_ident_byte(b: u8) -> bool {
 fn _docs(_s: &StateStore, _k: SymbolKey, _d: &DocumentState) {}
 #[allow(dead_code)]
 fn _symkind_noop(_k: SymbolKind) {}
+
+/// `prepareRename` for the LOCAL segment of `provider::LOCAL::fn(...)`.
+/// Returns the narrow range of the alias under the cursor with the
+/// alias text as the placeholder.
+fn prepare_rename_provider_local(
+    doc: &DocumentState,
+    pos: lsp_types::Position,
+) -> Option<PrepareRenameResponse> {
+    let offset = tfls_parser::lsp_position_to_byte_offset(&doc.rope, pos).ok()?;
+    let text = doc.rope.to_string();
+    let (start, end, local) = local_span_at(&text, offset)?;
+    let start_pos = tfls_parser::byte_offset_to_lsp_position(&doc.rope, start).ok()?;
+    let end_pos = tfls_parser::byte_offset_to_lsp_position(&doc.rope, end).ok()?;
+    Some(PrepareRenameResponse::RangeWithPlaceholder {
+        range: Range {
+            start: start_pos,
+            end: end_pos,
+        },
+        placeholder: local,
+    })
+}
+
+/// Cursor on a LOCAL segment? Return its byte span (start, end) and
+/// the alias string. Walks the identifier surrounding `offset` and
+/// confirms it's preceded by `provider::`.
+fn local_span_at(text: &str, offset: usize) -> Option<(usize, usize, String)> {
+    let bytes = text.as_bytes();
+    let mut start = offset;
+    while start > 0
+        && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_')
+    {
+        start -= 1;
+    }
+    let mut end = offset;
+    while end < bytes.len()
+        && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
+    {
+        end += 1;
+    }
+    if start == end {
+        return None;
+    }
+    if start < 10 || &bytes[start - 10..start] != b"provider::" {
+        return None;
+    }
+    if start > 10 {
+        let prev = bytes[start - 11];
+        if prev.is_ascii_alphanumeric() || prev == b'_' {
+            return None;
+        }
+    }
+    Some((start, end, text[start..end].to_string()))
+}
+
+/// Build a `WorkspaceEdit` that renames a provider local alias
+/// across:
+///   - the `LOCAL = { ... }` attribute key in
+///     `terraform { required_providers { ... } }` (every peer file
+///     in the same module dir).
+///   - every `provider::LOCAL::*` call site in every doc in the
+///     workspace.
+fn rename_provider_local(
+    state: &StateStore,
+    uri: &Url,
+    doc: &DocumentState,
+    pos: lsp_types::Position,
+    new_name: &str,
+) -> Option<WorkspaceEdit> {
+    let offset = tfls_parser::lsp_position_to_byte_offset(&doc.rope, pos).ok()?;
+    let text = doc.rope.to_string();
+    let (_, _, old_local) = local_span_at(&text, offset)?;
+
+    let mut edits: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+
+    // 1. required_providers attribute key — module-dir peer walk.
+    push_required_providers_attr_edits(state, uri, &old_local, new_name, &mut edits);
+
+    // 2. Every `provider::OLD::fn` call site, workspace-wide.
+    for entry in state.documents.iter() {
+        push_call_site_edits(
+            entry.key(),
+            entry.value(),
+            &old_local,
+            new_name,
+            &mut edits,
+        );
+    }
+
+    if edits.is_empty() {
+        return None;
+    }
+    Some(WorkspaceEdit {
+        changes: Some(edits),
+        ..Default::default()
+    })
+}
+
+fn push_required_providers_attr_edits(
+    state: &StateStore,
+    uri: &Url,
+    old_local: &str,
+    new_name: &str,
+    edits: &mut HashMap<Url, Vec<TextEdit>>,
+) {
+    let mut try_doc = |doc_uri: &Url, doc: &DocumentState| {
+        let Some(body) = doc.parsed.body.as_ref() else {
+            return;
+        };
+        if let Some(range) = required_providers_key_range(body, &doc.rope, old_local) {
+            edits
+                .entry(doc_uri.clone())
+                .or_default()
+                .push(TextEdit {
+                    range,
+                    new_text: new_name.to_string(),
+                });
+        }
+    };
+    if let Some(doc) = state.documents.get(uri) {
+        try_doc(uri, doc.value());
+    }
+    let Some(target_dir) = crate::handlers::util::parent_dir(uri) else {
+        return;
+    };
+    for entry in state.documents.iter() {
+        let other_uri = entry.key();
+        if other_uri == uri {
+            continue;
+        }
+        let Ok(path) = other_uri.to_file_path() else {
+            continue;
+        };
+        if path.parent() != Some(target_dir.as_path()) {
+            continue;
+        }
+        try_doc(other_uri, entry.value());
+    }
+}
+
+fn required_providers_key_range(
+    body: &hcl_edit::structure::Body,
+    rope: &Rope,
+    local: &str,
+) -> Option<Range> {
+    use hcl_edit::repr::Span as _;
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else { continue };
+        if block.ident.as_str() != "terraform" {
+            continue;
+        }
+        for inner in block.body.iter() {
+            let Some(rp_block) = inner.as_block() else { continue };
+            if rp_block.ident.as_str() != "required_providers" {
+                continue;
+            }
+            for entry in rp_block.body.iter() {
+                let Some(attr) = entry.as_attribute() else { continue };
+                if attr.key.as_str() != local {
+                    continue;
+                }
+                let span = attr.key.span()?;
+                let start = tfls_parser::byte_offset_to_lsp_position(rope, span.start).ok()?;
+                let end = tfls_parser::byte_offset_to_lsp_position(rope, span.end).ok()?;
+                return Some(Range { start, end });
+            }
+        }
+    }
+    None
+}
+
+fn push_call_site_edits(
+    doc_uri: &Url,
+    doc: &DocumentState,
+    old_local: &str,
+    new_name: &str,
+    edits: &mut HashMap<Url, Vec<TextEdit>>,
+) {
+    let text = doc.rope.to_string();
+    let bytes = text.as_bytes();
+    let needle = format!("provider::{old_local}::");
+    let mut search_from = 0;
+    while let Some(rel) = text[search_from..].find(&needle) {
+        let abs = search_from + rel;
+        let abs_end = abs + needle.len();
+        // Boundary check: `provider` must not be tail of longer
+        // ident.
+        let prev_ok = abs == 0 || {
+            let p = bytes[abs - 1];
+            !(p.is_ascii_alphanumeric() || p == b'_' || p == b':')
+        };
+        if !prev_ok {
+            search_from = abs_end;
+            continue;
+        }
+        // Must be followed by an identifier (the fn name) — protects
+        // against false positives if `LOCAL::` ends a different
+        // construct.
+        let after = abs_end;
+        if after >= bytes.len() {
+            search_from = abs_end;
+            continue;
+        }
+        let next = bytes[after];
+        if !(next.is_ascii_alphabetic() || next == b'_') {
+            search_from = abs_end;
+            continue;
+        }
+        // Range covers JUST the OLD local segment, not the whole
+        // `provider::OLD::` prefix — narrow edits compose better.
+        let local_start = abs + "provider::".len();
+        let local_end = local_start + old_local.len();
+        let Ok(start_pos) = tfls_parser::byte_offset_to_lsp_position(&doc.rope, local_start)
+        else {
+            search_from = abs_end;
+            continue;
+        };
+        let Ok(end_pos) = tfls_parser::byte_offset_to_lsp_position(&doc.rope, local_end) else {
+            search_from = abs_end;
+            continue;
+        };
+        edits
+            .entry(doc_uri.clone())
+            .or_default()
+            .push(TextEdit {
+                range: Range {
+                    start: start_pos,
+                    end: end_pos,
+                },
+                new_text: new_name.to_string(),
+            });
+        search_from = abs_end;
+    }
+}
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

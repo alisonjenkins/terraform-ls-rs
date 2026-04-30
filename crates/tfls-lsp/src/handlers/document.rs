@@ -515,6 +515,17 @@ pub fn compute_diagnostics_with_lookup(
         ));
         out.extend(tfls_diag::empty_list_equality_diagnostics(body, &doc.rope));
         out.extend(tfls_diag::map_duplicate_keys_diagnostics(body, &doc.rope));
+        // Provider-defined function calls (Terraform 1.8+). Lives
+        // outside `tfls-diag` because it needs `StateStore` access
+        // for `required_providers` peer-walk + `state.functions`
+        // lookup.
+        out.extend(
+            crate::handlers::diagnostic_provider_fn::provider_function_call_diagnostics(
+                state,
+                uri,
+                doc.value(),
+            ),
+        );
 
         // Cross-file / module-scoped rules. `graph` is either the
         // fresh per-call adapter (from `compute_diagnostics`) or a

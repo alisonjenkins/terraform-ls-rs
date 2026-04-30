@@ -6,6 +6,7 @@ pub mod code_lens;
 pub mod commands;
 pub mod completion;
 pub mod cursor;
+pub mod diagnostic_provider_fn;
 pub mod hover_attribute;
 pub mod hover_function;
 pub mod hover_module_input;
