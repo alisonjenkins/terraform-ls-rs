@@ -3275,3 +3275,146 @@ async fn rename_action_idempotent_when_moved_block_exists() {
         "must not duplicate existing moved entry; got {moved_appends:?}"
     );
 }
+
+#[tokio::test]
+async fn quickfix_unknown_provider_local_offers_known_aliases() {
+    let main_u = uri("file:///proj/main.tf");
+    let versions_u = uri("file:///proj/versions.tf");
+    let (service, _) = LspService::new(Backend::new);
+    let inner = service.inner();
+    inner.state.upsert_document(DocumentState::new(
+        versions_u.clone(),
+        "terraform {\n  required_providers {\n    aws_v6 = {\n      source = \"hashicorp/aws\"\n    }\n  }\n}\n",
+        1,
+    ));
+    inner.state.upsert_document(DocumentState::new(
+        main_u.clone(),
+        "output \"x\" {\n  value = provider::nope::trim_prefix(\"a\")\n}\n",
+        1,
+    ));
+    let backend = Backend::with_shared_state(
+        inner.client.clone(),
+        inner.state.clone(),
+        inner.jobs.clone(),
+    );
+    let diags = compute_diagnostics(&backend.state, &main_u);
+    let unknown = diags
+        .iter()
+        .find(|d| d.message.starts_with("Unknown provider local"))
+        .cloned()
+        .expect("unknown-local diag");
+    let actions = tfls_lsp::handlers::code_action::code_action(
+        &backend,
+        CodeActionParams {
+            text_document: TextDocumentIdentifier {
+                uri: main_u.clone(),
+            },
+            range: unknown.range,
+            context: CodeActionContext {
+                diagnostics: vec![unknown],
+                only: None,
+                trigger_kind: None,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        },
+    )
+    .await
+    .expect("ok")
+    .expect("actions");
+
+    let titles: Vec<String> = actions
+        .iter()
+        .filter_map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca) => Some(ca.title.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        titles.iter().any(|t| t.contains("`aws_v6`")),
+        "expected `aws_v6` quickfix, got: {titles:?}"
+    );
+}
+
+#[tokio::test]
+async fn quickfix_unknown_provider_function_offers_known_functions() {
+    let main_u = uri("file:///proj/main.tf");
+    let versions_u = uri("file:///proj/versions.tf");
+    let (service, _) = LspService::new(Backend::new);
+    let inner = service.inner();
+    inner.state.upsert_document(DocumentState::new(
+        versions_u.clone(),
+        "terraform {\n  required_providers {\n    aws = {\n      source = \"hashicorp/aws\"\n    }\n  }\n}\n",
+        1,
+    ));
+    inner.state.upsert_document(DocumentState::new(
+        main_u.clone(),
+        "output \"x\" {\n  value = provider::aws::no_such(\"a\")\n}\n",
+        1,
+    ));
+    let backend = Backend::with_shared_state(
+        inner.client.clone(),
+        inner.state.clone(),
+        inner.jobs.clone(),
+    );
+    backend.state.merge_functions(vec![
+        (
+            "provider::hashicorp::aws::trim_prefix".to_string(),
+            tfls_schema::FunctionSignature {
+                description: None,
+                return_type: sonic_rs::json!("string"),
+                parameters: vec![],
+                variadic_parameter: None,
+            },
+        ),
+        (
+            "provider::hashicorp::aws::arn_parse".to_string(),
+            tfls_schema::FunctionSignature {
+                description: None,
+                return_type: sonic_rs::json!("string"),
+                parameters: vec![],
+                variadic_parameter: None,
+            },
+        ),
+    ]);
+    let diags = compute_diagnostics(&backend.state, &main_u);
+    let bad_fn = diags
+        .iter()
+        .find(|d| d.message.contains("does not expose a function"))
+        .cloned()
+        .expect("unknown-fn diag");
+    let actions = tfls_lsp::handlers::code_action::code_action(
+        &backend,
+        CodeActionParams {
+            text_document: TextDocumentIdentifier {
+                uri: main_u.clone(),
+            },
+            range: bad_fn.range,
+            context: CodeActionContext {
+                diagnostics: vec![bad_fn],
+                only: None,
+                trigger_kind: None,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        },
+    )
+    .await
+    .expect("ok")
+    .expect("actions");
+    let titles: Vec<String> = actions
+        .iter()
+        .filter_map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca) => Some(ca.title.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        titles.iter().any(|t| t.contains("`trim_prefix`")),
+        "expected `trim_prefix` quickfix, got: {titles:?}"
+    );
+    assert!(
+        titles.iter().any(|t| t.contains("`arn_parse`")),
+        "expected `arn_parse` quickfix, got: {titles:?}"
+    );
+}

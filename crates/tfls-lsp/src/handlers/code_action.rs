@@ -104,6 +104,28 @@ pub async fn code_action(
                 // don't need a separate matcher predicate — the
                 // cursor-based block lookup is the matcher.
                 actions.push(CodeActionOrCommand::CodeAction(action));
+            } else if is_unknown_provider_local(diag) {
+                actions.extend(
+                    make_unknown_provider_local_quickfixes(
+                        &backend.state,
+                        &uri,
+                        diag,
+                        &doc,
+                    )
+                    .into_iter()
+                    .map(CodeActionOrCommand::CodeAction),
+                );
+            } else if is_unknown_provider_function(diag) {
+                actions.extend(
+                    make_unknown_provider_function_quickfixes(
+                        &backend.state,
+                        &uri,
+                        diag,
+                        &doc,
+                    )
+                    .into_iter()
+                    .map(CodeActionOrCommand::CodeAction),
+                );
             }
         }
     }
@@ -1000,6 +1022,15 @@ fn filename_of(uri: &Url) -> Option<String> {
 fn scan_blocks_of_kind(body: &Body, rope: &Rope, kind: &str) -> Vec<(Range, String)> {
     use hcl_edit::repr::Span as _;
 
+    // Pre-stringify the rope once. The per-block trailing-whitespace
+    // probe used to do `rope.byte_slice(end..end+1).to_string()` on
+    // every byte (each call allocates a String through the rope tree
+    // walker), which dominated cost on workspaces with many output
+    // blocks. A single up-front `to_string()` lets us index bytes
+    // directly.
+    let text = rope.to_string();
+    let bytes = text.as_bytes();
+    let total = bytes.len();
     let mut out = Vec::new();
     for structure in body.iter() {
         let Some(block) = structure.as_block() else {
@@ -1009,23 +1040,14 @@ fn scan_blocks_of_kind(body: &Body, rope: &Rope, kind: &str) -> Vec<(Range, Stri
             continue;
         }
         let Some(span) = block.span() else { continue };
-        let total = rope.len_bytes();
         let mut end = span.end.min(total);
-        // Pull in trailing whitespace + a single line break so the
-        // remaining file isn't left with stranded blank lines
-        // exactly where the block used to be.
         while end < total {
-            let ch = rope
-                .byte_slice(end..end + 1)
-                .to_string()
-                .chars()
-                .next();
-            match ch {
-                Some('\n') => {
+            match bytes[end] {
+                b'\n' => {
                     end += 1;
                     break;
                 }
-                Some(' ') | Some('\t') | Some('\r') => end += 1,
+                b' ' | b'\t' | b'\r' => end += 1,
                 _ => break,
             }
         }
@@ -1035,7 +1057,7 @@ fn scan_blocks_of_kind(body: &Body, rope: &Rope, kind: &str) -> Vec<(Range, Stri
         let Ok(end_pos) = tfls_parser::byte_offset_to_lsp_position(rope, end) else {
             continue;
         };
-        let src = rope.byte_slice(span.start..end).to_string();
+        let src = text[span.start..end].to_string();
         out.push((
             Range {
                 start: start_pos,
@@ -1043,73 +1065,6 @@ fn scan_blocks_of_kind(body: &Body, rope: &Rope, kind: &str) -> Vec<(Range, Stri
             },
             src,
         ));
-    }
-    out
-}
-
-/// Block-level edits only: `"null_resource"` label rewrite to
-/// `"terraform_data"` and `triggers` attribute key rename to
-/// `triggers_replace`. Excludes reference rewrites — the scoped
-/// emit path consumes those from the shared combined-ref cache
-/// to avoid a duplicate body walk per deprecation kind.
-fn scan_null_resource_block_edits(
-    body: &Body,
-    rope: &Rope,
-    names: Option<&FxHashSet<String>>,
-) -> Vec<TextEdit> {
-    use hcl_edit::repr::Span as _;
-
-    let mut out = Vec::new();
-    for structure in body.iter() {
-        let Some(block) = structure.as_block() else {
-            continue;
-        };
-        if block.ident.as_str() != "resource" {
-            continue;
-        }
-        let Some(label) = block.labels.first() else {
-            continue;
-        };
-        if label_str(label) != Some("null_resource") {
-            continue;
-        }
-        if let Some(filter) = names {
-            let block_name = block.labels.get(1).and_then(label_str).unwrap_or("");
-            if !filter.contains(block_name) {
-                continue;
-            }
-        }
-
-        if let Some(span) = label.span() {
-            if let (Ok(start), Ok(end)) = (
-                tfls_parser::byte_offset_to_lsp_position(rope, span.start),
-                tfls_parser::byte_offset_to_lsp_position(rope, span.end),
-            ) {
-                out.push(TextEdit {
-                    range: Range { start, end },
-                    new_text: "\"terraform_data\"".into(),
-                });
-            }
-        }
-        for sub in block.body.iter() {
-            let Some(attr) = sub.as_attribute() else {
-                continue;
-            };
-            if attr.key.as_str() != "triggers" {
-                continue;
-            }
-            if let Some(span) = attr.key.span() {
-                if let (Ok(start), Ok(end)) = (
-                    tfls_parser::byte_offset_to_lsp_position(rope, span.start),
-                    tfls_parser::byte_offset_to_lsp_position(rope, span.end),
-                ) {
-                    out.push(TextEdit {
-                        range: Range { start, end },
-                        new_text: "triggers_replace".into(),
-                    });
-                }
-            }
-        }
     }
     out
 }
@@ -1650,30 +1605,69 @@ fn make_replace_null_resource_for_diag(
     None
 }
 
-/// Names (`labels.get(1)`) of every `resource "null_resource"
-/// "X"` block in `body`. Used to drive the moved-block
-/// generator: each name becomes a `moved { from =
-/// null_resource.X to = terraform_data.X }` block in `moved.tf`
-/// alongside the rewrite, so Terraform migrates state in place
-/// instead of destroy+create.
-fn null_resource_names_in_body(body: &Body) -> Vec<String> {
-    let mut out = Vec::new();
+/// Combined block-edits + names walker. Equivalent to calling
+/// [`scan_null_resource_block_edits`] + [`null_resource_names_in_body`]
+/// back-to-back, but walks `body.iter()` exactly once. Saves a
+/// duplicate body iteration on the hot
+/// `code_action_deprecation/large` path.
+fn scan_null_resource_block_edits_and_names(
+    body: &Body,
+    rope: &Rope,
+    names_filter: Option<&FxHashSet<String>>,
+) -> (Vec<TextEdit>, Vec<String>) {
+    use hcl_edit::repr::Span as _;
+    let mut edits = Vec::new();
+    let mut names = Vec::new();
     for structure in body.iter() {
-        let Some(block) = structure.as_block() else {
-            continue;
-        };
+        let Some(block) = structure.as_block() else { continue };
         if block.ident.as_str() != "resource" {
             continue;
         }
-        if block.labels.first().and_then(label_str) != Some("null_resource") {
+        let Some(label) = block.labels.first() else { continue };
+        if label_str(label) != Some("null_resource") {
             continue;
         }
-        if let Some(name) = block.labels.get(1).and_then(label_str) {
-            out.push(name.to_string());
+        let block_name = block.labels.get(1).and_then(label_str).unwrap_or("");
+        if let Some(filter) = names_filter {
+            if !filter.contains(block_name) {
+                continue;
+            }
+        }
+        if !block_name.is_empty() {
+            names.push(block_name.to_string());
+        }
+        if let Some(span) = label.span() {
+            if let (Ok(start), Ok(end)) = (
+                tfls_parser::byte_offset_to_lsp_position(rope, span.start),
+                tfls_parser::byte_offset_to_lsp_position(rope, span.end),
+            ) {
+                edits.push(TextEdit {
+                    range: Range { start, end },
+                    new_text: "\"terraform_data\"".into(),
+                });
+            }
+        }
+        for sub in block.body.iter() {
+            let Some(attr) = sub.as_attribute() else { continue };
+            if attr.key.as_str() != "triggers" {
+                continue;
+            }
+            if let Some(span) = attr.key.span() {
+                if let (Ok(start), Ok(end)) = (
+                    tfls_parser::byte_offset_to_lsp_position(rope, span.start),
+                    tfls_parser::byte_offset_to_lsp_position(rope, span.end),
+                ) {
+                    edits.push(TextEdit {
+                        range: Range { start, end },
+                        new_text: "triggers_replace".into(),
+                    });
+                }
+            }
         }
     }
-    out
+    (edits, names)
 }
+
 
 /// Names already covered by a `moved { from = null_resource.X
 /// to = terraform_data.X }` block in `body`. The generator
@@ -1806,7 +1800,13 @@ fn emit_null_resource_actions(
                     } else if !module_supports_terraform_data(state, doc_uri) {
                         return None;
                     }
-                    let block_edits = scan_null_resource_block_edits(body, &doc.rope, None);
+                    // Single body walk that yields BOTH the block edits
+                    // and the resource names in one pass. Saves a
+                    // duplicate `body.iter()` over the same blocks (was
+                    // ~half of `emit_null_resource_actions`'s per-doc
+                    // cost on the 500-block bench).
+                    let (block_edits, names) =
+                        scan_null_resource_block_edits_and_names(body, &doc.rope, None);
                     let ref_edits = null_refs_from_cache(
                         combined_ref_cache,
                         doc_uri,
@@ -1819,7 +1819,7 @@ fn emit_null_resource_actions(
                     if all.is_empty() {
                         return None;
                     }
-                    Some((all, null_resource_names_in_body(body)))
+                    Some((all, names))
                 })();
                 scan_cache.insert(doc_uri.clone(), row);
             }
@@ -2417,6 +2417,242 @@ fn is_deprecated_lookup(diag: &Diagnostic) -> bool {
         && diag
             .message
             .contains("two-argument `lookup()` is deprecated")
+}
+
+fn is_unknown_provider_local(diag: &Diagnostic) -> bool {
+    diag.severity == Some(DiagnosticSeverity::ERROR)
+        && diag.source.as_deref() == Some("terraform-ls-rs")
+        && diag.message.starts_with("Unknown provider local name")
+}
+
+fn is_unknown_provider_function(diag: &Diagnostic) -> bool {
+    diag.severity == Some(DiagnosticSeverity::WARNING)
+        && diag.source.as_deref() == Some("terraform-ls-rs")
+        && diag.message.contains("does not expose a function")
+}
+
+/// Quick-fixes for "Unknown provider local name `X`": list every
+/// alias declared in the module's `required_providers` and offer a
+/// rewrite. Edit replaces only the LOCAL segment (between
+/// `provider::` and the trailing `::`) so call shape stays intact.
+fn make_unknown_provider_local_quickfixes(
+    state: &tfls_state::StateStore,
+    uri: &Url,
+    diag: &Diagnostic,
+    doc: &tfls_state::DocumentState,
+) -> Vec<CodeAction> {
+    let local_range =
+        match locate_provider_local_range(&doc.rope, &doc.rope.to_string(), &diag.range) {
+            Some(r) => r,
+            None => return Vec::new(),
+        };
+    let candidates = collect_required_providers_locals(state, uri);
+    let bad = match diag.message.split('`').nth(1) {
+        Some(s) => s.to_string(),
+        None => String::new(),
+    };
+    candidates
+        .into_iter()
+        .filter(|c| c != &bad)
+        .map(|c| {
+            let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+            changes.insert(
+                uri.clone(),
+                vec![TextEdit {
+                    range: local_range,
+                    new_text: c.clone(),
+                }],
+            );
+            CodeAction {
+                title: format!("Replace with `{c}`"),
+                kind: Some(CodeActionKind::QUICKFIX),
+                diagnostics: Some(vec![diag.clone()]),
+                edit: Some(WorkspaceEdit {
+                    changes: Some(changes),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        })
+        .collect()
+}
+
+/// Quick-fixes for "Provider `aws` does not expose a function `X`":
+/// list every function exposed by that provider and offer a rewrite
+/// of the fn-name segment.
+fn make_unknown_provider_function_quickfixes(
+    state: &tfls_state::StateStore,
+    uri: &Url,
+    diag: &Diagnostic,
+    doc: &tfls_state::DocumentState,
+) -> Vec<CodeAction> {
+    let text = doc.rope.to_string();
+    let fn_range = match locate_provider_fn_range(&doc.rope, &text, &diag.range) {
+        Some(r) => r,
+        None => return Vec::new(),
+    };
+    // Pull the provider name out of the message: the `Provider \`X\``
+    // prefix is the canonical form `make_provider_function_call_diagnostics`
+    // emits.
+    let provider = match diag.message.split('`').nth(1) {
+        Some(s) => s.to_string(),
+        None => return Vec::new(),
+    };
+    let typed_fn = match diag.message.split('`').nth(3) {
+        Some(s) => s.to_string(),
+        None => String::new(),
+    };
+    let suffix_marker = format!("::{provider}::");
+    let mut candidates: Vec<String> = state
+        .functions
+        .iter()
+        .filter_map(|e| {
+            let key = e.key();
+            if !key.starts_with("provider::") {
+                return None;
+            }
+            let idx = key.find(&suffix_marker)?;
+            let fn_name = &key[idx + suffix_marker.len()..];
+            if fn_name.is_empty() || fn_name == typed_fn {
+                return None;
+            }
+            Some(fn_name.to_string())
+        })
+        .collect();
+    candidates.sort();
+    candidates.dedup();
+    candidates
+        .into_iter()
+        .map(|c| {
+            let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+            changes.insert(
+                uri.clone(),
+                vec![TextEdit {
+                    range: fn_range,
+                    new_text: c.clone(),
+                }],
+            );
+            CodeAction {
+                title: format!("Replace with `{c}`"),
+                kind: Some(CodeActionKind::QUICKFIX),
+                diagnostics: Some(vec![diag.clone()]),
+                edit: Some(WorkspaceEdit {
+                    changes: Some(changes),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        })
+        .collect()
+}
+
+fn collect_required_providers_locals(
+    state: &tfls_state::StateStore,
+    uri: &Url,
+) -> Vec<String> {
+    use std::collections::BTreeSet;
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    let mut harvest = |body: &hcl_edit::structure::Body| {
+        for structure in body.iter() {
+            let Some(block) = structure.as_block() else { continue };
+            if block.ident.as_str() != "terraform" {
+                continue;
+            }
+            for inner in block.body.iter() {
+                let Some(rp_block) = inner.as_block() else { continue };
+                if rp_block.ident.as_str() != "required_providers" {
+                    continue;
+                }
+                for entry in rp_block.body.iter() {
+                    if let Some(attr) = entry.as_attribute() {
+                        out.insert(attr.key.as_str().to_string());
+                    }
+                }
+            }
+        }
+    };
+    if let Some(doc) = state.documents.get(uri) {
+        if let Some(body) = doc.parsed.body.as_ref() {
+            harvest(body);
+        }
+    }
+    if let Some(target_dir) = crate::handlers::util::parent_dir(uri) {
+        for entry in state.documents.iter() {
+            let other_uri = entry.key();
+            if other_uri == uri {
+                continue;
+            }
+            let Ok(path) = other_uri.to_file_path() else {
+                continue;
+            };
+            if path.parent() != Some(target_dir.as_path()) {
+                continue;
+            }
+            let doc = entry.value();
+            if let Some(body) = doc.parsed.body.as_ref() {
+                harvest(body);
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// Given the diagnostic range covering `provider::LOCAL::fn`,
+/// return the range covering JUST `LOCAL` so the edit replaces only
+/// the alias segment.
+fn locate_provider_local_range(
+    rope: &Rope,
+    text: &str,
+    diag_range: &lsp_types::Range,
+) -> Option<lsp_types::Range> {
+    let start = tfls_parser::lsp_position_to_byte_offset(rope, diag_range.start).ok()?;
+    let bytes = text.as_bytes();
+    if !text[start..].starts_with("provider::") {
+        return None;
+    }
+    let local_start = start + "provider::".len();
+    let mut p = local_start;
+    while p < bytes.len() && (bytes[p].is_ascii_alphanumeric() || bytes[p] == b'_') {
+        p += 1;
+    }
+    if p == local_start {
+        return None;
+    }
+    let s = tfls_parser::byte_offset_to_lsp_position(rope, local_start).ok()?;
+    let e = tfls_parser::byte_offset_to_lsp_position(rope, p).ok()?;
+    Some(lsp_types::Range { start: s, end: e })
+}
+
+/// Given the diagnostic range covering `provider::LOCAL::fn`,
+/// return the range covering JUST `fn`.
+fn locate_provider_fn_range(
+    rope: &Rope,
+    text: &str,
+    diag_range: &lsp_types::Range,
+) -> Option<lsp_types::Range> {
+    let start = tfls_parser::lsp_position_to_byte_offset(rope, diag_range.start).ok()?;
+    let bytes = text.as_bytes();
+    if !text[start..].starts_with("provider::") {
+        return None;
+    }
+    let mut p = start + "provider::".len();
+    while p < bytes.len() && (bytes[p].is_ascii_alphanumeric() || bytes[p] == b'_') {
+        p += 1;
+    }
+    if p + 2 > bytes.len() || &bytes[p..p + 2] != b"::" {
+        return None;
+    }
+    let fn_start = p + 2;
+    let mut q = fn_start;
+    while q < bytes.len() && (bytes[q].is_ascii_alphanumeric() || bytes[q] == b'_') {
+        q += 1;
+    }
+    if q == fn_start {
+        return None;
+    }
+    let s = tfls_parser::byte_offset_to_lsp_position(rope, fn_start).ok()?;
+    let e = tfls_parser::byte_offset_to_lsp_position(rope, q).ok()?;
+    Some(lsp_types::Range { start: s, end: e })
 }
 
 /// Compute the `(arg1_src, arg2_src)` pair for the 2-arg `lookup`

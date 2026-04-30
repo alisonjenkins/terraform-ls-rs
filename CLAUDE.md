@@ -295,7 +295,7 @@ Code-action handler runs many independent body scans / formats per invocation. S
 | Combined deprecation ref cache            | Single `code_action()` | Drops on return                                  |
 | Module-supports gate cache                | Single emit fn         | Drops on return                                  |
 
-Bench delta from baseline (`tfls-lsp/benches/handlers.rs::code_action_deprecation` at the 500-block synthetic worst-case): **70 ms → ~11 ms (-84%)**. Real-world workspaces benefit further from the cross-call format cache — repeated code-action menu opens on an unchanged doc skip the formatter entirely.
+Bench delta from baseline (`tfls-lsp/benches/handlers.rs::code_action_deprecation` at the 500-block synthetic worst-case): **70 ms → ~10.5 ms (-85%)**. Subsequent micro-optimisations: (a) `scan_null_resource_block_edits` + `null_resource_names_in_body` consolidated into one body walk; (b) `scan_blocks_of_kind` swapped its per-byte `rope.byte_slice(end..end+1).to_string()` trailing-whitespace probe for a `rope.to_string()` byte-array indexed scan, halving cost on the move-outputs path. Steady-state breakdown (10ms): `null_resource` 3.5ms, `template_file` 3.2ms, `move_outputs` 2.0ms, everything else <0.5ms total. Real-world workspaces benefit further from the cross-call format cache — repeated code-action menu opens on an unchanged doc skip the formatter entirely.
 
 Bench coverage for the freshly-added block-rename path: `code_action_block_rename` (multi-scope) + `code_action_block_rename_cursor` exercise AWS alb (Aliased) + Kubernetes pod (Manual) at 10 / 100 / 250-500 block scales. All sub-5ms baseline.
 
