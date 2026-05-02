@@ -2732,7 +2732,7 @@ dependencies = [
  "tfls-walker",
  "thiserror 2.0.18",
  "tokio",
- "tower 0.4.13",
+ "tower 0.5.3",
  "tower-lsp",
  "tracing",
 ]
@@ -2779,7 +2779,7 @@ dependencies = [
  "tokio-rustls",
  "tonic",
  "tonic-build",
- "tower 0.4.13",
+ "tower 0.5.3",
  "tracing",
  "tracing-subscriber",
 ]
@@ -3152,7 +3152,6 @@ version = "0.1.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100"
 dependencies = [
- "log",
  "pin-project-lite",
  "tracing-attributes",
  "tracing-core",
