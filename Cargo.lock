@@ -2650,8 +2650,10 @@ name = "tfls-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "futures",
  "hcl-edit",
  "lsp-types",
+ "reqwest",
  "serde_json",
  "sonic-rs",
  "tfls-core",

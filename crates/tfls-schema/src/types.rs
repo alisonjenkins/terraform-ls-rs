@@ -82,6 +82,16 @@ pub struct AttributeSchema {
     pub exactly_one_of: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub at_least_one_of: Vec<String>,
+
+    /// Enumerated set of values the attribute accepts, mined from the
+    /// registry's hand-written Markdown ("Possible values: `X`, `Y`",
+    /// "Must be one of `X`, `Y`", etc — see
+    /// `tfls_provider_protocol::registry_docs::extract_allowed_values`).
+    /// The Plugin Framework provider protocol does NOT carry validators
+    /// over the wire; the registry prose is the only source we have.
+    /// `None` = no enum information mined; empty list is never produced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_values: Option<Vec<String>>,
 }
 
 /// How a nested block relates to its parent.

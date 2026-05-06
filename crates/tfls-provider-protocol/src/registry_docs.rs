@@ -113,7 +113,7 @@ fn build_http_client() -> Result<reqwest::Client, ProtocolError> {
 /// Falls back to `std::env::temp_dir()` if the platform dir is
 /// unavailable (e.g. running under a minimal container without
 /// `HOME` set).
-fn cache_root() -> PathBuf {
+pub fn cache_root() -> PathBuf {
     if let Some(base) = dirs::cache_dir() {
         return base.join("terraform-ls-rs").join("provider-docs");
     }
@@ -125,7 +125,24 @@ fn cache_root() -> PathBuf {
 /// Version tag for the parsed-descriptions cache. Bump when the
 /// on-disk format changes incompatibly so stale caches don't cause
 /// subtle miscompares or panics on deserialize.
-const PARSED_CACHE_VERSION: u32 = 1;
+///
+/// v2 added `ParsedAttribute { description, allowed_values }` —
+/// previously the cache stored a bare description string per
+/// attribute. Bumping forces a one-shot re-fetch on existing
+/// installs so allowed-values info gets mined for cached
+/// providers.
+const PARSED_CACHE_VERSION: u32 = 2;
+
+/// One attribute's parsed registry-doc info. Description carries
+/// the bullet's prose; `allowed_values` carries any enum mined
+/// out of "Possible values: `X`, `Y`" / "Must be one of `X`, `Y`"
+/// / "Valid values: `X`, `Y`" prose.
+#[derive(Debug, Clone, serde::Serialize, Deserialize, PartialEq, Eq)]
+pub struct ParsedAttribute {
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_values: Option<Vec<String>>,
+}
 
 /// Parsed-descriptions cache: the consolidated output of running
 /// enrichment for one (namespace/name/version) tuple, keyed in a
@@ -137,13 +154,13 @@ struct ParsedDocsCache {
     namespace: String,
     name: String,
     version: String,
-    /// resource_type → (attribute_name → description)
-    resources: HashMap<String, HashMap<String, String>>,
-    /// data_source_type → (attribute_name → description)
-    data_sources: HashMap<String, HashMap<String, String>>,
+    /// resource_type → (attribute_name → parsed info)
+    resources: HashMap<String, HashMap<String, ParsedAttribute>>,
+    /// data_source_type → (attribute_name → parsed info)
+    data_sources: HashMap<String, HashMap<String, ParsedAttribute>>,
 }
 
-fn parsed_cache_path(namespace: &str, name: &str, version: &str) -> PathBuf {
+pub fn parsed_cache_path(namespace: &str, name: &str, version: &str) -> PathBuf {
     cache_root()
         .join(sanitise(namespace))
         .join(sanitise(name))
@@ -202,7 +219,7 @@ fn index_cache_path(namespace: &str, name: &str, version: &str) -> PathBuf {
         .join("index.json")
 }
 
-fn doc_cache_path(namespace: &str, name: &str, version: &str, doc_id: &str) -> PathBuf {
+pub fn doc_cache_path(namespace: &str, name: &str, version: &str, doc_id: &str) -> PathBuf {
     cache_root()
         .join(sanitise(namespace))
         .join(sanitise(name))
@@ -319,8 +336,26 @@ pub async fn fetch_doc_content(
 /// `- `name` (Type) description` style bullets out of the
 /// `Argument Reference` / `Attribute Reference` sections.
 ///
-/// Returns a map from attribute name → description string.
-pub fn parse_attribute_descriptions(markdown: &str) -> HashMap<String, String> {
+/// Returns a map from attribute name → [`ParsedAttribute`]. Each
+/// entry carries the prose description plus any enum surfaced by
+/// [`extract_allowed_values`] (e.g. "Possible values: `X`, `Y`").
+pub fn parse_attribute_descriptions(markdown: &str) -> HashMap<String, ParsedAttribute> {
+    let raw = parse_attribute_descriptions_raw(markdown);
+    raw.into_iter()
+        .map(|(k, v)| {
+            let allowed_values = extract_allowed_values(&v);
+            (
+                k,
+                ParsedAttribute {
+                    description: v,
+                    allowed_values,
+                },
+            )
+        })
+        .collect()
+}
+
+fn parse_attribute_descriptions_raw(markdown: &str) -> HashMap<String, String> {
     let mut out: HashMap<String, String> = HashMap::new();
 
     // Split markdown into top-level (`##`) sections. We only care about
@@ -367,8 +402,13 @@ pub fn parse_attribute_descriptions(markdown: &str) -> HashMap<String, String> {
         if let Some(h) = h2_start.captures(line).and_then(|c| c.get(1)) {
             flush(&mut current, &mut out);
             let title = h.as_str().to_ascii_lowercase();
-            in_section = title.contains("argument reference")
-                || title.contains("attribute reference")
+            // "Argument(s) Reference" / "Attribute(s) Reference"
+            // — azurerm uses plural ("## Arguments Reference"), aws
+            // uses singular ("## Argument Reference"). The plain
+            // "argument" / "attribute" stem covers both with no
+            // false positives in registry-doc h2s seen so far.
+            in_section = title.contains("argument")
+                || title.contains("attribute")
                 || title.contains("schema")
                 || title.contains("nested schema");
             continue;
@@ -436,6 +476,115 @@ pub fn parse_attribute_descriptions(markdown: &str) -> HashMap<String, String> {
     }
     flush(&mut current, &mut out);
     out
+}
+
+/// Mine an enumerated value list from a description's prose.
+///
+/// Recognises three phrasings the registry's hand-written docs
+/// commonly use:
+///
+/// - `Possible values are \`X\`, \`Y\`, \`Z\`.`
+/// - `Valid values: \`X\`, \`Y\`.`
+/// - `Must be one of \`X\`, \`Y\`.`
+///
+/// For boolean-as-string attributes (Plugin Framework's
+/// `log_progress` style) where prose is just "Verbose log
+/// option" with no explicit list, we conservatively return
+/// `None` rather than guessing. Heuristics over absent signal
+/// would surface wrong values.
+///
+/// The parser captures comma-separated backticked tokens AND
+/// "X, Y, Z, or W" / "X, Y, Z and W" tail styles. Returns
+/// `None` when no recognised phrasing appears or the captured
+/// list is empty.
+pub fn extract_allowed_values(desc: &str) -> Option<Vec<String>> {
+    // Anchor: one of the recognised lead-in phrases. We extract
+    // the *substring* starting from after the lead-in so the
+    // value-list regex can run over it without re-walking the
+    // whole description.
+    let anchors = [
+        "possible values are ",
+        "possible values: ",
+        "valid values are ",
+        "valid values: ",
+        "must be one of ",
+        "can be one of ",
+        "can be either ",
+        "one of: ",
+    ];
+    let lower = desc.to_ascii_lowercase();
+    let after_anchor = anchors
+        .iter()
+        .find_map(|a| lower.find(a).map(|i| &desc[i + a.len()..]))?;
+
+    // Collect every backticked token in the immediately-following
+    // run of "list-like" text. Stop at the first sentence-ending
+    // period that isn't inside backticks (sloppy but works for
+    // the registry's prose: "Possible values are `a`, `b`.
+    // The default is `a`." — we want a, b only).
+    let token_re = Regex::new(r"`([^`]+)`").ok()?;
+    let mut values: Vec<String> = Vec::new();
+    let mut cursor = 0usize;
+    let bytes = after_anchor.as_bytes();
+    while cursor < bytes.len() {
+        let slice = &after_anchor[cursor..];
+        let Some(cap) = token_re.captures(slice) else {
+            break;
+        };
+        let m = cap.get(0)?;
+        let v = cap.get(1)?.as_str().to_string();
+        // Reject empty / whitespace-only tokens.
+        if !v.trim().is_empty() {
+            values.push(v);
+        }
+        cursor += m.end();
+
+        // Look at the gap between this token and the next
+        // backtick. If the gap contains a sentence-ending period
+        // that's followed by whitespace / end-of-string AND the
+        // gap doesn't look like the natural separator between
+        // list items, we're done.
+        let remainder = &after_anchor[cursor..];
+        let next_tick = remainder.find('`');
+        let stop_at = next_tick.unwrap_or(remainder.len());
+        let gap = &remainder[..stop_at];
+        if gap_breaks_list(gap) {
+            break;
+        }
+    }
+    if values.is_empty() {
+        None
+    } else {
+        Some(values)
+    }
+}
+
+/// True when the gap between two backticked tokens shouldn't
+/// continue the value list. Matches sentence-ending periods,
+/// double newlines, or "but" / "however" / "instead" prose.
+fn gap_breaks_list(gap: &str) -> bool {
+    let trimmed = gap.trim();
+    // Sentence-ending period followed by anything that isn't a
+    // continuation. "`X`. The default..." stops; "`X`." (end of
+    // run) also stops.
+    if let Some(period_idx) = trimmed.find(". ") {
+        // The period must come BEFORE any list-continuation
+        // character (', ' / ' or ' / ' and ').
+        let before_period = &trimmed[..period_idx];
+        if !before_period.contains(',')
+            && !before_period.ends_with(" or")
+            && !before_period.ends_with(" and")
+        {
+            return true;
+        }
+    }
+    if trimmed.ends_with('.') && !trimmed.contains(',') {
+        return true;
+    }
+    if gap.contains("\n\n") {
+        return true;
+    }
+    false
 }
 
 /// Merge registry-fetched descriptions into an existing
@@ -648,24 +797,40 @@ fn schema_has_missing_descriptions(schema: &tfls_schema::Schema) -> bool {
         .any(|a| a.description.as_deref().map(str::is_empty).unwrap_or(true))
 }
 
-/// Copy descriptions into empty slots of `block`'s attributes. Does NOT
-/// recurse into nested blocks: AWS SDKv2 docs reuse the same attribute
-/// name across many nested blocks (e.g. `bucket` appears top-level and
-/// again under replication-rule destinations), and naively propagating
-/// the top-level description into every nested block would produce
-/// misleading hover text. Nested attributes stay description-less —
-/// that's no worse than the pre-enrichment state.
+/// Copy descriptions + allowed values into empty slots of
+/// `block`'s attributes. Does NOT recurse into nested blocks: AWS
+/// SDKv2 docs reuse the same attribute name across many nested
+/// blocks (e.g. `bucket` appears top-level and again under
+/// replication-rule destinations), and naively propagating the
+/// top-level description into every nested block would produce
+/// misleading hover text. Nested attributes stay description-less
+/// — that's no worse than the pre-enrichment state.
+///
+/// `allowed_values` is overwritten only when the parsed entry
+/// supplies one AND the schema's existing slot is `None` —
+/// matching the conservative description-merge policy.
 fn merge_descriptions_into_block(
     block: &mut tfls_schema::BlockSchema,
-    descriptions: &HashMap<String, String>,
+    descriptions: &HashMap<String, ParsedAttribute>,
 ) -> usize {
     let mut updated = 0;
     for (attr_name, attr) in block.attributes.iter_mut() {
+        let Some(parsed) = descriptions.get(attr_name) else {
+            continue;
+        };
+        let mut touched = false;
         if attr.description.as_deref().map(str::is_empty).unwrap_or(true) {
-            if let Some(desc) = descriptions.get(attr_name) {
-                attr.description = Some(desc.clone());
-                updated += 1;
+            attr.description = Some(parsed.description.clone());
+            touched = true;
+        }
+        if attr.allowed_values.is_none() {
+            if let Some(av) = &parsed.allowed_values {
+                attr.allowed_values = Some(av.clone());
+                touched = true;
             }
+        }
+        if touched {
+            updated += 1;
         }
     }
     updated
@@ -697,17 +862,67 @@ This resource supports the following arguments:
 "#;
         let descs = parse_attribute_descriptions(md);
         assert_eq!(
-            descs.get("domain").map(String::as_str),
+            descs.get("domain").map(|p| p.description.as_str()),
             Some("(Required) The domain name to assign to SES")
         );
         assert!(
-            descs.get("other").unwrap().contains("across two lines"),
+            descs
+                .get("other")
+                .unwrap()
+                .description
+                .contains("across two lines"),
             "multi-line continuation: {:?}",
-            descs.get("other")
+            descs.get("other"),
         );
         assert_eq!(
-            descs.get("arn").map(String::as_str),
+            descs.get("arn").map(|p| p.description.as_str()),
             Some("The ARN of the thing")
+        );
+    }
+
+    #[test]
+    fn parses_azurerm_arguments_reference_plural() {
+        // azurerm uses `## Arguments Reference` (plural) and
+        // `## Attributes Reference` (plural). The earlier parser
+        // only matched the singular forms ("argument reference"
+        // is NOT a substring of "arguments reference"), so every
+        // azurerm resource produced zero attributes and dropped
+        // out of the enrichment cache. Pin the plural form.
+        let md = r#"
+# azurerm_automation_runbook
+
+## Arguments Reference
+
+The following arguments are supported:
+
+* `name` - (Required) Specifies the name of the Runbook.
+
+* `log_progress` - (Required) Progress log option.
+
+* `log_verbose` - (Required) Verbose log option.
+
+## Attributes Reference
+
+In addition to the Arguments listed above - the following Attributes are exported:
+
+* `id` - The Automation Runbook ID.
+"#;
+        let descs = parse_attribute_descriptions(md);
+        assert_eq!(
+            descs.get("name").map(|p| p.description.as_str()),
+            Some("(Required) Specifies the name of the Runbook")
+        );
+        assert_eq!(
+            descs.get("log_progress").map(|p| p.description.as_str()),
+            Some("(Required) Progress log option")
+        );
+        assert_eq!(
+            descs.get("log_verbose").map(|p| p.description.as_str()),
+            Some("(Required) Verbose log option")
+        );
+        assert_eq!(
+            descs.get("id").map(|p| p.description.as_str()),
+            Some("The Automation Runbook ID")
         );
     }
 
@@ -726,11 +941,11 @@ This resource supports the following arguments:
 "#;
         let descs = parse_attribute_descriptions(md);
         assert_eq!(
-            descs.get("region").map(String::as_str),
+            descs.get("region").map(|p| p.description.as_str()),
             Some("AWS region name")
         );
         assert_eq!(
-            descs.get("profile").map(String::as_str),
+            descs.get("profile").map(|p| p.description.as_str()),
             Some("Named AWS profile")
         );
     }
@@ -760,8 +975,20 @@ This resource supports the following arguments:
             },
         );
         let mut descs = HashMap::new();
-        descs.insert("a".into(), "from registry".into());
-        descs.insert("b".into(), "should not overwrite".into());
+        descs.insert(
+            "a".into(),
+            ParsedAttribute {
+                description: "from registry".into(),
+                allowed_values: None,
+            },
+        );
+        descs.insert(
+            "b".into(),
+            ParsedAttribute {
+                description: "should not overwrite".into(),
+                allowed_values: None,
+            },
+        );
 
         let updated = merge_descriptions_into_block(&mut block, &descs);
         assert_eq!(updated, 1);
@@ -773,5 +1000,148 @@ This resource supports the following arguments:
             block.attributes.get("b").unwrap().description.as_deref(),
             Some("already here")
         );
+    }
+
+    #[test]
+    fn merge_fills_allowed_values_alongside_description() {
+        use tfls_schema::{AttributeSchema, BlockSchema};
+        let mut block = BlockSchema::default();
+        block.attributes.insert(
+            "trace".into(),
+            AttributeSchema {
+                description: None,
+                allowed_values: None,
+                ..Default::default()
+            },
+        );
+        let mut descs = HashMap::new();
+        descs.insert(
+            "trace".into(),
+            ParsedAttribute {
+                description: "Possible values are `0`, `9` or `15`.".into(),
+                allowed_values: Some(vec!["0".into(), "9".into(), "15".into()]),
+            },
+        );
+
+        let updated = merge_descriptions_into_block(&mut block, &descs);
+        assert_eq!(updated, 1);
+        let attr = block.attributes.get("trace").unwrap();
+        assert!(attr.description.is_some());
+        assert_eq!(
+            attr.allowed_values.as_deref(),
+            Some(["0".to_string(), "9".to_string(), "15".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn extract_allowed_values_handles_possible_values_phrasing() {
+        let v = extract_allowed_values(
+            "(Optional) The thing. Possible values are `Graph`, `PowerShell`, `Python3`.",
+        );
+        assert_eq!(
+            v,
+            Some(vec![
+                "Graph".to_string(),
+                "PowerShell".to_string(),
+                "Python3".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn extract_allowed_values_handles_valid_values_phrasing() {
+        let v = extract_allowed_values("Valid values: `true`, `false`.");
+        assert_eq!(v, Some(vec!["true".to_string(), "false".to_string()]));
+    }
+
+    #[test]
+    fn extract_allowed_values_handles_must_be_one_of() {
+        let v = extract_allowed_values("Must be one of `red`, `green`, `blue`.");
+        assert_eq!(
+            v,
+            Some(vec![
+                "red".to_string(),
+                "green".to_string(),
+                "blue".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn extract_allowed_values_handles_can_be_either() {
+        // azurerm runbook_type uses "can be either `X`, `Y`, ... or `Z`".
+        let v = extract_allowed_values(
+            "(Required) The type of the runbook - can be either `Graph`, \
+             `PowerShell` or `Script`. Changing this forces a new resource.",
+        );
+        assert_eq!(
+            v,
+            Some(vec![
+                "Graph".to_string(),
+                "PowerShell".to_string(),
+                "Script".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn extract_allowed_values_handles_x_y_or_z() {
+        // azurerm_automation_runbook's runbook_type uses this style:
+        // "can be either `Graph`, `GraphPowerShell`, ... or `Script`."
+        let v = extract_allowed_values(
+            "Possible values are `Graph`, `GraphPowerShell`, `Python3`, or `Script`.",
+        );
+        assert_eq!(
+            v,
+            Some(vec![
+                "Graph".to_string(),
+                "GraphPowerShell".to_string(),
+                "Python3".to_string(),
+                "Script".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn extract_allowed_values_returns_none_for_prose_without_anchor() {
+        // log_progress description: "(Required) Progress log option."
+        // — no enum phrasing means we don't guess.
+        let v = extract_allowed_values("(Required) Progress log option.");
+        assert_eq!(v, None);
+    }
+
+    #[test]
+    fn extract_allowed_values_stops_at_sentence_end() {
+        // The description trails into more prose after the
+        // values; we must NOT grab backticked tokens from the
+        // tail sentence.
+        let v = extract_allowed_values(
+            "Possible values are `0`, `9` or `15`. The default is `0`. \
+             Other notes about `unrelated_thing` follow.",
+        );
+        assert_eq!(
+            v,
+            Some(vec!["0".to_string(), "9".to_string(), "15".to_string()])
+        );
+    }
+
+    #[test]
+    fn parse_attribute_descriptions_propagates_allowed_values() {
+        let md = r#"
+## Arguments Reference
+
+* `runbook_type` - (Required) The type. Possible values are `Graph`, `PowerShell`.
+
+* `description` - (Optional) A description.
+"#;
+        let descs = parse_attribute_descriptions(md);
+        let rt = descs.get("runbook_type").unwrap();
+        assert!(rt.description.contains("Possible values"));
+        assert_eq!(
+            rt.allowed_values,
+            Some(vec!["Graph".to_string(), "PowerShell".to_string()])
+        );
+        // No anchor in plain "(Optional) A description" → None.
+        assert_eq!(descs.get("description").unwrap().allowed_values, None);
     }
 }

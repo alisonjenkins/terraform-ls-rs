@@ -113,6 +113,30 @@ cargo run --release --bin tfls-deprecation-scrape -- <dir> --uncovered-only
 
 The markdown output groups uncovered candidates by provider, surfaces registry-doc URLs (where migration breadcrumbs typically live), and lists already-covered labels separately so curators don't duplicate work. `is_hardcoded_deprecation` from `tfls-diag` is the source of truth for the covered set.
 
+### `tfls-doc-probe`
+
+Inspects registry-doc enrichment for a single provider. Hover descriptions for SDK-v2 / Plugin-Framework providers come from the Terraform Registry's hand-written Markdown rather than the gRPC schema (most providers ship empty descriptions over the wire). The enrichment pipeline in `tfls-provider-protocol::registry_docs` is best-effort and silently skips providers whose Markdown shape the parser doesn't recognise — this binary surfaces the pipeline state so a "hover doesn't work for X" report is one command away from a root cause.
+
+```bash
+# Inspect cache + index, then parse one resource's docs:
+cargo run --bin tfls-doc-probe -- hashicorp/azurerm@4.50.0 \
+    --resource azurerm_automation_runbook
+
+# Walk every resource in the index and report ones whose parser
+# output is empty (canary for unfamiliar Markdown shape):
+cargo run --bin tfls-doc-probe -- hashicorp/azurerm@4.50.0 --list-uncovered
+
+# Dump the raw Markdown content alongside parser output:
+cargo run --bin tfls-doc-probe -- hashicorp/azurerm@4.50.0 \
+    --resource azurerm_automation_runbook --show-markdown
+
+# Force a re-fetch (purges the doc + parsed cache slots):
+cargo run --bin tfls-doc-probe -- hashicorp/azurerm@4.50.0 \
+    --resource azurerm_automation_runbook --no-cache
+```
+
+Use this first when a user reports "hover descriptions empty for X". Output flags whether the parsed-descriptions cache exists, whether the registry index returned non-zero docs, and whether the Markdown parser produced any attribute entries. Each item also shows the mined `[valid: \`X\`, \`Y\`]` enum (when found) so you can audit the `extract_allowed_values` heuristics from real docs.
+
 ### `tfls-code-action-profile`
 
 Standalone profile driver for the `code_action` handler. Builds a synthetic in-memory workspace (configurable via positional args), fires N code-action requests against the active doc, prints the average. Used for perf regression hunts without spinning up a real LSP client.

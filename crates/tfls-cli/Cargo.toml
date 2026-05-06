@@ -37,6 +37,10 @@ path = "src/bin/code_action_profile.rs"
 name = "tfls-deprecation-scrape"
 path = "src/bin/deprecation_scrape.rs"
 
+[[bin]]
+name = "tfls-doc-probe"
+path = "src/bin/doc_probe.rs"
+
 [dependencies]
 tfls-lsp.workspace = true
 tfls-state.workspace = true
@@ -55,3 +59,5 @@ tower-lsp.workspace = true
 clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "json", "gzip"] }
+futures = "0.3"

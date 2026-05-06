@@ -75,6 +75,9 @@ fn attribute_from_proto(
         required_with: Vec::new(),
         exactly_one_of: Vec::new(),
         at_least_one_of: Vec::new(),
+        // tfplugin5 doesn't expose validators either; mined from
+        // registry Markdown by the enrichment pass.
+        allowed_values: None,
     })
 }
 

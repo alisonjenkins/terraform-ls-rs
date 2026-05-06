@@ -85,6 +85,10 @@ fn attribute_from_proto(
         required_with: Vec::new(),
         exactly_one_of: Vec::new(),
         at_least_one_of: Vec::new(),
+        // Plugin-protocol gRPC schemas don't carry validators
+        // over the wire — we mine these from the registry's
+        // hand-written Markdown later, not here.
+        allowed_values: None,
     })
 }
 
