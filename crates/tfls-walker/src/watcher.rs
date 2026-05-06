@@ -22,6 +22,12 @@ pub enum WorkspaceEvent {
     FileChanged(PathBuf),
     /// A Terraform file was removed.
     FileRemoved(PathBuf),
+    /// A `.terraform.lock.hcl` file was created, updated, or
+    /// removed in the given module directory. Carries the
+    /// containing dir, not the file path itself, so the
+    /// consumer can hand it straight to
+    /// `StateStore::invalidate_lock`.
+    LockFileChanged(PathBuf),
 }
 
 /// Handle to a running workspace watcher. Drop it to stop watching.
@@ -81,6 +87,20 @@ fn classify(de: &DebouncedEvent) -> Vec<WorkspaceEvent> {
         if should_ignore(path) {
             continue;
         }
+        if is_lockfile(path) {
+            // The lock file lives at the module root next to
+            // `.terraform/`. Emit the containing dir so consumers
+            // can invalidate per-module caches.
+            if let Some(parent) = path.parent() {
+                if matches!(
+                    de.event.kind,
+                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+                ) {
+                    out.push(WorkspaceEvent::LockFileChanged(parent.to_path_buf()));
+                }
+            }
+            continue;
+        }
         if !is_terraform_file(path) {
             continue;
         }
@@ -95,6 +115,10 @@ fn classify(de: &DebouncedEvent) -> Vec<WorkspaceEvent> {
         }
     }
     out
+}
+
+fn is_lockfile(path: &Path) -> bool {
+    path.file_name().and_then(|s| s.to_str()) == Some(".terraform.lock.hcl")
 }
 
 fn should_ignore(path: &Path) -> bool {
