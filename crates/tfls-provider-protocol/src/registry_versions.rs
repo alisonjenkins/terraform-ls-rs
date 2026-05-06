@@ -720,45 +720,50 @@ pub fn is_module_cached(namespace: &str, name: &str, provider: &str) -> bool {
 }
 
 /// Peek the cached latest version for `<namespace>/<name>` without
-/// touching the network. Reads either the Terraform or OpenTofu
-/// registry cache (whichever exists; falls through both), parses the
-/// JSON array of version strings, and returns the highest by
-/// [`semver_key`]. Returns `None` when neither cache file exists, the
-/// JSON is unparseable, or every entry fails semver parsing.
+/// touching the network. Returns the highest version that BOTH the
+/// Terraform Registry AND the OpenTofu Registry have indexed
+/// (intersection's max). Falls back to whichever single registry's
+/// cache exists when the other is missing. `None` when neither
+/// cache exists, the JSON is unparseable, or every entry fails
+/// semver parsing.
 ///
-/// Used by completion to bake the latest version into snippet
-/// placeholders ("`version = "~> X.Y"`") so users get a sensible
-/// default instead of a hard-coded `~> 1.0`. Callers that NEED the
-/// value (vs. just want the cached one if available) should call
-/// [`fetch_versions`] which performs the merge + sort already.
+/// Why intersect: bake-into-snippet defaults must resolve under
+/// both `terraform init` and `tofu init`. The OpenTofu registry
+/// often lags Terraform's by a release or two — picking the
+/// terraform-side absolute max would silently produce a constraint
+/// that `tofu init` can't satisfy.
+///
+/// Pre-releases (`-rc1`, `-beta`, etc.) are skipped — they're not
+/// useful defaults for a project's pinned version.
 pub fn cached_latest_version(namespace: &str, name: &str) -> Option<String> {
-    let mut best: Option<String> = None;
-    for registry in &["terraform", "opentofu"] {
-        let path = versions_cache_path(registry, namespace, name);
-        let body = match std::fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let versions: Vec<String> = match serde_json::from_str(&body) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        for v in versions {
-            // Skip pre-releases — `~> 4.71-rc1` isn't a useful default.
-            if v.contains('-') {
-                continue;
-            }
-            let candidate_key = semver_key(&v);
-            let take = match &best {
-                None => true,
-                Some(cur) => semver_key(cur) < candidate_key,
-            };
-            if take {
-                best = Some(v);
-            }
-        }
+    use std::collections::HashSet;
+
+    fn read_cache(path: &Path) -> Option<HashSet<String>> {
+        let body = std::fs::read_to_string(path).ok()?;
+        let versions: Vec<String> = serde_json::from_str(&body).ok()?;
+        Some(
+            versions
+                .into_iter()
+                .filter(|v| !v.contains('-'))
+                .collect(),
+        )
     }
-    best
+
+    let tf_path = versions_cache_path("terraform", namespace, name);
+    let tofu_path = versions_cache_path("opentofu", namespace, name);
+    let tf = read_cache(&tf_path);
+    let tofu = read_cache(&tofu_path);
+
+    let candidates: HashSet<String> = match (tf, tofu) {
+        (Some(a), Some(b)) => a.intersection(&b).cloned().collect(),
+        (Some(a), None) => a,
+        (None, Some(b)) => b,
+        (None, None) => return None,
+    };
+
+    candidates
+        .into_iter()
+        .max_by(|a, b| semver_key(a).cmp(&semver_key(b)))
 }
 
 /// Format a `MAJOR.MINOR` slice of a version string for use in
