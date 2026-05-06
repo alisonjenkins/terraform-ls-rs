@@ -45,6 +45,41 @@ pub fn spawn(backend: &Backend, uri: Url, version: Option<i32>) {
     });
 }
 
+/// Fire-and-forget eager fetch of Terraform / OpenTofu CLI release
+/// catalogues at server startup. Empty / un-initialised workspaces
+/// don't go through the per-document `did_open` path with anything
+/// meaningful to fetch — `collect_targets` returns empty until the
+/// user types something — so the on-disk cache stays cold and the
+/// first user-visible interaction (typing a `required_version`
+/// constraint, hovering over an existing one, or pulling a
+/// completion) ends up paying the full registry round-trip.
+///
+/// Doing this once on `initialize` populates the cache before the
+/// first keystroke, so completion / hover / inlay-hints / the
+/// "no matching version" diagnostic all light up immediately on
+/// the very first `did_change`.
+///
+/// One HTTP round trip apiece (GitHub releases for `terraform` /
+/// `opentofu`); 24h disk cache short-circuits subsequent calls.
+pub fn spawn_eager_tool_versions(client: tower_lsp::Client) {
+    tokio::spawn(async move {
+        let Ok(gh) = tfls_provider_protocol::tool_versions::build_http_client() else {
+            return;
+        };
+        if tfls_provider_protocol::tool_versions::fetch_tool_versions(&gh)
+            .await
+            .is_ok()
+        {
+            // Refresh inlay hints so the freshness annotations
+            // light up against the now-warm cache. Failure to
+            // refresh is non-fatal — clients that don't advertise
+            // the capability just won't refresh until the next
+            // user-driven request.
+            let _ = client.inlay_hint_refresh().await;
+        }
+    });
+}
+
 async fn prefetch_and_refresh(
     state: Arc<StateStore>,
     client: tower_lsp::Client,

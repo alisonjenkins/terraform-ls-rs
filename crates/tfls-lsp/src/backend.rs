@@ -186,6 +186,16 @@ impl LanguageServer for Backend {
 
         self.spawn_background().await;
 
+        // Warm the Terraform / OpenTofu CLI version cache eagerly so
+        // a user typing `required_version = "..."` in a brand-new
+        // empty file gets completion + inlay-hint freshness on the
+        // very first keystroke. Without this, the per-document
+        // `did_open` path's prefetch sees an empty body, finds no
+        // targets, and the cache stays cold until the user
+        // explicitly requests completion (which is the failure mode
+        // users hit on fresh, un-initialised workspaces).
+        crate::handlers::version_prefetch::spawn_eager_tool_versions(self.client.clone());
+
         for folder in params.workspace_folders.unwrap_or_default() {
             if let Ok(path) = folder.uri.to_file_path() {
                 self.spawn_workspace_watcher(path).await;
