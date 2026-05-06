@@ -5,6 +5,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::fs;
 use tfls_lsp::Backend;
 use tfls_lsp::handlers::document::compute_diagnostics;
 use tfls_state::DocumentState;
@@ -810,5 +811,168 @@ fn renamed_local_resolves_via_required_providers() {
         !msgs.iter()
             .any(|m| m.contains("trim_prefix") || m.contains("aws_v6")),
         "alias should resolve cleanly: {msgs:?}"
+    );
+}
+
+// --- .terraform.lock.hcl awareness ----------------------------------
+//
+// Lock-file pin overrides the lower bound of the declared
+// constraint. A `~> 1.0` constraint admits min 1.0.0 — so a rule
+// gated at >= 1.7.0 would normally NOT fire. But if the lock file
+// pins the provider at 1.7.0+ (the actual installed version), the
+// rule MUST fire — that's what `terraform plan` would run against.
+
+fn write_files(dir: &std::path::Path, files: &[(&str, &str)]) {
+    for (name, body) in files {
+        let path = dir.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, body).unwrap();
+    }
+}
+
+#[test]
+fn aws_lock_pin_unblocks_rule_that_constraint_floor_would_suppress() {
+    // `aws_alb` → `aws_lb` is gated at AWS provider 1.7.0 in
+    // `deprecated_aws_renames.rs`. With constraint `~> 1.0`
+    // (min admitted = 1.0.0), the rule is constraint-suppressed.
+    // A `.terraform.lock.hcl` pinning hashicorp/aws at 1.7.0
+    // must un-suppress.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    write_files(
+        dir,
+        &[
+            (
+                "terraform.tf",
+                "terraform {\n  required_providers {\n    aws = { source = \"hashicorp/aws\", version = \"~> 1.0\" }\n  }\n}\n",
+            ),
+            ("main.tf", "resource \"aws_alb\" \"x\" {}\n"),
+            (
+                ".terraform.lock.hcl",
+                "provider \"registry.terraform.io/hashicorp/aws\" {\n  version = \"1.7.0\"\n}\n",
+            ),
+        ],
+    );
+
+    let b = backend();
+    let tf_uri = Url::from_file_path(dir.join("terraform.tf")).unwrap();
+    let main_uri = Url::from_file_path(dir.join("main.tf")).unwrap();
+    insert(&b, &tf_uri, &fs::read_to_string(dir.join("terraform.tf")).unwrap());
+    insert(&b, &main_uri, &fs::read_to_string(dir.join("main.tf")).unwrap());
+
+    let msgs = messages(&b, &main_uri);
+    assert!(
+        msgs.iter().any(|m| m.contains("aws_lb")),
+        "lock pin 1.7.0 must un-suppress aws_alb→aws_lb rule; diags: {msgs:?}"
+    );
+}
+
+#[test]
+fn aws_constraint_alone_suppresses_rule_when_lock_absent() {
+    // Same as above, without the lock file. Confirms the
+    // baseline: under constraint `~> 1.0`, the rule does NOT
+    // fire — so the previous test's assertion is meaningful.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    write_files(
+        dir,
+        &[
+            (
+                "terraform.tf",
+                "terraform {\n  required_providers {\n    aws = { source = \"hashicorp/aws\", version = \"~> 1.0\" }\n  }\n}\n",
+            ),
+            ("main.tf", "resource \"aws_alb\" \"x\" {}\n"),
+        ],
+    );
+
+    let b = backend();
+    let tf_uri = Url::from_file_path(dir.join("terraform.tf")).unwrap();
+    let main_uri = Url::from_file_path(dir.join("main.tf")).unwrap();
+    insert(&b, &tf_uri, &fs::read_to_string(dir.join("terraform.tf")).unwrap());
+    insert(&b, &main_uri, &fs::read_to_string(dir.join("main.tf")).unwrap());
+
+    let msgs = messages(&b, &main_uri);
+    assert!(
+        !msgs.iter().any(|m| m.contains("aws_lb")),
+        "constraint `~> 1.0` (min 1.0.0) must suppress rule gated at 1.7.0; diags: {msgs:?}"
+    );
+}
+
+#[test]
+fn aws_lock_short_form_provider_resolves_via_implicit_hashicorp_namespace() {
+    // Short-form `aws = "~> 1.0"` (no `source = ...`) must still
+    // pair with the lock file's `hashicorp/aws` entry — short
+    // form implicitly resolves to that address.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    write_files(
+        dir,
+        &[
+            (
+                "terraform.tf",
+                "terraform {\n  required_providers {\n    aws = \"~> 1.0\"\n  }\n}\n",
+            ),
+            ("main.tf", "resource \"aws_alb\" \"x\" {}\n"),
+            (
+                ".terraform.lock.hcl",
+                "provider \"registry.terraform.io/hashicorp/aws\" {\n  version = \"1.7.0\"\n}\n",
+            ),
+        ],
+    );
+
+    let b = backend();
+    let tf_uri = Url::from_file_path(dir.join("terraform.tf")).unwrap();
+    let main_uri = Url::from_file_path(dir.join("main.tf")).unwrap();
+    insert(&b, &tf_uri, &fs::read_to_string(dir.join("terraform.tf")).unwrap());
+    insert(&b, &main_uri, &fs::read_to_string(dir.join("main.tf")).unwrap());
+
+    let msgs = messages(&b, &main_uri);
+    assert!(
+        msgs.iter().any(|m| m.contains("aws_lb")),
+        "short-form provider with hashicorp/aws lock pin must fire; diags: {msgs:?}"
+    );
+}
+
+#[test]
+fn aws_lock_invalidate_drops_diagnostic() {
+    // Cache invalidation contract: after the lock file is
+    // removed and `state.invalidate_lock` is called (mirroring
+    // the watcher path), diagnostics revert to constraint-only
+    // gating and the rule becomes suppressed again.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    write_files(
+        dir,
+        &[
+            (
+                "terraform.tf",
+                "terraform {\n  required_providers {\n    aws = { source = \"hashicorp/aws\", version = \"~> 1.0\" }\n  }\n}\n",
+            ),
+            ("main.tf", "resource \"aws_alb\" \"x\" {}\n"),
+            (
+                ".terraform.lock.hcl",
+                "provider \"registry.terraform.io/hashicorp/aws\" {\n  version = \"1.7.0\"\n}\n",
+            ),
+        ],
+    );
+
+    let b = backend();
+    let tf_uri = Url::from_file_path(dir.join("terraform.tf")).unwrap();
+    let main_uri = Url::from_file_path(dir.join("main.tf")).unwrap();
+    insert(&b, &tf_uri, &fs::read_to_string(dir.join("terraform.tf")).unwrap());
+    insert(&b, &main_uri, &fs::read_to_string(dir.join("main.tf")).unwrap());
+
+    // Sanity: with lock present, the rule fires.
+    let with_lock = messages(&b, &main_uri);
+    assert!(with_lock.iter().any(|m| m.contains("aws_lb")));
+
+    // Remove the lock file and invalidate the cache.
+    fs::remove_file(dir.join(".terraform.lock.hcl")).unwrap();
+    b.state.invalidate_lock(dir);
+
+    let without_lock = messages(&b, &main_uri);
+    assert!(
+        !without_lock.iter().any(|m| m.contains("aws_lb")),
+        "after invalidation + lock removal the rule must revert to constraint-only suppression; diags: {without_lock:?}"
     );
 }

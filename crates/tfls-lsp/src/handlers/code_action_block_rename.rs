@@ -322,8 +322,10 @@ pub fn make_replace_block_at_cursor(
     let (idx, spec, name, label_range) = matched?;
 
     // Gate check.
-    let mut provider_constraint_cache: FxHashMap<(PathBuf, &'static str), Option<String>> =
-        FxHashMap::default();
+    let mut provider_constraint_cache: FxHashMap<
+        (PathBuf, &'static str),
+        (Option<String>, Option<semver::Version>),
+    > = FxHashMap::default();
     let supported = compute_supported_specs(state, &module_dir, &mut provider_constraint_cache);
     if !supported.get(idx).copied().unwrap_or(false) {
         return None;
@@ -447,8 +449,10 @@ pub fn emit_block_rename_actions(
     // Per-call cache: provider name → joined constraint (None = no
     // constraint declared). One extraction per (provider, module);
     // each spec consults its own provider's entry.
-    let mut provider_constraint_cache: FxHashMap<(PathBuf, &'static str), Option<String>> =
-        FxHashMap::default();
+    let mut provider_constraint_cache: FxHashMap<
+        (PathBuf, &'static str),
+        (Option<String>, Option<semver::Version>),
+    > = FxHashMap::default();
 
     // Two indices over the spec table (built once per call):
     // - `by_kind_label` for block-label scans (`<block_kind> "<from>"`)
@@ -622,35 +626,53 @@ pub fn emit_block_rename_actions(
 /// Compute which specs are currently gate-supported for the
 /// given module dir. Caches per (module, provider) so a sweep
 /// over 26 specs across 4 providers walks siblings 4 times max.
+///
+/// Resolution order matches the rest of the deprecation
+/// pipeline: `.terraform.lock.hcl` pin (when present) wins
+/// over the declared `required_providers` constraint, since
+/// the lock is the version `terraform plan/apply` actually
+/// runs.
 fn compute_supported_specs(
     state: &StateStore,
     module_dir: &std::path::Path,
-    cache: &mut FxHashMap<(PathBuf, &'static str), Option<String>>,
+    cache: &mut FxHashMap<(PathBuf, &'static str), (Option<String>, Option<semver::Version>)>,
 ) -> Vec<bool> {
     let mut supported = vec![false; ALL_BLOCK_RENAMES.len()];
     for (i, spec) in ALL_BLOCK_RENAMES.iter().enumerate() {
         let key = (module_dir.to_path_buf(), spec.gate_provider);
-        let constraint = cache
+        let (constraint, locked) = cache
             .entry(key)
             .or_insert_with(|| {
-                module_constraint_for_provider_dir(state, module_dir, spec.gate_provider)
+                let constraint =
+                    module_constraint_for_provider_dir(state, module_dir, spec.gate_provider);
+                let locked =
+                    module_locked_provider_version_dir(state, module_dir, spec.gate_provider);
+                (constraint, locked)
             })
             .clone();
-        let admits = match constraint {
-            None => true, // absence of evidence — fire
-            Some(c) => {
-                // Use tfls_diag's helpers indirectly via
-                // building a minimal DeprecationRule with the
-                // matching gate.
-                let parsed = tfls_core::version_constraint::parse(&c);
-                if parsed.constraints.is_empty() {
-                    true
-                } else if let Some(min) =
-                    tfls_core::version_constraint::min_admitted_version(&parsed.constraints)
-                {
-                    tfls_core::version_constraint::version_at_least(min, spec.gate_threshold)
-                } else {
-                    false
+        let admits = if let Some(v) = locked {
+            // Lock pin: parse the threshold and compare
+            // directly. Threshold strings like "4.0.0" parse
+            // straight into `semver`; the per-provider tables
+            // already use that form.
+            match semver::Version::parse(spec.gate_threshold) {
+                Ok(t) => v >= t,
+                Err(_) => true, // unparseable threshold — don't suppress
+            }
+        } else {
+            match constraint {
+                None => true, // absence of evidence — fire
+                Some(c) => {
+                    let parsed = tfls_core::version_constraint::parse(&c);
+                    if parsed.constraints.is_empty() {
+                        true
+                    } else if let Some(min) =
+                        tfls_core::version_constraint::min_admitted_version(&parsed.constraints)
+                    {
+                        tfls_core::version_constraint::version_at_least(min, spec.gate_threshold)
+                    } else {
+                        false
+                    }
                 }
             }
         };
@@ -733,6 +755,37 @@ fn module_constraint_for_provider_dir(
     } else {
         Some(fragments.join(", "))
     }
+}
+
+/// Module-aware lock-file pin lookup by directory. Mirrors
+/// `crate::handlers::util::module_locked_provider_version`
+/// but keyed by directory rather than URI.
+fn module_locked_provider_version_dir(
+    state: &StateStore,
+    module_dir: &std::path::Path,
+    provider_name: &str,
+) -> Option<semver::Version> {
+    let lock = state.lock_file_for(module_dir)?;
+    let mut source: Option<String> = None;
+    for entry in state.documents.iter() {
+        let uri = entry.key();
+        let Ok(path) = uri.to_file_path() else { continue };
+        if path.parent() != Some(module_dir) {
+            continue;
+        }
+        let Some(body) = entry.value().parsed.body.as_ref() else {
+            continue;
+        };
+        if let Some(s) = tfls_diag::extract_required_provider_source(body, provider_name) {
+            source = Some(s);
+            break;
+        }
+    }
+    let address = match source.as_deref() {
+        Some(s) => tfls_core::ProviderAddress::parse(s).ok()?,
+        None => tfls_core::ProviderAddress::hashicorp(provider_name),
+    };
+    Some(lock.get(&address)?.version.clone())
 }
 
 /// Scan the body for resource/data blocks whose label matches

@@ -164,7 +164,13 @@ async fn ensure_module_indexed_triggers_child_scans_even_when_dir_already_scanne
     sleep(Duration::from_millis(400)).await;
 
     // The child's `variable "region"` should now be in the store.
-    let child_uri = Url::from_file_path(&child_vars).unwrap();
+    // `resolve_module_source` canonicalises the child path (so on
+    // macOS `/var/folders/…` becomes `/private/var/folders/…`); the
+    // scan worker stores docs under that canonical URI. Match that
+    // here so the assertion compares the same form the production
+    // path produces.
+    let canonical_child = child_vars.canonicalize().unwrap();
+    let child_uri = Url::from_file_path(&canonical_child).unwrap();
     let found = inner.state.documents.contains_key(&child_uri);
     worker.abort();
     assert!(found, "child module was not indexed despite ensure_module_indexed");

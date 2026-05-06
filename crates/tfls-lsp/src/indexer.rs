@@ -268,6 +268,9 @@ pub fn spawn_watcher(
                         state.remove_document(&url);
                     }
                 }
+                WorkspaceEvent::LockFileChanged(dir) => {
+                    state.invalidate_lock(&dir);
+                }
             }
         }
     });
@@ -1328,7 +1331,8 @@ pub fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
         let Ok(doc_path) = entry.key().to_file_path() else {
             continue;
         };
-        if doc_path.parent() != Some(dir) {
+        let Some(parent) = doc_path.parent() else { continue };
+        if !crate::handlers::util::dir_paths_match(parent, dir) {
             continue;
         }
         let Some(body) = entry.value().parsed.body.as_ref() else {
@@ -1440,7 +1444,8 @@ fn enqueue_child_module_scans(state: &StateStore, queue: &JobQueue, dir: &Path) 
         let Ok(doc_path) = uri.to_file_path() else {
             continue;
         };
-        if doc_path.parent() != Some(dir) {
+        let Some(parent) = doc_path.parent() else { continue };
+        if !crate::handlers::util::dir_paths_match(parent, dir) {
             continue;
         }
         for (label, source) in &entry.value().symbols.module_sources {

@@ -18,8 +18,9 @@ use tower_lsp::lsp_types::{
 
 use crate::backend::Backend;
 use crate::handlers::util::{
-    module_constraint_for_provider, module_supports_locals_replacement,
-    module_supports_templatefile, module_supports_terraform_data,
+    module_constraint_for_provider, module_locked_provider_version,
+    module_supports_locals_replacement, module_supports_templatefile,
+    module_supports_terraform_data,
 };
 
 pub async fn did_open(backend: &Backend, params: DidOpenTextDocumentParams) {
@@ -483,35 +484,40 @@ pub fn compute_diagnostics_with_lookup(
         // through the multi-rule body walker. Pattern repeats
         // per provider — captured by `run_provider_table` below.
         let aws_constraint = module_constraint_for_provider(state, uri, "aws");
+        let aws_locked = module_locked_provider_version(state, uri, "aws");
         out.extend(tfls_diag::aws_renames_diagnostics_for_module(
             body,
             &doc.rope,
-            &provider_rule_filter(&aws_constraint),
+            &provider_rule_filter(&aws_constraint, aws_locked.as_ref()),
         ));
         let kubernetes_constraint =
             module_constraint_for_provider(state, uri, "kubernetes");
+        let kubernetes_locked = module_locked_provider_version(state, uri, "kubernetes");
         out.extend(tfls_diag::kubernetes_renames_diagnostics_for_module(
             body,
             &doc.rope,
-            &provider_rule_filter(&kubernetes_constraint),
+            &provider_rule_filter(&kubernetes_constraint, kubernetes_locked.as_ref()),
         ));
         let azurerm_constraint = module_constraint_for_provider(state, uri, "azurerm");
+        let azurerm_locked = module_locked_provider_version(state, uri, "azurerm");
         out.extend(tfls_diag::azurerm_blocks_diagnostics_for_module(
             body,
             &doc.rope,
-            &provider_rule_filter(&azurerm_constraint),
+            &provider_rule_filter(&azurerm_constraint, azurerm_locked.as_ref()),
         ));
         let google_constraint = module_constraint_for_provider(state, uri, "google");
+        let google_locked = module_locked_provider_version(state, uri, "google");
         out.extend(tfls_diag::google_blocks_diagnostics_for_module(
             body,
             &doc.rope,
-            &provider_rule_filter(&google_constraint),
+            &provider_rule_filter(&google_constraint, google_locked.as_ref()),
         ));
         let vault_constraint = module_constraint_for_provider(state, uri, "vault");
+        let vault_locked = module_locked_provider_version(state, uri, "vault");
         out.extend(tfls_diag::vault_blocks_diagnostics_for_module(
             body,
             &doc.rope,
-            &provider_rule_filter(&vault_constraint),
+            &provider_rule_filter(&vault_constraint, vault_locked.as_ref()),
         ));
         out.extend(tfls_diag::empty_list_equality_diagnostics(body, &doc.rope));
         out.extend(tfls_diag::map_duplicate_keys_diagnostics(body, &doc.rope));
@@ -682,15 +688,25 @@ impl tfls_diag::VersionCacheLookup for OnDiskVersionCache {
 }
 
 /// Build a `rule_supported` closure for a provider table from
-/// its module-aggregated constraint string. Caller threads
+/// its module-aggregated constraint string + the
+/// `.terraform.lock.hcl`-pinned version (if any). Caller threads
 /// the result into `<provider>_diagnostics_for_module`.
-/// `None` constraint ⇒ every rule fires (absence of evidence).
-fn provider_rule_filter(
-    constraint: &Option<String>,
-) -> impl Fn(&tfls_diag::deprecation_rule::DeprecationRule) -> bool + '_ {
-    move |rule| match constraint.as_deref() {
-        None => true,
-        Some(c) => tfls_diag::deprecation_rule::supports(rule, c),
+///
+/// Locked version is the source of truth when present — it's
+/// what `terraform plan/apply` actually runs. The constraint is
+/// the fallback when no lock file exists yet (workspace not
+/// `terraform init`-ed). `None` for both ⇒ every rule fires
+/// (absence of evidence).
+fn provider_rule_filter<'a>(
+    constraint: &'a Option<String>,
+    locked: Option<&'a semver::Version>,
+) -> impl Fn(&tfls_diag::deprecation_rule::DeprecationRule) -> bool + 'a {
+    move |rule| {
+        tfls_diag::deprecation_rule::supports_with_lock(
+            rule,
+            constraint.as_deref(),
+            locked,
+        )
     }
 }
 

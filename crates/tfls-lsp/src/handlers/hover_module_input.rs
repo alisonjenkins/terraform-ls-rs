@@ -121,7 +121,8 @@ fn child_variable(
         let Ok(doc_path) = entry.key().to_file_path() else {
             continue;
         };
-        if doc_path.parent() != Some(child_dir) {
+        let Some(parent) = doc_path.parent() else { continue };
+        if !super::util::dir_paths_match(parent, child_dir) {
             continue;
         }
         let table = &entry.value().symbols;
@@ -358,7 +359,8 @@ fn child_output(
         let Ok(doc_path) = entry.key().to_file_path() else {
             continue;
         };
-        if doc_path.parent() != Some(child_dir) {
+        let Some(parent) = doc_path.parent() else { continue };
+        if !super::util::dir_paths_match(parent, child_dir) {
             continue;
         }
         let table = &entry.value().symbols;
@@ -495,7 +497,8 @@ fn build_module_overview(
         let Ok(doc_path) = entry.key().to_file_path() else {
             continue;
         };
-        if doc_path.parent() != Some(child_dir) {
+        let Some(parent) = doc_path.parent() else { continue };
+        if !super::util::dir_paths_match(parent, child_dir) {
             continue;
         }
         let table = &entry.value().symbols;

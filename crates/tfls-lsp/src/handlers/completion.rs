@@ -2311,7 +2311,10 @@ fn doc_in_dir(doc_uri: &Url, dir: Option<&std::path::Path>) -> bool {
         // Without a resolvable parent dir for the active doc, don't
         // over-filter — include everything.
         None => true,
-        Some(d) => parent_dir(doc_uri).as_deref() == Some(d),
+        Some(d) => match parent_dir(doc_uri) {
+            Some(p) => super::util::dir_paths_match(&p, d),
+            None => false,
+        },
     }
 }
 

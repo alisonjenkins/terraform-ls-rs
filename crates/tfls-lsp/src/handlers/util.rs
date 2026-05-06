@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use lsp_types::{Location, Url};
 use serde::Deserialize;
-use tfls_core::{SymbolKind, SymbolLocation};
+use tfls_core::{ProviderAddress, SymbolKind, SymbolLocation};
 use tfls_state::StateStore;
 
 /// Filesystem parent directory of a `file://` URI. Returns `None` for
@@ -12,6 +12,29 @@ use tfls_state::StateStore;
 /// schemes) so callers can degrade gracefully.
 pub(crate) fn parent_dir(uri: &Url) -> Option<PathBuf> {
     uri.to_file_path().ok()?.parent().map(|p| p.to_path_buf())
+}
+
+/// True when `a` and `b` refer to the same directory, with
+/// symlink tolerance.
+///
+/// `resolve_module_source` returns canonicalised paths
+/// (e.g. `/private/var/folders/.../mod` on macOS), but doc URIs
+/// stored in the [`StateStore`] preserve the un-canonicalised
+/// path the user opened (`/var/folders/.../mod`). On macOS
+/// `/var` symlinks to `/private/var`, so naive `==` comparison
+/// misses the match. Fast path: literal equality. Slow path:
+/// canonicalise both sides and compare. The slow path costs one
+/// syscall each, only on first miss — production callers
+/// usually have already-canonical paths from `resolve_*`,
+/// so the fast path covers them.
+pub fn dir_paths_match(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
+    }
 }
 
 /// True when the active module's `required_version` admits any
@@ -79,6 +102,50 @@ pub(crate) fn module_constraint_for_provider(
     } else {
         Some(fragments.join(", "))
     }
+}
+
+/// Resolve `provider_name` to the exact version pinned by the
+/// active module's `.terraform.lock.hcl` file (if any). Walks
+/// the same per-dir document set as
+/// [`module_constraint_for_provider`] to find the provider's
+/// long-form `source = "..."` (so the lock-file lookup can use
+/// the canonical address), falling back to the implicit
+/// `hashicorp/<name>` address for short-form declarations per
+/// Terraform's own rule.
+///
+/// Returns `None` when:
+/// - the active doc has no parent dir on disk,
+/// - the lock file does not exist (workspace not initialised),
+/// - or the provider isn't listed in the lock file.
+pub(crate) fn module_locked_provider_version(
+    state: &StateStore,
+    primary_uri: &Url,
+    provider_name: &str,
+) -> Option<semver::Version> {
+    let target_dir = parent_dir(primary_uri)?;
+    let lock = state.lock_file_for(&target_dir)?;
+    // Find the long-form `source` across siblings; default to
+    // hashicorp/<name> when none is declared.
+    let mut source: Option<String> = None;
+    for entry in state.documents.iter() {
+        let uri = entry.key();
+        let Ok(path) = uri.to_file_path() else { continue };
+        if path.parent() != Some(&target_dir) {
+            continue;
+        }
+        let Some(body) = entry.value().parsed.body.as_ref() else {
+            continue;
+        };
+        if let Some(s) = tfls_diag::extract_required_provider_source(body, provider_name) {
+            source = Some(s);
+            break;
+        }
+    }
+    let address = match source.as_deref() {
+        Some(s) => ProviderAddress::parse(s).ok()?,
+        None => ProviderAddress::hashicorp(provider_name),
+    };
+    Some(lock.get(&address)?.version.clone())
 }
 
 /// Helper: aggregate the module's `required_version` fragments
@@ -215,7 +282,8 @@ pub fn module_source_in_dir(
         let Ok(doc_path) = entry.key().to_file_path() else {
             continue;
         };
-        if doc_path.parent() != Some(module_dir) {
+        let Some(parent) = doc_path.parent() else { continue };
+        if !dir_paths_match(parent, module_dir) {
             continue;
         }
         if let Some(source) = entry.value().symbols.module_sources.get(module_label) {
@@ -235,7 +303,8 @@ pub(crate) fn lookup_child_module_symbol(
         let Ok(doc_path) = entry.key().to_file_path() else {
             continue;
         };
-        if doc_path.parent() != Some(child_dir) {
+        let Some(parent) = doc_path.parent() else { continue };
+        if !dir_paths_match(parent, child_dir) {
             continue;
         }
         let table = &entry.value().symbols;
