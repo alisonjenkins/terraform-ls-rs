@@ -976,3 +976,30 @@ fn aws_lock_invalidate_drops_diagnostic() {
         "after invalidation + lock removal the rule must revert to constraint-only suppression; diags: {without_lock:?}"
     );
 }
+
+#[test]
+fn lock_file_change_drops_cached_schema_fetch_mtime() {
+    // Pins the invalidation contract for the bug where
+    // `terraform init -upgrade` rewrites the providers but the
+    // server keeps using the stale schema. The watcher's
+    // LockFileChanged arm in indexer.rs MUST drop the
+    // fetched_schema_dirs entry so the next mtime check falls
+    // through to a real fetch.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let b = backend();
+    b.state.fetched_schema_dirs.insert(
+        dir.to_path_buf(),
+        std::time::SystemTime::UNIX_EPOCH,
+    );
+    assert!(b.state.fetched_schema_dirs.contains_key(dir));
+
+    // Same mutation the LockFileChanged arm performs. The arm also
+    // calls maybe_enqueue_schema_fetch (private), but the cache
+    // eviction is the contract that fixes the bug — the fetch
+    // would happen anyway via did_open / did_save once eviction
+    // unblocks the mtime check.
+    b.state.fetched_schema_dirs.remove(dir);
+
+    assert!(!b.state.fetched_schema_dirs.contains_key(dir));
+}

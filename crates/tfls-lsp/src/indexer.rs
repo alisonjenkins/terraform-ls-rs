@@ -270,6 +270,19 @@ pub fn spawn_watcher(
                 }
                 WorkspaceEvent::LockFileChanged(dir) => {
                     state.invalidate_lock(&dir);
+                    // `terraform init` (the only thing that touches
+                    // `.terraform.lock.hcl`) also rewrites the
+                    // provider binaries under `.terraform/providers/`.
+                    // The watcher can't see those — `.terraform/` is
+                    // in `IGNORED_DIRS` — so the lock-file event is
+                    // our only signal that an upgrade happened. Drop
+                    // the cached fetch mtime and re-enqueue: the
+                    // mtime check inside `maybe_enqueue_schema_fetch`
+                    // would otherwise short-circuit if the providers-
+                    // dir mtime happens to match (rare but possible
+                    // when init is a no-op).
+                    state.fetched_schema_dirs.remove(&dir);
+                    maybe_enqueue_schema_fetch(&state, &queue, &dir);
                 }
             }
         }
