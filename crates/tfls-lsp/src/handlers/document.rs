@@ -201,6 +201,16 @@ pub async fn did_change(backend: &Backend, params: DidChangeTextDocumentParams) 
     })
     .await;
     publish_current_diagnostics(backend, &uri, Some(version)).await;
+    // Re-run the version-cache prefetch in case this edit
+    // introduced a new constraint target (typed `required_version`
+    // for the first time, added a new provider, swapped a module
+    // source). The prefetch filters to uncached targets up front,
+    // so warm-cache keystrokes are a true no-op (no progress
+    // dialog, no refresh churn). Lets a user starting a fresh
+    // file see completion / inlay-hints / no-match diagnostics
+    // immediately after the first relevant keystroke instead of
+    // waiting for the next did_save.
+    crate::handlers::version_prefetch::spawn(backend, uri.clone(), Some(version));
     // Changes to THIS file can invalidate diagnostics in OTHER
     // open buffers in the same module. Push fresh diagnostics
     // directly to each such open peer; this is the reliable

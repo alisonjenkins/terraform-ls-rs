@@ -97,6 +97,22 @@ async fn prefetch_and_refresh(
         return;
     }
 
+    // Filter to targets whose cache file is missing on disk.
+    // `did_change` fires this prefetch on every keystroke once
+    // wired in (see `did_change` handler); without the filter,
+    // every keystroke would surface a "Fetching N version
+    // catalog(s)" progress dialog and an `inlay_hint_refresh` /
+    // diagnostic re-publish, even though the actual `fetch_*`
+    // calls inside short-circuit on the 24h disk cache. Filter
+    // up front so warm-cache `did_change` is a true no-op.
+    let targets: HashSet<Target> = targets
+        .into_iter()
+        .filter(|t| !target_is_cached(t))
+        .collect();
+    if targets.is_empty() {
+        return;
+    }
+
     let Ok(http) = tfls_provider_protocol::registry_versions::build_http_client() else {
         return;
     };
@@ -164,6 +180,22 @@ async fn prefetch_and_refresh(
     // leaving the file apparently clean even when the constraint
     // is actually unsatisfiable.
     crate::indexer::maybe_refresh_diagnostics(&state, Some(&client)).await;
+}
+
+fn target_is_cached(target: &Target) -> bool {
+    match target {
+        Target::TerraformCli => tfls_provider_protocol::tool_versions::is_cached(),
+        Target::Provider { namespace, name } => {
+            tfls_provider_protocol::registry_versions::is_provider_cached(namespace, name)
+        }
+        Target::Module {
+            namespace,
+            name,
+            provider,
+        } => tfls_provider_protocol::registry_versions::is_module_cached(
+            namespace, name, provider,
+        ),
+    }
 }
 
 fn collect_targets(body: &Body) -> HashSet<Target> {

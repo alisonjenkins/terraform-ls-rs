@@ -177,6 +177,17 @@ fn tool_cache_path(slug: &str) -> PathBuf {
     cache_root().join(format!("{}.json", sanitise(slug)))
 }
 
+/// True when both the `terraform` and `opentofu` cache files exist
+/// on disk (regardless of freshness). Used by the LSP prefetch path
+/// to decide whether a `did_change` should fire the per-target fetch
+/// pipeline (with progress UI + refresh signals) or quietly skip it
+/// because subsequent calls would just hit the cache.
+pub fn is_cached() -> bool {
+    let tf = tool_cache_path("terraform");
+    let tofu = tool_cache_path("opentofu");
+    std::fs::metadata(&tf).is_ok() && std::fs::metadata(&tofu).is_ok()
+}
+
 async fn read_fresh_cache(path: &Path) -> Option<Vec<CachedRelease>> {
     let meta = tokio::fs::metadata(path).await.ok()?;
     let modified = meta.modified().ok()?;

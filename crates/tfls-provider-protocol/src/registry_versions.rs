@@ -692,6 +692,33 @@ fn module_versions_cache_path(
         .join("versions.json")
 }
 
+/// True when at least one of the per-registry version caches
+/// (Terraform Registry or OpenTofu Registry) exists on disk for
+/// `<namespace>/<name>`, regardless of freshness. The LSP prefetch
+/// path uses this to decide whether to run the full fetch pipeline
+/// (with progress UI + refresh signals) on a `did_change`, or
+/// quietly skip when subsequent calls would just hit cache.
+pub fn is_provider_cached(namespace: &str, name: &str) -> bool {
+    for registry in &["terraform", "opentofu"] {
+        let path = versions_cache_path(registry, namespace, name);
+        if std::fs::metadata(&path).is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Module-version analogue of [`is_provider_cached`].
+pub fn is_module_cached(namespace: &str, name: &str, provider: &str) -> bool {
+    for registry in &["terraform", "opentofu"] {
+        let path = module_versions_cache_path(registry, namespace, name, provider);
+        if std::fs::metadata(&path).is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
 async fn fetch_registry_versions(
     client: &reqwest::Client,
     host: &str,
