@@ -344,6 +344,20 @@ fn emit_for_attr(
     if !within(visible, range) {
         return;
     }
+    // Pin the hint to the END of the line containing the value
+    // expression rather than to `range.end` directly. hcl-edit's
+    // `Expression::span()` for nested object values can occasionally
+    // return a byte range that lands mid-identifier when the host
+    // line ends with a CR/LF combo or the rope has a trailing-no-eol
+    // — splitting tokens like `azurerm = {` into `az<HINT>urerm`.
+    // End-of-line is a stable anchor: it can't fall inside a token
+    // and visually keeps the hint glued to the value it annotates.
+    let end_pos = end_of_line(rope, range.end.line);
+    let position = if end_pos.character >= range.end.character {
+        end_pos
+    } else {
+        range.end
+    };
     let Some(raw) = literal_string(expr) else { return };
     let parsed = tfls_core::version_constraint::parse(&raw);
     if !parsed.errors.is_empty() || parsed.constraints.is_empty() {
@@ -366,7 +380,7 @@ fn emit_for_attr(
         None
     };
     out.push(InlayHint {
-        position: range.end,
+        position,
         label: InlayHintLabel::String(label),
         kind: Some(InlayHintKind::TYPE),
         tooltip,
@@ -813,6 +827,34 @@ fn within(outer: &Range, inner: Range) -> bool {
     (inner.start.line, inner.start.character)
         >= (outer.start.line, outer.start.character)
         && (inner.end.line, inner.end.character) <= (outer.end.line, outer.end.character)
+}
+
+/// LSP `Position` at the end of the given line, stripping the
+/// trailing CR/LF. Returns line 0 character 0 when the line index
+/// is out of range — defensive, never panics.
+fn end_of_line(rope: &Rope, line: u32) -> lsp_types::Position {
+    let total_lines = rope.len_lines() as u32;
+    if line >= total_lines {
+        return lsp_types::Position::new(line, 0);
+    }
+    let line_byte_start = rope.line_to_byte(line as usize);
+    let line_byte_end = if (line as usize) + 1 < rope.len_lines() {
+        rope.line_to_byte((line as usize) + 1)
+    } else {
+        rope.len_bytes()
+    };
+    let mut len = line_byte_end - line_byte_start;
+    // Strip trailing newline / carriage return so the position
+    // sits AT END OF VISIBLE TEXT, not after the line break.
+    if len > 0 && rope.byte(line_byte_start + len - 1) == b'\n' {
+        len -= 1;
+        if len > 0 && rope.byte(line_byte_start + len - 1) == b'\r' {
+            len -= 1;
+        }
+    } else if len > 0 && rope.byte(line_byte_start + len - 1) == b'\r' {
+        len -= 1;
+    }
+    lsp_types::Position::new(line, len as u32)
 }
 
 #[cfg(test)]
