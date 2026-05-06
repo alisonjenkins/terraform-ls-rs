@@ -2675,10 +2675,13 @@ dependencies = [
  "criterion",
  "hcl-edit",
  "lsp-types",
+ "rustc-hash",
+ "semver",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tower-lsp",
+ "tracing",
 ]
 
 [[package]]
@@ -2689,6 +2692,7 @@ dependencies = [
  "hcl-edit",
  "lsp-types",
  "ropey",
+ "semver",
  "sonic-rs",
  "tfls-core",
  "tfls-parser",
@@ -2718,6 +2722,7 @@ dependencies = [
  "rayon",
  "ropey",
  "rustc-hash",
+ "semver",
  "serde",
  "serde_json",
  "sonic-rs",

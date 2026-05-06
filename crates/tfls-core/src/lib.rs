@@ -6,6 +6,7 @@
 pub mod builtin_blocks;
 pub mod completion;
 pub mod error;
+pub mod lock_file;
 pub mod meta_arguments;
 pub mod types;
 pub mod variable_type;
