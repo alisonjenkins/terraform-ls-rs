@@ -504,9 +504,18 @@ pub fn extract_allowed_values(desc: &str) -> Option<Vec<String>> {
     // whole description.
     let anchors = [
         "possible values are ",
+        "possible values include: ",
         "possible values: ",
         "valid values are ",
+        "valid values include: ",
+        "valid values include ",
         "valid values: ",
+        "supported values are ",
+        "supported values include: ",
+        "supported values include ",
+        "supported values: ",
+        "acceptable values are ",
+        "acceptable values: ",
         "must be one of ",
         "can be one of ",
         "can be either ",
