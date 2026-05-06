@@ -19,6 +19,7 @@ use rustc_hash::FxBuildHasher;
 type FxDashMap<K, V> = DashMap<K, V, FxBuildHasher>;
 /// Same rationale for the open-doc URI set.
 type FxDashSet<K> = DashSet<K, FxBuildHasher>;
+use tfls_core::lock_file::{self, LockFile};
 use tfls_core::variable_type::{Primitive, SchemaLookup, VariableType};
 use tfls_core::{ProviderAddress, SymbolKind, SymbolLocation};
 use tfls_parser::ReferenceKind;
@@ -151,6 +152,21 @@ pub struct StateStore {
     /// that resolve to `Any` are filtered out at insertion time.
     pub assigned_variable_types:
         FxDashMap<std::path::PathBuf, std::collections::HashMap<String, Vec<tfls_core::variable_type::VariableType>>>,
+
+    /// Per-module-dir cache of the parsed `.terraform.lock.hcl`
+    /// file. Populated lazily by [`StateStore::lock_file_for`],
+    /// keyed by the module-root directory (the dir that holds
+    /// the lock file alongside `.terraform/`). Sentinel "no lock
+    /// file present" is encoded by the absence of an entry —
+    /// cache misses go through a `metadata()` syscall and
+    /// repopulate (or remove) accordingly.
+    pub locks: FxDashMap<std::path::PathBuf, Arc<LockFile>>,
+    /// Mtime of the lock file at the time it was parsed into
+    /// [`Self::locks`]. Used by [`StateStore::lock_file_for`] to
+    /// reparse on disk change without depending on the file
+    /// watcher having delivered an event yet (cold-read first
+    /// access right after `terraform init`).
+    pub locks_mtime: FxDashMap<std::path::PathBuf, std::time::SystemTime>,
 }
 
 impl StateStore {
@@ -257,6 +273,46 @@ impl StateStore {
     /// buffers the user can actually see.
     pub fn is_open(&self, uri: &Url) -> bool {
         self.open_docs.contains(uri)
+    }
+
+    /// Read the parsed `.terraform.lock.hcl` for `module_dir`.
+    /// Cached after first call; reparsed when the on-disk mtime
+    /// changes (so a `terraform init` upgrade is picked up the
+    /// next time a handler asks). Returns `None` when the lock
+    /// file does not exist — that's the normal case for an
+    /// un-initialised workspace.
+    pub fn lock_file_for(&self, module_dir: &std::path::Path) -> Option<Arc<LockFile>> {
+        let lock_path = module_dir.join(".terraform.lock.hcl");
+        let mtime = std::fs::metadata(&lock_path)
+            .ok()
+            .and_then(|m| m.modified().ok());
+        let Some(current_mtime) = mtime else {
+            // File gone — drop any stale cache entry.
+            self.locks.remove(module_dir);
+            self.locks_mtime.remove(module_dir);
+            return None;
+        };
+        if let Some(cached_mtime) = self.locks_mtime.get(module_dir) {
+            if *cached_mtime == current_mtime {
+                if let Some(cached) = self.locks.get(module_dir) {
+                    return Some(Arc::clone(&cached));
+                }
+            }
+        }
+        let parsed = lock_file::read_for_module(module_dir)?;
+        let arc = Arc::new(parsed);
+        self.locks.insert(module_dir.to_path_buf(), Arc::clone(&arc));
+        self.locks_mtime
+            .insert(module_dir.to_path_buf(), current_mtime);
+        Some(arc)
+    }
+
+    /// Drop any cached lock file for `module_dir`. Called from
+    /// the indexer when the file watcher reports a change to
+    /// the lock file — next `lock_file_for` call will re-read.
+    pub fn invalidate_lock(&self, module_dir: &std::path::Path) {
+        self.locks.remove(module_dir);
+        self.locks_mtime.remove(module_dir);
     }
 
     /// Record that a scan has been enqueued for `dir`. Returns
@@ -873,6 +929,70 @@ mod tests {
     // never pulls). The function is now a constant `false`; this
     // test pins it so re-introducing the skip without restoring
     // pull mode fails loudly.
+
+    // --- lock_file_for cache --------------------------------------
+
+    #[test]
+    fn lock_file_for_returns_none_when_missing() {
+        let store = StateStore::new();
+        let dir = std::env::temp_dir().join(format!(
+            "tfls-store-locktest-{}",
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(store.lock_file_for(&dir).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn lock_file_for_caches_and_invalidates() {
+        let store = StateStore::new();
+        let dir = std::env::temp_dir().join(format!(
+            "tfls-store-locktest-cache-{}",
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".terraform.lock.hcl");
+        std::fs::write(
+            &path,
+            r#"provider "registry.terraform.io/hashicorp/aws" { version = "5.50.0" }"#,
+        )
+        .unwrap();
+
+        let first = store.lock_file_for(&dir).expect("present");
+        assert_eq!(first.len(), 1);
+        // Cached: same Arc reference identity on second call.
+        let second = store.lock_file_for(&dir).expect("present");
+        assert!(Arc::ptr_eq(&first, &second), "second call must hit cache");
+
+        // Invalidate, then verify cache repopulates after the syscall.
+        store.invalidate_lock(&dir);
+        let third = store.lock_file_for(&dir).expect("present");
+        assert_eq!(third.len(), 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn lock_file_for_drops_cache_when_file_removed() {
+        let store = StateStore::new();
+        let dir = std::env::temp_dir().join(format!(
+            "tfls-store-locktest-removed-{}",
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".terraform.lock.hcl");
+        std::fs::write(
+            &path,
+            r#"provider "registry.terraform.io/hashicorp/aws" { version = "5.50.0" }"#,
+        )
+        .unwrap();
+        assert!(store.lock_file_for(&dir).is_some());
+        std::fs::remove_file(&path).unwrap();
+        assert!(store.lock_file_for(&dir).is_none());
+        assert!(!store.locks.contains_key(&dir));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn never_skip_push_in_push_only_mode() {
