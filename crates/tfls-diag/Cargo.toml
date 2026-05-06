@@ -17,6 +17,7 @@ thiserror.workspace = true
 lsp-types.workspace = true
 ropey.workspace = true
 hcl-edit.workspace = true
+semver = "1"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }

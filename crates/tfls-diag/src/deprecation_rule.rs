@@ -292,6 +292,56 @@ pub fn supports(rule: &DeprecationRule, constraint: &str) -> bool {
     tfls_core::version_constraint::version_at_least(min, rule.threshold())
 }
 
+/// Lock-aware variant of [`supports`]. When `locked` is `Some`
+/// and the rule is a [`Gate::ProviderVersion`], the locked
+/// version is the source of truth — it's what `terraform
+/// plan/apply` runs, not the lower bound of the declared
+/// constraint. Falls back to constraint-based gating when no
+/// locked version is available (lock file missing or provider
+/// not listed).
+///
+/// Behaviour:
+/// - `locked = Some(v)` and rule is `ProviderVersion`: compare
+///   `v >= rule.threshold` directly. (Constraint is ignored —
+///   if the lock contradicts the declared constraint that's a
+///   stale-lock issue for the user to reconcile, but the lock
+///   is still what's installed.)
+/// - `locked = Some(_)` but rule is `TerraformVersion`: lock
+///   doesn't track Terraform CLI versions, fall through.
+/// - `locked = None`: fall through to [`supports`] with the
+///   constraint, or `true` if no constraint either.
+pub fn supports_with_lock(
+    rule: &DeprecationRule,
+    constraint: Option<&str>,
+    locked: Option<&semver::Version>,
+) -> bool {
+    if let (Gate::ProviderVersion { .. }, Some(v)) = (&rule.gate, locked) {
+        let threshold = match semver::Version::parse(rule.threshold()) {
+            Ok(t) => t,
+            Err(_) => {
+                // Threshold can be loose like "4.0" — try padding
+                // to "4.0.0" before falling through.
+                match semver::Version::parse(&format!("{}.0", rule.threshold())) {
+                    Ok(t) => t,
+                    Err(_) => match semver::Version::parse(&format!("{}.0.0", rule.threshold())) {
+                        Ok(t) => t,
+                        Err(_) => return supports_via_constraint(rule, constraint),
+                    },
+                }
+            }
+        };
+        return *v >= threshold;
+    }
+    supports_via_constraint(rule, constraint)
+}
+
+fn supports_via_constraint(rule: &DeprecationRule, constraint: Option<&str>) -> bool {
+    match constraint {
+        Some(c) => supports(rule, c),
+        None => true,
+    }
+}
+
 /// Extract the literal `required_version = "..."` string from
 /// the top-level `terraform { }` block, if present. Empty
 /// fragments / non-string forms are ignored.
@@ -382,6 +432,62 @@ pub fn extract_required_provider_version(
                             hcl_edit::expr::ObjectKey::Expression(
                                 Expression::String(s),
                             ) => s.value().as_str() == "version",
+                            _ => false,
+                        };
+                        if key_matches {
+                            if let Some(s) = read_string_value(v.expr()) {
+                                return Some(s);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract the `source = "..."` attribute declared for
+/// `provider_name` in any `terraform { required_providers { ... } }`
+/// block. Only the long form carries a `source`; short-form
+/// entries (`aws = "~> 4.0"`) implicitly resolve to
+/// `hashicorp/<name>` per Terraform's own rule, so callers should
+/// fall back to that default on `None`.
+pub fn extract_required_provider_source(
+    body: &Body,
+    provider_name: &str,
+) -> Option<String> {
+    for structure in body.iter() {
+        let Some(tf_block) = structure.as_block() else {
+            continue;
+        };
+        if tf_block.ident.as_str() != "terraform" {
+            continue;
+        }
+        for inner in tf_block.body.iter() {
+            let Some(rp_block) = inner.as_block() else {
+                continue;
+            };
+            if rp_block.ident.as_str() != "required_providers" {
+                continue;
+            }
+            for entry in rp_block.body.iter() {
+                let Some(attr) = entry.as_attribute() else {
+                    continue;
+                };
+                if attr.key.as_str() != provider_name {
+                    continue;
+                }
+                if let Expression::Object(obj) = &attr.value {
+                    for (k, v) in obj.iter() {
+                        let key_matches = match k {
+                            hcl_edit::expr::ObjectKey::Ident(id) => id.as_str() == "source",
+                            hcl_edit::expr::ObjectKey::Expression(
+                                Expression::Variable(var),
+                            ) => var.value().as_str() == "source",
+                            hcl_edit::expr::ObjectKey::Expression(
+                                Expression::String(s),
+                            ) => s.value().as_str() == "source",
                             _ => false,
                         };
                         if key_matches {
@@ -587,5 +693,113 @@ mod tests {
             extract_required_provider_version(&body, "aws"),
             Some("5.42.0".into())
         );
+    }
+
+    #[test]
+    fn extract_required_provider_source_long_form() {
+        let body = parse_source(concat!(
+            "terraform {\n  required_providers {\n",
+            "    aws = { source = \"hashicorp/aws\", version = \"5.42.0\" }\n",
+            "  }\n}\n",
+        ))
+        .body
+        .expect("parses");
+        assert_eq!(
+            extract_required_provider_source(&body, "aws"),
+            Some("hashicorp/aws".into())
+        );
+    }
+
+    #[test]
+    fn extract_required_provider_source_returns_none_for_short_form() {
+        let body = parse_source(
+            "terraform {\n  required_providers {\n    aws = \"~> 4.0\"\n  }\n}\n",
+        )
+        .body
+        .expect("parses");
+        assert!(extract_required_provider_source(&body, "aws").is_none());
+    }
+
+    #[test]
+    fn supports_with_lock_lock_above_threshold_fires() {
+        let v = semver::Version::new(5, 50, 0);
+        assert!(supports_with_lock(
+            &TEST_PROVIDER_RULE,
+            Some("~> 4.0"),
+            Some(&v),
+        ));
+    }
+
+    #[test]
+    fn supports_with_lock_lock_below_threshold_suppresses() {
+        // Threshold is 1.7.0; locked at 1.5.0 — not yet upgraded.
+        let v = semver::Version::new(1, 5, 0);
+        assert!(!supports_with_lock(
+            &TEST_PROVIDER_RULE,
+            Some("~> 1.5"),
+            Some(&v),
+        ));
+    }
+
+    #[test]
+    fn supports_with_lock_falls_back_to_constraint_when_no_lock() {
+        // Constraint admits >= 1.7 — fires.
+        assert!(supports_with_lock(
+            &TEST_PROVIDER_RULE,
+            Some("~> 1.7"),
+            None,
+        ));
+        // Constraint excludes >= 1.7 — suppresses.
+        assert!(!supports_with_lock(
+            &TEST_PROVIDER_RULE,
+            Some("< 1.5"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn supports_with_lock_no_inputs_fires_by_default() {
+        // Absence of evidence — can't suppress.
+        assert!(supports_with_lock(&TEST_PROVIDER_RULE, None, None));
+    }
+
+    #[test]
+    fn supports_with_lock_terraform_version_rule_ignores_lock() {
+        // TerraformVersion gates aren't covered by .terraform.lock.hcl;
+        // a locked provider version must NOT influence them.
+        let v = semver::Version::new(99, 0, 0);
+        // Constraint excludes the 1.4 threshold; lock should be ignored.
+        assert!(!supports_with_lock(&TEST_RULE, Some("< 1.3"), Some(&v)));
+        // Constraint admits the threshold; fires.
+        assert!(supports_with_lock(&TEST_RULE, Some(">= 1.4"), Some(&v)));
+    }
+
+    #[test]
+    fn supports_with_lock_handles_two_part_threshold() {
+        // The AWS rule's threshold is "1.7.0"; some rules use "4.0"
+        // (two-part). Verify the parsing fallback handles it.
+        const TWO_PART: DeprecationRule = DeprecationRule {
+            block_kind: "resource",
+            label: "x",
+            gate: Gate::ProviderVersion {
+                provider: "p",
+                threshold: "4.0",
+            },
+            message: "m",
+        };
+        let v = semver::Version::new(4, 50, 0);
+        assert!(supports_with_lock(&TWO_PART, None, Some(&v)));
+        let v = semver::Version::new(3, 99, 99);
+        assert!(!supports_with_lock(&TWO_PART, None, Some(&v)));
+    }
+
+    #[test]
+    fn extract_required_provider_source_returns_none_when_provider_absent() {
+        let body = parse_source(
+            "terraform {\n  required_providers {\n    random = { source = \"hashicorp/random\" }\n  }\n}\n",
+        )
+        .body
+        .expect("parses");
+        assert!(extract_required_provider_source(&body, "aws").is_none());
     }
 }

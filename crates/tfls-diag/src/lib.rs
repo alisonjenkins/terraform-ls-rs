@@ -64,7 +64,8 @@ pub use deprecated_null_resource::{
     extract_required_version, supports_terraform_data,
 };
 pub use deprecation_rule::{
-    extract_required_provider_version, is_hardcoded_deprecation,
+    extract_required_provider_source, extract_required_provider_version, is_hardcoded_deprecation,
+    supports_with_lock,
 };
 pub use deprecated_template_dir::{
     deprecated_template_dir_diagnostics, deprecated_template_dir_diagnostics_for_module,
