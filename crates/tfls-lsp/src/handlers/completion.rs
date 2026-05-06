@@ -831,8 +831,11 @@ fn constraint_operator_items() -> Vec<CompletionItem> {
 }
 
 /// Items for `version = "|"` inside a `required_providers` entry.
-/// Constraint-aware: operator completions at the start / after a
-/// comma, registry versions after an operator or mid-version.
+/// Constraint-aware: at the start of an empty constraint (or after
+/// a comma) we pre-fill the latest version + its common
+/// constraint-prefixed variants so the user can pick a flavour
+/// without having to type a digit first; mid-version we just list
+/// the matching exact versions.
 async fn required_provider_version_value_items(
     source: Option<&str>,
     cursor_partial: &str,
@@ -840,17 +843,125 @@ async fn required_provider_version_value_items(
     use tfls_core::version_constraint::{CursorSlot, cursor_slot};
     let slot = cursor_slot(cursor_partial, cursor_partial.len());
     match slot {
-        CursorSlot::AtOperator | CursorSlot::Trailing => constraint_operator_items(),
+        CursorSlot::AtOperator | CursorSlot::Trailing => {
+            // Pre-filled flavours (latest exact, `~> MM`, `>= latest`, …)
+            // sit on top, followed by raw operator items + the
+            // remaining exact versions. If the registry fetch failed
+            // (cold cache, network down) we still show operators —
+            // better than empty.
+            let mut items = prefilled_provider_version_items(source).await;
+            if items.is_empty() {
+                items = constraint_operator_items();
+            }
+            items
+        }
         CursorSlot::AfterOperator(_) | CursorSlot::InsideVersion { .. } => {
             let mut items = provider_version_items_from_registry(source).await;
             if items.is_empty() {
-                // Still offer operators if we've got nothing from the
-                // registry — better than an empty list.
                 items = constraint_operator_items();
             }
             items
         }
     }
+}
+
+/// Build the "empty constraint" suggestion list for a provider:
+/// latest exact, `~> MAJOR.MINOR`, `>= latest`, then the operator
+/// scaffolds, then all known versions. Sort-keys keep the latest
+/// flavours pinned at the top regardless of how the client
+/// alphabetises operator + version labels.
+async fn prefilled_provider_version_items(source: Option<&str>) -> Vec<CompletionItem> {
+    let Some((ns, name)) = source.and_then(parse_source) else {
+        // No source → can't fetch — fall back to operator-only.
+        return constraint_operator_items();
+    };
+    let Ok(client) = tfls_provider_protocol::registry_versions::build_http_client() else {
+        return constraint_operator_items();
+    };
+    let versions = match tfls_provider_protocol::registry_versions::fetch_versions(
+        &client, &ns, &name,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!(error = %e, "registry version fetch failed");
+            return constraint_operator_items();
+        }
+    };
+    let Some(latest) = versions.first() else {
+        return constraint_operator_items();
+    };
+    let latest_v = latest.version.clone();
+    let provenance = latest.provenance_label();
+
+    let mut items: Vec<CompletionItem> = Vec::new();
+
+    // 0000 — bare latest exact: `5.94.0`. Most common pick.
+    items.push(CompletionItem {
+        label: latest_v.clone(),
+        kind: Some(CompletionItemKind::VALUE),
+        detail: Some(format!("latest — {ns}/{name} ({provenance})")),
+        insert_text: Some(latest_v.clone()),
+        insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+        sort_text: Some("0000_latest".to_string()),
+        preselect: Some(true),
+        ..Default::default()
+    });
+
+    // 0001 — `~> MAJOR.MINOR` of the latest. Pessimistic upgrade
+    // band; the recommended default per Terraform docs.
+    if let Some(mm) = major_minor(&latest_v) {
+        let label = format!("~> {mm}");
+        items.push(CompletionItem {
+            label: label.clone(),
+            kind: Some(CompletionItemKind::SNIPPET),
+            detail: Some("pessimistic (compatible) constraint to latest".to_string()),
+            insert_text: Some(label),
+            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+            sort_text: Some("0001_pessimistic".to_string()),
+            ..Default::default()
+        });
+    }
+
+    // 0002 — `>= LATEST` (lower-bound, no upper).
+    let gte = format!(">= {latest_v}");
+    items.push(CompletionItem {
+        label: gte.clone(),
+        kind: Some(CompletionItemKind::SNIPPET),
+        detail: Some("at least latest, any future".to_string()),
+        insert_text: Some(gte),
+        insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+        sort_text: Some("0002_gte_latest".to_string()),
+        ..Default::default()
+    });
+
+    // 1xxx — raw operator scaffolds (preserve existing UX for
+    // users who want to start with `~>` and pick a different
+    // version themselves).
+    for mut op in constraint_operator_items() {
+        if let Some(s) = op.sort_text.take() {
+            op.sort_text = Some(format!("1{s}"));
+        }
+        items.push(op);
+    }
+
+    // 2xxx — every known exact version, descending. Latest is
+    // duplicated at 0000 above; keep it here too so users
+    // searching by typing digits still find it.
+    for (idx, vi) in versions.iter().enumerate() {
+        items.push(CompletionItem {
+            label: vi.version.clone(),
+            kind: Some(CompletionItemKind::VALUE),
+            detail: Some(format!("{ns}/{name} — {}", vi.provenance_label())),
+            insert_text: Some(vi.version.clone()),
+            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+            sort_text: Some(format!("2{idx:04}")),
+            ..Default::default()
+        });
+    }
+
+    items
 }
 
 /// Pull exact-version items + `~> MAJOR.MINOR` templates for a given
@@ -905,13 +1016,21 @@ async fn provider_version_items_from_registry(source: Option<&str>) -> Vec<Compl
 }
 
 /// Items for `required_version = "|"` inside a top-level `terraform {}`
-/// block. Constraint-aware: operator completions at the start / after
-/// a comma, Terraform + OpenTofu CLI versions after an operator.
+/// block. At an empty constraint we pre-fill the latest CLI release +
+/// common operator-prefixed flavours so `Tab` / `Enter` lands on a
+/// usable value immediately. After an operator we fall through to
+/// the existing exact-version list.
 async fn required_version_value_items(cursor_partial: &str) -> Vec<CompletionItem> {
     use tfls_core::version_constraint::{CursorSlot, cursor_slot};
     let slot = cursor_slot(cursor_partial, cursor_partial.len());
     match slot {
-        CursorSlot::AtOperator | CursorSlot::Trailing => constraint_operator_items(),
+        CursorSlot::AtOperator | CursorSlot::Trailing => {
+            let mut items = prefilled_tool_version_items().await;
+            if items.is_empty() {
+                items = constraint_operator_items();
+            }
+            items
+        }
         CursorSlot::AfterOperator(_) | CursorSlot::InsideVersion { .. } => {
             let mut items = tool_version_items_from_github().await;
             if items.is_empty() {
@@ -920,6 +1039,82 @@ async fn required_version_value_items(cursor_partial: &str) -> Vec<CompletionIte
             items
         }
     }
+}
+
+/// Mirror of [`prefilled_provider_version_items`] for the Terraform
+/// + OpenTofu CLI release catalogue. Pins the latest release at
+/// sort-key `0000_latest`; offers `~> MAJOR.MINOR` /
+/// `>= LATEST` flavours; then the operator scaffolds; then every
+/// known exact release for users who want to scroll-and-pick.
+async fn prefilled_tool_version_items() -> Vec<CompletionItem> {
+    let Ok(client) = tfls_provider_protocol::tool_versions::build_http_client() else {
+        return constraint_operator_items();
+    };
+    let versions =
+        match tfls_provider_protocol::tool_versions::fetch_tool_versions(&client).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!(error = %e, "github release fetch failed");
+                return constraint_operator_items();
+            }
+        };
+    let Some(latest) = versions.first() else {
+        return constraint_operator_items();
+    };
+    let latest_v = latest.version.clone();
+    let provenance = latest.provenance_label();
+
+    let mut items: Vec<CompletionItem> = Vec::new();
+    items.push(CompletionItem {
+        label: latest_v.clone(),
+        kind: Some(CompletionItemKind::VALUE),
+        detail: Some(format!("latest CLI release ({provenance})")),
+        insert_text: Some(latest_v.clone()),
+        insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+        sort_text: Some("0000_latest".to_string()),
+        preselect: Some(true),
+        ..Default::default()
+    });
+    if let Some(mm) = major_minor(&latest_v) {
+        let label = format!("~> {mm}");
+        items.push(CompletionItem {
+            label: label.clone(),
+            kind: Some(CompletionItemKind::SNIPPET),
+            detail: Some("pessimistic (compatible) constraint to latest".to_string()),
+            insert_text: Some(label),
+            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+            sort_text: Some("0001_pessimistic".to_string()),
+            ..Default::default()
+        });
+    }
+    let gte = format!(">= {latest_v}");
+    items.push(CompletionItem {
+        label: gte.clone(),
+        kind: Some(CompletionItemKind::SNIPPET),
+        detail: Some("at least latest, any future".to_string()),
+        insert_text: Some(gte),
+        insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+        sort_text: Some("0002_gte_latest".to_string()),
+        ..Default::default()
+    });
+    for mut op in constraint_operator_items() {
+        if let Some(s) = op.sort_text.take() {
+            op.sort_text = Some(format!("1{s}"));
+        }
+        items.push(op);
+    }
+    for (idx, vi) in versions.iter().enumerate() {
+        items.push(CompletionItem {
+            label: vi.version.clone(),
+            kind: Some(CompletionItemKind::VALUE),
+            detail: Some(format!("CLI release — {}", vi.provenance_label())),
+            insert_text: Some(vi.version.clone()),
+            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+            sort_text: Some(format!("2{idx:04}")),
+            ..Default::default()
+        });
+    }
+    items
 }
 
 async fn tool_version_items_from_github() -> Vec<CompletionItem> {
