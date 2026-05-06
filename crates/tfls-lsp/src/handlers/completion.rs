@@ -670,19 +670,46 @@ fn provider_block_body_items(
 
 /// Items for `required_providers { | }` — each common provider local
 /// name as a scaffold that expands to the full `NAME = { source = "…",
-/// version = "…" }` entry, with tabstops for the version constraint.
+/// version = "…" }` entry. The version tabstop's default text is the
+/// latest published `~> MAJOR.MINOR` from the cached registry version
+/// list when available; falls back to an empty tabstop when the
+/// cache is cold (so the user lands on `version = ""` and the
+/// per-version completion path takes over). The previous template
+/// hard-coded `~> 1.0`, which on long-lived providers like azurerm
+/// (latest 4.x) silently anchored every new project at the original
+/// 2018-era major version.
 fn required_providers_entry_items(filter: &BodyFilter) -> Vec<CompletionItem> {
     let mut items: Vec<CompletionItem> = Vec::new();
     for (local_name, source, hint) in builtin_blocks::REQUIRED_PROVIDERS_COMMON_ENTRIES {
         if filter.present_attrs.contains(*local_name) {
             continue;
         }
+        // `source` is "<namespace>/<name>" — every entry in
+        // REQUIRED_PROVIDERS_COMMON_ENTRIES uses this two-part form.
+        let (ns, name) = match source.split_once('/') {
+            Some(parts) => parts,
+            None => continue,
+        };
+        let version_tabstop = match tfls_provider_protocol::registry_versions::cached_latest_version(ns, name)
+            .as_deref()
+            .and_then(tfls_provider_protocol::registry_versions::major_minor_of)
+        {
+            // Cached MM available → bake `~> 4.71` (or whatever) into
+            // the placeholder so a tab-and-accept lands on a sensible
+            // default tracking the current major.
+            Some(mm) => format!("${{1:~> {mm}}}"),
+            // Cold cache → empty tabstop. The version-value
+            // completion path (`required_provider_version_value_items`)
+            // fires the moment the user triggers completion inside
+            // the empty quotes; preselects latest.
+            None => "${1}".to_string(),
+        };
         items.push(CompletionItem {
             label: local_name.to_string(),
             kind: Some(CompletionItemKind::MODULE),
             detail: Some(format!("{} — source {}", hint, source)),
             insert_text: Some(format!(
-                "{local_name} = {{\n  source  = \"{source}\"\n  version = \"${{1:~> 1.0}}\"\n}}$0"
+                "{local_name} = {{\n  source  = \"{source}\"\n  version = \"{version_tabstop}\"\n}}$0"
             )),
             insert_text_format: Some(InsertTextFormat::SNIPPET),
             ..Default::default()

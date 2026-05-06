@@ -719,6 +719,63 @@ pub fn is_module_cached(namespace: &str, name: &str, provider: &str) -> bool {
     false
 }
 
+/// Peek the cached latest version for `<namespace>/<name>` without
+/// touching the network. Reads either the Terraform or OpenTofu
+/// registry cache (whichever exists; falls through both), parses the
+/// JSON array of version strings, and returns the highest by
+/// [`semver_key`]. Returns `None` when neither cache file exists, the
+/// JSON is unparseable, or every entry fails semver parsing.
+///
+/// Used by completion to bake the latest version into snippet
+/// placeholders ("`version = "~> X.Y"`") so users get a sensible
+/// default instead of a hard-coded `~> 1.0`. Callers that NEED the
+/// value (vs. just want the cached one if available) should call
+/// [`fetch_versions`] which performs the merge + sort already.
+pub fn cached_latest_version(namespace: &str, name: &str) -> Option<String> {
+    let mut best: Option<String> = None;
+    for registry in &["terraform", "opentofu"] {
+        let path = versions_cache_path(registry, namespace, name);
+        let body = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let versions: Vec<String> = match serde_json::from_str(&body) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        for v in versions {
+            // Skip pre-releases — `~> 4.71-rc1` isn't a useful default.
+            if v.contains('-') {
+                continue;
+            }
+            let candidate_key = semver_key(&v);
+            let take = match &best {
+                None => true,
+                Some(cur) => semver_key(cur) < candidate_key,
+            };
+            if take {
+                best = Some(v);
+            }
+        }
+    }
+    best
+}
+
+/// Format a `MAJOR.MINOR` slice of a version string for use in
+/// `~> X.Y` constraint snippets. Returns `None` for unparseable
+/// versions.
+pub fn major_minor_of(version: &str) -> Option<String> {
+    let core = version.split('-').next().unwrap_or(version);
+    let core = core.split('+').next().unwrap_or(core);
+    let mut parts = core.splitn(3, '.');
+    let ma = parts.next()?;
+    let mi = parts.next()?;
+    if ma.parse::<u32>().is_err() || mi.parse::<u32>().is_err() {
+        return None;
+    }
+    Some(format!("{ma}.{mi}"))
+}
+
 async fn fetch_registry_versions(
     client: &reqwest::Client,
     host: &str,
@@ -1048,4 +1105,42 @@ mod tests {
 
         let _ = tokio::fs::remove_dir_all(&tmp).await;
     }
+
+    #[test]
+    fn major_minor_of_extracts_two_parts() {
+        assert_eq!(
+            super::major_minor_of("4.71.0"),
+            Some("4.71".to_string())
+        );
+        assert_eq!(super::major_minor_of("1.0.0"), Some("1.0".to_string()));
+    }
+
+    #[test]
+    fn major_minor_of_handles_pre_and_build() {
+        assert_eq!(
+            super::major_minor_of("4.71.0-rc1"),
+            Some("4.71".to_string())
+        );
+        assert_eq!(
+            super::major_minor_of("4.71.0+build.123"),
+            Some("4.71".to_string())
+        );
+    }
+
+    #[test]
+    fn major_minor_of_rejects_unparseable() {
+        assert_eq!(super::major_minor_of("nightly"), None);
+        assert_eq!(super::major_minor_of("1"), None);
+        assert_eq!(super::major_minor_of("v1.0"), None);
+    }
+
+    // `cached_latest_version` is exercised end-to-end via the
+    // completion path (`required_providers_entry_items`) and by
+    // hand against real provider caches. A unit test here would
+    // need to mutate `XDG_CACHE_HOME`, which other tests in this
+    // module also touch — `cargo test` runs them in parallel and
+    // the env-var clobbering produces flaky failures. Selection +
+    // skip-pre-release logic is small enough to verify by reading
+    // the implementation; major_minor_of (above) and the
+    // integration tests cover the surrounding plumbing.
 }
