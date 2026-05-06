@@ -128,7 +128,15 @@ fn lifecycle_enabled_hints(
                 if attr.key.as_str() != "enabled" {
                     continue;
                 }
-                let Some(span) = attr.value.span() else { continue };
+                // Use the full attribute span, NOT `attr.value.span()`.
+                // hcl-edit's Expression::span on a Traversal (`var.X`)
+                // returns only the head's span, so for a long
+                // attribute like `var.create_customer_storage_account`
+                // the hint lands BETWEEN `var.create` and the rest of
+                // the name. The Attribute's own span covers the whole
+                // `enabled = expr` form, so its end reliably sits
+                // after the entire value regardless of shape.
+                let Some(span) = attr.span() else { continue };
                 let Ok(range) = hcl_span_to_lsp_range(rope, span) else { continue };
                 if !within(visible, range) {
                     continue;
@@ -931,6 +939,28 @@ mod tests {
             "file:///m/main.tofu.json",
         );
         assert!(hints.is_empty(), "got: {hints:?}");
+    }
+
+    #[test]
+    fn enabled_hint_position_is_after_full_traversal_value() {
+        // Regression: hcl-edit's Expression::span on a Traversal
+        // (`var.X`) returns only the head's span, so for a long
+        // attribute name like `var.create_customer_storage_account`
+        // the hint was being placed BETWEEN `var.create` and
+        // `_customer_storage_account`, splitting the variable name
+        // visually. Switching to Attribute::span fixes this.
+        let src = "resource \"x\" \"y\" {\n  lifecycle {\n    enabled = var.create_customer_storage_account\n  }\n}\n";
+        let hints = make_hints(src, "file:///m/main.tf");
+        assert_eq!(hints.len(), 1, "got: {hints:?}");
+        let h = &hints[0];
+        // Line 2 (zero-based) is `    enabled = var.create_customer_storage_account`.
+        assert_eq!(h.position.line, 2, "hint must be on the lifecycle line");
+        let line = "    enabled = var.create_customer_storage_account";
+        assert_eq!(
+            h.position.character as usize,
+            line.chars().count(),
+            "hint must land at end of full traversal, not in the middle of the variable name"
+        );
     }
 
     #[test]
