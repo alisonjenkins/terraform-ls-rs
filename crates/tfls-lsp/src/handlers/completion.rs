@@ -1984,6 +1984,71 @@ fn qualified_function_short_name(qualified: &str) -> Option<&str> {
     Some(fn_name)
 }
 
+/// Suggest the registry-mined enum values for a top-level
+/// resource / data-source attribute. Strings get wrapped in
+/// quotes; numeric / boolean literals are emitted bare so the
+/// completion produces valid HCL either way. Callers prepend
+/// these so they sort above generic var.* / local.* /
+/// function suggestions.
+fn allowed_value_items(
+    backend: &Backend,
+    resource_type: &str,
+    attr_name: &str,
+    sort_index: &mut u32,
+) -> Vec<CompletionItem> {
+    let schema = backend
+        .state
+        .resource_schema(resource_type)
+        .or_else(|| backend.state.data_source_schema(resource_type));
+    let Some(schema) = schema else { return Vec::new() };
+    let Some(attr) = schema.block.attributes.get(attr_name) else {
+        return Vec::new();
+    };
+    let Some(values) = attr.allowed_values.as_deref() else {
+        return Vec::new();
+    };
+    if values.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out: Vec<CompletionItem> = Vec::with_capacity(values.len());
+    for v in values {
+        let insert_text = if literal_should_be_unquoted(v) {
+            v.clone()
+        } else {
+            format!("\"{v}\"")
+        };
+        out.push(CompletionItem {
+            label: insert_text.clone(),
+            kind: Some(CompletionItemKind::ENUM_MEMBER),
+            detail: Some("valid value".to_string()),
+            insert_text: Some(insert_text.clone()),
+            sort_text: Some(format!("{:04}_{insert_text}", *sort_index)),
+            ..Default::default()
+        });
+        *sort_index += 1;
+    }
+    out
+}
+
+/// True when `v` is a number or boolean literal — i.e. should
+/// land in the buffer as `42` / `true` rather than `"42"` /
+/// `"true"`. Plugin Framework's stringified-boolean attributes
+/// (e.g. azurerm `log_progress`) intentionally take the QUOTED
+/// form, so the heuristic only emits a bare literal when the
+/// value parses cleanly as a Rust number / bool.
+fn literal_should_be_unquoted(v: &str) -> bool {
+    if v.parse::<i64>().is_ok() || v.parse::<f64>().is_ok() {
+        return true;
+    }
+    // Note: NOT matching "true" / "false" here — many string
+    // attrs in Plugin Framework providers accept ONLY the quoted
+    // form (azurerm log_progress takes "true" not true). Erring
+    // on the side of quoting is the safer default; a user who
+    // wants unquoted can delete the quotes.
+    false
+}
+
 /// Context-aware value completions: suggest matching resources, data
 /// sources, variables, locals, and functions based on the attribute
 /// being edited.
@@ -1997,6 +2062,14 @@ fn attribute_value_items(
 
     let mut items = Vec::new();
     let mut sort_index = 0u32;
+
+    // Enum values mined from the registry's hand-written Markdown
+    // (see `tfls_provider_protocol::registry_docs::extract_allowed_values`).
+    // Emit these FIRST — they're the most concrete suggestion the
+    // server can make, and Plugin Framework providers don't expose
+    // validators over the wire so the schema's bare `string` type
+    // is otherwise the only signal.
+    items.extend(allowed_value_items(backend, resource_type, attr_name, &mut sort_index));
 
     let known_types: HashSet<String> = backend.state.all_resource_types().into_iter().collect();
 
@@ -2805,5 +2878,22 @@ mod type_aware_insert_tests {
     #[test]
     fn variable_without_type_falls_back_to_bare() {
         assert_eq!(variable_insert_text("x", None), "x = ${1}");
+    }
+
+    #[test]
+    fn literal_should_be_unquoted_emits_bare_for_numbers() {
+        assert!(literal_should_be_unquoted("0"));
+        assert!(literal_should_be_unquoted("9"));
+        assert!(literal_should_be_unquoted("3.14"));
+    }
+
+    #[test]
+    fn literal_should_be_unquoted_emits_quoted_for_strings_and_bools() {
+        // Plugin Framework stringified-bool attributes take the
+        // quoted form even though the value LOOKS like a bool.
+        assert!(!literal_should_be_unquoted("true"));
+        assert!(!literal_should_be_unquoted("false"));
+        assert!(!literal_should_be_unquoted("Graph"));
+        assert!(!literal_should_be_unquoted("PowerShell"));
     }
 }

@@ -1031,6 +1031,16 @@ fn render_attribute(hit: &AttributeHit, schema: &AttributeSchema) -> String {
     append_related(&mut out, "Exactly one of", &schema.exactly_one_of);
     append_related(&mut out, "At least one of", &schema.at_least_one_of);
 
+    // Mined enum surface (registry markdown only — see
+    // tfls_provider_protocol::registry_docs::extract_allowed_values).
+    if let Some(values) = schema.allowed_values.as_deref() {
+        if !values.is_empty() {
+            let formatted: Vec<String> =
+                values.iter().map(|v| format!("`{v}`")).collect();
+            out.push_str(&format!("\n\n**Valid values:** {}", formatted.join(", ")));
+        }
+    }
+
     out
 }
 
@@ -1304,4 +1314,58 @@ fn render_dynamic_meta_attr(hit: &DynamicMetaAttrHit) -> String {
         attr = hit.attr_name,
         label = hit.target_label,
     )
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    fn hit(name: &str) -> AttributeHit {
+        AttributeHit {
+            root_kind: RootBlockKind::Resource,
+            root_type: "azurerm_automation_runbook".into(),
+            attr_name: name.into(),
+            nested_path: Vec::new(),
+            key_span: 0..0,
+        }
+    }
+
+    #[test]
+    fn render_attribute_appends_valid_values_section() {
+        let schema = AttributeSchema {
+            description: Some("(Required) The type of the runbook.".into()),
+            allowed_values: Some(vec!["Graph".into(), "PowerShell".into()]),
+            required: true,
+            ..Default::default()
+        };
+        let out = render_attribute(&hit("runbook_type"), &schema);
+        assert!(
+            out.contains("**Valid values:** `Graph`, `PowerShell`"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn render_attribute_omits_valid_values_when_none() {
+        let schema = AttributeSchema {
+            description: Some("(Required) Progress log option.".into()),
+            allowed_values: None,
+            ..Default::default()
+        };
+        let out = render_attribute(&hit("log_progress"), &schema);
+        assert!(!out.contains("Valid values"), "got: {out}");
+    }
+
+    #[test]
+    fn render_attribute_omits_valid_values_when_empty_vec() {
+        // Empty Vec should be treated as "no enum mined".
+        let schema = AttributeSchema {
+            description: Some("desc".into()),
+            allowed_values: Some(Vec::new()),
+            ..Default::default()
+        };
+        let out = render_attribute(&hit("x"), &schema);
+        assert!(!out.contains("Valid values"), "got: {out}");
+    }
 }
