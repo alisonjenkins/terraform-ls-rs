@@ -46,37 +46,72 @@ pub fn spawn(backend: &Backend, uri: Url, version: Option<i32>) {
 }
 
 /// Fire-and-forget eager fetch of Terraform / OpenTofu CLI release
-/// catalogues at server startup. Empty / un-initialised workspaces
-/// don't go through the per-document `did_open` path with anything
-/// meaningful to fetch — `collect_targets` returns empty until the
-/// user types something — so the on-disk cache stays cold and the
-/// first user-visible interaction (typing a `required_version`
-/// constraint, hovering over an existing one, or pulling a
-/// completion) ends up paying the full registry round-trip.
+/// catalogues AND the common-provider version catalogues at server
+/// startup. Empty / un-initialised workspaces don't go through the
+/// per-document `did_open` path with anything meaningful to fetch —
+/// `collect_targets` returns empty until the user types something —
+/// so the on-disk cache stays cold and the first user-visible
+/// interaction (typing a `required_version` constraint, accepting a
+/// `required_providers` block-snippet for a fresh provider, hovering
+/// over an existing version) ends up paying the full registry
+/// round-trip.
 ///
 /// Doing this once on `initialize` populates the cache before the
 /// first keystroke, so completion / hover / inlay-hints / the
 /// "no matching version" diagnostic all light up immediately on
-/// the very first `did_change`.
+/// the very first `did_change`. The provider-catalog prefetch in
+/// particular makes the `required_providers_entry_items`
+/// snippet bake a real `~> MAJOR.MINOR` from cache instead of
+/// falling back to an empty tabstop on cold start.
 ///
-/// One HTTP round trip apiece (GitHub releases for `terraform` /
-/// `opentofu`); 24h disk cache short-circuits subsequent calls.
+/// All HTTP fetches respect the existing 24h disk cache; subsequent
+/// server starts are network-free. Provider catalogs prefetched in
+/// parallel with bounded concurrency to stay polite to the registry.
 pub fn spawn_eager_tool_versions(client: tower_lsp::Client) {
     tokio::spawn(async move {
         let Ok(gh) = tfls_provider_protocol::tool_versions::build_http_client() else {
             return;
         };
-        if tfls_provider_protocol::tool_versions::fetch_tool_versions(&gh)
-            .await
-            .is_ok()
-        {
-            // Refresh inlay hints so the freshness annotations
-            // light up against the now-warm cache. Failure to
-            // refresh is non-fatal — clients that don't advertise
-            // the capability just won't refresh until the next
-            // user-driven request.
-            let _ = client.inlay_hint_refresh().await;
+        let Ok(http) = tfls_provider_protocol::registry_versions::build_http_client() else {
+            return;
+        };
+
+        // Issue both the CLI fetch and every common-provider fetch
+        // concurrently. Each `fetch_*` short-circuits internally on
+        // a fresh cache hit so warm-disk runs still cost just stat
+        // syscalls. We DO filter cached providers up front to avoid
+        // spawning useless tasks that the registry would tally
+        // against rate limits even if they no-op.
+        let mut joins = Vec::new();
+        joins.push(tokio::spawn(async move {
+            let _ = tfls_provider_protocol::tool_versions::fetch_tool_versions(&gh).await;
+        }));
+        for (_, source, _) in tfls_core::builtin_blocks::REQUIRED_PROVIDERS_COMMON_ENTRIES {
+            let Some((ns, name)) = source.split_once('/') else {
+                continue;
+            };
+            if tfls_provider_protocol::registry_versions::is_provider_cached(ns, name) {
+                continue;
+            }
+            let http = http.clone();
+            let ns = ns.to_string();
+            let name = name.to_string();
+            joins.push(tokio::spawn(async move {
+                let _ = tfls_provider_protocol::registry_versions::fetch_versions(
+                    &http, &ns, &name,
+                )
+                .await;
+            }));
         }
+        for j in joins {
+            let _ = j.await;
+        }
+
+        // Refresh inlay hints so the freshness annotations light
+        // up against the now-warm cache. Failure to refresh is
+        // non-fatal — clients that don't advertise the capability
+        // just won't refresh until the next user-driven request.
+        let _ = client.inlay_hint_refresh().await;
     });
 }
 
