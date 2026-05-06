@@ -74,6 +74,8 @@ pub async fn inlay_hint(
         &doc.rope,
         &params.range,
         config.stale_version_days,
+        &backend.state,
+        &uri,
     ));
 
     // --- OpenTofu-only portability hints --------------------------------
@@ -167,12 +169,27 @@ enum VersionSource {
     },
 }
 
-fn version_hints(body: &Body, rope: &Rope, visible: &Range, stale_days: u32) -> Vec<InlayHint> {
+fn version_hints(
+    body: &Body,
+    rope: &Rope,
+    visible: &Range,
+    stale_days: u32,
+    state: &tfls_state::StateStore,
+    uri: &Url,
+) -> Vec<InlayHint> {
     let mut out = Vec::new();
     for structure in body.iter() {
         let Some(block) = structure.as_block() else { continue };
         match block.ident.as_str() {
-            "terraform" => walk_terraform(&block.body, rope, visible, stale_days, &mut out),
+            "terraform" => walk_terraform(
+                &block.body,
+                rope,
+                visible,
+                stale_days,
+                state,
+                uri,
+                &mut out,
+            ),
             "module" => walk_module(&block.body, rope, visible, stale_days, &mut out),
             _ => {}
         }
@@ -185,16 +202,34 @@ fn walk_terraform(
     rope: &Rope,
     visible: &Range,
     stale_days: u32,
+    state: &tfls_state::StateStore,
+    uri: &Url,
     out: &mut Vec<InlayHint>,
 ) {
     for structure in body.iter() {
         if let Some(attr) = structure.as_attribute() {
             if attr.key.as_str() == "required_version" {
-                emit_for_attr(&attr.value, rope, visible, &VersionSource::TerraformCli, stale_days, out);
+                emit_for_attr(
+                    &attr.value,
+                    rope,
+                    visible,
+                    &VersionSource::TerraformCli,
+                    stale_days,
+                    None,
+                    out,
+                );
             }
         } else if let Some(nested) = structure.as_block() {
             if nested.ident.as_str() == "required_providers" {
-                walk_required_providers(&nested.body, rope, visible, stale_days, out);
+                walk_required_providers(
+                    &nested.body,
+                    rope,
+                    visible,
+                    stale_days,
+                    state,
+                    uri,
+                    out,
+                );
             }
         }
     }
@@ -205,10 +240,18 @@ fn walk_required_providers(
     rope: &Rope,
     visible: &Range,
     stale_days: u32,
+    state: &tfls_state::StateStore,
+    uri: &Url,
     out: &mut Vec<InlayHint>,
 ) {
     for structure in body.iter() {
         let Some(attr) = structure.as_attribute() else { continue };
+        // The map key in `required_providers` is the local name
+        // the user picked (`aws`, `awsv5`, …). Used for the
+        // lock-file lookup below — `module_locked_provider_version`
+        // matches it back to the declared `source` (or the
+        // implicit `hashicorp/<name>` default).
+        let provider_local_name = attr.key.as_str().to_string();
         let Expression::Object(obj) = &attr.value else { continue };
         let mut source_str: Option<String> = None;
         let mut version_expr: Option<&Expression> = None;
@@ -223,6 +266,11 @@ fn walk_required_providers(
         }
         let Some(source) = source_str.and_then(|s| parse_provider_source(&s)) else { continue };
         let Some(expr) = version_expr else { continue };
+        let locked = crate::handlers::util::module_locked_provider_version(
+            state,
+            uri,
+            &provider_local_name,
+        );
         emit_for_attr(
             expr,
             rope,
@@ -232,6 +280,7 @@ fn walk_required_providers(
                 name: source.1,
             },
             stale_days,
+            locked.as_ref(),
             out,
         );
     }
@@ -268,6 +317,7 @@ fn walk_module(
             provider,
         },
         stale_days,
+        None,
         out,
     );
 }
@@ -278,6 +328,7 @@ fn emit_for_attr(
     visible: &Range,
     source: &VersionSource,
     stale_days: u32,
+    locked: Option<&semver::Version>,
     out: &mut Vec<InlayHint>,
 ) {
     let Some(span) = expr.span() else { return };
@@ -291,13 +342,26 @@ fn emit_for_attr(
         return;
     }
     let Some(entries) = read_versions_with_dates(source) else { return };
-    let label = compose_label(&parsed.constraints, &entries, stale_days);
-    let Some(label) = label else { return };
+    let composed = compose_label(&parsed.constraints, &entries, stale_days, locked);
+    let Some((label, has_lock)) = composed else { return };
+    let tooltip = if has_lock {
+        Some(InlayHintTooltip::MarkupContent(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value:
+                "**Constraint:** the version range declared in `required_providers`.\n\n\
+                 **Locked:** the exact version pinned by `.terraform.lock.hcl` (written by `terraform init`). \
+                 This is the version that will be used by `terraform plan` / `apply` until you re-run \
+                 `terraform init -upgrade`."
+                    .to_string(),
+        }))
+    } else {
+        None
+    };
     out.push(InlayHint {
         position: range.end,
         label: InlayHintLabel::String(label),
         kind: Some(InlayHintKind::TYPE),
-        tooltip: None,
+        tooltip,
         text_edits: None,
         padding_left: Some(true),
         padding_right: None,
@@ -305,11 +369,15 @@ fn emit_for_attr(
     });
 }
 
+/// Format the version-freshness label. Returns `(label,
+/// has_lock)`; the caller uses `has_lock` to decide whether to
+/// attach the "constraint vs locked" tooltip.
 fn compose_label(
     constraints: &[tfls_core::version_constraint::Constraint],
     entries: &[(String, Option<String>)],
     stale_days: u32,
-) -> Option<String> {
+    locked: Option<&semver::Version>,
+) -> Option<(String, bool)> {
     use tfls_core::version_constraint::satisfies_all;
 
     // Latest overall = first entry (list arrives semver-desc sorted
@@ -320,6 +388,8 @@ fn compose_label(
         .iter()
         .find(|(v, _)| satisfies_all(constraints, v));
 
+    let locked_str = locked.map(|v| v.to_string());
+
     match latest_matching {
         Some((v, _)) if *v == latest_overall => {
             // Pinned IS the latest available — no upgrade path. Skip
@@ -327,17 +397,38 @@ fn compose_label(
             // is older than `stale_days`: the user has nothing to do
             // about it. Show `✓ <ver>` so the "I'm up to date" signal
             // still surfaces.
-            Some(format!("✓ {v}"))
+            //
+            // If the lock pin is BELOW latest, surface the drift —
+            // user's running an older version than the constraint
+            // would let them install. Hide when locked equals
+            // latest (redundant noise).
+            if let Some(lk) = locked_str.as_deref() {
+                if lk != v {
+                    return Some((format!("✓ {v}  (locked: {lk})"), true));
+                }
+            }
+            Some((format!("✓ {v}"), false))
         }
         Some((v, date)) => {
             // Newer available. Include staleness of the matched version.
-            let mut label = format!("→ {latest_overall}  (pinned: {v})");
+            let mut label = if let Some(lk) = locked_str.as_deref() {
+                if lk == v {
+                    // Lock matches the constraint best-match; collapse
+                    // the redundant `(pinned: X, locked: X)` to a
+                    // single segment.
+                    format!("→ {latest_overall}  (locked: {lk})")
+                } else {
+                    format!("→ {latest_overall}  (pinned: {v}, locked: {lk})")
+                }
+            } else {
+                format!("→ {latest_overall}  (pinned: {v})")
+            };
             if let Some(age) = age_days(date.as_deref()) {
                 if stale_days > 0 && age > stale_days as i64 {
                     label.push_str(&format!("  ⚠ {}", humanise_age(age)));
                 }
             }
-            Some(label)
+            Some((label, locked_str.is_some()))
         }
         None => {
             // No match — diagnostic warning already flags this; skip
@@ -895,8 +986,9 @@ mod tests {
         // the user can't act on it.
         let constraints = tfls_core::version_constraint::parse("3.7.2").constraints;
         let entries = vec![entry("3.7.2", 400)];
-        let label = compose_label(&constraints, &entries, 30).expect("label");
+        let (label, has_lock) = compose_label(&constraints, &entries, 30, None).expect("label");
         assert_eq!(label, "✓ 3.7.2", "got: {label}");
+        assert!(!has_lock);
     }
 
     #[test]
@@ -905,9 +997,74 @@ mod tests {
         // warning so user sees the urgency of the upgrade.
         let constraints = tfls_core::version_constraint::parse("3.7.2").constraints;
         let entries = vec![entry("3.8.1", 30), entry("3.7.2", 400)];
-        let label = compose_label(&constraints, &entries, 30).expect("label");
+        let (label, _) = compose_label(&constraints, &entries, 30, None).expect("label");
         assert!(label.starts_with("→ 3.8.1"), "got: {label}");
         assert!(label.contains("pinned: 3.7.2"), "got: {label}");
         assert!(label.contains("old"), "got: {label}");
+    }
+
+    // --- compose_label lock-file awareness -----------------------
+
+    #[test]
+    fn compose_label_shows_locked_when_constraint_at_latest_but_lock_below() {
+        // Constraint admits 5.x, latest is 5.94, lock pins 5.50 —
+        // show the drift between the latest constraint-allowed
+        // version and what the lock actually pins.
+        let constraints = tfls_core::version_constraint::parse("~> 5.0").constraints;
+        let entries = vec![entry("5.94.0", 5), entry("5.50.0", 200)];
+        let lock = semver::Version::new(5, 50, 0);
+        let (label, has_lock) =
+            compose_label(&constraints, &entries, 30, Some(&lock)).expect("label");
+        // Constraint best-match (5.94.0) == latest_overall — the
+        // `✓ ...` arm fires; lock segment surfaces the drift.
+        assert_eq!(label, "✓ 5.94.0  (locked: 5.50.0)", "got: {label}");
+        assert!(has_lock);
+    }
+
+    #[test]
+    fn compose_label_hides_locked_when_equal_to_latest() {
+        // Lock matches latest — no drift to surface, so no
+        // `(locked: …)` segment.
+        let constraints = tfls_core::version_constraint::parse("~> 5.0").constraints;
+        let entries = vec![entry("5.50.0", 5)];
+        let lock = semver::Version::new(5, 50, 0);
+        let (label, has_lock) =
+            compose_label(&constraints, &entries, 30, Some(&lock)).expect("label");
+        assert_eq!(label, "✓ 5.50.0", "got: {label}");
+        assert!(!has_lock);
+    }
+
+    #[test]
+    fn compose_label_collapses_redundant_pinned_when_lock_matches_constraint_best() {
+        // Constraint pins to 3.7.2, lock also at 3.7.2, but a
+        // newer version (3.8.1) exists. Render `(locked: 3.7.2)`,
+        // not `(pinned: 3.7.2, locked: 3.7.2)`.
+        let constraints = tfls_core::version_constraint::parse("3.7.2").constraints;
+        let entries = vec![entry("3.8.1", 30), entry("3.7.2", 400)];
+        let lock = semver::Version::new(3, 7, 2);
+        let (label, has_lock) =
+            compose_label(&constraints, &entries, 30, Some(&lock)).expect("label");
+        assert!(label.starts_with("→ 3.8.1"), "got: {label}");
+        assert!(label.contains("(locked: 3.7.2)"), "got: {label}");
+        assert!(!label.contains("pinned"), "got: {label}");
+        assert!(has_lock);
+    }
+
+    #[test]
+    fn compose_label_shows_both_when_lock_disagrees_with_constraint_best() {
+        // Stale lock case: constraint best-match would resolve to
+        // 5.60.0, but the lock pins 5.50.0. Surface both.
+        let constraints = tfls_core::version_constraint::parse("~> 5.0").constraints;
+        let entries = vec![
+            entry("5.94.0", 5),
+            entry("5.60.0", 30),
+            entry("5.50.0", 200),
+        ];
+        let lock = semver::Version::new(5, 50, 0);
+        let (label, _) =
+            compose_label(&constraints, &entries, 30, Some(&lock)).expect("label");
+        // Constraint best-match (5.94.0) is the latest_overall —
+        // ✓ arm. Drift segment shows the lock pin.
+        assert_eq!(label, "✓ 5.94.0  (locked: 5.50.0)", "got: {label}");
     }
 }
