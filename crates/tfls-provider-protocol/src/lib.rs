@@ -143,6 +143,11 @@ fn read_lock_pins(
         return out;
     };
     for (addr, entry) in lock.iter() {
+        // ProviderAddress::parse canonicalises
+        // `registry.opentofu.org` to `registry.terraform.io` so
+        // both lock-file dialects share one identity. The
+        // discovered binaries from disk are also stored with
+        // canonical hosts — keys match without further work.
         out.insert(
             (
                 addr.hostname.clone(),

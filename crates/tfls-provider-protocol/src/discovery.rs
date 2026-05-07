@@ -81,24 +81,25 @@ pub fn dedupe_providers_using_pins(
     //  1. Pin-matches sort FIRST within each (host, ns, name) group.
     //  2. Within non-pin-match (or no pin), highest version FIRST.
     // Then `dedup_by` keeps the first occurrence per provider.
+    // Canonicalise the host before pin lookup so registry mirrors
+    // (`registry.opentofu.org` ↔ `registry.terraform.io`) match
+    // each other. Same logic that `ProviderAddress::parse` applies
+    // on the lock-file side.
+    let canon = |h: &str| match h {
+        "registry.opentofu.org" | "registry.terraform.io" => "registry.terraform.io",
+        other => other,
+    }
+    .to_string();
     bins.sort_by(|a, b| {
         let ka = (&a.registry_host, &a.namespace, &a.name);
         let kb = (&b.registry_host, &b.namespace, &b.name);
         ka.cmp(&kb).then_with(|| {
             let pin_a = pins
-                .get(&(
-                    a.registry_host.clone(),
-                    a.namespace.clone(),
-                    a.name.clone(),
-                ))
+                .get(&(canon(&a.registry_host), a.namespace.clone(), a.name.clone()))
                 .map(|v| v.as_str() == a.version)
                 .unwrap_or(false);
             let pin_b = pins
-                .get(&(
-                    b.registry_host.clone(),
-                    b.namespace.clone(),
-                    b.name.clone(),
-                ))
+                .get(&(canon(&b.registry_host), b.namespace.clone(), b.name.clone()))
                 .map(|v| v.as_str() == b.version)
                 .unwrap_or(false);
             // Pin matches before non-matches (true sorts after

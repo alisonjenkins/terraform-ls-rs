@@ -28,13 +28,17 @@ pub struct ProviderAddress {
 }
 
 impl ProviderAddress {
+    /// Construct without normalising — hostname is stored verbatim.
+    /// Used by tests + a few legacy call sites; new code should
+    /// prefer [`Self::parse`] which canonicalises common
+    /// terraform / opentofu registry hosts to a single identity.
     pub fn new(
         hostname: impl Into<String>,
         namespace: impl Into<String>,
         r#type: impl Into<String>,
     ) -> Self {
         Self {
-            hostname: hostname.into(),
+            hostname: canonicalise_hostname(&hostname.into()).to_string(),
             namespace: namespace.into(),
             r#type: r#type.into(),
         }
@@ -47,6 +51,14 @@ impl ProviderAddress {
 
     /// Parse a provider address like `registry.terraform.io/hashicorp/aws`
     /// or the short form `hashicorp/aws` (assumes registry.terraform.io).
+    ///
+    /// `registry.opentofu.org/<ns>/<name>` is canonicalised to
+    /// `registry.terraform.io/<ns>/<name>` — both registries
+    /// serve identical provider artefacts (the OpenTofu registry
+    /// is a mirror), so they're the same provider for identity
+    /// purposes. The lock file may store either host depending
+    /// on which CLI ran `init`; canonicalising at parse time
+    /// means every downstream lookup sees one identity.
     pub fn parse(input: &str) -> Result<Self, CoreError> {
         let parts: Vec<&str> = input.split('/').collect();
         match parts.as_slice() {
@@ -57,6 +69,16 @@ impl ProviderAddress {
                 reason: "expected 'host/namespace/type' or 'namespace/type'".to_string(),
             }),
         }
+    }
+}
+
+/// Map equivalent registry hosts to a single canonical name so
+/// `ProviderAddress` equality / hashing treats `tofu`-fetched
+/// and `terraform`-fetched copies of the same provider as one.
+fn canonicalise_hostname(host: &str) -> &str {
+    match host {
+        "registry.opentofu.org" | "registry.terraform.io" => "registry.terraform.io",
+        other => other,
     }
 }
 

@@ -44,8 +44,28 @@ pub struct LockFile {
 }
 
 impl LockFile {
+    /// Exact-address lookup. Matches host + namespace + type
+    /// strictly. Useful when the caller already has a canonical
+    /// address.
     pub fn get(&self, addr: &ProviderAddress) -> Option<&LockFileEntry> {
-        self.entries.get(addr)
+        self.entries.get(addr).or_else(|| self.find_by_ns_name(&addr.namespace, &addr.r#type))
+    }
+
+    /// Host-tolerant lookup by `(namespace, type)`. Matches the
+    /// first entry regardless of which registry host the lock
+    /// file uses (`registry.terraform.io` vs
+    /// `registry.opentofu.org`). Required because the lock file
+    /// stores the host the user's CLI fetched the provider from
+    /// (tofu writes `registry.opentofu.org`, terraform writes
+    /// `registry.terraform.io`), but the LSP-side caller usually
+    /// only knows the short-form `<ns>/<name>` from
+    /// `required_providers` and defaults the host to
+    /// `registry.terraform.io`.
+    pub fn find_by_ns_name(&self, namespace: &str, name: &str) -> Option<&LockFileEntry> {
+        self.entries
+            .iter()
+            .find(|(addr, _)| addr.namespace == namespace && addr.r#type == name)
+            .map(|(_, e)| e)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&ProviderAddress, &LockFileEntry)> {
