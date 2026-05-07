@@ -1003,3 +1003,147 @@ fn lock_file_change_drops_cached_schema_fetch_mtime() {
 
     assert!(!b.state.fetched_schema_dirs.contains_key(dir));
 }
+
+// --- lock-vs-constraint drift across repeated init runs ---------
+//
+// User-reported regression: after `tofu init -upgrade` to pin a
+// version that satisfies the constraint, the stale "constraint
+// doesn't admit lock pin" diagnostic from BEFORE the init kept
+// being reported. Repro flow:
+//
+//   1. Open file with `version = "~> 4.71.0"` and lock pin 4.71.0.
+//      No diagnostic.
+//   2. Rewrite lock to 2.71.0 (mimics user pinning + init).
+//      `invalidate_lock` runs (mimics LockFileChanged watcher arm).
+//      Diagnostic fires.
+//   3. Rewrite lock back to 4.71.0.
+//      invalidate_lock runs.
+//      Diagnostic clears.
+//
+// Tests the full cache-invalidation chain: state.lock_file_for ->
+// compute_diagnostics::lock_vs_constraint_diagnostics, including
+// the canonical-path key collapsing (macOS /var symlink handling).
+
+fn write_lock(dir: &std::path::Path, azurerm_version: &str) {
+    let body = format!(
+        r#"provider "registry.opentofu.org/hashicorp/azurerm" {{
+  version     = "{azurerm_version}"
+  constraints = "~> 4.71.0"
+  hashes      = []
+}}
+"#
+    );
+    fs::write(dir.join(".terraform.lock.hcl"), body).unwrap();
+}
+
+#[test]
+fn lock_constraint_drift_clears_after_invalidate() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    fs::write(
+        dir.join("main.tf"),
+        r#"terraform {
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 4.71.0"
+    }
+  }
+}
+"#,
+    )
+    .unwrap();
+    write_lock(dir, "4.71.0");
+
+    let b = backend();
+    let main_uri = Url::from_file_path(dir.join("main.tf")).unwrap();
+    insert(&b, &main_uri, &fs::read_to_string(dir.join("main.tf")).unwrap());
+
+    // Step 1: lock matches → no drift warning.
+    let initial = messages(&b, &main_uri);
+    assert!(
+        !initial.iter().any(|m| m.contains("does not admit")),
+        "initial state should be clean; got: {initial:?}"
+    );
+
+    // Step 2: rewrite lock to a version OUTSIDE the constraint
+    // band. Sleep ~10ms to ensure the rewrite produces a distinct
+    // mtime even on filesystems with second-level granularity.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    write_lock(dir, "2.71.0");
+    b.state.invalidate_lock(dir);
+
+    let after_downgrade = messages(&b, &main_uri);
+    assert!(
+        after_downgrade.iter().any(|m| m.contains("does not admit") && m.contains("2.71.0")),
+        "downgrade should produce drift warning citing 2.71.0; got: {after_downgrade:?}"
+    );
+
+    // Step 3: rewrite lock back to a satisfying version.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    write_lock(dir, "4.71.0");
+    b.state.invalidate_lock(dir);
+
+    let after_re_upgrade = messages(&b, &main_uri);
+    assert!(
+        !after_re_upgrade.iter().any(|m| m.contains("does not admit")),
+        "re-upgrade should clear drift warning; got: {after_re_upgrade:?}"
+    );
+}
+
+/// Same flow but mimics macOS-style symlinked tmp paths by using
+/// `/var/folders/.../X` (non-canonical) for the URI side and
+/// `/private/var/folders/.../X` (canonical) for the
+/// invalidate_lock call — exactly the watcher-vs-URI path
+/// mismatch the canonicalisation fix is supposed to handle.
+#[test]
+fn lock_invalidate_with_canonical_path_clears_cache_keyed_under_non_canonical() {
+    let tmp = tempfile::tempdir().unwrap();
+    // tempdir() on macOS returns `/var/folders/.../X` which IS
+    // a symlink. Capture both forms.
+    let non_canonical = tmp.path().to_path_buf();
+    let canonical = non_canonical.canonicalize().unwrap();
+    if non_canonical == canonical {
+        // Linux / no symlinks — skip; the bug's specific to
+        // macOS-style symlinked /tmp.
+        eprintln!(
+            "skip: non_canonical and canonical paths match, no symlink to test against",
+        );
+        return;
+    }
+    fs::write(
+        non_canonical.join("main.tf"),
+        r#"terraform {
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 4.71.0"
+    }
+  }
+}
+"#,
+    )
+    .unwrap();
+    write_lock(&non_canonical, "4.71.0");
+
+    let b = backend();
+    let main_uri = Url::from_file_path(non_canonical.join("main.tf")).unwrap();
+    insert(&b, &main_uri, &fs::read_to_string(non_canonical.join("main.tf")).unwrap());
+
+    // Prime the lock cache via the non-canonical URI parent.
+    let _ = messages(&b, &main_uri);
+
+    // Mutate lock and invalidate via the CANONICAL path
+    // (mimicking the watcher's fsevents-reported event).
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    write_lock(&non_canonical, "2.71.0");
+    b.state.invalidate_lock(&canonical);
+
+    // Diagnostic should fire — invalidate_lock must collapse
+    // both path forms to the same cache key.
+    let after = messages(&b, &main_uri);
+    assert!(
+        after.iter().any(|m| m.contains("does not admit") && m.contains("2.71.0")),
+        "invalidate via canonical path must clear cache keyed under non-canonical; got: {after:?}"
+    );
+}

@@ -2654,6 +2654,7 @@ dependencies = [
  "hcl-edit",
  "lsp-types",
  "reqwest",
+ "rustls",
  "serde_json",
  "sonic-rs",
  "tfls-core",

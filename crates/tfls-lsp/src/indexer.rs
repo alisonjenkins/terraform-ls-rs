@@ -270,6 +270,10 @@ pub fn spawn_watcher(
                     }
                 }
                 WorkspaceEvent::LockFileChanged(dir) => {
+                    tracing::info!(
+                        dir = %dir.display(),
+                        "watcher: LockFileChanged — invalidating cache + re-fetching schemas"
+                    );
                     state.invalidate_lock(&dir);
                     // `terraform init` (the only thing that touches
                     // `.terraform.lock.hcl`) also rewrites the

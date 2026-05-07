@@ -41,6 +41,10 @@ path = "src/bin/deprecation_scrape.rs"
 name = "tfls-doc-probe"
 path = "src/bin/doc_probe.rs"
 
+[[bin]]
+name = "tfls-lock-probe"
+path = "src/bin/lock_probe.rs"
+
 [dependencies]
 tfls-lsp.workspace = true
 tfls-state.workspace = true
@@ -61,3 +65,4 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "json", "gzip"] }
 futures = "0.3"
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
