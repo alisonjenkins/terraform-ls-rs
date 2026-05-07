@@ -293,6 +293,17 @@ pub fn spawn_watcher(
                     // immediately, not on the user's next edit.
                     if let Some(client) = &client {
                         let _ = client.inlay_hint_refresh().await;
+                        // Push fresh diagnostics for every open
+                        // document in this module dir. The
+                        // lock-vs-constraint warning emitted by
+                        // `compute_diagnostics` reads the lock
+                        // pin we just invalidated; without an
+                        // explicit re-publish here, a stale
+                        // "constraint doesn't admit lock pin"
+                        // diagnostic from before the user ran
+                        // `terraform init -upgrade` would persist
+                        // until the user typed in the buffer.
+                        publish_for_dir(&state, client, &dir).await;
                     }
                 }
             }
@@ -680,6 +691,34 @@ async fn publish_for_path(
     client
         .publish_diagnostics(uri, diagnostics, Some(version))
         .await;
+}
+
+/// Push fresh diagnostics for every document loaded in `dir`. Used
+/// by the `LockFileChanged` watcher arm so post-init lock changes
+/// land in the client's diagnostic display without waiting for
+/// the user to edit the buffer.
+async fn publish_for_dir(state: &StateStore, client: &tower_lsp::Client, dir: &Path) {
+    let uris: Vec<tower_lsp::lsp_types::Url> = state
+        .documents
+        .iter()
+        .filter_map(|entry| {
+            let uri = entry.key();
+            let path = uri.to_file_path().ok()?;
+            if path.parent() == Some(dir) {
+                Some(uri.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    for uri in uris {
+        if state.should_skip_push_diagnostics(&uri) {
+            continue;
+        }
+        let version = state.documents.get(&uri).map(|d| d.version);
+        let diagnostics = crate::handlers::document::compute_diagnostics(state, &uri);
+        client.publish_diagnostics(uri, diagnostics, version).await;
+    }
 }
 
 /// Walk upward from `start` looking for a directory whose
