@@ -57,6 +57,65 @@ pub fn dedupe_providers_keep_highest(mut bins: Vec<ProviderBinary>) -> Vec<Provi
     bins
 }
 
+/// Like [`dedupe_providers_keep_highest`] but consults a
+/// `(host, namespace, name) → pinned_version` map to pick the
+/// LOCK-PINNED version instead of the highest-on-disk one. Falls
+/// back to "highest" when no pin exists for a given provider.
+///
+/// Why: `tofu init` doesn't always reap superseded provider
+/// binaries from `.terraform/providers/`. After a downgrade —
+/// e.g. constraint loosened then re-pinned to an older version —
+/// both the old AND new binaries sit on disk. Picking the
+/// highest gives the user a schema that doesn't match what
+/// `terraform plan` will actually run, which surfaces as
+/// "unknown attribute" diagnostics that don't fire (the schema
+/// includes attrs the binary on disk doesn't expose) and worse
+/// false-positives where the schema permits something the
+/// binary will reject. The `.terraform.lock.hcl` is the
+/// authoritative source — every `init` writes it — so use that.
+pub fn dedupe_providers_using_pins(
+    mut bins: Vec<ProviderBinary>,
+    pins: &std::collections::HashMap<(String, String, String), String>,
+) -> Vec<ProviderBinary> {
+    // Sort so:
+    //  1. Pin-matches sort FIRST within each (host, ns, name) group.
+    //  2. Within non-pin-match (or no pin), highest version FIRST.
+    // Then `dedup_by` keeps the first occurrence per provider.
+    bins.sort_by(|a, b| {
+        let ka = (&a.registry_host, &a.namespace, &a.name);
+        let kb = (&b.registry_host, &b.namespace, &b.name);
+        ka.cmp(&kb).then_with(|| {
+            let pin_a = pins
+                .get(&(
+                    a.registry_host.clone(),
+                    a.namespace.clone(),
+                    a.name.clone(),
+                ))
+                .map(|v| v.as_str() == a.version)
+                .unwrap_or(false);
+            let pin_b = pins
+                .get(&(
+                    b.registry_host.clone(),
+                    b.namespace.clone(),
+                    b.name.clone(),
+                ))
+                .map(|v| v.as_str() == b.version)
+                .unwrap_or(false);
+            // Pin matches before non-matches (true sorts after
+            // false by default → swap with reverse).
+            pin_b
+                .cmp(&pin_a)
+                .then_with(|| version_cmp(&b.version, &a.version))
+        })
+    });
+    bins.dedup_by(|a, b| {
+        a.registry_host == b.registry_host
+            && a.namespace == b.namespace
+            && a.name == b.name
+    });
+    bins
+}
+
 fn version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     match (semver::Version::parse(a), semver::Version::parse(b)) {
         (Ok(va), Ok(vb)) => va.cmp(&vb),
@@ -347,6 +406,90 @@ mod tests {
             .find(|b| b.name == "aws")
             .expect("aws retained");
         assert_eq!(aws.version, "6.18.0", "keeps highest: {aws:?}");
+    }
+
+    #[test]
+    fn dedupe_with_pins_picks_pinned_over_highest() {
+        // Both 4.50.0 and 4.71.0 of azurerm are on disk (e.g.
+        // user downgraded, tofu init didn't reap the old binary).
+        // Lock pins 4.50.0 — that's what `terraform plan` will run,
+        // so that's the schema we should fetch from. Without the
+        // pin lookup, we'd take 4.71.0 (highest) and the user's
+        // diagnostics would track a binary they're not using.
+        let mk = |ns: &str, name: &str, ver: &str| ProviderBinary {
+            binary: std::path::PathBuf::from("/dev/null"),
+            registry_host: "registry.terraform.io".to_string(),
+            namespace: ns.to_string(),
+            name: name.to_string(),
+            version: ver.to_string(),
+        };
+        let input = vec![
+            mk("hashicorp", "azurerm", "4.50.0"),
+            mk("hashicorp", "azurerm", "4.71.0"),
+        ];
+        let mut pins = std::collections::HashMap::new();
+        pins.insert(
+            (
+                "registry.terraform.io".to_string(),
+                "hashicorp".to_string(),
+                "azurerm".to_string(),
+            ),
+            "4.50.0".to_string(),
+        );
+        let out = dedupe_providers_using_pins(input, &pins);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].version, "4.50.0", "lock pin wins over higher: {out:?}");
+    }
+
+    #[test]
+    fn dedupe_with_pins_falls_back_to_highest_when_no_pin() {
+        // Provider not listed in the pin map → behaviour matches
+        // dedupe_providers_keep_highest.
+        let mk = |ns: &str, name: &str, ver: &str| ProviderBinary {
+            binary: std::path::PathBuf::from("/dev/null"),
+            registry_host: "registry.terraform.io".to_string(),
+            namespace: ns.to_string(),
+            name: name.to_string(),
+            version: ver.to_string(),
+        };
+        let input = vec![
+            mk("hashicorp", "aws", "6.0.0"),
+            mk("hashicorp", "aws", "6.43.0"),
+        ];
+        let pins = std::collections::HashMap::new();
+        let out = dedupe_providers_using_pins(input, &pins);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].version, "6.43.0", "no pin → highest: {out:?}");
+    }
+
+    #[test]
+    fn dedupe_with_pins_falls_back_to_highest_when_pin_missing_on_disk() {
+        // Lock pins a version we don't have on disk (e.g. binary
+        // not yet downloaded). Pick the highest available rather
+        // than dropping the provider entirely.
+        let mk = |ns: &str, name: &str, ver: &str| ProviderBinary {
+            binary: std::path::PathBuf::from("/dev/null"),
+            registry_host: "registry.terraform.io".to_string(),
+            namespace: ns.to_string(),
+            name: name.to_string(),
+            version: ver.to_string(),
+        };
+        let input = vec![
+            mk("hashicorp", "azurerm", "4.50.0"),
+            mk("hashicorp", "azurerm", "4.71.0"),
+        ];
+        let mut pins = std::collections::HashMap::new();
+        pins.insert(
+            (
+                "registry.terraform.io".to_string(),
+                "hashicorp".to_string(),
+                "azurerm".to_string(),
+            ),
+            "4.99.0".to_string(),
+        );
+        let out = dedupe_providers_using_pins(input, &pins);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].version, "4.71.0", "missing pin → fall back: {out:?}");
     }
 
     #[test]

@@ -31,7 +31,10 @@ pub(crate) mod proto_v5 {
     tonic::include_proto!("tfplugin5");
 }
 
-pub use discovery::{ProviderBinary, dedupe_providers_keep_highest, discover_providers};
+pub use discovery::{
+    ProviderBinary, dedupe_providers_keep_highest, dedupe_providers_using_pins,
+    discover_providers,
+};
 pub use handshake::{HandshakeInfo, PluginInstance, spawn_and_handshake};
 
 /// Error type for the protocol crate.
@@ -126,6 +129,32 @@ pub struct RawPluginSchemas {
 /// Fetches across providers run concurrently with a semaphore cap of
 /// 8. Each gRPC handshake is independent (separate process spawn +
 /// mTLS) so parallelism scales near-linearly until the cap.
+/// Read `<init_root>/.terraform.lock.hcl` and return a
+/// `(host, namespace, name) → version` map. Empty when the file
+/// doesn't exist or fails to parse.
+fn read_lock_pins(
+    terraform_dir: &Path,
+) -> std::collections::HashMap<(String, String, String), String> {
+    let mut out = std::collections::HashMap::new();
+    let Some(init_root) = terraform_dir.parent() else {
+        return out;
+    };
+    let Some(lock) = tfls_core::lock_file::read_for_module(init_root) else {
+        return out;
+    };
+    for (addr, entry) in lock.iter() {
+        out.insert(
+            (
+                addr.hostname.clone(),
+                addr.namespace.clone(),
+                addr.r#type.clone(),
+            ),
+            entry.version.to_string(),
+        );
+    }
+    out
+}
+
 pub async fn fetch_schemas_from_plugins_raw(
     terraform_dir: &Path,
     on_progress: Option<SchemaProgressCallback>,
@@ -135,12 +164,18 @@ pub async fn fetch_schemas_from_plugins_raw(
     let start = std::time::Instant::now();
     let raw_binaries = discover_providers(terraform_dir)?;
     let discovered = raw_binaries.len();
-    // Keep only the highest version of each provider. Terraform's
-    // own lock resolver sometimes leaves multiple versions cached
-    // together; spawning the gRPC binary for every stale version
-    // wastes CPU/RAM (each spawn is ~100 MiB RSS) and the older
-    // schemas get overwritten anyway.
-    let binaries = dedupe_providers_keep_highest(raw_binaries);
+    // Prefer lock-pinned versions over highest-on-disk. `tofu init`
+    // doesn't always reap superseded provider binaries; without
+    // the lock-pin preference, post-downgrade workspaces would
+    // pull schema from the (still-present) newer binary and the
+    // user's diagnostics would track a version they're not
+    // running.
+    let pins = read_lock_pins(terraform_dir);
+    let binaries = if pins.is_empty() {
+        dedupe_providers_keep_highest(raw_binaries)
+    } else {
+        dedupe_providers_using_pins(raw_binaries, &pins)
+    };
     let total = binaries.len();
     if discovered != total {
         tracing::info!(

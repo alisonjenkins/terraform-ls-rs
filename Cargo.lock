@@ -2780,6 +2780,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sonic-rs",
+ "tfls-core",
  "tfls-schema",
  "thiserror 2.0.18",
  "tokio",
