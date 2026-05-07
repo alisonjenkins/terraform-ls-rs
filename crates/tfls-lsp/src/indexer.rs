@@ -258,8 +258,10 @@ pub fn spawn_watcher(
         Duration::from_millis(WATCH_DEBOUNCE_MS),
     )?;
 
+    tracing::info!(root = %root.display(), "watcher: spawned");
     let handle = tokio::spawn(async move {
         while let Some(event) = watcher.events.recv().await {
+            tracing::debug!(event = ?event, "watcher: event");
             match event {
                 WorkspaceEvent::FileChanged(path) => {
                     queue.enqueue(Job::ParseFile(path), Priority::Normal);

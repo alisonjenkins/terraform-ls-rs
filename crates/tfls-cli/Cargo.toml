@@ -45,6 +45,10 @@ path = "src/bin/doc_probe.rs"
 name = "tfls-lock-probe"
 path = "src/bin/lock_probe.rs"
 
+[[bin]]
+name = "tfls-mux-lock-probe"
+path = "src/bin/mux_lock_probe.rs"
+
 [dependencies]
 tfls-lsp.workspace = true
 tfls-state.workspace = true
