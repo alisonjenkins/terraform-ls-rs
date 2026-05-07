@@ -85,46 +85,6 @@
             mainProgram = "tfls";
           };
         });
-
-        # sccache-wrapped build for fast iteration. Most useful when
-        # paired with `nix build .#tfls-sccache --impure` plus a
-        # SCCACHE_* environment passed in (SCCACHE_DIR, SCCACHE_BUCKET,
-        # SCCACHE_REDIS_ENDPOINT, …). With a populated SCCACHE_DIR
-        # warm-cache rebuilds skip individual rustc compilations.
-        #
-        # Caveats: nix sandboxing means SCCACHE_DIR ends up isolated
-        # per-build unless you explicitly bind-mount or run with
-        # `--impure` so the build inherits your user environment.
-        # Crane's `cargoArtifacts` already caches dep builds, so the
-        # marginal benefit of sccache in a clean nix build is small —
-        # the bigger win comes from sccache in the devShell, where
-        # `cargo build` runs outside the sandbox.
-        commonArgsSccache = commonArgs // {
-          # `cargo` invocations during the build will spawn `rustc`
-          # via this wrapper. The sccache binary must be on PATH;
-          # add to nativeBuildInputs alongside the other tools.
-          RUSTC_WRAPPER = "${pkgs.sccache}/bin/sccache";
-          # sccache + cargo's own incremental cache fight over
-          # the same artefacts and the result is slower than either
-          # alone. Disable cargo incremental — sccache is the cache.
-          CARGO_INCREMENTAL = "0";
-          nativeBuildInputs = (commonArgs.nativeBuildInputs or [ ]) ++ [
-            pkgs.sccache
-          ];
-        };
-
-        cargoArtifactsSccache = craneLib.buildDepsOnly commonArgsSccache;
-
-        tfls-sccache = craneLib.buildPackage (commonArgsSccache // {
-          cargoArtifacts = cargoArtifactsSccache;
-          pname = "terraform-ls-rs-sccache";
-          cargoExtraArgs = "--package tfls-cli";
-          meta = with pkgs.lib; {
-            description = "terraform-ls-rs built with sccache as RUSTC_WRAPPER";
-            license = licenses.mpl20;
-            mainProgram = "tfls";
-          };
-        });
       in
       {
         checks = {
@@ -147,14 +107,6 @@
         packages = {
           default = tfls;
           tfls = tfls;
-          # `nix build .#tfls-sccache` — same binary as `tfls` but
-          # built with sccache wrapping rustc. Use with `--impure`
-          # plus exported `SCCACHE_*` env vars when iterating
-          # locally so the warm cache survives across nix builds:
-          #
-          #   export SCCACHE_DIR=~/.cache/sccache
-          #   nix build .#tfls-sccache --impure
-          tfls-sccache = tfls-sccache;
         };
 
         apps.default = flake-utils.lib.mkApp {
