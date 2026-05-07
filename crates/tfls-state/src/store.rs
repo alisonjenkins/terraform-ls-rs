@@ -106,6 +106,15 @@ pub struct StateStore {
     pub fetched_schema_dirs:
         FxDashMap<std::path::PathBuf, std::time::SystemTime>,
 
+    /// Installed provider VERSION per [`ProviderAddress`]. Populated
+    /// alongside [`Self::schemas`] when the plugin-protocol /
+    /// CLI-fallback fetch lands. Used by the upgrade-hint
+    /// diagnostic to render messages like "available in v4.71.0 —
+    /// you're on v4.50.0". Empty when schemas come from a path
+    /// that doesn't carry version metadata; the diagnostic falls
+    /// back to a hint that doesn't quote the installed version.
+    pub installed_provider_versions: FxDashMap<ProviderAddress, String>,
+
     /// Set to `true` during `initialize` when the client advertises
     /// support for pull-based diagnostics
     /// (`capabilities.textDocument.diagnostic`). When `true` the
@@ -399,6 +408,23 @@ impl StateStore {
                 ),
             }
         }
+    }
+
+    /// Record the installed version for `addr`. Called alongside
+    /// `install_schemas` once the provider-protocol fetch knows
+    /// which version it spoke to. Used by the upgrade-hint
+    /// diagnostic.
+    pub fn record_installed_version(&self, addr: ProviderAddress, version: String) {
+        self.installed_provider_versions.insert(addr, version);
+    }
+
+    /// Look up the installed version recorded for a provider, if
+    /// any. `None` when schemas were installed from a source that
+    /// didn't carry version metadata (e.g. early CLI fallback).
+    pub fn installed_version(&self, addr: &ProviderAddress) -> Option<String> {
+        self.installed_provider_versions
+            .get(addr)
+            .map(|e| e.value().clone())
     }
 
     /// Look up a resource schema by its unqualified type name across

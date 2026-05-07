@@ -1531,10 +1531,27 @@ async fn fetch_and_install_schemas(
                 // registry-doc round-trip (~60 s for aws) before
                 // completion unblocks.
                 state.install_schemas(raw.schemas.clone());
+                // Record installed provider versions so the
+                // upgrade-hint diagnostic can render
+                // "you're on vX.Y.Z, available in v<latest>".
+                for coord in &raw.coords {
+                    if let Ok(addr) =
+                        tfls_core::ProviderAddress::parse(&coord.address)
+                    {
+                        state.record_installed_version(addr, coord.version.clone());
+                    }
+                }
                 tracing::info!(
                     providers = count,
                     "installed provider schemas (plugin, pre-enrichment)"
                 );
+
+                // Spawn latest-published-docs prefetch for these
+                // providers so the upgrade-hint diagnostic has data
+                // to consult on next did_change. Per-provider work
+                // is small (one HTTP call to /v1/providers + N doc
+                // fetches, all 7d-cached on disk).
+                spawn_latest_docs_prefetch(raw.coords.clone());
 
                 // Enrichment in the background. Clones the current
                 // installed ProviderSchemas, mutates it, and
@@ -1627,6 +1644,38 @@ fn path_to_url(path: &Path) -> Option<lsp_types::Url> {
 /// `Arc<ProviderSchema>` entries atomically in the DashMap — any
 /// concurrent reader sees either the old or the new, never a torn
 /// view.
+/// Fire-and-forget background fetch of LATEST-published-version
+/// registry docs for each provider in `coords`. Independent of the
+/// per-installed-version enrichment — the upgrade-hint diagnostic
+/// needs to know the SHAPE of the latest release so it can spot
+/// names that the user's installed binary doesn't expose yet.
+fn spawn_latest_docs_prefetch(
+    coords: Vec<tfls_provider_protocol::registry_docs::ProviderCoords>,
+) {
+    tokio::spawn(async move {
+        // Bound concurrency so we don't hammer the registry on
+        // workspaces with many providers.
+        use futures::stream::{self, StreamExt};
+        stream::iter(coords)
+            .for_each_concurrent(4, |c| async move {
+                if let Err(e) =
+                    tfls_provider_protocol::registry_docs::fetch_latest_parsed_docs(
+                        &c.namespace,
+                        &c.name,
+                    )
+                    .await
+                {
+                    tracing::debug!(
+                        error = %e,
+                        provider = %format!("{}/{}", c.namespace, c.name),
+                        "latest-docs prefetch failed",
+                    );
+                }
+            })
+            .await;
+    });
+}
+
 fn spawn_background_enrichment(
     state: Arc<StateStore>,
     mut schemas: tfls_schema::ProviderSchemas,

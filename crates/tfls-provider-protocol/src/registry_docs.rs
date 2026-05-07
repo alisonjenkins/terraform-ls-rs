@@ -168,6 +168,34 @@ pub fn parsed_cache_path(namespace: &str, name: &str, version: &str) -> PathBuf 
         .join("parsed-descriptions.json")
 }
 
+/// Cache path for the "latest-published-version" parsed docs of a
+/// provider. Independent of the per-installed-version cache; the
+/// inner JSON carries the actual version string under
+/// `latest_version` so callers know which version's surface they're
+/// matching against.
+pub fn latest_parsed_cache_path(namespace: &str, name: &str) -> PathBuf {
+    cache_root()
+        .join(sanitise(namespace))
+        .join(sanitise(name))
+        .join("_latest")
+        .join("parsed-descriptions.json")
+}
+
+/// "Latest-published-version" parsed-doc cache used by the
+/// upgrade-hint diagnostic. Stored alongside the per-installed-
+/// version cache but at a separate path so we always know the
+/// shape of the latest registry release without depending on what
+/// the user currently has installed.
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
+pub struct LatestParsedDocs {
+    pub cache_version: u32,
+    pub namespace: String,
+    pub name: String,
+    pub latest_version: String,
+    pub resources: HashMap<String, HashMap<String, ParsedAttribute>>,
+    pub data_sources: HashMap<String, HashMap<String, ParsedAttribute>>,
+}
+
 async fn read_parsed_cache(path: &Path) -> Option<ParsedDocsCache> {
     let text = tokio::fs::read_to_string(path).await.ok()?;
     let parsed: ParsedDocsCache = serde_json::from_str(&text).ok()?;
@@ -788,6 +816,186 @@ pub struct ProviderCoords {
     pub namespace: String,
     pub name: String,
     pub version: String,
+}
+
+/// Fetch + parse the registry's hand-written docs at the latest
+/// published version of `<namespace>/<name>` and cache them under
+/// `provider-docs/<ns>/<name>/_latest/parsed-descriptions.json`.
+/// Used by the upgrade-hint diagnostic — needs to know the SHAPE of
+/// the latest release, not whatever version the user has on disk.
+///
+/// Latest version comes from
+/// [`crate::registry_versions::cached_latest_version`] (intersection
+/// of Terraform + OpenTofu registries' caches), so this is cheap
+/// once provider catalogs are warm.
+///
+/// Cached on disk; subsequent calls re-use the cache when the
+/// returned `latest_version` matches the cached entry's. When the
+/// catalog reports a newer version we re-fetch end to end.
+pub async fn fetch_latest_parsed_docs(
+    namespace: &str,
+    name: &str,
+) -> Result<Option<LatestParsedDocs>, ProtocolError> {
+    let Some(latest) = crate::registry_versions::cached_latest_version(namespace, name)
+    else {
+        return Ok(None);
+    };
+    let cache_path = latest_parsed_cache_path(namespace, name);
+    if let Some(cached) = read_latest_parsed_cache(&cache_path).await {
+        if cached.latest_version == latest {
+            return Ok(Some(cached));
+        }
+    }
+
+    let client = build_http_client()?;
+    let index = match fetch_index(&client, namespace, name, &latest).await {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::info!(
+                error = %e,
+                provider = %format!("{}/{}@{}", namespace, name, latest),
+                "skipping latest-docs fetch (index unavailable)"
+            );
+            return Ok(None);
+        }
+    };
+
+    enum Kind {
+        Resource,
+        DataSource,
+    }
+    let mut targets: Vec<(Kind, String, String)> = Vec::new();
+    for (key, id) in &index.entries {
+        let Some((category, slug)) = key.split_once(':') else {
+            continue;
+        };
+        let kind = match category {
+            "resources" => Kind::Resource,
+            "data-sources" => Kind::DataSource,
+            _ => continue,
+        };
+        // Reattach the provider prefix so callers can index by
+        // `<provider>_<slug>` (matching how schema validation sees
+        // resource type names).
+        let type_name = format!("{name}_{slug}");
+        targets.push((kind, type_name, id.clone()));
+    }
+
+    let ns = namespace.to_string();
+    let nm = name.to_string();
+    let version = latest.clone();
+    let fetches = stream::iter(targets.into_iter().map(|(kind, type_name, id)| {
+        let client = client.clone();
+        let ns = ns.clone();
+        let nm = nm.clone();
+        let version = version.clone();
+        async move {
+            let content = fetch_doc_content(&client, &ns, &nm, &version, &id).await;
+            (kind, type_name, content)
+        }
+    }))
+    .buffer_unordered(FETCH_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+
+    let mut resources: HashMap<String, HashMap<String, ParsedAttribute>> = HashMap::new();
+    let mut data_sources: HashMap<String, HashMap<String, ParsedAttribute>> = HashMap::new();
+    for (kind, type_name, result) in fetches {
+        let Ok(content) = result else { continue };
+        let parsed = parse_attribute_descriptions(&content);
+        if parsed.is_empty() {
+            // Index hit but parse failed — still record the
+            // resource as known so the "unknown resource type"
+            // upgrade hint can fire.
+            match kind {
+                Kind::Resource => {
+                    resources.entry(type_name).or_default();
+                }
+                Kind::DataSource => {
+                    data_sources.entry(type_name).or_default();
+                }
+            }
+            continue;
+        }
+        match kind {
+            Kind::Resource => {
+                resources.insert(type_name, parsed);
+            }
+            Kind::DataSource => {
+                data_sources.insert(type_name, parsed);
+            }
+        }
+    }
+
+    let entry = LatestParsedDocs {
+        cache_version: PARSED_CACHE_VERSION,
+        namespace: namespace.to_string(),
+        name: name.to_string(),
+        latest_version: latest,
+        resources,
+        data_sources,
+    };
+    write_latest_parsed_cache(&cache_path, &entry).await;
+    Ok(Some(entry))
+}
+
+/// Sync read of the latest-parsed-docs cache (no network). Used by
+/// diagnostic emission at edit time so the upgrade-hint lookup is a
+/// stat + JSON parse, not an HTTP round trip.
+pub fn cached_latest_parsed_docs(namespace: &str, name: &str) -> Option<LatestParsedDocs> {
+    let path = latest_parsed_cache_path(namespace, name);
+    let body = std::fs::read_to_string(&path).ok()?;
+    let parsed: LatestParsedDocs = serde_json::from_str(&body).ok()?;
+    if parsed.cache_version != PARSED_CACHE_VERSION {
+        return None;
+    }
+    Some(parsed)
+}
+
+async fn read_latest_parsed_cache(path: &Path) -> Option<LatestParsedDocs> {
+    let text = tokio::fs::read_to_string(path).await.ok()?;
+    let parsed: LatestParsedDocs = serde_json::from_str(&text).ok()?;
+    if parsed.cache_version != PARSED_CACHE_VERSION {
+        return None;
+    }
+    Some(parsed)
+}
+
+async fn write_latest_parsed_cache(path: &Path, entry: &LatestParsedDocs) {
+    let json = match serde_json::to_string(entry) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!(error = %e, "latest parsed cache serialize failed");
+            return;
+        }
+    };
+    if let Some(parent) = path.parent() {
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            tracing::debug!(
+                error = %e,
+                dir = %parent.display(),
+                "latest parsed cache dir create failed",
+            );
+            return;
+        }
+    }
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = tokio::fs::write(&tmp, json).await {
+        tracing::debug!(
+            error = %e,
+            path = %tmp.display(),
+            "latest parsed cache tmp write failed",
+        );
+        return;
+    }
+    if let Err(e) = tokio::fs::rename(&tmp, path).await {
+        tracing::debug!(
+            error = %e,
+            path = %path.display(),
+            "latest parsed cache rename failed",
+        );
+        let _ = tokio::fs::remove_file(&tmp).await;
+    }
 }
 
 /// Resources on the registry are listed by their short slug

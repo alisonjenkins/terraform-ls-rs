@@ -6,7 +6,7 @@
 
 use tfls_core::SymbolKind;
 use tfls_diag::{
-    diagnostics_for_parse_errors, resource_diagnostics, undefined_reference_diagnostics,
+    diagnostics_for_parse_errors, undefined_reference_diagnostics,
 };
 use tfls_parser::ReferenceKind;
 use tfls_schema::Schema;
@@ -431,7 +431,16 @@ pub fn compute_diagnostics_with_lookup(
 
     if let Some(body) = doc.parsed.body.as_ref() {
         let lookup = StateStoreSchemaLookup { state };
-        out.extend(resource_diagnostics(body, &doc.rope, uri, &lookup));
+        let hints = RegistryDocsHints { state };
+        out.extend(
+            tfls_diag::schema_validation::resource_diagnostics_with_hints(
+                body,
+                &doc.rope,
+                uri,
+                &lookup,
+                Some(&hints),
+            ),
+        );
         let cache_lookup = OnDiskVersionCache;
         out.extend(tfls_diag::constraint_diagnostics(
             body,
@@ -827,6 +836,121 @@ impl tfls_diag::schema_validation::SchemaLookup for StateStoreSchemaLookup<'_> {
     }
     fn data_source(&self, type_name: &str) -> Option<Schema> {
         self.state.data_source_schema(type_name)
+    }
+}
+
+/// Adapter that answers `UpgradeHintLookup` queries by reading the
+/// latest-published-version registry-doc cache laid down by
+/// `tfls_provider_protocol::registry_docs::fetch_latest_parsed_docs`.
+///
+/// All lookups are first-letter-prefix-based: a resource named
+/// `azurerm_X` is assumed to belong to the `hashicorp/azurerm`
+/// provider. That covers the common-providers map the rest of the
+/// LSP relies on; community providers without a matching hashicorp
+/// prefix won't get hints, which is the safe failure mode (no
+/// false-positive recommendations to upgrade something we can't
+/// identify).
+struct RegistryDocsHints<'a> {
+    state: &'a StateStore,
+}
+
+impl RegistryDocsHints<'_> {
+    /// Resolve a resource / data-source type name to the
+    /// `(namespace, name)` pair we'll consult the registry-doc
+    /// cache for.
+    ///
+    /// Today this uses the `<provider_local>_<rest>` convention to
+    /// pull the provider local name, then reuses the same map the
+    /// completion path uses (`REQUIRED_PROVIDERS_COMMON_ENTRIES`)
+    /// to resolve to a `(namespace, name)` pair. Limits hints to
+    /// the curated set; out-of-set providers stay silent.
+    fn resolve_provider(&self, type_name: &str) -> Option<(String, String, String)> {
+        let local = type_name.split_once('_').map(|(p, _)| p)?;
+        for (entry_local, source, _) in
+            tfls_core::builtin_blocks::REQUIRED_PROVIDERS_COMMON_ENTRIES
+        {
+            if *entry_local != local {
+                continue;
+            }
+            let (ns, name) = source.split_once('/')?;
+            return Some((local.to_string(), ns.to_string(), name.to_string()));
+        }
+        None
+    }
+
+    fn make_hint(
+        &self,
+        local: String,
+        ns: &str,
+        name: &str,
+        latest_version: String,
+    ) -> tfls_diag::schema_validation::UpgradeHint {
+        let installed = self
+            .state
+            .installed_version(&tfls_core::ProviderAddress::new(
+                "registry.terraform.io",
+                ns,
+                name,
+            ));
+        tfls_diag::schema_validation::UpgradeHint {
+            provider_local_name: local,
+            latest_version,
+            installed_version: installed,
+        }
+    }
+}
+
+impl tfls_diag::schema_validation::UpgradeHintLookup for RegistryDocsHints<'_> {
+    fn attribute_hint(
+        &self,
+        type_name: &str,
+        attr_name: &str,
+    ) -> Option<tfls_diag::schema_validation::UpgradeHint> {
+        let (local, ns, name) = self.resolve_provider(type_name)?;
+        let cached =
+            tfls_provider_protocol::registry_docs::cached_latest_parsed_docs(&ns, &name)?;
+        // The doc cache stores top-level + nested attributes
+        // flattened together (registry markdown reuses names
+        // across nested blocks, so we lose the boundary at parse
+        // time). Hint only when the attr appears in the
+        // resource's top-level Argument Reference list — i.e. the
+        // map is non-empty AND the attribute is in there. We use
+        // direct membership; same-name nested attrs won't false-
+        // positive too often in practice.
+        let attrs = cached
+            .resources
+            .get(type_name)
+            .or_else(|| cached.data_sources.get(type_name))?;
+        if !attrs.contains_key(attr_name) {
+            return None;
+        }
+        Some(self.make_hint(local, &ns, &name, cached.latest_version))
+    }
+
+    fn resource_hint(
+        &self,
+        type_name: &str,
+    ) -> Option<tfls_diag::schema_validation::UpgradeHint> {
+        let (local, ns, name) = self.resolve_provider(type_name)?;
+        let cached =
+            tfls_provider_protocol::registry_docs::cached_latest_parsed_docs(&ns, &name)?;
+        if !cached.resources.contains_key(type_name) {
+            return None;
+        }
+        Some(self.make_hint(local, &ns, &name, cached.latest_version))
+    }
+
+    fn data_source_hint(
+        &self,
+        type_name: &str,
+    ) -> Option<tfls_diag::schema_validation::UpgradeHint> {
+        let (local, ns, name) = self.resolve_provider(type_name)?;
+        let cached =
+            tfls_provider_protocol::registry_docs::cached_latest_parsed_docs(&ns, &name)?;
+        if !cached.data_sources.contains_key(type_name) {
+            return None;
+        }
+        Some(self.make_hint(local, &ns, &name, cached.latest_version))
     }
 }
 

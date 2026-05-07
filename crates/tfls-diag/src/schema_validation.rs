@@ -28,6 +28,53 @@ impl SchemaLookup for ProviderSchemas {
     }
 }
 
+/// Diagnostic upgrade-hint payload returned when a name the user
+/// typed isn't in the installed schema but IS documented in the
+/// latest published version of the provider. The schema-validation
+/// emitter splices the latest version (and the installed version
+/// when known) into the diagnostic message so the user can see
+/// exactly what to upgrade to.
+#[derive(Debug, Clone)]
+pub struct UpgradeHint {
+    /// Provider local name (e.g. `azurerm`) — used purely for
+    /// display in the rendered message.
+    pub provider_local_name: String,
+    /// Latest published version we have docs for (e.g. `4.71.0`).
+    pub latest_version: String,
+    /// What the user currently has on disk, if known.
+    pub installed_version: Option<String>,
+}
+
+/// Look up upgrade hints for unknown names against the registry's
+/// latest-published-version doc cache. Implemented in the LSP
+/// layer over `tfls_provider_protocol::registry_docs`; injected
+/// here to keep `tfls-diag` decoupled from the protocol crate.
+pub trait UpgradeHintLookup {
+    /// Hint for an unknown attribute on a known resource type.
+    fn attribute_hint(&self, type_name: &str, attr_name: &str) -> Option<UpgradeHint>;
+    /// Hint for an unknown resource type entirely.
+    fn resource_hint(&self, type_name: &str) -> Option<UpgradeHint>;
+    /// Hint for an unknown data source type entirely.
+    fn data_source_hint(&self, type_name: &str) -> Option<UpgradeHint>;
+}
+
+/// Render the trailing-hint clause appended to an "unknown ..."
+/// diagnostic.
+fn render_upgrade_hint(hint: &UpgradeHint) -> String {
+    let provider = &hint.provider_local_name;
+    let latest = &hint.latest_version;
+    match &hint.installed_version {
+        Some(installed) => format!(
+            ". Available in `{provider}` v{latest} — run \
+             `terraform init -upgrade` to update from v{installed}."
+        ),
+        None => format!(
+            ". Available in `{provider}` v{latest} — run \
+             `terraform init -upgrade` to pull it in."
+        ),
+    }
+}
+
 /// Walk the body and emit diagnostics for each `resource`/`data`
 /// block that we have a schema for.
 pub fn resource_diagnostics(
@@ -35,6 +82,36 @@ pub fn resource_diagnostics(
     rope: &Rope,
     _uri: &Url,
     lookup: &impl SchemaLookup,
+) -> Vec<Diagnostic> {
+    resource_diagnostics_with_hints(body, rope, _uri, lookup, None::<&NoHints>)
+}
+
+/// No-op `UpgradeHintLookup` — used when no hint provider is
+/// supplied. Keeps the public no-hint entry point trivial.
+struct NoHints;
+impl UpgradeHintLookup for NoHints {
+    fn attribute_hint(&self, _: &str, _: &str) -> Option<UpgradeHint> {
+        None
+    }
+    fn resource_hint(&self, _: &str) -> Option<UpgradeHint> {
+        None
+    }
+    fn data_source_hint(&self, _: &str) -> Option<UpgradeHint> {
+        None
+    }
+}
+
+/// Walk the body and emit diagnostics for each `resource`/`data`
+/// block. When `hints` is supplied, augments unknown-attribute /
+/// unknown-resource / unknown-data-source diagnostics with a hint
+/// pointing at the latest-published version of the provider that
+/// would satisfy the reference.
+pub fn resource_diagnostics_with_hints<L: SchemaLookup, H: UpgradeHintLookup>(
+    body: &Body,
+    rope: &Rope,
+    _uri: &Url,
+    lookup: &L,
+    hints: Option<&H>,
 ) -> Vec<Diagnostic> {
     let mut out = Vec::new();
 
@@ -50,7 +127,38 @@ pub fn resource_diagnostics(
             ("data", Some(t)) => (BlockKind::Data, t, lookup.data_source(t)),
             _ => continue,
         };
-        let Some(schema) = schema else { continue };
+        let Some(schema) = schema else {
+            // Schema lookup miss — when `hints` carries a match for
+            // this type from the latest registry-published docs,
+            // emit an "unknown ... type" diagnostic with the
+            // upgrade hint. Otherwise stay silent (provider isn't
+            // known to us, can't say anything useful).
+            if let Some(hints) = hints {
+                let hint = match kind {
+                    BlockKind::Resource => hints.resource_hint(type_name),
+                    BlockKind::Data => hints.data_source_hint(type_name),
+                };
+                if let Some(hint) = hint {
+                    if let Some(label_range) = first_label_range(block, rope) {
+                        let kind_word = match kind {
+                            BlockKind::Resource => "resource",
+                            BlockKind::Data => "data source",
+                        };
+                        out.push(Diagnostic {
+                            range: label_range,
+                            severity: Some(DiagnosticSeverity::ERROR),
+                            source: Some("terraform-ls-rs".to_string()),
+                            message: format!(
+                                "unknown {kind_word} type `{type_name}`{}",
+                                render_upgrade_hint(&hint),
+                            ),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+            continue;
+        };
 
         // Tier-2 deprecation: provider's schema marks this whole
         // resource / data source as deprecated. Suppress when a
@@ -76,7 +184,7 @@ pub fn resource_diagnostics(
             }
         }
 
-        validate_block(block, rope, &schema, kind, &mut out);
+        validate_block(block, rope, &schema, kind, type_name, hints, &mut out);
     }
 
     out
@@ -92,11 +200,13 @@ fn first_label_range(block: &Block, rope: &Rope) -> Option<lsp_types::Range> {
     hcl_span_to_lsp_range(rope, span).ok()
 }
 
-fn validate_block(
+fn validate_block<H: UpgradeHintLookup>(
     block: &Block,
     rope: &Rope,
     schema: &Schema,
     kind: BlockKind,
+    type_name_for_hints: &str,
+    hints: Option<&H>,
     out: &mut Vec<Diagnostic>,
 ) {
     let Some(header_range) = header_range(block, rope) else {
@@ -139,11 +249,15 @@ fn validate_block(
                 if schema.block.block_types.contains_key(*name) {
                     continue;
                 }
+                let hint_suffix = hints
+                    .and_then(|h| h.attribute_hint(type_name_for_hints, name))
+                    .map(|h| render_upgrade_hint(&h))
+                    .unwrap_or_default();
                 out.push(Diagnostic {
                     range: *range,
                     severity: Some(DiagnosticSeverity::ERROR),
                     source: Some("terraform-ls-rs".to_string()),
-                    message: format!("unknown attribute `{name}`"),
+                    message: format!("unknown attribute `{name}`{hint_suffix}"),
                     ..Default::default()
                 });
             }
