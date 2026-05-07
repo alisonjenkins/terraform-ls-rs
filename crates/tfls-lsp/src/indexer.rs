@@ -449,7 +449,18 @@ async fn dispatch_job(
             // or have ones computed against a stale / missing schema
             // — refresh so they reflect the new install.
             if result.is_ok() {
+                // Pull-model clients honour `workspace/diagnostic/refresh`.
                 maybe_refresh_diagnostics(&state, client).await;
+                // Push-model clients (nvim's default LSP) ignore the
+                // refresh request and need an explicit re-publish to
+                // see the new schema reflected in their open buffers.
+                // Without this, `terraform init -upgrade` (which
+                // changes the installed provider version) won't
+                // clear the previous "unknown attribute" diagnostic
+                // until the user types in the buffer.
+                if let Some(c) = client {
+                    publish_for_dir(&state, c, &working_dir).await;
+                }
             }
             result
         }
@@ -699,11 +710,17 @@ async fn publish_for_path(
         .await;
 }
 
-/// Push fresh diagnostics for every document loaded in `dir`. Used
-/// by the `LockFileChanged` watcher arm so post-init lock changes
-/// land in the client's diagnostic display without waiting for
-/// the user to edit the buffer.
+/// Push fresh diagnostics for every document loaded under `dir`
+/// (recursively — direct children AND submodules). Used by the
+/// `LockFileChanged` watcher arm and the `FetchSchemas` job
+/// completion path so post-init schema / lock changes land in
+/// the client's diagnostic display without waiting for the user
+/// to edit the buffer. Push-model LSP clients (nvim's default)
+/// don't honour `workspace/diagnostic/refresh`, so this is the
+/// only way to clear stale "unknown attribute" diagnostics for
+/// already-open buffers.
 async fn publish_for_dir(state: &StateStore, client: &tower_lsp::Client, dir: &Path) {
+    let canon_dir = dir.canonicalize().ok();
     let uris: Vec<tower_lsp::lsp_types::Url> = state
         .documents
         .iter()
@@ -717,10 +734,24 @@ async fn publish_for_dir(state: &StateStore, client: &tower_lsp::Client, dir: &P
             // would skip every doc despite the path referring to
             // the same dir.
             if crate::handlers::util::dir_paths_match(parent, dir) {
-                Some(uri.clone())
-            } else {
-                None
+                return Some(uri.clone());
             }
+            // Submodule case: `dir` is the .terraform-init module
+            // root; doc is in a nested `modules/foo/`. Match if
+            // doc path is UNDER `dir` (canonicalised either side
+            // for the same /private/var symlink reasons).
+            let canon_path = path.canonicalize().ok();
+            if let (Some(canon_dir), Some(canon_path)) =
+                (canon_dir.as_ref(), canon_path.as_ref())
+            {
+                if canon_path.starts_with(canon_dir) {
+                    return Some(uri.clone());
+                }
+            }
+            if path.starts_with(dir) {
+                return Some(uri.clone());
+            }
+            None
         })
         .collect();
     for uri in uris {
