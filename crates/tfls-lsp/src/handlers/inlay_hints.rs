@@ -418,16 +418,12 @@ fn compose_label(
             // the age warning even if the registry's newest release
             // is older than `stale_days`: the user has nothing to do
             // about it. Show `✓ <ver>` so the "I'm up to date" signal
-            // still surfaces.
-            //
-            // If the lock pin is BELOW latest, surface the drift —
-            // user's running an older version than the constraint
-            // would let them install. Hide when locked equals
-            // latest (redundant noise).
+            // still surfaces. Always append the lock pin when known
+            // — the user explicitly wants to see what
+            // `terraform plan/apply` will run regardless of whether
+            // it matches the declared constraint.
             if let Some(lk) = locked_str.as_deref() {
-                if lk != v {
-                    return Some((format!("✓ {v}  (locked: {lk})"), true));
-                }
+                return Some((format!("✓ {v}  (locked: {lk})"), true));
             }
             Some((format!("✓ {v}"), false))
         }
@@ -1094,16 +1090,18 @@ mod tests {
     }
 
     #[test]
-    fn compose_label_hides_locked_when_equal_to_latest() {
-        // Lock matches latest — no drift to surface, so no
-        // `(locked: …)` segment.
+    fn compose_label_shows_locked_when_known_even_if_equal_to_latest() {
+        // User explicitly wants to see what
+        // `terraform plan/apply` will run; redundancy is
+        // acceptable. Always-on lock segment beats the previous
+        // "hide when equal" heuristic which left users guessing.
         let constraints = tfls_core::version_constraint::parse("~> 5.0").constraints;
         let entries = vec![entry("5.50.0", 5)];
         let lock = semver::Version::new(5, 50, 0);
         let (label, has_lock) =
             compose_label(&constraints, &entries, 30, Some(&lock)).expect("label");
-        assert_eq!(label, "✓ 5.50.0", "got: {label}");
-        assert!(!has_lock);
+        assert_eq!(label, "✓ 5.50.0  (locked: 5.50.0)", "got: {label}");
+        assert!(has_lock);
     }
 
     #[test]

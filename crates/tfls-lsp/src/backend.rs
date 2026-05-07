@@ -82,6 +82,7 @@ impl Backend {
             Arc::clone(&self.state),
             Arc::clone(&self.jobs),
             root.clone(),
+            Some(self.client.clone()),
         ) {
             Ok(handle) => {
                 let mut guard = self.tasks.lock().await;

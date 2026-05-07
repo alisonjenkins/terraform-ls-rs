@@ -251,6 +251,7 @@ pub fn spawn_watcher(
     state: Arc<StateStore>,
     queue: Arc<JobQueue>,
     root: PathBuf,
+    client: Option<tower_lsp::Client>,
 ) -> Result<tokio::task::JoinHandle<()>, WalkerError> {
     let mut watcher = watch_workspace(
         &root,
@@ -283,6 +284,16 @@ pub fn spawn_watcher(
                     // when init is a no-op).
                     state.fetched_schema_dirs.remove(&dir);
                     maybe_enqueue_schema_fetch(&state, &queue, &dir);
+                    // Inlay-hint version-freshness annotations cache
+                    // the lock pin per provider — the freshness
+                    // label includes a `(locked: X)` segment when
+                    // the lock pin differs from the constraint's
+                    // best match. Tell the client to re-pull
+                    // inlay hints so the new lock state surfaces
+                    // immediately, not on the user's next edit.
+                    if let Some(client) = &client {
+                        let _ = client.inlay_hint_refresh().await;
+                    }
                 }
             }
         }

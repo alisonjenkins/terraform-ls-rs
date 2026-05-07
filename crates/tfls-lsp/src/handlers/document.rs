@@ -558,6 +558,15 @@ pub fn compute_diagnostics_with_lookup(
         out.extend(tfls_diag::required_version_presence_diagnostics(
             body, &doc.rope, graph,
         ));
+        // Lock-vs-constraint drift: user bumped a `version`
+        // constraint but didn't `terraform init -upgrade` — the
+        // lock file still pins the OLD version that no longer
+        // satisfies the new constraint. Catch silently-broken
+        // states before `terraform plan` chokes.
+        out.extend(lock_vs_constraint_diagnostics(state, uri, body, &doc.rope));
+        out.extend(tfls_diag::required_providers_version_diagnostics(
+            body, &doc.rope, graph,
+        ));
         out.extend(tfls_diag::required_providers_version_diagnostics(
             body, &doc.rope, graph,
         ));
@@ -704,6 +713,120 @@ impl tfls_diag::VersionCacheLookup for OnDiskVersionCache {
             }
         }
     }
+}
+
+/// Walk `terraform { required_providers { ... } }` and emit a
+/// warning for each provider whose declared `version` constraint
+/// doesn't admit the lock-pinned version. Catches the case where
+/// the user bumped a constraint (`~> 4.0` → `~> 4.71`) and forgot
+/// to run `terraform init -upgrade` — `terraform plan` would
+/// resolve the lock to the OLD version, which no longer satisfies
+/// the new constraint, and fail at apply time. Surface it now
+/// so the user sees the drift while editing.
+fn lock_vs_constraint_diagnostics(
+    state: &StateStore,
+    uri: &Url,
+    body: &hcl_edit::structure::Body,
+    rope: &ropey::Rope,
+) -> Vec<Diagnostic> {
+    use hcl_edit::expr::{Expression, ObjectKey};
+    use hcl_edit::repr::Span;
+    use lsp_types::DiagnosticSeverity;
+    let mut out = Vec::new();
+    let Some(parent) = uri
+        .to_file_path()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+    else {
+        return out;
+    };
+    let Some(lock) = state.lock_file_for(&parent) else {
+        return out;
+    };
+    for structure in body.iter() {
+        let Some(tf_block) = structure.as_block() else { continue };
+        if tf_block.ident.as_str() != "terraform" {
+            continue;
+        }
+        for inner in tf_block.body.iter() {
+            let Some(rp_block) = inner.as_block() else { continue };
+            if rp_block.ident.as_str() != "required_providers" {
+                continue;
+            }
+            for entry in rp_block.body.iter() {
+                let Some(attr) = entry.as_attribute() else { continue };
+                let provider_local = attr.key.as_str().to_string();
+                let Expression::Object(obj) = &attr.value else { continue };
+                let mut source_str: Option<String> = None;
+                let mut version_lit: Option<(String, lsp_types::Range)> = None;
+                for (key, value) in obj.iter() {
+                    let key_str = match key {
+                        ObjectKey::Ident(d) => d.as_str().to_string(),
+                        ObjectKey::Expression(Expression::String(s)) => {
+                            s.value().to_string()
+                        }
+                        _ => continue,
+                    };
+                    match key_str.as_str() {
+                        "source" => {
+                            if let Expression::String(s) = value.expr() {
+                                source_str = Some(s.value().to_string());
+                            }
+                        }
+                        "version" => {
+                            if let Expression::String(s) = value.expr() {
+                                if let Some(span) = value.expr().span() {
+                                    if let Ok(range) =
+                                        tfls_parser::hcl_span_to_lsp_range(rope, span)
+                                    {
+                                        version_lit = Some((s.value().to_string(), range));
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let Some((constraint_str, version_range)) = version_lit else {
+                    continue;
+                };
+                let address = match source_str.as_deref() {
+                    Some(s) => match tfls_core::ProviderAddress::parse(s) {
+                        Ok(a) => a,
+                        Err(_) => continue,
+                    },
+                    None => tfls_core::ProviderAddress::hashicorp(&provider_local),
+                };
+                let Some(lock_entry) = lock.get(&address) else {
+                    continue;
+                };
+                let parsed = tfls_core::version_constraint::parse(&constraint_str);
+                if !parsed.errors.is_empty() || parsed.constraints.is_empty() {
+                    continue;
+                }
+                let lock_str = lock_entry.version.to_string();
+                if tfls_core::version_constraint::satisfies_all(
+                    &parsed.constraints,
+                    &lock_str,
+                ) {
+                    continue;
+                }
+                out.push(Diagnostic {
+                    range: version_range,
+                    severity: Some(DiagnosticSeverity::WARNING),
+                    source: Some("terraform-ls-rs".to_string()),
+                    message: format!(
+                        "version constraint `{constraint_str}` does not admit the \
+                         lock-pinned version `{lock_str}` for `{provider_local}`. \
+                         Run `terraform init -upgrade` to refresh the lock so \
+                         `terraform plan/apply` matches the declared constraint."
+                    ),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Build a `rule_supported` closure for a provider table from
