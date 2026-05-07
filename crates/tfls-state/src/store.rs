@@ -284,44 +284,72 @@ impl StateStore {
         self.open_docs.contains(uri)
     }
 
+}
+
+/// Resolve a path to its canonical form when possible; fall back
+/// to the original `PathBuf` when canonicalisation fails (path
+/// doesn't exist, permission denied, etc.). Used to keep lock-
+/// file cache keys consistent regardless of whether the caller
+/// passed a canonical (watcher / fsevents) or non-canonical
+/// (URI parent) path.
+fn canonical_or_owned(p: &std::path::Path) -> std::path::PathBuf {
+    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+}
+
+impl StateStore {
+
     /// Read the parsed `.terraform.lock.hcl` for `module_dir`.
     /// Cached after first call; reparsed when the on-disk mtime
     /// changes (so a `terraform init` upgrade is picked up the
     /// next time a handler asks). Returns `None` when the lock
     /// file does not exist — that's the normal case for an
     /// un-initialised workspace.
+    ///
+    /// Path is canonicalised at the cache layer so symlinked dirs
+    /// (macOS `/var → /private/var`) don't produce two cache
+    /// entries for the same lock file. Without this, the watcher
+    /// (which reports canonical paths via fsevents) and the
+    /// inlay-hint / diagnostic call sites (which use URI parents,
+    /// often non-canonical) would write under different keys —
+    /// `invalidate_lock(canonical)` would miss a non-canonical
+    /// entry and stale lock data would persist across user
+    /// `terraform init` runs.
     pub fn lock_file_for(&self, module_dir: &std::path::Path) -> Option<Arc<LockFile>> {
-        let lock_path = module_dir.join(".terraform.lock.hcl");
+        let key = canonical_or_owned(module_dir);
+        let lock_path = key.join(".terraform.lock.hcl");
         let mtime = std::fs::metadata(&lock_path)
             .ok()
             .and_then(|m| m.modified().ok());
         let Some(current_mtime) = mtime else {
             // File gone — drop any stale cache entry.
-            self.locks.remove(module_dir);
-            self.locks_mtime.remove(module_dir);
+            self.locks.remove(&key);
+            self.locks_mtime.remove(&key);
             return None;
         };
-        if let Some(cached_mtime) = self.locks_mtime.get(module_dir) {
+        if let Some(cached_mtime) = self.locks_mtime.get(&key) {
             if *cached_mtime == current_mtime {
-                if let Some(cached) = self.locks.get(module_dir) {
+                if let Some(cached) = self.locks.get(&key) {
                     return Some(Arc::clone(&cached));
                 }
             }
         }
-        let parsed = lock_file::read_for_module(module_dir)?;
+        let parsed = lock_file::read_for_module(&key)?;
         let arc = Arc::new(parsed);
-        self.locks.insert(module_dir.to_path_buf(), Arc::clone(&arc));
-        self.locks_mtime
-            .insert(module_dir.to_path_buf(), current_mtime);
+        self.locks.insert(key.clone(), Arc::clone(&arc));
+        self.locks_mtime.insert(key, current_mtime);
         Some(arc)
     }
 
     /// Drop any cached lock file for `module_dir`. Called from
     /// the indexer when the file watcher reports a change to
     /// the lock file — next `lock_file_for` call will re-read.
+    /// Canonicalises the path so the watcher's canonical-path
+    /// invalidation matches caches written under non-canonical
+    /// URI-parent keys.
     pub fn invalidate_lock(&self, module_dir: &std::path::Path) {
-        self.locks.remove(module_dir);
-        self.locks_mtime.remove(module_dir);
+        let key = canonical_or_owned(module_dir);
+        self.locks.remove(&key);
+        self.locks_mtime.remove(&key);
     }
 
     /// Record that a scan has been enqueued for `dir`. Returns

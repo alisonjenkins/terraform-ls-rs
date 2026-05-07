@@ -704,7 +704,13 @@ async fn publish_for_dir(state: &StateStore, client: &tower_lsp::Client, dir: &P
         .filter_map(|entry| {
             let uri = entry.key();
             let path = uri.to_file_path().ok()?;
-            if path.parent() == Some(dir) {
+            let parent = path.parent()?;
+            // Symlink-tolerant compare: watcher reports canonical
+            // paths (`/private/var/...` on macOS), URI parents are
+            // typically non-canonical (`/var/...`). Naive equality
+            // would skip every doc despite the path referring to
+            // the same dir.
+            if crate::handlers::util::dir_paths_match(parent, dir) {
                 Some(uri.clone())
             } else {
                 None
