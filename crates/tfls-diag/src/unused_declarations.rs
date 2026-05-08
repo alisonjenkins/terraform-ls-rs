@@ -239,6 +239,71 @@ mod tests {
     }
 
     #[test]
+    fn local_diagnostic_range_points_at_the_local_definition_line() {
+        // Repro for an end-user report: user shows the
+        // "local `_dr_target_region_short` is declared but not used"
+        // virtual text rendered on the wrong line — the diagnostic
+        // landed on a `module "vm" { ... environment = var.environment }`
+        // line above the locals block instead of on the local
+        // attribute itself. The rest of the file is multi-block so
+        // any hcl-edit span quirk specific to that arrangement
+        // surfaces.
+        let src = r#"module "vm" {
+  source = "./modules/vm"
+  count = var.asr_target && local.create_vm_infrastructure ? 1 : 0
+  customer         = var.customer
+  enable_public_ip = var.sql_server_public_ip
+  environment      = var.environment
+  region           = var.region
+  resource_group   = module.azure[0].main_resource_group
+  subnet_id        = module.azure[0].main_subnet
+  tags             = local.tags
+}
+
+locals {
+  _dr_region_short_map = {
+    "UK South" = "uks"
+    "UK West"  = "ukw"
+  }
+  _dr_target_region_short = var.dr_failover_config != null ? local._dr_region_short_map[var.dr_failover_config.target_region] : ""
+}
+"#;
+        // Treat the map as referenced (it's used by the target
+        // region computation); only `_dr_target_region_short`
+        // should be flagged.
+        let d = diags(
+            src,
+            FakeLookup {
+                used_vars: HashSet::new(),
+                used_locals: ["_dr_region_short_map"].into_iter().collect(),
+                used_data: HashSet::new(),
+                is_root: true,
+            },
+        );
+        assert_eq!(d.len(), 1, "got: {d:?}");
+
+        let target_line: u32 = src
+            .lines()
+            .position(|l| l.contains("_dr_target_region_short ="))
+            .expect("target line present") as u32;
+        assert_eq!(
+            d[0].range.start.line, target_line,
+            "diagnostic should point at the `_dr_target_region_short = ...` line, \
+             got start.line={} (expected {target_line}). full diagnostic: {:?}",
+            d[0].range.start.line, d[0]
+        );
+        // End must not stray off the same line either — virtual-text
+        // renderers anchor to start.line in practice but a multi-line
+        // range may still mislead some clients.
+        assert_eq!(
+            d[0].range.end.line, target_line,
+            "diagnostic should not span past the local key, \
+             got end.line={}. full diagnostic: {:?}",
+            d[0].range.end.line, d[0]
+        );
+    }
+
+    #[test]
     fn silent_for_referenced_local() {
         let d = diags(
             r#"locals { x = 1 }"#,

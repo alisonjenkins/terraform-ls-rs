@@ -82,6 +82,173 @@ async fn formatting_fixes_trailing_whitespace_and_blank_lines() {
     assert!(!edits[0].new_text.contains("  \n"));
 }
 
+/// Apply a sequence of `TextEdit`s to a string.
+///
+/// LSP edits are sorted in reverse (end-to-start) before applying so
+/// earlier edits don't shift later edits' offsets. We're given a
+/// single whole-document edit in the formatting path, which is the
+/// shape `formatting()` produces, so this is straightforward — but
+/// keep the helper general for future callers.
+fn apply_edits(src: &str, edits: &[lsp_types::TextEdit]) -> String {
+    use ropey::Rope;
+    let mut rope = Rope::from_str(src);
+    let mut sorted: Vec<&lsp_types::TextEdit> = edits.iter().collect();
+    sorted.sort_by_key(|e| {
+        std::cmp::Reverse((e.range.start.line, e.range.start.character))
+    });
+    for edit in sorted {
+        let start_line = edit.range.start.line as usize;
+        let end_line = edit.range.end.line as usize;
+        let start_byte = rope.line_to_byte(start_line)
+            + edit.range.start.character as usize;
+        let end_byte = rope.line_to_byte(end_line)
+            + edit.range.end.character as usize;
+        let start_char = rope.byte_to_char(start_byte);
+        let end_char = rope.byte_to_char(end_byte);
+        rope.remove(start_char..end_char);
+        rope.insert(start_char, &edit.new_text);
+    }
+    rope.to_string()
+}
+
+/// For each diagnostic produced by the server, assert that the
+/// content of the line at `range.start.line` actually contains a
+/// substring identifying the diagnostic's subject. Catches the
+/// "diagnostic landed on the wrong line" class of bug — most
+/// commonly seen when an opinionated formatter rearranges the
+/// document but the diagnostic's range doesn't shift to match the
+/// new layout.
+fn assert_diagnostics_aligned(
+    label: &str,
+    src: &str,
+    diags: &[lsp_types::Diagnostic],
+    expected_substrings: &[(&str, &str)],
+) {
+    let lines: Vec<&str> = src.lines().collect();
+    for (msg_needle, content_needle) in expected_substrings {
+        let matching: Vec<_> = diags
+            .iter()
+            .filter(|d| d.message.contains(msg_needle))
+            .collect();
+        assert!(
+            !matching.is_empty(),
+            "[{label}] expected diagnostic matching {msg_needle:?}, \
+             got: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+        for d in matching {
+            let line_idx = d.range.start.line as usize;
+            let line = lines.get(line_idx).copied().unwrap_or("");
+            assert!(
+                line.contains(content_needle),
+                "[{label}] diagnostic {:?} points at line {line_idx} \
+                 = {line:?}, but expected line content to contain {content_needle:?}\n\
+                 (full src:\n{src})",
+                d.message,
+                line = line
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn opinionated_format_then_diagnostics_align_to_new_buffer() {
+    // Repro: user reported diagnostics rendering on the wrong lines
+    // after running an opinionated reformat that reorders blocks.
+    // Construct a workspace that fires diagnostics across:
+    //   - unused locals (line-attached via attr.key.span)
+    //   - unused variables (line-attached via block.ident.span)
+    //   - unknown attribute on a known resource
+    // Then format with opinionated style (which alphabetises +
+    // reorders), apply the edits, and re-compute diagnostics. Each
+    // new diagnostic's range MUST point at a line whose content
+    // actually corresponds to its message.
+    let u = uri("file:///wrong_line_repro.tf");
+
+    // Order chosen so opinionated `tf-format` reorders:
+    //   variable -> resource -> locals  becomes
+    //   resource -> locals -> variable (block-kind ordering rules).
+    // Plus per-kind alphabetisation of `unused_z` / `unused_a`.
+    let src = "\
+variable \"unused_z\" {
+  type = string
+}
+
+variable \"unused_a\" {
+  type = string
+}
+
+resource \"aws_instance\" \"web\" {
+  ami           = \"ami-0\"
+  instance_type = \"t3.micro\"
+  bogus_attr    = \"x\"
+}
+
+locals {
+  unused_local_z = 1
+  unused_local_a = 2
+}
+";
+
+    let backend = fresh_backend(src, &u);
+    install_aws_schema(&backend);
+    // Opinionated style — what tf-format calls when reordering.
+    backend
+        .state
+        .config
+        .update_from_json(&sonic_rs::from_str::<sonic_rs::Value>(
+            r#"{"formatStyle":"opinionated"}"#,
+        )
+        .unwrap());
+
+    // ---- Pre-format diagnostics ----------------------------------------
+    let diags_before = compute_diagnostics(&backend.state, &u);
+    let pre_label = "pre-format";
+    let pre_expectations: &[(&str, &str)] = &[
+        ("`unused_z`", "unused_z"),
+        ("`unused_a`", "unused_a"),
+        ("`unused_local_z`", "unused_local_z"),
+        ("`unused_local_a`", "unused_local_a"),
+        ("`bogus_attr`", "bogus_attr"),
+    ];
+    assert_diagnostics_aligned(pre_label, src, &diags_before, pre_expectations);
+
+    // ---- Run the opinionated formatter --------------------------------
+    let edits = tfls_lsp::handlers::formatting::formatting(
+        &backend,
+        DocumentFormattingParams {
+            text_document: TextDocumentIdentifier { uri: u.clone() },
+            options: FormattingOptions::default(),
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        },
+    )
+    .await
+    .expect("ok")
+    .expect("edits");
+    assert!(
+        !edits.is_empty(),
+        "opinionated formatter should produce edits for this layout"
+    );
+
+    let formatted = apply_edits(src, &edits);
+    assert_ne!(formatted, src, "formatter should have changed something");
+
+    // Simulate the client's `didChange`: server replaces its
+    // document state with the new full text.
+    backend
+        .state
+        .upsert_document(DocumentState::new(u.clone(), &formatted, 2));
+
+    // ---- Post-format diagnostics --------------------------------------
+    let diags_after = compute_diagnostics(&backend.state, &u);
+    assert_diagnostics_aligned(
+        "post-format",
+        &formatted,
+        &diags_after,
+        pre_expectations,
+    );
+}
+
 #[tokio::test]
 async fn formatting_returns_empty_for_already_formatted_source() {
     let u = uri("file:///a.tf");

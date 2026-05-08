@@ -49,6 +49,10 @@ path = "src/bin/lock_probe.rs"
 name = "tfls-mux-lock-probe"
 path = "src/bin/mux_lock_probe.rs"
 
+[[bin]]
+name = "tfls-mux-format-probe"
+path = "src/bin/mux_format_probe.rs"
+
 [dependencies]
 tfls-lsp.workspace = true
 tfls-state.workspace = true
@@ -70,3 +74,4 @@ tracing-subscriber.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "json", "gzip"] }
 futures = "0.3"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+ropey = "1.6"
