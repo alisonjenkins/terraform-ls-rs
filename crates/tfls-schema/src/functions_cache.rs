@@ -120,7 +120,13 @@ fn cache_key(binary: &Path) -> Option<String> {
     let mut hasher = Sha256::new();
     hasher.update(canonical.as_os_str().as_encoded_bytes());
     hasher.update(mtime.to_le_bytes());
-    Some(format!("{:x}", hasher.finalize()))
+    let digest = hasher.finalize();
+    let mut s = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        use std::fmt::Write;
+        let _ = write!(&mut s, "{b:02x}");
+    }
+    Some(s)
 }
 
 fn cache_dir() -> Option<PathBuf> {
