@@ -71,7 +71,7 @@ tower-lsp.workspace = true
 clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "json", "gzip"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "webpki-roots", "json", "gzip"] }
 futures = "0.3"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 ropey = "1.6"
