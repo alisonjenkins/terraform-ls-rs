@@ -1389,6 +1389,37 @@ fn collect_provider_locals(
                     out.insert(name);
                 }
             }
+            "module" => {
+                // `providers = { aws = aws.useast1 }` passes this module's
+                // provider config to a child — both sides count as used.
+                use hcl_edit::expr::{Expression, ObjectKey};
+                for attr in block.body.iter().filter_map(|s| s.as_attribute()) {
+                    if attr.key.as_str() != "providers" {
+                        continue;
+                    }
+                    let Expression::Object(obj) = &attr.value else {
+                        continue;
+                    };
+                    for (key, val) in obj.iter() {
+                        if let Some(local) = extract_provider_local(val.expr()) {
+                            out.insert(local);
+                        }
+                        let key_ident = match key {
+                            ObjectKey::Ident(id) => Some(id.as_str().to_string()),
+                            ObjectKey::Expression(Expression::Variable(v)) => {
+                                Some(v.value().as_str().to_string())
+                            }
+                            ObjectKey::Expression(Expression::String(s)) => {
+                                Some(s.value().as_str().to_string())
+                            }
+                            _ => None,
+                        };
+                        if let Some(k) = key_ident {
+                            out.insert(k);
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -1528,5 +1559,39 @@ mod did_open_publish_tests {
                 | DidOpenPublish::PublishReal => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod provider_locals_tests {
+    use super::collect_provider_locals;
+    use std::collections::HashSet;
+
+    fn locals(src: &str) -> HashSet<String> {
+        let body = tfls_parser::parse_source(src).body.expect("parse");
+        let mut out = HashSet::new();
+        collect_provider_locals(&body, &mut out);
+        out
+    }
+
+    #[test]
+    fn module_providers_meta_arg_marks_local_used() {
+        // A provider passed to a child via `providers = {}` must count
+        // as used, else it trips a false unused-required-providers warning.
+        let src = "module \"x\" {\n  source = \"./child\"\n  \
+                   providers = {\n    aws = aws.useast1\n  }\n}\n";
+        let used = locals(src);
+        assert!(used.contains("aws"), "got: {used:?}");
+    }
+
+    #[test]
+    fn module_providers_distinct_key_and_value_both_used() {
+        let src = "module \"x\" {\n  source = \"./child\"\n  \
+                   providers = {\n    kubernetes = kubernetes.useast1\n    aws = awsalt\n  }\n}\n";
+        let used = locals(src);
+        assert!(used.contains("kubernetes"), "got: {used:?}");
+        assert!(used.contains("aws"), "got: {used:?}");
+        assert!(used.contains("awsalt"), "got: {used:?}");
     }
 }

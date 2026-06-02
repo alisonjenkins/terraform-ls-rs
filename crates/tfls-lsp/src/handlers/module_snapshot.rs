@@ -145,6 +145,41 @@ impl ModuleSnapshot {
                             used_provider_locals.insert(name);
                         }
                     }
+                    "module" => {
+                        // `module "x" { providers = { aws = aws.useast1 } }`
+                        // passes this module's provider config down to a
+                        // child. Both the value (this module's local) and
+                        // the key (the child's expected name, usually the
+                        // same local) count as "used" — otherwise a
+                        // provider declared solely to pass down trips a
+                        // false unused-required-providers warning.
+                        for attr in block.body.iter().filter_map(|s| s.as_attribute()) {
+                            if attr.key.as_str() != "providers" {
+                                continue;
+                            }
+                            let Expression::Object(obj) = &attr.value else {
+                                continue;
+                            };
+                            for (key, val) in obj.iter() {
+                                if let Some(local) = extract_provider_local(val.expr()) {
+                                    used_provider_locals.insert(local);
+                                }
+                                let key_ident = match key {
+                                    ObjectKey::Ident(id) => Some(id.as_str().to_string()),
+                                    ObjectKey::Expression(Expression::Variable(v)) => {
+                                        Some(v.value().as_str().to_string())
+                                    }
+                                    ObjectKey::Expression(Expression::String(s)) => {
+                                        Some(s.value().as_str().to_string())
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(k) = key_ident {
+                                    used_provider_locals.insert(k);
+                                }
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
