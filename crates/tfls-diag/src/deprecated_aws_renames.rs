@@ -27,12 +27,15 @@
 //! | `aws_alb_target_group_attachment` | `aws_lb_target_group_attachment`| 1.7.0                     |
 //! | `aws_s3_bucket_object`            | `aws_s3_object`                 | 4.0.0                     |
 //!
-//! All rules are diagnostic-only at present — the auto-fix
-//! shape exists (block-label rewrite + ref rewrite + `moved`
-//! generation, mirror of `null_resource → terraform_data`)
-//! but isn't generalised yet. Tier-2 schema-driven warnings
-//! cover any deprecations the AWS provider flags that aren't
-//! in this table.
+//! Most of these now carry the generic block-rename auto-fix
+//! (see `code_action_block_rename`): the `aws_alb*` alias family
+//! emits real `moved {}` blocks, and `aws_s3_bucket_object` →
+//! `aws_s3_object` emits real (Terraform 1.8+) or commented-out
+//! `moved` scaffolding. `aws_kinesis_analytics_application` →
+//! `_v2` is a non-compatible migration, so its action emits
+//! commented-out scaffolding only (no real `moved`). Tier-2
+//! schema-driven warnings cover any deprecations the AWS
+//! provider flags that aren't in this table.
 
 use hcl_edit::structure::Body;
 use lsp_types::Diagnostic;

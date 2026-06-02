@@ -161,11 +161,11 @@ Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially r
     The `Some(attr)` arm only checks `attr.deprecated`; assigning a `computed && !optional && !required` attribute (read-only) is silently accepted.
     **Proposal:** In the Some(attr) arm, when `attr.computed && !attr.optional && !attr.required`, emit ERROR "attribute `X` is read-only (computed) and cannot be set". Guard against computed+optional.
 
-- [ ] **Rule message claims 'schema is identical' for Kubernetes renames, but it is not** (low, effort S, confidence high) — `deprecated_kubernetes_renames.rs:68-71`
+- [x] **Rule message claims 'schema is identical' for Kubernetes renames, but it is not** (low, effort S, confidence high) — `deprecated_kubernetes_renames.rs:68-71`
     The shared message says "schema is identical", contradicting the codebase's own notes that some `_v1` variants (notably HPA) narrow the schema — encouraging a blind label swap that can drop attributes.
     **Proposal:** Reword to warn that some `_v1` variants narrow the schema (call out HPA) and to `terraform plan` before applying; drop the unconditional "schema is identical" claim.
 
-- [ ] **AWS rename family module doc understates current auto-fix coverage** (low, effort S, confidence high) — `deprecated_aws_renames.rs:30-35` + `code_action_block_rename.rs`
+- [x] **AWS rename family module doc understates current auto-fix coverage** (low, effort S, confidence high) — `deprecated_aws_renames.rs:30-35` + `code_action_block_rename.rs`
     The doc says "All rules are diagnostic-only at present", but the block-rename framework now covers the alb-aliased family and aws_s3_bucket_object/objects.
     **Proposal:** Update the module doc to reflect block-rename auto-fix coverage; note aws_kinesis_analytics_application emits no real `moved` block.
 
