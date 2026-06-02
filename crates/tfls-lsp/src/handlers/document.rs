@@ -633,13 +633,21 @@ pub fn compute_diagnostics_with_lookup(
     // line offsets will still see two diagnostics: ranges differ,
     // dedup leaves both.
     {
+        use lsp_types::DiagnosticSeverity;
         use rustc_hash::FxHashSet;
-        type DedupKey = (
-            (u32, u32, u32, u32),
-            Option<String>,
-            String,
-            String,
-        );
+        type DedupKey = ((u32, u32, u32, u32), u8, String, String);
+        // Map severity to its LSP numeric (0 = none) — `DiagnosticSeverity`
+        // isn't `Hash`, and a `u8` avoids the per-diagnostic Debug-string
+        // allocation the old key used in this hot loop.
+        let sev_code = |s: Option<DiagnosticSeverity>| -> u8 {
+            match s {
+                Some(v) if v == DiagnosticSeverity::ERROR => 1,
+                Some(v) if v == DiagnosticSeverity::WARNING => 2,
+                Some(v) if v == DiagnosticSeverity::INFORMATION => 3,
+                Some(v) if v == DiagnosticSeverity::HINT => 4,
+                _ => 0,
+            }
+        };
         let pre = out.len();
         let mut seen: FxHashSet<DedupKey> = FxHashSet::default();
         out.retain(|d| {
@@ -649,9 +657,8 @@ pub fn compute_diagnostics_with_lookup(
                 d.range.end.line,
                 d.range.end.character,
             );
-            let sev = d.severity.map(|s| format!("{s:?}"));
             let src = d.source.clone().unwrap_or_default();
-            seen.insert((r, sev, src, d.message.clone()))
+            seen.insert((r, sev_code(d.severity), src, d.message.clone()))
         });
         if out.len() != pre {
             tracing::debug!(
