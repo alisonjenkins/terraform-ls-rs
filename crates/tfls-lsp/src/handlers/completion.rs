@@ -918,7 +918,8 @@ async fn required_provider_version_value_items(
             items
         }
         CursorSlot::AfterOperator(_) | CursorSlot::InsideVersion { .. } => {
-            let mut items = provider_version_items_from_registry(source).await;
+            let vp = version_partial_of(&slot);
+            let mut items = provider_version_items_from_registry(source, vp).await;
             if items.is_empty() {
                 items = constraint_operator_items();
             }
@@ -1034,9 +1035,23 @@ async fn prefilled_provider_version_items(source: Option<&str>) -> Vec<Completio
     items
 }
 
-/// Pull exact-version items + `~> MAJOR.MINOR` templates for a given
-/// provider source from the Terraform + OpenTofu registries.
-async fn provider_version_items_from_registry(source: Option<&str>) -> Vec<CompletionItem> {
+/// Extract the version digits the user has already typed (`>= 4.7` →
+/// `4.7`), so the registry list can be pre-filtered. Empty for the
+/// AfterOperator slot (operator typed, no digits yet).
+fn version_partial_of(slot: &tfls_core::version_constraint::CursorSlot) -> &str {
+    use tfls_core::version_constraint::CursorSlot;
+    match slot {
+        CursorSlot::InsideVersion { partial, .. } => partial.as_str(),
+        _ => "",
+    }
+}
+
+/// Pull exact-version items for a given provider source from the
+/// Terraform + OpenTofu registries, pre-filtered to the typed prefix.
+async fn provider_version_items_from_registry(
+    source: Option<&str>,
+    version_partial: &str,
+) -> Vec<CompletionItem> {
     let Some((ns, name)) = source.and_then(parse_source) else {
         return Vec::new();
     };
@@ -1054,8 +1069,18 @@ async fn provider_version_items_from_registry(source: Option<&str>) -> Vec<Compl
             return Vec::new();
         }
     };
+    // Pre-filter to versions matching the typed prefix so clients without
+    // label-prefix matching don't show the full 1000+ list each keystroke.
+    // Fall back to the full list when nothing matches (typo / new digit).
+    let mut matches: Vec<&_> = versions
+        .iter()
+        .filter(|vi| vi.version.starts_with(version_partial))
+        .collect();
+    if matches.is_empty() {
+        matches = versions.iter().collect();
+    }
     let mut items: Vec<CompletionItem> = Vec::new();
-    for vi in &versions {
+    for vi in matches {
         items.push(CompletionItem {
             label: vi.version.clone(),
             kind: Some(CompletionItemKind::VALUE),
@@ -1090,7 +1115,7 @@ async fn required_version_value_items(cursor_partial: &str) -> Vec<CompletionIte
             items
         }
         CursorSlot::AfterOperator(_) | CursorSlot::InsideVersion { .. } => {
-            let mut items = tool_version_items_from_github().await;
+            let mut items = tool_version_items_from_github(version_partial_of(&slot)).await;
             if items.is_empty() {
                 items = constraint_operator_items();
             }
@@ -1182,7 +1207,7 @@ async fn prefilled_tool_version_items() -> Vec<CompletionItem> {
     items
 }
 
-async fn tool_version_items_from_github() -> Vec<CompletionItem> {
+async fn tool_version_items_from_github(version_partial: &str) -> Vec<CompletionItem> {
     let Ok(client) = tfls_provider_protocol::tool_versions::build_http_client() else {
         return Vec::new();
     };
@@ -1194,8 +1219,15 @@ async fn tool_version_items_from_github() -> Vec<CompletionItem> {
                 return Vec::new();
             }
         };
+    let mut matches: Vec<&_> = versions
+        .iter()
+        .filter(|vi| vi.version.starts_with(version_partial))
+        .collect();
+    if matches.is_empty() {
+        matches = versions.iter().collect();
+    }
     let mut items: Vec<CompletionItem> = Vec::new();
-    for vi in &versions {
+    for vi in matches {
         items.push(CompletionItem {
             label: vi.version.clone(),
             kind: Some(CompletionItemKind::VALUE),
@@ -1222,7 +1254,8 @@ async fn module_version_value_items(
     match slot {
         CursorSlot::AtOperator | CursorSlot::Trailing => constraint_operator_items(),
         CursorSlot::AfterOperator(_) | CursorSlot::InsideVersion { .. } => {
-            let mut items = module_version_items_from_registry(source).await;
+            let mut items =
+                module_version_items_from_registry(source, version_partial_of(&slot)).await;
             if items.is_empty() {
                 items = constraint_operator_items();
             }
@@ -1231,7 +1264,10 @@ async fn module_version_value_items(
     }
 }
 
-async fn module_version_items_from_registry(source: Option<&str>) -> Vec<CompletionItem> {
+async fn module_version_items_from_registry(
+    source: Option<&str>,
+    version_partial: &str,
+) -> Vec<CompletionItem> {
     let Some((ns, name, provider)) = source.and_then(parse_module_source) else {
         return Vec::new();
     };
@@ -1249,8 +1285,15 @@ async fn module_version_items_from_registry(source: Option<&str>) -> Vec<Complet
             return Vec::new();
         }
     };
+    let mut matches: Vec<&_> = versions
+        .iter()
+        .filter(|vi| vi.version.starts_with(version_partial))
+        .collect();
+    if matches.is_empty() {
+        matches = versions.iter().collect();
+    }
     let mut items: Vec<CompletionItem> = Vec::new();
-    for vi in &versions {
+    for vi in matches {
         items.push(CompletionItem {
             label: vi.version.clone(),
             kind: Some(CompletionItemKind::VALUE),
@@ -3377,5 +3420,26 @@ mod type_aware_insert_tests {
         assert!(!literal_should_be_unquoted("false"));
         assert!(!literal_should_be_unquoted("Graph"));
         assert!(!literal_should_be_unquoted("PowerShell"));
+    }
+}
+
+#[cfg(test)]
+mod version_partial_tests {
+    use super::*;
+    use tfls_core::version_constraint::{ConstraintOp, CursorSlot};
+
+    #[test]
+    fn inside_version_yields_typed_digits() {
+        let slot = CursorSlot::InsideVersion {
+            op: ConstraintOp::Gte,
+            partial: "4.7".to_string(),
+        };
+        assert_eq!(version_partial_of(&slot), "4.7");
+    }
+
+    #[test]
+    fn after_operator_yields_empty() {
+        let slot = CursorSlot::AfterOperator(ConstraintOp::Gte);
+        assert_eq!(version_partial_of(&slot), "");
     }
 }
