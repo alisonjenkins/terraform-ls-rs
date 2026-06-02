@@ -9,7 +9,7 @@
 //! traversals, template interpolations, parenthesised sub-expressions
 //! — so no expression position is missed.
 
-use hcl_edit::expr::{Expression, ObjectValue};
+use hcl_edit::expr::{Expression, ObjectKey};
 use hcl_edit::structure::Body;
 use hcl_edit::template::{Element, StringTemplate};
 
@@ -59,8 +59,13 @@ where
             }
         }
         Expression::Object(obj) => {
-            for (_key, value) in obj.iter() {
-                let ObjectValue { .. } = value;
+            for (key, value) in obj.iter() {
+                // Computed keys carry expressions too:
+                // `{ (lookup(var.m, "k")) = 1 }`. Visit them so no
+                // expression position is missed.
+                if let ObjectKey::Expression(k) = key {
+                    visit_expr(k, visit);
+                }
                 visit_expr(value.expr(), visit);
             }
         }
@@ -113,5 +118,42 @@ where
             Element::Interpolation(interp) => visit_expr(&interp.expr, visit),
             Element::Directive(_) | Element::Literal(_) => {}
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use tfls_parser::parse_source;
+
+    /// Collect every `var.X` head ident the walker reaches.
+    fn visited_vars(src: &str) -> Vec<String> {
+        let body = parse_source(src).body.expect("parses");
+        let mut names = Vec::new();
+        for_each_expression(&body, |expr| {
+            if let Expression::Traversal(t) = expr {
+                if let Expression::Variable(v) = &t.expr {
+                    names.push(v.as_str().to_string());
+                }
+            }
+        });
+        names
+    }
+
+    #[test]
+    fn visits_computed_object_key_expression() {
+        // `(var.k)` in key position is an expression that must be visited.
+        let src = r#"output "x" { value = { (var.key) = 1 } }"#;
+        assert!(
+            visited_vars(src).contains(&"var".to_string()),
+            "computed object key expression was not visited"
+        );
+    }
+
+    #[test]
+    fn visits_object_value_expression() {
+        let src = r#"output "x" { value = { a = var.val } }"#;
+        assert!(visited_vars(src).contains(&"var".to_string()));
     }
 }
