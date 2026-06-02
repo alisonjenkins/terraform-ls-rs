@@ -292,14 +292,31 @@ pub fn classify_context(source: &str, byte_offset: usize) -> CompletionContext {
         return ctx;
     }
 
-    // Expression position where a function call could start.
-    if let Some(ctx) = expression_context(before) {
-        return ctx;
+    // Inside opaque string-literal text (not a `${…}` interpolation),
+    // suppress the generic expression / function-call fallback — typing
+    // free text like `ami = "foo(` must not pop a function menu. The
+    // recognised string-value contexts (source/version) and interpolation
+    // references were handled above. Block-label strings (`resource "|`)
+    // still need block_opener_context below, so don't bail yet.
+    let in_string_literal = cursor_in_string_literal(before);
+
+    // Expression position where a function call could start (skipped in a
+    // string literal).
+    if !in_string_literal {
+        if let Some(ctx) = expression_context(before) {
+            return ctx;
+        }
     }
 
     // `resource "` / `data "` opener on the current logical "statement".
     if let Some(ctx) = block_opener_context(before) {
         return ctx;
+    }
+
+    // A string-literal position that wasn't a recognised value or a block
+    // label offers nothing — don't fall through to body-level completion.
+    if in_string_literal {
+        return CompletionContext::Unknown;
     }
 
     // Inside a resource/data block body?
@@ -371,6 +388,96 @@ fn string_value_context(before: &str) -> Option<CompletionContext> {
         }
         _ => None,
     }
+}
+
+/// `true` when the cursor sits inside string / heredoc LITERAL text — i.e.
+/// not inside a `${…}` / `%{…}` interpolation (which is an expression
+/// position) and not in plain code. Used to suppress the generic
+/// expression / function-call fallback inside opaque string content
+/// (`ami = "foo(|"` must not offer functions). Frame-aware like
+/// [`ignored_brace_positions`].
+fn cursor_in_string_literal(before: &str) -> bool {
+    let bytes = before.as_bytes();
+    let n = bytes.len();
+    enum Frame {
+        String,
+        Interp { depth: u32 },
+        Heredoc { tag: Vec<u8>, indented: bool },
+    }
+    let mut stack: Vec<Frame> = Vec::new();
+    let mut i = 0;
+    while i < n {
+        let b = bytes[i];
+        match stack.last_mut() {
+            None => {
+                if b == b'"' {
+                    stack.push(Frame::String);
+                    i += 1;
+                    continue;
+                }
+                if b == b'<' {
+                    if let Some((tag, indented, after)) = parse_heredoc_opener(bytes, i) {
+                        stack.push(Frame::Heredoc { tag, indented });
+                        i = after;
+                        continue;
+                    }
+                }
+                i += 1;
+            }
+            Some(Frame::String) => {
+                if b == b'\\' && i + 1 < n {
+                    i += 2;
+                    continue;
+                }
+                if b == b'"' {
+                    stack.pop();
+                    i += 1;
+                    continue;
+                }
+                if (b == b'$' || b == b'%') && i + 1 < n && bytes[i + 1] == b'{' {
+                    stack.push(Frame::Interp { depth: 1 });
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+            }
+            Some(Frame::Heredoc { tag, indented }) => {
+                if let Some(after) = match_heredoc_closer(bytes, i, tag, *indented) {
+                    stack.pop();
+                    i = after;
+                    continue;
+                }
+                if (b == b'$' || b == b'%') && i + 1 < n && bytes[i + 1] == b'{' {
+                    stack.push(Frame::Interp { depth: 1 });
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+            }
+            Some(Frame::Interp { depth }) => {
+                if b == b'"' {
+                    stack.push(Frame::String);
+                    i += 1;
+                    continue;
+                }
+                if b == b'{' {
+                    *depth += 1;
+                    i += 1;
+                    continue;
+                }
+                if b == b'}' {
+                    *depth -= 1;
+                    if *depth == 0 {
+                        stack.pop();
+                    }
+                    i += 1;
+                    continue;
+                }
+                i += 1;
+            }
+        }
+    }
+    matches!(stack.last(), Some(Frame::String | Frame::Heredoc { .. }))
 }
 
 /// Returns `(byte_offset_of_open_quote, is_unterminated)` if there's
@@ -1721,6 +1828,27 @@ mod tests {
     }
 
     #[test]
+    fn expression_completion_suppressed_inside_string_literal() {
+        // Free text in a string must not pop a function/expression menu.
+        assert_eq!(at_end("ami = \"foo("), CompletionContext::Unknown);
+        assert_eq!(at_end("ami = \"a = "), CompletionContext::Unknown);
+    }
+
+    #[test]
+    fn expression_completion_active_inside_interpolation() {
+        // Inside `${…}` it IS an expression position — a reference there
+        // still classifies (not Unknown).
+        assert!(
+            !matches!(at_end("ami = \"${"), CompletionContext::Unknown),
+            "interpolation expression-start should offer completions"
+        );
+        assert!(matches!(
+            at_end("ami = \"prefix-${var."),
+            CompletionContext::VariableRef
+        ));
+    }
+
+    #[test]
     fn cursor_inside_hash_comment_is_unknown() {
         assert_eq!(at_end("value = 1 # see var."), CompletionContext::Unknown);
         assert_eq!(at_end("# resource "), CompletionContext::Unknown);
@@ -1758,13 +1886,11 @@ mod tests {
 
     #[test]
     fn hash_inside_string_is_not_a_comment() {
-        // `#` inside a string value must stay string content — the cursor
-        // after it is still inside the string, not a comment.
-        let src = "tags = \"a#b";
-        assert!(
-            !matches!(at_end(src), CompletionContext::Unknown),
-            "string content treated as comment"
-        );
+        // A `#` inside a CLOSED string must not be treated as a comment —
+        // code after the string is still classified normally (top level
+        // here), not swallowed as comment text.
+        let src = "locals { a = \"x#y\" }\n";
+        assert_eq!(at_end(src), CompletionContext::TopLevel);
     }
 
     #[test]
