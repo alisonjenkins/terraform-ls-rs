@@ -24,8 +24,10 @@ jobs:
             target: aarch64-apple-darwin
           - os: macos-13
             target: x86_64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
+          # Windows is intentionally excluded: the provider-plugin
+          # transport (crates/tfls-provider-protocol) speaks unix-domain
+          # sockets (tokio::net::UnixStream), which Terraform uses on
+          # unix; Windows providers use TCP, which isn't implemented yet.
     steps:
       - uses: actions/checkout@v4
 
@@ -48,8 +50,7 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked -p tfls-cli --bin tfls --target ${{ matrix.target }}
 
-      - name: Package (unix)
-        if: runner.os != 'Windows'
+      - name: Package
         shell: bash
         run: |
           staging="tfls-${GITHUB_REF_NAME}-${{ matrix.target }}"
@@ -58,17 +59,6 @@ jobs:
           cp README.md LICENSE* "$staging/" 2>/dev/null || true
           tar czf "$staging.tar.gz" "$staging"
           echo "ASSET=$staging.tar.gz" >> "$GITHUB_ENV"
-
-      - name: Package (windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          staging="tfls-${GITHUB_REF_NAME}-${{ matrix.target }}"
-          mkdir "$staging"
-          cp "target/${{ matrix.target }}/release/tfls.exe" "$staging/"
-          cp README.md LICENSE* "$staging/" 2>/dev/null || true
-          7z a "$staging.zip" "$staging"
-          echo "ASSET=$staging.zip" >> "$GITHUB_ENV"
 
       - name: Attach to release
         uses: softprops/action-gh-release@v2
