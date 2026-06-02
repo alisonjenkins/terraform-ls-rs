@@ -540,6 +540,10 @@ pub fn compute_diagnostics_with_lookup(
         ));
         out.extend(tfls_diag::empty_list_equality_diagnostics(body, &doc.rope));
         out.extend(tfls_diag::map_duplicate_keys_diagnostics(body, &doc.rope));
+        // Same-file duplicate definitions (a hard `terraform validate`
+        // error). Cross-file duplicates within a module are a separate,
+        // index-driven follow-up.
+        out.extend(tfls_diag::duplicate_definition_diagnostics(body, &doc.rope));
         // Provider-defined function calls (Terraform 1.8+). Lives
         // outside `tfls-diag` because it needs `StateStore` access
         // for `required_providers` peer-walk + `state.functions`

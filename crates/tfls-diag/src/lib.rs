@@ -15,6 +15,7 @@ pub mod deprecated_template_file;
 pub mod deprecated_vault_blocks;
 pub mod deprecation_rule;
 pub mod documented_outputs;
+pub mod duplicate_definition;
 pub mod documented_variables;
 pub mod empty_list_equality;
 pub mod error;
@@ -79,6 +80,7 @@ pub use deprecated_vault_blocks::{
 };
 pub use documented_outputs::documented_outputs_diagnostics;
 pub use documented_variables::documented_variables_diagnostics;
+pub use duplicate_definition::duplicate_definition_diagnostics;
 pub use empty_list_equality::empty_list_equality_diagnostics;
 pub use error::DiagError;
 pub use map_duplicate_keys::map_duplicate_keys_diagnostics;

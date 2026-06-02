@@ -16,6 +16,27 @@ mod support;
 
 use support::{TestClient, any_message_contains, contains_undefined_var};
 
+/// A same-file duplicate definition is a hard `terraform validate` error;
+/// the server must publish it by default (not behind any opt-in).
+#[tokio::test]
+async fn duplicate_variable_published_as_error() {
+    let mut client = TestClient::new();
+    client.initialize(None).await;
+
+    let uri = "file:///mod/main.tf";
+    client
+        .did_open(uri, "variable \"region\" {}\nvariable \"region\" {}\n")
+        .await;
+    client.settle(150).await;
+
+    let diags = client.last_diagnostics(uri).await;
+    assert!(
+        any_message_contains(&diags, "duplicate variable `region`"),
+        "expected a duplicate-definition error by default, got {diags:?}"
+    );
+    client.shutdown().await;
+}
+
 /// Toggling `styleRules` on via didChangeConfiguration must recompute and
 /// republish open buffers — without the user editing them. A
 /// `documented_variables` (style-pack) diagnostic is the probe: it only
