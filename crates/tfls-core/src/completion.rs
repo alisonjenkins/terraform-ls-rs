@@ -749,39 +749,11 @@ fn reference_prefix_context(before: &str) -> Option<CompletionContext> {
     if let Some(ctx) = provider_function_prefix_context(trimmed) {
         return Some(ctx);
     }
-    // Fast-path: short single-segment refs (unchanged historical behaviour).
-    if trimmed.ends_with("var.") {
-        return Some(CompletionContext::VariableRef);
-    }
-    if trimmed.ends_with("local.") {
-        return Some(CompletionContext::LocalRef);
-    }
-    if trimmed.ends_with("module.") {
-        return Some(CompletionContext::ModuleRef);
-    }
-    if trimmed.ends_with("each.") {
-        return Some(CompletionContext::EachRef);
-    }
-    if trimmed.ends_with("count.") {
-        return Some(CompletionContext::CountRef);
-    }
-    if trimmed.ends_with("path.") {
-        return Some(CompletionContext::PathRef);
-    }
-    if trimmed.ends_with("terraform.") {
-        return Some(CompletionContext::TerraformNamespaceRef);
-    }
-    if trimmed.ends_with("self.") {
-        // `self` is only valid inside provisioner / connection
-        // blocks under a resource. Walk back to find the
-        // enclosing resource and capture its type.
-        if let Some(resource_type) = enclosing_resource_type(before) {
-            return Some(CompletionContext::SelfRef { resource_type });
-        }
-        // `self.` outside a resource — not valid Terraform; fall
-        // through to the catch-all so the user doesn't see a
-        // misleading completion menu.
-    }
+    // Single-segment namespaces (`var.`, `count.`, …) and multi-segment
+    // traversals are both handled by the segment match below, so a user
+    // identifier named after a namespace (`var.count.`, `local.path.`) is
+    // classified correctly instead of being shadowed by a raw
+    // `ends_with("count.")` fast-path.
     // Multi-segment traversal (TYPE.NAME., data.TYPE.NAME., var.foo.bar.).
     let prefix = trimmed.strip_suffix('.')?;
     // Strip trailing `[...]` bracket groups so e.g.
@@ -792,6 +764,20 @@ fn reference_prefix_context(before: &str) -> Option<CompletionContext> {
     let segments = traversal_segments_reverse(prefix);
     let segs: Vec<&str> = segments.iter().map(|s| s.as_str()).collect();
     match segs.as_slice() {
+        // Single-segment namespaces. Matched here (not via a raw
+        // `ends_with`) so an object-typed `var.count` / `local.path`
+        // reaches the multi-segment arms instead.
+        ["var"] => Some(CompletionContext::VariableRef),
+        ["local"] => Some(CompletionContext::LocalRef),
+        ["module"] => Some(CompletionContext::ModuleRef),
+        ["each"] => Some(CompletionContext::EachRef),
+        ["count"] => Some(CompletionContext::CountRef),
+        ["path"] => Some(CompletionContext::PathRef),
+        ["terraform"] => Some(CompletionContext::TerraformNamespaceRef),
+        // `self` is only valid inside provisioner / connection blocks
+        // under a resource; resolve the enclosing resource type.
+        ["self"] => enclosing_resource_type(before)
+            .map(|resource_type| CompletionContext::SelfRef { resource_type }),
         ["var", rest @ ..] if !rest.is_empty() => Some(CompletionContext::VariableAttrRef {
             path: rest.iter().map(|s| (*s).to_string()).collect(),
         }),
@@ -1708,6 +1694,30 @@ mod tests {
     #[test]
     fn top_level_at_start_of_empty_doc() {
         assert_eq!(at_end(""), CompletionContext::TopLevel);
+    }
+
+    #[test]
+    fn single_segment_namespaces_classify() {
+        assert_eq!(at_end("x = count."), CompletionContext::CountRef);
+        assert_eq!(at_end("x = path."), CompletionContext::PathRef);
+        assert_eq!(at_end("x = each."), CompletionContext::EachRef);
+        assert_eq!(at_end("x = var."), CompletionContext::VariableRef);
+    }
+
+    #[test]
+    fn object_var_named_like_namespace_is_not_shadowed() {
+        // `var.count.` must complete the `count` variable's fields, not
+        // the `count` namespace.
+        assert!(
+            matches!(
+                at_end("x = var.count."),
+                CompletionContext::VariableAttrRef { ref path } if path == &["count".to_string()]
+            ),
+            "got: {:?}",
+            at_end("x = var.count.")
+        );
+        // `local.path.` must NOT classify as the `path` namespace.
+        assert_ne!(at_end("x = local.path."), CompletionContext::PathRef);
     }
 
     #[test]
