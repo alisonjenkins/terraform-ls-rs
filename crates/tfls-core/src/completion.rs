@@ -411,6 +411,21 @@ fn scan_body_for_source_attr(body: &str) -> Option<String> {
     // quoted string. Whitespace-insensitive.
     let mut rest = body;
     while let Some(idx) = rest.find("source") {
+        // Require an identifier boundary before the match so we don't
+        // match `source` as the tail of another key (`data_source`,
+        // `config_source`, …). The trailing boundary is covered below by
+        // the `= "…"` check (`source_x = …` trims to `_x …`, not `=`).
+        let preceded_by_ident = idx
+            .checked_sub(1)
+            .map(|b| {
+                let c = rest.as_bytes()[b];
+                c.is_ascii_alphanumeric() || c == b'_'
+            })
+            .unwrap_or(false);
+        if preceded_by_ident {
+            rest = &rest[idx + 1..];
+            continue;
+        }
         let tail = &rest[idx + "source".len()..];
         let trimmed = tail.trim_start();
         if !trimmed.starts_with('=') {
@@ -1521,6 +1536,35 @@ mod tests {
 
     fn at_end(src: &str) -> CompletionContext {
         classify_context(src, src.len())
+    }
+
+    #[test]
+    fn scan_body_source_matches_real_source_attr() {
+        assert_eq!(
+            scan_body_for_source_attr(" source = \"hashicorp/aws\" "),
+            Some("hashicorp/aws".to_string())
+        );
+    }
+
+    #[test]
+    fn scan_body_source_ignores_substring_keys() {
+        // `data_source`, `config_source` must NOT be read as `source`.
+        assert_eq!(
+            scan_body_for_source_attr(" data_source = \"aws_caller_identity\" "),
+            None
+        );
+        assert_eq!(
+            scan_body_for_source_attr(" config_source = \"x\" "),
+            None
+        );
+    }
+
+    #[test]
+    fn scan_body_source_finds_real_attr_after_decoy() {
+        assert_eq!(
+            scan_body_for_source_attr("data_source = \"x\"\n  source = \"hashicorp/aws\""),
+            Some("hashicorp/aws".to_string())
+        );
     }
 
     #[test]
