@@ -544,6 +544,8 @@ pub fn compute_diagnostics_with_lookup(
         // error). Cross-file duplicates within a module are a separate,
         // index-driven follow-up.
         out.extend(tfls_diag::duplicate_definition_diagnostics(body, &doc.rope));
+        // count/for_each meta-argument misuse.
+        out.extend(tfls_diag::meta_argument_diagnostics(body, &doc.rope));
         // Sensitive variable leaking into a non-sensitive output. The
         // sensitive-variable set is aggregated across the module (vars
         // and outputs usually live in different files).
