@@ -342,15 +342,30 @@ fn read_slice(rope: &Rope, range: std::ops::Range<usize>) -> String {
     rope.byte_slice(range.start..range.end).to_string()
 }
 
+/// The public registries whose version catalogues we cache and can
+/// validate against. A source hosted elsewhere (HCP Terraform private
+/// registry, an internal mirror) has no catalogue here, so we must NOT
+/// validate it against the public registry — that would compare against
+/// an unrelated provider/module of the same `namespace/name`.
+fn is_public_registry_host(host: &str) -> bool {
+    matches!(host, "registry.terraform.io" | "registry.opentofu.org")
+}
+
 fn parse_provider_source(s: &str) -> Option<(String, String)> {
     let s = s.trim();
-    let mut parts = s.splitn(3, '/');
-    let a = parts.next()?;
-    let b = parts.next()?;
-    if let Some(c) = parts.next() {
-        Some((b.to_string(), c.to_string()))
-    } else {
-        Some((a.to_string(), b.to_string()))
+    let parts: Vec<&str> = s.split('/').collect();
+    match parts.as_slice() {
+        // Short form: `hashicorp/aws`.
+        [ns, name] if !ns.is_empty() && !name.is_empty() => {
+            Some((ns.to_string(), name.to_string()))
+        }
+        // Host-qualified: `registry.terraform.io/hashicorp/aws`. Only the
+        // public registries are checkable; a private host is skipped
+        // rather than mis-validated against the public catalogue.
+        [host, ns, name] if !ns.is_empty() && !name.is_empty() => {
+            is_public_registry_host(host).then(|| (ns.to_string(), name.to_string()))
+        }
+        _ => None,
     }
 }
 
@@ -361,8 +376,19 @@ fn parse_module_source_parts(s: &str) -> Option<(String, String, String)> {
     }
     let parts: Vec<&str> = s.split('/').collect();
     match parts.as_slice() {
+        // Registry form: `namespace/name/provider`.
         [ns, name, provider] if !ns.is_empty() && !name.is_empty() && !provider.is_empty() => {
             Some((ns.to_string(), name.to_string(), provider.to_string()))
+        }
+        // Host-qualified registry form:
+        // `registry.terraform.io/namespace/name/provider`. Accept only a
+        // public host (consistent with module_version_presence); a private
+        // host has no checkable catalogue.
+        [host, ns, name, provider]
+            if !ns.is_empty() && !name.is_empty() && !provider.is_empty() =>
+        {
+            is_public_registry_host(host)
+                .then(|| (ns.to_string(), name.to_string(), provider.to_string()))
         }
         _ => None,
     }
@@ -487,5 +513,41 @@ mod tests {
             diags.iter().all(|d| !d.message.contains("malformed")),
             "corrected version must clear the malformed diag: {diags:?}"
         );
+    }
+
+    #[test]
+    fn provider_source_short_and_public_host_forms() {
+        assert_eq!(
+            parse_provider_source("hashicorp/aws"),
+            Some(("hashicorp".into(), "aws".into()))
+        );
+        assert_eq!(
+            parse_provider_source("registry.terraform.io/hashicorp/aws"),
+            Some(("hashicorp".into(), "aws".into()))
+        );
+    }
+
+    #[test]
+    fn provider_source_private_host_is_skipped() {
+        // Must NOT resolve to `org/foo` against the public registry.
+        assert_eq!(parse_provider_source("app.terraform.io/org/foo"), None);
+        assert_eq!(parse_provider_source("my-internal-mirror.corp/org/foo"), None);
+    }
+
+    #[test]
+    fn module_source_registry_and_public_host_forms() {
+        assert_eq!(
+            parse_module_source_parts("terraform-aws-modules/vpc/aws"),
+            Some(("terraform-aws-modules".into(), "vpc".into(), "aws".into()))
+        );
+        assert_eq!(
+            parse_module_source_parts("registry.terraform.io/terraform-aws-modules/vpc/aws"),
+            Some(("terraform-aws-modules".into(), "vpc".into(), "aws".into()))
+        );
+    }
+
+    #[test]
+    fn module_source_private_host_is_skipped() {
+        assert_eq!(parse_module_source_parts("app.terraform.io/org/vpc/aws"), None);
     }
 }
