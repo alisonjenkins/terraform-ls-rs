@@ -576,15 +576,18 @@ pub fn compute_diagnostics_with_lookup(
         out.extend(tfls_diag::unused_required_providers_diagnostics(
             body, &doc.rope, graph,
         ));
-        out.extend(tfls_diag::standard_module_structure_diagnostics(
-            body,
-            &doc.rope,
-            current_file,
-            graph,
-        ));
 
-        // Pass 3 — opt-in style pack.
+        // Pass 3 — opt-in style pack. standard_module_structure belongs
+        // here too: it warns on every variable/output when
+        // variables.tf/outputs.tf is absent, i.e. on the common
+        // single-file `main.tf` module, so it must not fire by default.
         if state.config.snapshot().style_rules {
+            out.extend(tfls_diag::standard_module_structure_diagnostics(
+                body,
+                &doc.rope,
+                current_file,
+                graph,
+            ));
             out.extend(tfls_diag::documented_variables_diagnostics(body, &doc.rope));
             out.extend(tfls_diag::documented_outputs_diagnostics(body, &doc.rope));
             out.extend(tfls_diag::naming_convention_diagnostics(body, &doc.rope));
