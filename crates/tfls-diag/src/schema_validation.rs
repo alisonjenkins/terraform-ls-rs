@@ -200,6 +200,13 @@ fn first_label_range(block: &Block, rope: &Rope) -> Option<lsp_types::Range> {
     hcl_span_to_lsp_range(rope, span).ok()
 }
 
+fn block_label_str(label: &BlockLabel) -> Option<&str> {
+    match label {
+        BlockLabel::String(s) => Some(s.value().as_str()),
+        BlockLabel::Ident(i) => Some(i.as_str()),
+    }
+}
+
 fn validate_block<H: UpgradeHintLookup>(
     block: &Block,
     rope: &Rope,
@@ -294,6 +301,51 @@ fn validate_block<H: UpgradeHintLookup>(
                 severity: Some(DiagnosticSeverity::ERROR),
                 source: Some("terraform-ls-rs".to_string()),
                 message: format!("missing required attribute `{name}`"),
+                ..Default::default()
+            });
+        }
+    }
+
+    // Required / bounded nested blocks (schema `min_items` / `max_items`).
+    // A `dynamic "<name>"` block can generate any number of instances, so
+    // its presence satisfies a min and makes the max uncheckable.
+    for (bname, nested) in &schema.block.block_types {
+        let mut count: u64 = 0;
+        let mut has_dynamic = false;
+        for structure in block.body.iter() {
+            let Some(inner) = structure.as_block() else {
+                continue;
+            };
+            if inner.ident.as_str() == bname.as_str() {
+                count += 1;
+            } else if inner.ident.as_str() == "dynamic"
+                && inner.labels.first().and_then(block_label_str) == Some(bname.as_str())
+            {
+                has_dynamic = true;
+            }
+        }
+        if nested.min_items >= 1 && count == 0 && !has_dynamic {
+            out.push(Diagnostic {
+                range: header_range,
+                severity: Some(DiagnosticSeverity::ERROR),
+                source: Some("terraform-ls-rs".to_string()),
+                message: if nested.min_items == 1 {
+                    format!("missing required block `{bname}`")
+                } else {
+                    format!("block `{bname}` requires at least {} entries", nested.min_items)
+                },
+                ..Default::default()
+            });
+        }
+        if nested.max_items > 0 && count > nested.max_items && !has_dynamic {
+            out.push(Diagnostic {
+                range: header_range,
+                severity: Some(DiagnosticSeverity::ERROR),
+                source: Some("terraform-ls-rs".to_string()),
+                message: format!(
+                    "too many `{bname}` blocks ({count}, max {})",
+                    nested.max_items
+                ),
                 ..Default::default()
             });
         }
@@ -891,6 +943,94 @@ mod tests {
         let rope = Rope::from_str(src);
         let body = parse_source(src).body.expect("parses");
         resource_diagnostics(&body, &rope, &uri(), schemas)
+    }
+
+    fn schemas_with_nested_blocks() -> ProviderSchemas {
+        // `required_block` min_items=1; `bounded_block` max_items=2.
+        sonic_rs::from_str(
+            r#"{
+                "format_version": "1.0",
+                "provider_schemas": {
+                    "registry.terraform.io/hashicorp/aws": {
+                        "provider": { "version": 0, "block": {} },
+                        "resource_schemas": {
+                            "aws_thing": {
+                                "version": 1,
+                                "block": {
+                                    "attributes": {},
+                                    "block_types": {
+                                        "required_block": {
+                                            "nesting_mode": "list",
+                                            "min_items": 1,
+                                            "max_items": 0,
+                                            "block": { "attributes": {}, "block_types": {} }
+                                        },
+                                        "bounded_block": {
+                                            "nesting_mode": "list",
+                                            "min_items": 0,
+                                            "max_items": 2,
+                                            "block": { "attributes": {}, "block_types": {} }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("parse")
+    }
+
+    #[test]
+    fn flags_missing_required_nested_block() {
+        let schemas = schemas_with_nested_blocks();
+        let d = diags_with(&schemas, "resource \"aws_thing\" \"x\" {}\n");
+        let miss = d
+            .iter()
+            .find(|d| d.message.contains("missing required block `required_block`"))
+            .expect("missing-required-block diagnostic");
+        assert_eq!(miss.severity, Some(DiagnosticSeverity::ERROR));
+    }
+
+    #[test]
+    fn required_nested_block_present_is_ok() {
+        let schemas = schemas_with_nested_blocks();
+        let d = diags_with(
+            &schemas,
+            "resource \"aws_thing\" \"x\" {\n  required_block {}\n}\n",
+        );
+        assert!(
+            d.iter().all(|d| !d.message.contains("missing required block")),
+            "got: {d:?}"
+        );
+    }
+
+    #[test]
+    fn dynamic_block_satisfies_required_nested_block() {
+        let schemas = schemas_with_nested_blocks();
+        let d = diags_with(
+            &schemas,
+            "resource \"aws_thing\" \"x\" {\n  dynamic \"required_block\" {\n    for_each = var.xs\n    content {}\n  }\n}\n",
+        );
+        assert!(
+            d.iter().all(|d| !d.message.contains("missing required block")),
+            "got: {d:?}"
+        );
+    }
+
+    #[test]
+    fn flags_too_many_bounded_blocks() {
+        let schemas = schemas_with_nested_blocks();
+        let d = diags_with(
+            &schemas,
+            "resource \"aws_thing\" \"x\" {\n  required_block {}\n  bounded_block {}\n  bounded_block {}\n  bounded_block {}\n}\n",
+        );
+        let too_many = d
+            .iter()
+            .find(|d| d.message.contains("too many `bounded_block`"))
+            .expect("too-many-blocks diagnostic");
+        assert!(too_many.message.contains("max 2"), "got: {}", too_many.message);
     }
 
     #[test]
