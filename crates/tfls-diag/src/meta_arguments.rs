@@ -10,6 +10,8 @@
 //! - **`for_each` over a tuple/list literal** — `for_each` requires a map
 //!   or a set of strings; a list is a type error. WARNING with a
 //!   `toset(...)` hint.
+//! - **quoted `depends_on` entries** — `depends_on` takes bare references;
+//!   a string literal (`["aws_instance.web"]`) is rejected. ERROR.
 
 use hcl_edit::expr::Expression;
 use hcl_edit::repr::Span;
@@ -47,6 +49,7 @@ fn check_block(block: &Block, rope: &Rope, out: &mut Vec<Diagnostic>) {
                     for_each = Some((r, &attr.value));
                 }
             }
+            "depends_on" => check_depends_on(&attr.value, rope, out),
             _ => {}
         }
     }
@@ -81,6 +84,33 @@ fn check_block(block: &Block, rope: &Rope, out: &mut Vec<Diagnostic>) {
 
 fn attr_range(attr: &hcl_edit::structure::Attribute, rope: &Rope) -> Option<Range> {
     hcl_span_to_lsp_range(rope, attr.key.span()?).ok()
+}
+
+/// `depends_on` takes a list of bare references (`aws_instance.web`,
+/// `module.x`). A quoted string entry (`["aws_instance.web"]`) — the most
+/// common mistake, a Terraform 0.11 leftover — is rejected by Terraform.
+fn check_depends_on(value: &Expression, rope: &Rope, out: &mut Vec<Diagnostic>) {
+    let Expression::Array(arr) = value else {
+        return;
+    };
+    for elem in arr.iter() {
+        if let Expression::String(s) = elem {
+            let range = elem
+                .span()
+                .and_then(|sp| hcl_span_to_lsp_range(rope, sp).ok())
+                .unwrap_or_default();
+            out.push(Diagnostic {
+                range,
+                severity: Some(DiagnosticSeverity::ERROR),
+                source: Some("terraform-ls-rs".to_string()),
+                message: format!(
+                    "depends_on entries must be references, not strings — remove the quotes around `{}`",
+                    s.value().as_str()
+                ),
+                ..Default::default()
+            });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -132,6 +162,27 @@ mod tests {
     #[test]
     fn silent_for_for_each_over_map() {
         let d = diags("resource \"aws_instance\" \"x\" {\n  for_each = var.instances\n}\n");
+        assert!(d.is_empty(), "got: {d:?}");
+    }
+
+    #[test]
+    fn flags_quoted_depends_on_entry() {
+        let d = diags(
+            "resource \"aws_instance\" \"x\" {\n  depends_on = [\"aws_db_instance.db\"]\n}\n",
+        );
+        let bad = d
+            .iter()
+            .find(|d| d.message.contains("must be references, not strings"))
+            .expect("depends_on string diagnostic");
+        assert_eq!(bad.severity, Some(DiagnosticSeverity::ERROR));
+        assert!(bad.message.contains("aws_db_instance.db"), "got: {}", bad.message);
+    }
+
+    #[test]
+    fn silent_for_bare_depends_on_references() {
+        let d = diags(
+            "resource \"aws_instance\" \"x\" {\n  depends_on = [aws_db_instance.db, module.net]\n}\n",
+        );
         assert!(d.is_empty(), "got: {d:?}");
     }
 
