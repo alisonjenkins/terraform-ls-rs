@@ -101,6 +101,15 @@ fn make_params(u: &Url, pos: Position) -> CompletionParams {
     }
 }
 
+fn make_params_triggered(u: &Url, pos: Position, ch: &str) -> CompletionParams {
+    let mut p = make_params(u, pos);
+    p.context = Some(CompletionContext {
+        trigger_kind: CompletionTriggerKind::TRIGGER_CHARACTER,
+        trigger_character: Some(ch.to_string()),
+    });
+    p
+}
+
 fn labels(resp: CompletionResponse) -> Vec<String> {
     match resp {
         CompletionResponse::Array(items) => items.into_iter().map(|i| i.label).collect(),
@@ -232,6 +241,23 @@ async fn attribute_value_refs_sort_before_functions() {
         fn_st.starts_with('9') && var_st < fn_st,
         "refs must sort before functions: var={var_st:?} fn={fn_st:?}"
     );
+}
+
+#[tokio::test]
+async fn single_colon_trigger_bails_cheaply() {
+    // A `:` that isn't the second of `::` (ternary / for-colon) must not
+    // produce completions.
+    let u = uri("file:///a.tf");
+    let src = "locals {\n  x = cond ? a : b\n}\n";
+    let backend = fresh_backend(src, &u);
+    // Cursor right after the lone `:` on line 1 (col 15).
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params_triggered(&u, Position::new(1, 15), ":"),
+    )
+    .await
+    .expect("ok");
+    assert!(resp.is_none(), "lone colon trigger should bail");
 }
 
 #[tokio::test]

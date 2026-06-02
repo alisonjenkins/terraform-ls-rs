@@ -90,6 +90,10 @@ pub async fn completion(
 ) -> jsonrpc::Result<Option<CompletionResponse>> {
     let uri = params.text_document_position.text_document.uri;
     let pos = params.text_document_position.position;
+    let trigger_char = params
+        .context
+        .as_ref()
+        .and_then(|c| c.trigger_character.as_deref());
 
     let Some(doc) = backend.state.documents.get(&uri) else {
         return Ok(None);
@@ -102,6 +106,20 @@ pub async fn completion(
             return Ok(None);
         }
     };
+
+    // A `:` trigger is only useful as the second `:` of `provider::`
+    // (provider-defined function namespace). It also fires on every
+    // ternary / for-expression / object-literal colon — bail cheaply on
+    // those before any materialization or classify. The byte before the
+    // typed `:` must itself be `:`.
+    if trigger_char == Some(":") {
+        let prev_is_colon = offset
+            .checked_sub(2)
+            .is_some_and(|i| doc.rope.byte(i) == b':');
+        if !prev_is_colon {
+            return Ok(None);
+        }
+    }
     // classify_context only reads `&text[..offset]` and label_closed_after
     // only reads up to the next newline after the cursor — so materialize
     // just through the end of the cursor's line, not the whole document.

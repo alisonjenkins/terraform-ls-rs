@@ -28,14 +28,16 @@ pub fn server_capabilities() -> ServerCapabilities {
         selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
         completion_provider: Some(CompletionOptions {
             // `.` attribute/namespace, `"` block labels, `[` index-key
-            // completion (`aws_x.y["…"]`). `:`/`$` are deliberately
-            // omitted — a single `:` fires on every ternary / for-colon
-            // and `$` on every interpolation char, and the handler would
-            // pay a full classify before producing nothing useful.
+            // completion (`aws_x.y["…"]`), `:` provider-function namespace
+            // (`provider::`). The `:` handler cheaply bails unless the
+            // preceding byte is also `:`, so ternary / for-colon keystrokes
+            // cost nothing. `$` is omitted — it fires on `$` before `{`, too
+            // early to know an interpolation is starting.
             trigger_characters: Some(vec![
                 ".".to_string(),
                 "\"".to_string(),
                 "[".to_string(),
+                ":".to_string(),
             ]),
             resolve_provider: Some(false),
             ..Default::default()
@@ -134,7 +136,7 @@ mod tests {
             .completion_provider
             .and_then(|c| c.trigger_characters)
             .unwrap_or_default();
-        for expected in [".", "\"", "["] {
+        for expected in [".", "\"", "[", ":"] {
             assert!(
                 triggers.iter().any(|t| t == expected),
                 "missing trigger {expected:?}; got {triggers:?}"
