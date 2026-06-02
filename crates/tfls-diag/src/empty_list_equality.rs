@@ -30,14 +30,20 @@ pub fn empty_list_equality_diagnostics(body: &Body, rope: &Rope) -> Vec<Diagnost
         }
         let span = op.span().unwrap_or(0..0);
         let range = hcl_span_to_lsp_range(rope, span).unwrap_or_default();
+        // `x == []` is always FALSE (use `length(x) == 0`); `x != []` is
+        // always TRUE (use `length(x) > 0`). The replacement and the
+        // truth value both differ by operator — `length(x) >= 0` would be
+        // vacuously always-true, not equivalent to `x != []`.
+        let message = match op_kind {
+            "==" => "comparing with `== []` is always false; use `length(x) == 0` instead",
+            _ => "comparing with `!= []` is always true; use `length(x) > 0` instead",
+        }
+        .to_string();
         out.push(Diagnostic {
             range,
             severity: Some(DiagnosticSeverity::WARNING),
             source: Some("terraform-ls-rs".to_string()),
-            message: format!(
-                "comparing with `{op_kind} []` is always false; use `length(x) {}= 0` instead",
-                if op_kind == "==" { "=" } else { ">" }
-            ),
+            message,
             ..Default::default()
         });
     });
@@ -71,6 +77,17 @@ mod tests {
     fn flags_inequality_with_empty_list_on_rhs() {
         let d = diags(r#"output "x" { value = var.ids != [] }"#);
         assert_eq!(d.len(), 1);
+        // `!=` is always TRUE and the idiom is `length(x) > 0` — not the
+        // `>= 0` / "always false" the rule previously emitted.
+        assert!(d[0].message.contains("always true"), "got: {}", d[0].message);
+        assert!(d[0].message.contains("length(x) > 0"), "got: {}", d[0].message);
+    }
+
+    #[test]
+    fn equality_message_says_always_false_and_eq_zero() {
+        let d = diags(r#"output "x" { value = var.ids == [] }"#);
+        assert!(d[0].message.contains("always false"), "got: {}", d[0].message);
+        assert!(d[0].message.contains("length(x) == 0"), "got: {}", d[0].message);
     }
 
     #[test]
