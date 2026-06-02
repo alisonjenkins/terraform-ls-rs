@@ -95,3 +95,54 @@ async fn empty_list_equality_offers_length_quickfix() {
 
     client.shutdown().await;
 }
+
+/// An undocumented variable (style pack on) offers an `Add description`
+/// quick-fix that inserts a `description = ""` stub.
+#[tokio::test]
+async fn missing_description_offers_add_quickfix() {
+    let mut client = TestClient::new();
+    client.initialize(None).await;
+    // documented_variables is in the opt-in style pack.
+    client
+        .did_change_configuration(serde_json::json!({
+            "terraform-ls-rs": { "styleRules": true }
+        }))
+        .await;
+
+    let uri = "file:///mod/main.tf";
+    client.did_open(uri, "variable \"region\" {\n  type = string\n}\n").await;
+    client.settle(250).await;
+
+    let diags = client.last_diagnostics(uri).await;
+    let nodesc = diags
+        .iter()
+        .find(|d| {
+            d.get("message")
+                .and_then(|m| m.as_str())
+                .is_some_and(|m| m.contains("has no description"))
+        })
+        .expect("missing-description diagnostic published");
+
+    let range = nodesc.get("range").cloned().expect("range");
+    let resp = client
+        .code_action(uri, range, Value::Array(vec![nodesc.clone()]))
+        .await;
+    let actions = resp["result"].as_array().cloned().unwrap_or_default();
+    let add = actions
+        .iter()
+        .find(|a| {
+            a.get("title")
+                .and_then(|t| t.as_str())
+                .is_some_and(|t| t.contains("Add `description`"))
+        })
+        .expect("add-description action present");
+    let new_text = add["edit"]["changes"][uri]
+        .as_array()
+        .and_then(|e| e.first())
+        .and_then(|e| e.get("newText"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
+    assert!(new_text.contains("description = \"\""), "got: {new_text:?}");
+
+    client.shutdown().await;
+}

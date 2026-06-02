@@ -105,6 +105,10 @@ pub async fn code_action(
                 {
                     actions.push(CodeActionOrCommand::CodeAction(action));
                 }
+            } else if is_missing_description(diag) {
+                if let Some(action) = make_add_description_action(&uri, diag, body, &rope) {
+                    actions.push(CodeActionOrCommand::CodeAction(action));
+                }
             } else if is_deprecated_null_resource(diag) {
                 if let Some(action) =
                     make_replace_null_resource_for_diag(&backend.state, &uri, diag, body, &rope)
@@ -2447,6 +2451,64 @@ fn is_empty_list_equality(diag: &Diagnostic) -> bool {
     diag.source.as_deref() == Some("terraform-ls-rs")
         && (diag.message.contains("comparing with `== []`")
             || diag.message.contains("comparing with `!= []`"))
+}
+
+fn is_missing_description(diag: &Diagnostic) -> bool {
+    diag.source.as_deref() == Some("terraform-ls-rs")
+        && diag.message.contains("has no description")
+        && (diag.message.starts_with("variable ") || diag.message.starts_with("output "))
+}
+
+fn find_named_block<'b>(body: &'b Body, ident: &str, name: &str) -> Option<&'b Block> {
+    body.iter().filter_map(|s| s.as_block()).find(|b| {
+        b.ident.as_str() == ident && b.labels.first().and_then(label_str) == Some(name)
+    })
+}
+
+/// Quick-fix for the documented-variables / documented-outputs warning:
+/// insert an empty `description = ""` stub at the top of the block body.
+fn make_add_description_action(
+    uri: &Url,
+    diag: &Diagnostic,
+    body: &Body,
+    rope: &Rope,
+) -> Option<CodeAction> {
+    let ident = if diag.message.starts_with("variable ") {
+        "variable"
+    } else if diag.message.starts_with("output ") {
+        "output"
+    } else {
+        return None;
+    };
+    let name = diag.message.split('`').nth(1)?;
+    let block = find_named_block(body, ident, name)?;
+    if block_has_attribute(block, "description") {
+        return None;
+    }
+    let (pos, prefix) = insertion_position(block, rope)?;
+    let new_text = format!("{prefix}  description = \"\"\n");
+    let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    changes.insert(
+        uri.clone(),
+        vec![TextEdit {
+            range: Range {
+                start: pos,
+                end: pos,
+            },
+            new_text,
+        }],
+    );
+    Some(CodeAction {
+        title: "Add `description`".to_string(),
+        kind: Some(CodeActionKind::QUICKFIX),
+        diagnostics: Some(vec![diag.clone()]),
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        is_preferred: Some(true),
+        ..Default::default()
+    })
 }
 
 /// Quick-fix for `x == []` / `x != []`: rewrite to `length(x) == 0` /
