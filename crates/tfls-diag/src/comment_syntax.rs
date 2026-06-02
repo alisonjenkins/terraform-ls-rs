@@ -17,20 +17,45 @@ pub fn comment_syntax_diagnostics(rope: &Rope) -> Vec<Diagnostic> {
     let mut in_string = false;
     let mut in_block_comment = false;
     let mut in_line_comment = false;
+    // When inside a heredoc (`<<EOT` / `<<-EOT`), holds the terminator
+    // tag. The body is opaque literal text — `//` and `http://` in
+    // user_data / command / policy bodies must NOT be flagged.
+    let mut heredoc: Option<String> = None;
+    // Byte index where the current line begins, for heredoc terminator
+    // matching (a line whose trimmed content equals the tag ends it).
+    let mut line_start = 0usize;
     let mut line: u32 = 0;
     let mut col: u32 = 0;
 
     while i < bytes.len() {
         let b = bytes[i];
+        if heredoc.is_some() {
+            if b == b'\n' {
+                let line_text = source.get(line_start..i).unwrap_or("");
+                if heredoc.as_deref() == Some(line_text.trim()) {
+                    heredoc = None;
+                }
+                line += 1;
+                col = 0;
+                i += 1;
+                line_start = i;
+            } else {
+                col += 1;
+                i += 1;
+            }
+            continue;
+        }
         if in_line_comment {
             if b == b'\n' {
                 in_line_comment = false;
                 line += 1;
                 col = 0;
+                i += 1;
+                line_start = i;
             } else {
                 col += 1;
+                i += 1;
             }
-            i += 1;
             continue;
         }
         if in_block_comment {
@@ -38,6 +63,7 @@ pub fn comment_syntax_diagnostics(rope: &Rope) -> Vec<Diagnostic> {
                 line += 1;
                 col = 0;
                 i += 1;
+                line_start = i;
                 continue;
             }
             if b == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
@@ -62,10 +88,12 @@ pub fn comment_syntax_diagnostics(rope: &Rope) -> Vec<Diagnostic> {
             if b == b'\n' {
                 line += 1;
                 col = 0;
+                i += 1;
+                line_start = i;
             } else {
                 col += 1;
+                i += 1;
             }
-            i += 1;
             continue;
         }
         match b {
@@ -73,6 +101,29 @@ pub fn comment_syntax_diagnostics(rope: &Rope) -> Vec<Diagnostic> {
                 in_string = true;
                 i += 1;
                 col += 1;
+            }
+            // Heredoc opener: `<<TAG` or `<<-TAG`. Enter heredoc mode so
+            // the (opaque) body isn't scanned for `//`.
+            b'<' if i + 1 < bytes.len() && bytes[i + 1] == b'<' => {
+                let mut j = i + 2;
+                if j < bytes.len() && bytes[j] == b'-' {
+                    j += 1;
+                }
+                let tag_start = j;
+                while j < bytes.len()
+                    && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_')
+                {
+                    j += 1;
+                }
+                if j > tag_start {
+                    heredoc = Some(source[tag_start..j].to_string());
+                    col += (j - i) as u32;
+                    i = j;
+                } else {
+                    // `<<` not followed by a tag — treat literally.
+                    col += 1;
+                    i += 1;
+                }
             }
             b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
                 // Flag this `//` comment.
@@ -110,6 +161,7 @@ pub fn comment_syntax_diagnostics(rope: &Rope) -> Vec<Diagnostic> {
                 line += 1;
                 col = 0;
                 i += 1;
+                line_start = i;
             }
             _ => {
                 col += 1;
@@ -165,5 +217,28 @@ mod tests {
     fn flags_multiple_comments() {
         let d = diags("// a\n// b\n// c\n");
         assert_eq!(d.len(), 3, "got: {d:?}");
+    }
+
+    #[test]
+    fn does_not_flag_slashes_inside_heredoc() {
+        let src = "resource \"x\" \"y\" {\n  user_data = <<EOF\n#!/bin/sh\ncurl http://example.com // fetch\nEOF\n}\n";
+        let d = diags(src);
+        assert!(d.is_empty(), "got: {d:?}");
+    }
+
+    #[test]
+    fn does_not_flag_slashes_inside_indented_heredoc() {
+        let src = "locals {\n  script = <<-EOT\n    echo http://x // y\n  EOT\n}\n";
+        let d = diags(src);
+        assert!(d.is_empty(), "got: {d:?}");
+    }
+
+    #[test]
+    fn flags_comment_after_heredoc_closes() {
+        // The terminator ends the heredoc; a `//` after it is real code.
+        let src = "locals {\n  s = <<EOT\nhttp://x\nEOT\n}\n// real comment\n";
+        let d = diags(src);
+        assert_eq!(d.len(), 1, "got: {d:?}");
+        assert_eq!(d[0].range.start.line, 5, "got: {d:?}");
     }
 }
