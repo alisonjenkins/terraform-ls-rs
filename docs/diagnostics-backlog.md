@@ -141,7 +141,7 @@ Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially r
     `publish_for_dir` loops every doc under a dir calling the per-call variant — the O(N²) the doc-comment warns against — so after FetchSchemas/LockFileChanged on a large module every file rebuilds the full aggregate.
     **Proposal:** Group uris by parent dir, build one ModuleSnapshot per dir (as scan_files_parallel does), call `compute_diagnostics_with_lookup`. Preserve canonical/submodule dir-matching.
 
-- [ ] **deprecated_index, empty_list_equality, map_duplicate_keys have no paired code action** (low, effort M, confidence high) — `document.rs:468-542`
+- [x] **deprecated_index, empty_list_equality, map_duplicate_keys have no paired code action** (index + empty-list done; map-key fix remains) (low, effort M, confidence high) — `document.rs:468-542`
     deprecated_lookup/interpolation have quick-fixes; these three are diagnostic-only despite mechanical fixes (`.N`→`[N]`, `x==[]`→`length(x)==0`, remove overridden duplicate key).
     **Proposal:** Add scan_X functions + emit_scoped_actions wiring. Legacy-index and length() are pure text rewrites; the duplicate-key fix needs new entry-span computation (the diagnostic records only key-name spans).
 
@@ -177,6 +177,6 @@ Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially r
     Hardcodes `[a-z][a-z0-9_]*` with no per-block-type override, unlike tflint's configurable format/custom regex. Already opt-in + INFORMATION, so harm is bounded.
     **Proposal:** Add a `naming_convention` config sub-object (default + per-block-type overrides accepting snake_case|mixed_snake_case|{custom regex}). Needs nested config plumbing + a regex dep (regex::Regex isn't Eq, conflicting with Config's derive — store pattern string + lazy-compile).
 
-- [ ] **documented_variables / documented_outputs not paired with a code action** (low, effort S, confidence high) — `documented_variables.rs:39`; `documented_outputs.rs:38`
+- [x] **documented_variables / documented_outputs not paired with a code action** (low, effort S, confidence high) — `documented_variables.rs:39`; `documented_outputs.rs:38`
     Both rules nag "has no description" with no quick-fix to insert a `description = ""` stub.
     **Proposal:** Add a shared `make_add_description_for_diag` quick-fix inserting `description = ""` as the first body attribute, reusing insertion_position; surface via the diagnostic-attached lightbulb path.
