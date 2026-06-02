@@ -32,29 +32,32 @@ pub fn lsp_position_to_byte_offset(rope: &Rope, pos: Position) -> Result<usize, 
 
     let line_start_byte = rope.line_to_byte(line_idx);
     let line = rope.line(line_idx);
-    let line_byte_len = line.len_bytes();
 
-    // Exclude any trailing newline so the clamped position stays on
-    // the requested line instead of landing at the start of the next.
-    let visible_line_len = {
-        let mut len = line_byte_len;
-        if len > 0 {
-            let last = rope.byte(line_start_byte + len - 1);
-            if last == b'\n' {
-                len -= 1;
-                // Strip the carriage return of a CRLF sequence.
-                if len > 0 && rope.byte(line_start_byte + len - 1) == b'\r' {
-                    len -= 1;
-                }
-            } else if last == b'\r' {
-                len -= 1;
+    // LSP `Position.character` is a UTF-16 code-unit offset within the
+    // line (the default encoding; we don't negotiate `positionEncoding`).
+    // It must NOT be treated as a byte offset — on a line with multibyte
+    // text before the cursor that both mislocates the cursor and can land
+    // mid-codepoint, which panics callers that slice `&source[..offset]`.
+    //
+    // Visible char count excludes any trailing newline so a clamped
+    // past-EOL column stays on the requested line.
+    let visible_chars = {
+        let mut n = line.len_chars();
+        if n > 0 && line.char(n - 1) == '\n' {
+            n -= 1;
+            if n > 0 && line.char(n - 1) == '\r' {
+                n -= 1;
             }
+        } else if n > 0 && line.char(n - 1) == '\r' {
+            n -= 1;
         }
-        len
+        n
     };
-
-    let char_offset = (pos.character as usize).min(visible_line_len);
-    Ok(line_start_byte + char_offset)
+    let visible_cu = line.slice(..visible_chars).len_utf16_cu();
+    let cu = (pos.character as usize).min(visible_cu);
+    let char_in_line = line.utf16_cu_to_char(cu);
+    let byte_in_line = line.char_to_byte(char_in_line);
+    Ok(line_start_byte + byte_in_line)
 }
 
 /// Convert a byte offset to an LSP `Position`.
@@ -69,7 +72,10 @@ pub fn byte_offset_to_lsp_position(rope: &Rope, offset: usize) -> Result<Positio
 
     let line_idx = rope.byte_to_line(offset);
     let line_start_byte = rope.line_to_byte(line_idx);
-    let character = offset.saturating_sub(line_start_byte);
+    // Emit a UTF-16 code-unit column (LSP's default `Position.character`
+    // encoding), not a byte difference — they diverge on multibyte lines.
+    let char_in_line = rope.byte_to_char(offset) - rope.byte_to_char(line_start_byte);
+    let character = rope.line(line_idx).slice(..char_in_line).len_utf16_cu();
 
     Ok(Position {
         line: line_idx as u32,
@@ -130,6 +136,38 @@ mod tests {
             let back = byte_offset_to_lsp_position(&r, offset).expect("valid");
             assert_eq!(back, pos);
         }
+    }
+
+    #[test]
+    fn utf16_column_maps_to_byte_offset_after_multibyte() {
+        // `café = ` — `é` is 2 bytes / 1 UTF-16 CU. Column 5 (UTF-16) is
+        // right after `café ` (the space), byte offset 6.
+        let r = rope("café = 1\n");
+        let off = lsp_position_to_byte_offset(&r, Position::new(0, 5)).expect("valid");
+        assert_eq!(off, 6, "UTF-16 col 5 → byte 6 (é is 2 bytes)");
+        // Round-trips back to the same UTF-16 column.
+        let back = byte_offset_to_lsp_position(&r, off).expect("valid");
+        assert_eq!(back, Position::new(0, 5));
+    }
+
+    #[test]
+    fn utf16_column_handles_astral_surrogate_pair() {
+        // `😀` is 4 bytes / 2 UTF-16 code units. Column 2 is right after it.
+        let r = rope("😀x\n");
+        let off = lsp_position_to_byte_offset(&r, Position::new(0, 2)).expect("valid");
+        assert_eq!(off, 4, "after the 4-byte emoji");
+        assert_eq!(
+            byte_offset_to_lsp_position(&r, off).expect("valid"),
+            Position::new(0, 2)
+        );
+    }
+
+    #[test]
+    fn past_eol_column_clamps_without_panic() {
+        let r = rope("café\n");
+        // Column 99 past EOL clamps to end of the visible line (byte 5).
+        let off = lsp_position_to_byte_offset(&r, Position::new(0, 99)).expect("valid");
+        assert_eq!(off, 5);
     }
 
     #[test]

@@ -2838,14 +2838,16 @@ fn index_key_items(
 /// is on the same line. The emitted text always includes its own `]`,
 /// so an existing `]` is replaced rather than duplicated.
 fn compute_index_replace_range(line: &str, pos: Position) -> Range {
-    let col = pos.character as usize;
-    let before = line.get(..col).unwrap_or("");
-    let bracket_col = before.rfind('[').map(|b| b + 1).unwrap_or(col);
+    // `pos.character` is a UTF-16 code-unit column; convert to a byte
+    // index for the slice/scan math, then convert the resulting byte
+    // positions back to UTF-16 columns for the emitted Range. Treating it
+    // as a byte index misaligns the replace span on lines with multibyte
+    // text before the `[` and overwrites the wrong region on accept.
+    let byte_col = utf16_cu_to_byte(line, pos.character as usize);
+    let before = &line[..byte_col];
+    let bracket_byte = before.rfind('[').map(|b| b + 1).unwrap_or(byte_col);
 
-    // `col` comes from the client's `pos.character` and may sit past EOL
-    // or mid-codepoint (UTF-16 → byte mismatch); `get` avoids a panic on a
-    // non-boundary / out-of-range slice. Mirrors the `before` guard above.
-    let after = line.get(col..).unwrap_or("");
+    let after = &line[byte_col..];
     let mut consumed = 0usize;
     let mut done = false;
     for c in after.chars() {
@@ -2865,9 +2867,34 @@ fn compute_index_replace_range(line: &str, pos: Position) -> Range {
     }
 
     Range {
-        start: Position::new(pos.line, bracket_col as u32),
-        end: Position::new(pos.line, (col + consumed) as u32),
+        start: Position::new(pos.line, byte_to_utf16_cu(line, bracket_byte) as u32),
+        end: Position::new(pos.line, byte_to_utf16_cu(line, byte_col + consumed) as u32),
     }
+}
+
+/// Byte offset of the UTF-16 code-unit column `cu` within `line`
+/// (clamped to the line's end). Lands on a char boundary.
+fn utf16_cu_to_byte(line: &str, cu: usize) -> usize {
+    let mut acc = 0usize;
+    for (b, c) in line.char_indices() {
+        if acc >= cu {
+            return b;
+        }
+        acc += c.len_utf16();
+    }
+    line.len()
+}
+
+/// UTF-16 code-unit column of byte offset `byte` within `line`.
+fn byte_to_utf16_cu(line: &str, byte: usize) -> usize {
+    let mut acc = 0usize;
+    for (b, c) in line.char_indices() {
+        if b >= byte {
+            break;
+        }
+        acc += c.len_utf16();
+    }
+    acc
 }
 
 #[cfg(test)]
@@ -2918,19 +2945,29 @@ mod compute_index_replace_range_tests {
 
     #[test]
     fn cursor_column_past_end_of_line_does_not_panic() {
-        // Client may send a `character` past EOL; must not panic on the
-        // `line[col..]` slice. `var.x[` is 6 bytes; ask for column 20.
-        // Degrades to an empty replace at the cursor — the point is no panic.
+        // Client may send a `character` past EOL; clamps to the line's end
+        // (column 6 for the 6-char `var.x[`) without panicking.
         let (s, e) = range("var.x[", 20);
-        assert_eq!((s, e), (20, 20));
+        assert_eq!((s, e), (6, 6));
     }
 
     #[test]
     fn cursor_column_mid_codepoint_does_not_panic() {
-        // A multibyte char before the cursor means a UTF-16-derived column
-        // can land mid-codepoint as a byte index; must not panic.
-        let line = "x[\u{00e9}]"; // `x[é]` — `é` is 2 bytes at index 2..4.
-        let _ = range(line, 3); // byte 3 is inside `é`.
+        // A multibyte char before the cursor must not panic — `pos.character`
+        // is treated as a UTF-16 column, converted to a char-boundary byte.
+        let line = "x[\u{00e9}]"; // `x[é]`
+        let _ = range(line, 3);
+    }
+
+    #[test]
+    fn multibyte_before_bracket_yields_utf16_columns() {
+        // `var.régions["a"]` — `é` is 1 UTF-16 CU but 2 bytes. Cursor in
+        // UTF-16 column 12 (just after the `[`), key `"a"`. The emitted
+        // Range must use UTF-16 columns: start at 12 (after `[`), end 16
+        // (after `]`), NOT byte columns (which would be off by one).
+        let line = "var.régions[\"a\"]";
+        let (s, e) = range(line, 12);
+        assert_eq!((s, e), (12, 16), "UTF-16 columns, not byte offsets");
     }
 }
 
