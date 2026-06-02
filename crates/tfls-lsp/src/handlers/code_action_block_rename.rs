@@ -50,6 +50,13 @@ use crate::handlers::code_action_scope::{
     Scope, for_each_doc_in_scope, range_intersects, scope_kind,
 };
 
+/// Per-call cache of provider-version constraint resolution, keyed by
+/// `(module_dir, provider_name)`. Value is the raw constraint string (if
+/// any) plus its parsed minimum version. Avoids re-walking sibling files
+/// for the same `(dir, provider)` across a multi-spec rename table.
+type ProviderConstraintCache =
+    FxHashMap<(PathBuf, &'static str), (Option<String>, Option<semver::Version>)>;
+
 /// One type-rename rule used by the generic auto-fix.
 #[derive(Debug, Clone, Copy)]
 pub struct BlockRenameSpec {
@@ -322,10 +329,7 @@ pub fn make_replace_block_at_cursor(
     let (idx, spec, name, label_range) = matched?;
 
     // Gate check.
-    let mut provider_constraint_cache: FxHashMap<
-        (PathBuf, &'static str),
-        (Option<String>, Option<semver::Version>),
-    > = FxHashMap::default();
+    let mut provider_constraint_cache: ProviderConstraintCache = FxHashMap::default();
     let supported = compute_supported_specs(state, &module_dir, &mut provider_constraint_cache);
     if !supported.get(idx).copied().unwrap_or(false) {
         return None;
@@ -449,10 +453,7 @@ pub fn emit_block_rename_actions(
     // Per-call cache: provider name → joined constraint (None = no
     // constraint declared). One extraction per (provider, module);
     // each spec consults its own provider's entry.
-    let mut provider_constraint_cache: FxHashMap<
-        (PathBuf, &'static str),
-        (Option<String>, Option<semver::Version>),
-    > = FxHashMap::default();
+    let mut provider_constraint_cache: ProviderConstraintCache = FxHashMap::default();
 
     // Two indices over the spec table (built once per call):
     // - `by_kind_label` for block-label scans (`<block_kind> "<from>"`)
@@ -635,7 +636,7 @@ pub fn emit_block_rename_actions(
 fn compute_supported_specs(
     state: &StateStore,
     module_dir: &std::path::Path,
-    cache: &mut FxHashMap<(PathBuf, &'static str), (Option<String>, Option<semver::Version>)>,
+    cache: &mut ProviderConstraintCache,
 ) -> Vec<bool> {
     let mut supported = vec![false; ALL_BLOCK_RENAMES.len()];
     for (i, spec) in ALL_BLOCK_RENAMES.iter().enumerate() {
