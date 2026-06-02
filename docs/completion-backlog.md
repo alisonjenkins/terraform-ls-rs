@@ -9,51 +9,51 @@ Workflow: `completion-deep-dive`. 48 agents, ~2.5M tokens. Bugs adversarially re
 
 ## Bugs
 
-- [ ] **LSP Position.character treated as bytes, not UTF-16 — wrong context + panic on non-ASCII lines** (high, effort M, confidence high) — crates/tfls-parser/src/position.rs:56 (via completion.rs:77); crates/tfls-lsp/src/handlers/completion.rs:2840 (compute_index_replace_range); capabilities.rs:29
+- [x] **LSP Position.character treated as bytes, not UTF-16 — wrong context + panic on non-ASCII lines** (high, effort M, confidence high) — crates/tfls-parser/src/position.rs:56 (via completion.rs:77); crates/tfls-lsp/src/handlers/completion.rs:2840 (compute_index_replace_range); capabilities.rs:29
   `lsp_position_to_byte_offset` adds `pos.character` (UTF-16 code units per spec; no positionEncoding negotiated) as raw bytes; on any line with multibyte text before the cursor the slice is wrong (misclassification) and can land mid-codepoint, panicking `&source[..byte_offset]` in classify_context — a reachable runtime panic that aborts completion. The same byte-as-UTF16 confusion in compute_index_replace_range (the one completion path emitting a textEdit) misaligns the replace Range, corrupting the buffer on accept.
   **Proposal:** Either advertise `positionEncoding=utf-8` in the initialize handshake (and honor client negotiation), or convert UTF-16 columns to byte offsets via ropey (`utf16_cu_to_char`/`char_to_byte`) for all `lsp_position_to_byte_offset` callers; in compute_index_replace_range do rfind/consume math in bytes then convert returned columns back to UTF-16. Add a multibyte-before-cursor test asserting correct columns.
 
-- [ ] **Comments are not masked: any brace/quote in a comment corrupts the classifier** (high, effort M, confidence high) — crates/tfls-core/src/completion.rs:1061 (ignored_brace_positions), :1254 (enclosing_block_context), :1519 (is_top_level), :573 (expression_context), :356 (unterminated_string_open)
+- [x] **Comments are not masked: any brace/quote in a comment corrupts the classifier** (high, effort M, confidence high) — crates/tfls-core/src/completion.rs:1061 (ignored_brace_positions), :1254 (enclosing_block_context), :1519 (is_top_level), :573 (expression_context), :356 (unterminated_string_open)
   The classifier has no comment handling; `#`, `//`, `/* */` content is read as live code. `resource "x" "w" {\n # } closing?\n |` classifies as TopLevel; `value = 1 # see var.|` → VariableRef; a stray `"` in a comment unbalances string tracking for everything after. Wrong/irrelevant completions constantly in real comment-laden files.
   **Proposal:** Extend ignored_brace_positions into one source-state scanner that masks comment runs (`#`/`//` to end-of-line, `/* */` to closing) when not in a string; rewrite is_top_level and expression_context (and classify_block_header_from) to consume the same mask so comment braces no longer corrupt depth.
 
-- [ ] **Version completions never set a textEdit replace range — accepting mid-typing garbles constraints** (high, effort M, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:980-988, 1016-1023, 1134-1144, 1162-1169, 1232-1244
+- [x] **Version completions never set a textEdit replace range — accepting mid-typing garbles constraints** (high, effort M, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:980-988, 1016-1023, 1134-1144, 1162-1169, 1232-1244
   Provider/module/tool version items carry only `insert_text` (full version) with no `text_edit`/`filter_text`. Typing `version = "5.9|"` routes to InsideVersion and accepting `5.94.0` yields `version = "5.95.94.0"` on clients that don't strip the typed prefix. `.` is a trigger char so this is the normal flow.
   **Proposal:** Compute a UTF-16 replace range over the typed partial (thread `string_open`/partial from string_value_context) and emit `CompletionTextEdit::Edit` on every version item, mirroring index_key_items; at minimum set `filter_text` to the bare version.
 
-- [ ] **Function/expression completion fires inside plain string literals** (medium, effort M, confidence high) — crates/tfls-core/src/completion.rs:573 (expression_context), :251/:300 (string_value_context)
+- [x] **Function/expression completion fires inside plain string literals** (medium, effort M, confidence high) — crates/tfls-core/src/completion.rs:573 (expression_context), :251/:300 (string_value_context)
   For an unrecognized string attribute, string_value_context returns None and expression_context (string-unaware) offers FunctionCall/AttributeValue inside opaque string content: `ami = "foo(|` → FunctionCall, `ami = "a = |` → AttributeValue. Spurious menus while typing free text.
   **Proposal:** In classify_context/expression_context, detect via unterminated_string_open that the cursor is inside a string and not inside a `${`/`%{` interpolation opened after the quote; return Unknown (or a StringLiteral context) instead of running expression_context.
 
-- [ ] **Attribute-value context lost inside nested blocks (root_block_device, ingress, …)** (medium, effort M, confidence high) — crates/tfls-core/src/completion.rs:627 (attribute_value_context), :656 (classify_block_header_from)
+- [x] **Attribute-value context lost inside nested blocks (root_block_device, ingress, …)** (medium, effort M, confidence high) — crates/tfls-core/src/completion.rs:627 (attribute_value_context), :656 (classify_block_header_from)
   classify_block_header_from only inspects the innermost `{`; if it's a nested block it returns None, so `attr = |` inside e.g. `root_block_device {` degrades to FunctionCall, losing variables, locals, and schema-aware resource/data reference suggestions.
   **Proposal:** When the innermost block isn't resource/data, keep walking outward to find the owning resource/data type (reuse enclosing_block_context/BuiltinNestedBody), carry the nested path, and emit AttributeValue with the resolved resource_type even several block levels deep.
 
-- [ ] **Namespace fast-paths shadow user identifiers named path/count/each/terraform** (medium, effort S, confidence high) — crates/tfls-core/src/completion.rs:721 (reference_prefix_context), lines 731-762
+- [x] **Namespace fast-paths shadow user identifiers named path/count/each/terraform** (medium, effort S, confidence high) — crates/tfls-core/src/completion.rs:721 (reference_prefix_context), lines 731-762
   Raw `ends_with("count.")`/`"path."`/`"each."`/`"terraform.")` matches fire before the multi-segment arm, so `var.count.|` → CountRef, `local.terraform.|` → TerraformNamespaceRef. Valid object-typed vars/locals get the wrong namespace's completions instead of their fields.
   **Proposal:** Drop the ends_with fast-paths and route through traversal_segments_reverse, matching `["count"]`/`["path"]`/etc. as exact single-segment slices (multi-segment already handles `["var","count"]` correctly).
 
-- [ ] **index_key_items emits text_edit Range using byte offsets, not UTF-16** (medium, effort S, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:2840-2871 (compute_index_replace_range)
+- [x] **index_key_items emits text_edit Range using byte offsets, not UTF-16** (medium, effort S, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:2840-2871 (compute_index_replace_range)
   `pos.character` is used as a byte index into the line and emitted Range columns are byte offsets; a multibyte char before `[` (e.g. `var.régions["…"]`) misaligns the only offset-sensitive reference path, overwriting the wrong span on accept. (Shares root with the position.rs UTF-16 bug above.)
   **Proposal:** Convert pos.character (UTF-16) to a byte index over the line, do rfind/consume in bytes, then convert bracket_col and (byte_col+consumed) back to UTF-16 code-unit columns for the Range. Add a multibyte-before-`[` test.
 
-- [ ] **Nested blocks with max_items=1 (List/Set) re-suggested after one is present** (medium, effort S, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:1398-1414
+- [x] **Nested blocks with max_items=1 (List/Set) re-suggested after one is present** (medium, effort S, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:1398-1414
   resource_body_items suppresses an already-present block only for NestingMode::Single, but providers encode max-one blocks as List/Set + max_items=1 (root_block_device, etc.). They keep appearing; adding a second is a hard Terraform error (which the server's own diagnostics then flag). max_items is never read in completion.rs.
   **Proposal:** Track present-block counts (HashMap<String,usize>) in BodyFilter and suppress when `nb.max_items != 0 && present_count >= nb.max_items` regardless of nesting_mode; keep Single as the max_items=1 special case.
 
-- [ ] **`~> MAJOR.MINOR` operator snippets offered after an operator already typed → double operator** (medium, effort M, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:1031-1041, 1177-1187, 1251-1261
+- [x] **`~> MAJOR.MINOR` operator snippets offered after an operator already typed → double operator** (medium, effort M, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:1031-1041, 1177-1187, 1251-1261
   The AfterOperator/InsideVersion branch's `*_from_registry`/`*_from_github` builders unconditionally append `~> MM` items; reached when the user already typed an operator (`version = ">= |"`), so selecting `~> 4.71` yields invalid `">= ~> 4.71"`.
   **Proposal:** Pass the CursorSlot (or `at_operator` bool) into the three builders and emit operator-prefixed entries only in the AtOperator/Trailing slot; emit bare versions in the after-operator slot.
 
-- [ ] **Provider-defined functions leak into plain function-call completion with uninvokable insert text** (medium, effort S, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:1845-1871 (function_name_items)
+- [x] **Provider-defined functions leak into plain function-call completion with uninvokable insert text** (medium, effort S, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:1845-1871 (function_name_items)
   function_name_items iterates the shared functions DashMap unfiltered, emitting items labelled `provider::hashicorp::aws::arn_parse` whose insert_text is the raw registry-namespaced key — invalid HCL (Terraform needs the local provider name). Pollutes the builtin menu in TF 1.8+ workspaces; surfaces in both FunctionCall and reference-expression paths.
   **Proposal:** In function_name_items, skip keys starting with `provider::` (filter_map); provider functions are already surfaced correctly via the ProviderFunctionNamespace/Name contexts.
 
-- [ ] **resource_scaffold_snippet hard-codes quoted placeholders → invalid HCL for numeric/bool/list/object required attrs** (medium, effort S, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:422
+- [x] **resource_scaffold_snippet hard-codes quoted placeholders → invalid HCL for numeric/bool/list/object required attrs** (medium, effort S, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:422
   The top-level resource/data scaffold fills every required attr as `name = "${N}"` regardless of type (discards the AttributeSchema), so a required number/bool/list inserts a quoted string and immediately errors. nested_block_scaffold_snippet already does this correctly.
   **Proposal:** Capture the AttributeSchema in the loop and route through classify_schema_type: string → `"${n}"`, sequence → `[${n}]`, mapping → `{ ${n} }`, scalar → `${n}` (as nested_block_scaffold_snippet does).
 
-- [ ] **`cursor_slot` misclassifies a half-typed `~>` operator as a version token** (low, effort S, confidence high) — crates/tfls-core/src/version_constraint.rs:322-339
+- [x] **`cursor_slot` misclassifies a half-typed `~>` operator as a version token** (low, effort S, confidence high) — crates/tfls-core/src/version_constraint.rs:322-339
   detect_operator("~") returns (Eq, 0), so input `~` becomes InsideVersion{partial:"~"} and the menu switches from operators to exact versions whose labels don't start with `~`, collapsing to empty over the most common operator's first keystroke.
   **Proposal:** In cursor_slot, when the trimmed piece is a partial operator prefix (`~`, `!`, or a leading run of operator chars not yet a complete token with no version after it), return AtOperator so operator items keep showing until the operator is complete.
 
