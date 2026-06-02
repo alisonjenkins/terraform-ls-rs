@@ -1448,6 +1448,27 @@ async fn resource_attr_suggests_schema_attributes() {
 }
 
 #[tokio::test]
+async fn resource_attr_suggests_nested_block_names() {
+    // Nested blocks (root_block_device, …) are valid reference targets
+    // and must appear alongside flat attributes in `<res>.<name>.`.
+    let u = uri("file:///mod/a.tf");
+    let (src, pos) = src_with_cursor(
+        "resource \"aws_instance\" \"web\" {}\noutput \"x\" { value = aws_instance.web.|xxx }\n",
+    );
+    let backend = fresh_backend(&src, &u);
+    install_aws_schema(&backend);
+    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&u, pos))
+        .await
+        .expect("ok")
+        .expect("some completions");
+    let ls = labels(resp);
+    assert!(
+        ls.contains(&"root_block_device".to_string()),
+        "nested block name should be referenceable; got: {ls:?}"
+    );
+}
+
+#[tokio::test]
 async fn data_source_attr_has_focused_response() {
     let u = uri("file:///mod/a.tf");
     let (src, pos) = src_with_cursor(

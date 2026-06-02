@@ -2658,6 +2658,26 @@ fn resource_attr_items(backend: &Backend, type_name: &str, data: bool) -> Vec<Co
             ..Default::default()
         })
         .collect();
+
+    // Nested blocks (root_block_device, network_interface, …) are valid
+    // referenceable targets — `aws_instance.x.root_block_device` resolves
+    // to a list/object of the block's attributes — yet only the flat
+    // attribute set was offered. Surface each nested block name too.
+    // Skip config-only blocks that aren't reference targets.
+    const CONFIG_ONLY_BLOCKS: &[&str] = &["timeouts", "lifecycle"];
+    for name in schema.block.block_types.keys() {
+        if CONFIG_ONLY_BLOCKS.contains(&name.as_str()) {
+            continue;
+        }
+        items.push(CompletionItem {
+            label: name.clone(),
+            kind: Some(CompletionItemKind::STRUCT),
+            detail: Some("nested block".to_string()),
+            insert_text: Some(name.clone()),
+            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+            ..Default::default()
+        });
+    }
     items.sort_by(|a, b| a.label.cmp(&b.label));
     items
 }
