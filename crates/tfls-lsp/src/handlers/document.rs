@@ -567,9 +567,6 @@ pub fn compute_diagnostics_with_lookup(
         out.extend(tfls_diag::required_providers_version_diagnostics(
             body, &doc.rope, graph,
         ));
-        out.extend(tfls_diag::required_providers_version_diagnostics(
-            body, &doc.rope, graph,
-        ));
         out.extend(tfls_diag::unused_declarations_diagnostics(
             body, &doc.rope, graph,
         ));
