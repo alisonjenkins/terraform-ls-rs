@@ -790,19 +790,25 @@ fn classify_block_header_from(before: &str) -> Option<(String, String)> {
         i -= 1;
         match bytes[i] {
             b'}' => depth += 1,
+            b'{' if depth > 0 => depth -= 1,
             b'{' => {
-                if depth == 0 {
-                    let header = &before[..i];
-                    let line_start = header.rfind('\n').map_or(0, |j| j + 1);
-                    let line = header[line_start..].trim();
-                    let (keyword, rest) = line.split_once(char::is_whitespace)?;
-                    if keyword != "resource" && keyword != "data" {
-                        return None;
+                // An enclosing block opener at depth 0. If it's the
+                // resource/data block, return it. If it's a NESTED block
+                // (e.g. `root_block_device {`), keep walking outward to
+                // the owning resource/data so an attribute several levels
+                // deep still gets variable / local / reference suggestions
+                // — rather than degrading to a bare function menu.
+                let header = &before[..i];
+                let line_start = header.rfind('\n').map_or(0, |j| j + 1);
+                let line = header[line_start..].trim();
+                if let Some((keyword, rest)) = line.split_once(char::is_whitespace) {
+                    if (keyword == "resource" || keyword == "data") && !rest.is_empty() {
+                        if let Some(type_name) = first_quoted_string(rest) {
+                            return Some((keyword.to_string(), type_name));
+                        }
                     }
-                    let type_name = first_quoted_string(rest)?;
-                    return Some((keyword.to_string(), type_name));
                 }
-                depth -= 1;
+                // Nested block — continue outward (depth stays 0).
             }
             _ => {}
         }
@@ -1990,6 +1996,40 @@ mod tests {
             } => {
                 assert_eq!(resource_type, "aws_instance");
                 assert_eq!(attr_name, "subnet_id");
+            }
+            other => panic!("expected AttributeValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attribute_value_inside_nested_block_resolves_owning_resource() {
+        // Attribute inside a nested block (`root_block_device`) must still
+        // resolve the owning resource type so var/local/ref suggestions
+        // fire — not degrade to a bare function menu.
+        let src = "resource \"aws_instance\" \"web\" {\n  \
+                   root_block_device {\n    volume_size = ";
+        match at_end(src) {
+            CompletionContext::AttributeValue {
+                resource_type,
+                attr_name,
+            } => {
+                assert_eq!(resource_type, "aws_instance");
+                assert_eq!(attr_name, "volume_size");
+            }
+            other => panic!("expected AttributeValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attribute_value_inside_nested_block_skips_balanced_siblings() {
+        // A balanced sibling object (`tags = { ... }`) before the nested
+        // block must not derail the outward walk to the resource header.
+        let src = "resource \"aws_instance\" \"web\" {\n  \
+                   tags = { Name = \"x\" }\n  \
+                   root_block_device {\n    volume_size = ";
+        match at_end(src) {
+            CompletionContext::AttributeValue { resource_type, .. } => {
+                assert_eq!(resource_type, "aws_instance");
             }
             other => panic!("expected AttributeValue, got {other:?}"),
         }
