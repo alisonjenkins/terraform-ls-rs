@@ -524,7 +524,7 @@ async fn recv<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<String, String> {
     r.read_exact(&mut body)
         .await
         .map_err(|e| format!("read body: {e}"))?;
-    Ok(String::from_utf8(body).map_err(|e| format!("body utf-8: {e}"))?)
+    String::from_utf8(body).map_err(|e| format!("body utf-8: {e}"))
 }
 
 async fn recv_response<R: AsyncReadExt + Unpin>(

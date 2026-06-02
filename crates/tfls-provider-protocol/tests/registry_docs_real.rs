@@ -25,7 +25,7 @@
 //!     crates/tfls-provider-protocol/tests/fixtures/registry_docs/<name>.md
 //! ```
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use tfls_provider_protocol::registry_docs::parse_attribute_descriptions;
 

@@ -788,30 +788,6 @@ pub fn merge_observations(obs: &[VariableType]) -> Option<VariableType> {
 ///   anything other than `Any` must be present — `optional(…)`
 ///   fields parse as `Any` (see [`parse_type_expr`]) and are thus
 ///   allowed to be absent without a false positive.
-/// Whether a value of primitive type `actual` satisfies a declared
-/// primitive type, accounting for Terraform's automatic primitive
-/// conversions. Terraform losslessly converts between `string` and
-/// `number`, and between `string` and `bool` (e.g. `type = number`
-/// with `default = "5"`, or `type = bool` with `default = "true"`, are
-/// both accepted by `terraform plan`). `number` and `bool` do NOT
-/// inter-convert. We only know the static type here, not the literal,
-/// so we accept the conversion conservatively — the worst case is a
-/// missed error (`default = "abc"` for a `number`), never a false
-/// positive on valid config.
-fn primitives_compatible(a: Primitive, b: Primitive) -> bool {
-    use Primitive::*;
-    matches!(
-        (a, b),
-        (String, String)
-            | (Number, Number)
-            | (Bool, Bool)
-            | (String, Number)
-            | (Number, String)
-            | (String, Bool)
-            | (Bool, String)
-    )
-}
-
 pub fn satisfies(declared: &VariableType, actual: &VariableType) -> bool {
     use VariableType::*;
     match (declared, actual) {
@@ -850,6 +826,30 @@ pub fn satisfies(declared: &VariableType, actual: &VariableType) -> bool {
         }
         _ => false,
     }
+}
+
+/// Whether a value of primitive type `actual` satisfies a declared
+/// primitive type, accounting for Terraform's automatic primitive
+/// conversions. Terraform losslessly converts between `string` and
+/// `number`, and between `string` and `bool` (e.g. `type = number`
+/// with `default = "5"`, or `type = bool` with `default = "true"`, are
+/// both accepted by `terraform plan`). `number` and `bool` do NOT
+/// inter-convert. We only know the static type here, not the literal,
+/// so we accept the conversion conservatively — the worst case is a
+/// missed error (`default = "abc"` for a `number`), never a false
+/// positive on valid config.
+fn primitives_compatible(a: Primitive, b: Primitive) -> bool {
+    use Primitive::*;
+    matches!(
+        (a, b),
+        (String, String)
+            | (Number, Number)
+            | (Bool, Bool)
+            | (String, Number)
+            | (Number, String)
+            | (String, Bool)
+            | (Bool, String)
+    )
 }
 
 /// Produce a human-readable explanation of why `actual` doesn't
