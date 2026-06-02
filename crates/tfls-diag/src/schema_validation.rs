@@ -387,6 +387,43 @@ fn validate_block<H: UpgradeHintLookup>(
         }
         seen_groups.push(group);
     }
+
+    // exactly_one_of: the pairwise loop above flags >1 members present;
+    // this pass flags the ZERO-present case (Terraform requires exactly
+    // one). Dedupe by sorted group, mirroring at_least_one_of.
+    let mut seen_exactly_one: Vec<Vec<String>> = Vec::new();
+    for (attr_name, attr) in &schema.block.attributes {
+        if attr.exactly_one_of.is_empty() {
+            continue;
+        }
+        let mut group: Vec<String> = attr.exactly_one_of.clone();
+        if !group.contains(attr_name) {
+            group.push(attr_name.clone());
+        }
+        group.sort();
+        if seen_exactly_one.contains(&group) {
+            continue;
+        }
+        let present_count = group
+            .iter()
+            .filter(|member| present_attrs.iter().any(|(n, _)| *n == member.as_str()))
+            .count();
+        if present_count == 0 {
+            let members = group
+                .iter()
+                .map(|m| format!("`{m}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push(Diagnostic {
+                range: header_range,
+                severity: Some(DiagnosticSeverity::WARNING),
+                source: Some("terraform-ls-rs".to_string()),
+                message: format!("exactly one of {members} must be set"),
+                ..Default::default()
+            });
+        }
+        seen_exactly_one.push(group);
+    }
 }
 
 /// Validate attributes and sub-blocks inside a `lifecycle { ... }` block.
@@ -903,6 +940,23 @@ mod tests {
             .iter()
             .find(|d| d.message.contains("exactly-one-of"))
             .expect("exactly-one-of diagnostic");
+        assert_eq!(exactly.severity, Some(DiagnosticSeverity::WARNING));
+    }
+
+    #[test]
+    fn flags_exactly_one_of_when_none_set() {
+        // Neither `e` nor `f` present — Terraform requires exactly one.
+        let schemas = schemas_with_relations();
+        let d = diags_with(
+            &schemas,
+            r#"resource "aws_thing" "x" {
+              a = "one"
+            }"#,
+        );
+        let exactly = d
+            .iter()
+            .find(|d| d.message.contains("exactly one of"))
+            .expect("exactly-one-of (none set) diagnostic");
         assert_eq!(exactly.severity, Some(DiagnosticSeverity::WARNING));
     }
 
