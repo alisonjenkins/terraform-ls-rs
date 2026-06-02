@@ -242,7 +242,29 @@ pub fn classify_context(source: &str, byte_offset: usize) -> CompletionContext {
     if byte_offset > source.len() {
         return CompletionContext::Unknown;
     }
-    let before = &source[..byte_offset];
+    let raw_before = &source[..byte_offset];
+
+    // Comment handling: a cursor inside a comment offers nothing, and
+    // comment content (braces, quotes, `var.` text) must not be read as
+    // live code by the downstream classifiers. Compute the comment mask
+    // once; bail if the cursor sits in a comment, otherwise blank comment
+    // bytes to spaces so every classifier below sees comment-free code.
+    let cmask = comment_mask(raw_before);
+    if byte_offset > 0 && cmask.get(byte_offset - 1).copied().unwrap_or(false) {
+        return CompletionContext::Unknown;
+    }
+    let cleaned = if cmask.iter().any(|&m| m) {
+        let mut bytes = raw_before.as_bytes().to_vec();
+        for (idx, &masked) in cmask.iter().enumerate() {
+            if masked {
+                bytes[idx] = b' ';
+            }
+        }
+        String::from_utf8(bytes).ok()
+    } else {
+        None
+    };
+    let before = cleaned.as_deref().unwrap_or(raw_before);
 
     // Cursor inside an unterminated string literal that's the value of
     // a recognised attribute (e.g. `source = "|"`, `version = "|"`).
@@ -1161,6 +1183,122 @@ fn ignored_brace_positions(src: &str) -> Vec<bool> {
     mask
 }
 
+/// Mask of bytes that are inside a comment (`#` / `//` to end-of-line,
+/// `/* … */`), respecting string / heredoc / interpolation state so a `#`
+/// inside a string is not treated as a comment. Mirrors the frame machine
+/// in [`ignored_brace_positions`]; comments only start in live-code frames
+/// (top level and block bodies — both the `None` frame). The classifier
+/// blanks these bytes so comment content can't corrupt brace-depth /
+/// string tracking, and treats a cursor inside one as no-completion.
+fn comment_mask(src: &str) -> Vec<bool> {
+    let bytes = src.as_bytes();
+    let n = bytes.len();
+    let mut mask = vec![false; n];
+    enum Frame {
+        String,
+        Interp { depth: u32 },
+        Heredoc { tag: Vec<u8>, indented: bool },
+    }
+    let mut stack: Vec<Frame> = Vec::new();
+    let mut i = 0;
+    while i < n {
+        let b = bytes[i];
+        match stack.last_mut() {
+            None => {
+                // Live code — comments may start here.
+                if b == b'#' || (b == b'/' && i + 1 < n && bytes[i + 1] == b'/') {
+                    while i < n && bytes[i] != b'\n' {
+                        mask[i] = true;
+                        i += 1;
+                    }
+                    continue;
+                }
+                if b == b'/' && i + 1 < n && bytes[i + 1] == b'*' {
+                    mask[i] = true;
+                    mask[i + 1] = true;
+                    i += 2;
+                    while i < n {
+                        if bytes[i] == b'*' && i + 1 < n && bytes[i + 1] == b'/' {
+                            mask[i] = true;
+                            mask[i + 1] = true;
+                            i += 2;
+                            break;
+                        }
+                        mask[i] = true;
+                        i += 1;
+                    }
+                    continue;
+                }
+                if b == b'"' {
+                    stack.push(Frame::String);
+                    i += 1;
+                    continue;
+                }
+                if b == b'<' {
+                    if let Some((tag, indented, after)) = parse_heredoc_opener(bytes, i) {
+                        stack.push(Frame::Heredoc { tag, indented });
+                        i = after;
+                        continue;
+                    }
+                }
+                i += 1;
+            }
+            Some(Frame::String) => {
+                if b == b'\\' && i + 1 < n {
+                    i += 2;
+                    continue;
+                }
+                if b == b'"' {
+                    stack.pop();
+                    i += 1;
+                    continue;
+                }
+                if (b == b'$' || b == b'%') && i + 1 < n && bytes[i + 1] == b'{' {
+                    stack.push(Frame::Interp { depth: 1 });
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+            }
+            Some(Frame::Heredoc { tag, indented }) => {
+                if let Some(after) = match_heredoc_closer(bytes, i, tag, *indented) {
+                    stack.pop();
+                    i = after;
+                    continue;
+                }
+                if (b == b'$' || b == b'%') && i + 1 < n && bytes[i + 1] == b'{' {
+                    stack.push(Frame::Interp { depth: 1 });
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+            }
+            Some(Frame::Interp { depth }) => {
+                if b == b'"' {
+                    stack.push(Frame::String);
+                    i += 1;
+                    continue;
+                }
+                if b == b'{' {
+                    *depth += 1;
+                    i += 1;
+                    continue;
+                }
+                if b == b'}' {
+                    *depth -= 1;
+                    if *depth == 0 {
+                        stack.pop();
+                    }
+                    i += 1;
+                    continue;
+                }
+                i += 1;
+            }
+        }
+    }
+    mask
+}
+
 /// If `bytes[i..]` starts with a heredoc opener (`<<TAG\n` or
 /// `<<-TAG\n`), return `(tag, indented, position-after-newline)`.
 /// The tag must be a bare identifier (`[A-Za-z_][A-Za-z0-9_]*`).
@@ -1570,6 +1708,53 @@ mod tests {
     #[test]
     fn top_level_at_start_of_empty_doc() {
         assert_eq!(at_end(""), CompletionContext::TopLevel);
+    }
+
+    #[test]
+    fn cursor_inside_hash_comment_is_unknown() {
+        assert_eq!(at_end("value = 1 # see var."), CompletionContext::Unknown);
+        assert_eq!(at_end("# resource "), CompletionContext::Unknown);
+    }
+
+    #[test]
+    fn cursor_inside_slash_comment_is_unknown() {
+        assert_eq!(at_end("value = 1 // var."), CompletionContext::Unknown);
+    }
+
+    #[test]
+    fn cursor_inside_block_comment_is_unknown() {
+        assert_eq!(at_end("/* resource \"x\" \"y\" { "), CompletionContext::Unknown);
+    }
+
+    #[test]
+    fn brace_in_comment_does_not_break_top_level() {
+        // The `}` in the comment must not close the (non-existent) block;
+        // cursor on the next line is still top level.
+        let src = "# closing brace } in a comment\n";
+        assert_eq!(at_end(src), CompletionContext::TopLevel);
+    }
+
+    #[test]
+    fn comment_brace_does_not_escape_resource_body() {
+        // The `}` inside the comment must NOT close the resource block, so
+        // the cursor stays inside the body (an attribute-value position).
+        let src = "resource \"aws_instance\" \"w\" {\n  # a closing } here\n  ";
+        assert!(
+            !matches!(at_end(src), CompletionContext::TopLevel),
+            "comment brace wrongly closed the block: {:?}",
+            at_end(src)
+        );
+    }
+
+    #[test]
+    fn hash_inside_string_is_not_a_comment() {
+        // `#` inside a string value must stay string content — the cursor
+        // after it is still inside the string, not a comment.
+        let src = "tags = \"a#b";
+        assert!(
+            !matches!(at_end(src), CompletionContext::Unknown),
+            "string content treated as comment"
+        );
     }
 
     #[test]
