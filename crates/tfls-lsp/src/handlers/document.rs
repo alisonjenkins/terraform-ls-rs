@@ -159,10 +159,80 @@ pub(crate) fn did_open_publish_action(_state: &StateStore) -> DidOpenPublish {
     DidOpenPublish::PublishReal
 }
 
+/// A hash of everything in `doc` that can affect ANOTHER file's
+/// diagnostics: its definitions (var/local/output/module/resource/data),
+/// its references, and the raw text of its `terraform {}` blocks
+/// (required_version / required_providers). Used to skip the
+/// recompute-all-open-peers pass when an edit (a value, comment, or
+/// whitespace change) leaves cross-file state untouched.
+fn cross_file_fingerprint(doc: &DocumentState) -> u64 {
+    use hcl_edit::repr::Span as _;
+    use std::hash::{Hash, Hasher};
+
+    let mut tokens: Vec<String> = Vec::new();
+    let s = &doc.symbols;
+    tokens.extend(s.variables.keys().map(|k| format!("v:{k}")));
+    tokens.extend(s.locals.keys().map(|k| format!("l:{k}")));
+    tokens.extend(s.outputs.keys().map(|k| format!("o:{k}")));
+    tokens.extend(s.modules.keys().map(|k| format!("m:{k}")));
+    tokens.extend(
+        s.resources
+            .keys()
+            .map(|a| format!("r:{}.{}", a.resource_type, a.name)),
+    );
+    tokens.extend(
+        s.data_sources
+            .keys()
+            .map(|a| format!("d:{}.{}", a.resource_type, a.name)),
+    );
+    for r in &doc.references {
+        tokens.push(match &r.kind {
+            ReferenceKind::Variable { name } => format!("ref:var.{name}"),
+            ReferenceKind::Local { name } => format!("ref:local.{name}"),
+            ReferenceKind::Module { name } => format!("ref:module.{name}"),
+            ReferenceKind::Resource { resource_type, name } => {
+                format!("ref:{resource_type}.{name}")
+            }
+            ReferenceKind::DataSource { resource_type, name } => {
+                format!("ref:data.{resource_type}.{name}")
+            }
+        });
+    }
+    // Raw `terraform {}` block text — captures required_version /
+    // required_providers edits that change peer version diagnostics.
+    if let Some(body) = doc.parsed.body.as_ref() {
+        for st in body.iter() {
+            let Some(b) = st.as_block() else { continue };
+            if b.ident.as_str() != "terraform" {
+                continue;
+            }
+            if let Some(span) = b.span() {
+                let text = doc.rope.byte_slice(span.start..span.end).to_string();
+                tokens.push(format!("tf:{text}"));
+            }
+        }
+    }
+
+    tokens.sort();
+    let mut h = rustc_hash::FxHasher::default();
+    for t in &tokens {
+        t.hash(&mut h);
+    }
+    h.finish()
+}
+
 pub async fn did_change(backend: &Backend, params: DidChangeTextDocumentParams) {
     let uri = params.text_document.uri.clone();
     let version = params.text_document.version;
     tracing::info!(uri = %uri, version, "did_change");
+
+    // Fingerprint the doc's cross-file-relevant state BEFORE the edit, so
+    // we can skip the recompute-all-peers pass when it didn't change.
+    let old_fingerprint = backend
+        .state
+        .documents
+        .get(&uri)
+        .map(|d| cross_file_fingerprint(&d));
 
     let apply_err = {
         let mut entry = match backend.state.documents.get_mut(&uri) {
@@ -225,7 +295,25 @@ pub async fn did_change(backend: &Backend, params: DidChangeTextDocumentParams) 
     // update path single-source — every observed staleness bug
     // has been a refresh-then-push race, never a
     // push-didn't-land.
-    publish_peer_diagnostics(backend, &uri).await;
+    //
+    // Skip the (O(open peers) × full-module-compute) pass when this edit
+    // left the doc's cross-file state untouched — a value, comment, or
+    // whitespace change can't affect any peer's diagnostics. If the
+    // pre-edit state couldn't be fingerprinted, recompute to be safe.
+    let new_fingerprint = backend
+        .state
+        .documents
+        .get(&uri)
+        .map(|d| cross_file_fingerprint(&d));
+    let cross_file_changed = match (old_fingerprint, new_fingerprint) {
+        (Some(a), Some(b)) => a != b,
+        _ => true,
+    };
+    if cross_file_changed {
+        publish_peer_diagnostics(backend, &uri).await;
+    } else {
+        tracing::debug!(uri = %uri, "did_change: cross-file state unchanged; skipping peer recompute");
+    }
 }
 
 pub async fn did_save(backend: &Backend, params: DidSaveTextDocumentParams) {

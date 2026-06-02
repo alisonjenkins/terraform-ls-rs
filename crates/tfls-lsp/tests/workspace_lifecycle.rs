@@ -119,6 +119,48 @@ async fn sensitive_var_leaking_into_output_across_files() {
     client.shutdown().await;
 }
 
+/// A value-only edit to one file must NOT trigger a recompute of open
+/// peers — its cross-file state (definitions, references, terraform
+/// blocks) is unchanged. Conversely, adding a declaration MUST.
+#[tokio::test]
+async fn value_only_edit_skips_peer_recompute() {
+    let mut client = TestClient::new();
+    client.initialize(None).await;
+
+    let main_uri = "file:///mod/main.tf";
+    let vars_uri = "file:///mod/variables.tf";
+    client.did_open(vars_uri, "variable \"foo\" { default = \"a\" }\n").await;
+    client.settle(100).await;
+    client.did_open(main_uri, "output \"x\" { value = var.foo }\n").await;
+    client.settle(200).await;
+
+    let before = client.publish_count(main_uri).await;
+
+    // Edit only the default VALUE in variables.tf — `foo` is still
+    // defined, no refs/terraform-blocks change. Peers must be untouched.
+    client
+        .did_change_full(vars_uri, 2, "variable \"foo\" { default = \"b\" }\n")
+        .await;
+    client.settle(200).await;
+    assert_eq!(
+        client.publish_count(main_uri).await,
+        before,
+        "value-only edit should not republish the peer main.tf"
+    );
+
+    // Now ADD a new variable — cross-file state changes, peer recomputes.
+    client
+        .did_change_full(vars_uri, 3, "variable \"foo\" { default = \"b\" }\nvariable \"bar\" {}\n")
+        .await;
+    client.settle(200).await;
+    assert!(
+        client.publish_count(main_uri).await > before,
+        "adding a declaration should republish the peer"
+    );
+
+    client.shutdown().await;
+}
+
 /// Toggling `styleRules` on via didChangeConfiguration must recompute and
 /// republish open buffers — without the user editing them. A
 /// `documented_variables` (style-pack) diagnostic is the probe: it only
