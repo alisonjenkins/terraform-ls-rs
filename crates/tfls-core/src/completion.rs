@@ -209,6 +209,11 @@ pub enum CompletionContext {
     /// resource / data / module addresses.
     DependsOnList,
 
+    /// Cursor is at `each.value.<path>` — drilling into the element shape
+    /// of the enclosing block's `for_each`. `path` is the field chain
+    /// after `value` (empty for `each.value.|`).
+    EachAttr { path: Vec<String> },
+
     /// Cursor is at a bare expression value (`= |`) inside a block that
     /// is NOT a resource/data block — e.g. `output { value = | }`,
     /// `locals { x = | }`, a `module` input. We have no schema-typed
@@ -987,6 +992,11 @@ fn reference_prefix_context(before: &str) -> Option<CompletionContext> {
         ["local"] => Some(CompletionContext::LocalRef),
         ["module"] => Some(CompletionContext::ModuleRef),
         ["each"] => Some(CompletionContext::EachRef),
+        // `each.value.<field>` drills into the for_each element shape.
+        // (`each.key` is always a string, so only `value` drills.)
+        ["each", "value", rest @ ..] => Some(CompletionContext::EachAttr {
+            path: rest.iter().map(|s| (*s).to_string()).collect(),
+        }),
         ["count"] => Some(CompletionContext::CountRef),
         ["path"] => Some(CompletionContext::PathRef),
         ["terraform"] => Some(CompletionContext::TerraformNamespaceRef),
@@ -2164,6 +2174,24 @@ mod tests {
     fn function_call_after_open_paren() {
         let src = "resource \"x\" \"y\" {\n  value = foo(";
         assert_eq!(at_end(src), CompletionContext::FunctionCall);
+    }
+
+    #[test]
+    fn each_value_field_drills_to_each_attr() {
+        let src = "resource \"aws_instance\" \"x\" {\n  ami = each.value.";
+        match at_end(src) {
+            CompletionContext::EachAttr { path } => assert!(path.is_empty()),
+            other => panic!("expected EachAttr, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn each_value_nested_field_carries_path() {
+        let src = "resource \"aws_instance\" \"x\" {\n  ami = each.value.config.";
+        match at_end(src) {
+            CompletionContext::EachAttr { path } => assert_eq!(path, vec!["config".to_string()]),
+            other => panic!("expected EachAttr, got {other:?}"),
+        }
     }
 
     #[test]

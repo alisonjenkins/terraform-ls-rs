@@ -235,6 +235,28 @@ async fn attribute_value_refs_sort_before_functions() {
 }
 
 #[tokio::test]
+async fn each_value_field_offers_element_fields() {
+    let u = uri("file:///a.tf");
+    // Trailing `xxx` so the (otherwise incomplete) traversal parses and
+    // the block's for_each shape is still indexed — the cursor sits right
+    // after the `.`.
+    let src = "resource \"aws_instance\" \"x\" {\n  \
+               for_each = { a = { size = \"s\", color = \"c\" } }\n  \
+               instance_type = each.value.xxx\n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 29)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"size".to_string()), "got {ls:?}");
+    assert!(ls.contains(&"color".to_string()), "got {ls:?}");
+}
+
+#[tokio::test]
 async fn ignore_changes_offers_resource_attrs_and_all() {
     let u = uri("file:///a.tf");
     let src =

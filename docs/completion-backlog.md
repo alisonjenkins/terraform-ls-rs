@@ -75,7 +75,7 @@ Workflow: `completion-deep-dive`. 48 agents, ~2.5M tokens. Bugs adversarially re
   Inside `lifecycle { ignore_changes = [|] }` the cursor falls to FunctionCall, offering only function names — actively wrong, since ignore_changes takes bare attribute identifiers. replace_triggered_by/depends_on get no resource/data/module address references.
   **Proposal:** Intercept the `[`-interior of these attrs before expression_context and emit new contexts: IgnoreChangesList{resource_type} → enclosing resource's bare attribute names (via resource_attr_items) plus `all`; replace_triggered_by/depends_on → resource/data/module addresses via a new StateStore address enumerator.
 
-- [ ] **each.value.<field> drill-down never offered despite available shape data** (medium, effort M, confidence high) — crates/tfls-core/src/completion.rs:740-744,772-794; handler each_namespace_items
+- [x] **each.value.<field> drill-down never offered despite available shape data** (medium, effort M, confidence high) — crates/tfls-core/src/completion.rs:740-744,772-794; handler each_namespace_items
   `each.value.|` strips to `["each","value"]` and falls to Unknown because the `[t,n]` arm is guarded by `!is_builtin_prefix(t)` and `each` is builtin; yet for_each element shapes are already inferred/stored. One of the most common reference patterns yields nothing.
   **Proposal:** Add CompletionContext::EachAttr{path} classified from `["each","value", rest..]`; resolve the enclosing block's for_each address, unwrap one level (Map→value / Set/List→element / Object→field) from the stored collection shape, and walk_shape along rest to offer object fields (mirror index_key_items). Cover data/module for_each variants.
 

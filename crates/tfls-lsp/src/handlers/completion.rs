@@ -237,6 +237,9 @@ pub async fn completion(
             ignore_changes_items(backend, &resource_type)
         }
         CompletionContext::DependsOnList => depends_on_address_items(backend, &uri),
+        CompletionContext::EachAttr { path } => {
+            each_attr_items(backend, &uri, doc.parsed.body.as_ref(), offset, &path)
+        }
         CompletionContext::ProviderFunctionNamespace => {
             provider_function_namespace_items(backend, &uri)
         }
@@ -2048,6 +2051,109 @@ fn expression_scaffold_items() -> Vec<CompletionItem> {
             ..Default::default()
         })
         .collect()
+}
+
+/// The enclosing top-level addressable block (`resource` / `data` /
+/// `module`) whose span contains `offset`, as `(kind, type, name)`.
+/// `kind` is the block ident; for `module` the type slot holds the
+/// module name and `name` is empty.
+fn enclosing_addressable_block(
+    body: &Body,
+    offset: usize,
+) -> Option<(String, String, String)> {
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
+        if !span_contains_offset(block.span(), offset) {
+            continue;
+        }
+        let ident = block.ident.as_str();
+        let labels: Vec<String> = block.labels.iter().map(block_label_text).collect();
+        return match ident {
+            "resource" | "data" => {
+                let ty = labels.first()?.clone();
+                let name = labels.get(1).cloned().unwrap_or_default();
+                Some((ident.to_string(), ty, name))
+            }
+            "module" => {
+                let name = labels.first()?.clone();
+                Some(("module".to_string(), name, String::new()))
+            }
+            _ => None,
+        };
+    }
+    None
+}
+
+/// `each.value.<path>` — drill into the for_each element shape of the
+/// enclosing block and offer the object fields at `path`.
+fn each_attr_items(
+    backend: &Backend,
+    uri: &Url,
+    body: Option<&Body>,
+    offset: usize,
+    path: &[String],
+) -> Vec<CompletionItem> {
+    let Some((kind, ty, name)) = body.and_then(|b| enclosing_addressable_block(b, offset)) else {
+        return Vec::new();
+    };
+    // The for_each *collection* shape, keyed by the block's address.
+    let root = match kind.as_str() {
+        "resource" => IndexRootRef::Resource { resource_type: ty, name },
+        "data" => IndexRootRef::DataSource { resource_type: ty, name },
+        "module" => IndexRootRef::Module { module_name: ty },
+        _ => return Vec::new(),
+    };
+    let Some(collection) = shape_for_root(backend, uri, &root) else {
+        return Vec::new();
+    };
+    // `each.value` is one element of the collection — unwrap a level.
+    let Some(element) = for_each_element_shape(&collection) else {
+        return Vec::new();
+    };
+    // Walk the remaining `.field` chain.
+    let steps: Vec<PathStep> = path.iter().map(|p| PathStep::Attr(p.clone())).collect();
+    let Some(VariableType::Object(fields)) = walk_shape(&element, &steps) else {
+        return Vec::new();
+    };
+    let mut items: Vec<CompletionItem> = fields
+        .keys()
+        .map(|k| CompletionItem {
+            label: k.clone(),
+            kind: Some(CompletionItemKind::FIELD),
+            detail: Some("each.value field".to_string()),
+            insert_text: Some(k.clone()),
+            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+            ..Default::default()
+        })
+        .collect();
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    items
+}
+
+/// One element of a `for_each` collection. The stored shape is the
+/// collection itself (an Object keyed by the for_each keys, or a
+/// Map/Set/List), so unwrap a single level to the element type. For an
+/// Object we merge all per-key value shapes into one representative
+/// element.
+fn for_each_element_shape(collection: &VariableType) -> Option<VariableType> {
+    match collection {
+        VariableType::Object(fields) => {
+            let mut acc: Option<VariableType> = None;
+            for v in fields.values() {
+                acc = Some(match acc {
+                    Some(prev) => merge_shapes(prev, v.clone()),
+                    None => v.clone(),
+                });
+            }
+            acc
+        }
+        VariableType::Map(value)
+        | VariableType::List(value)
+        | VariableType::Set(value) => Some((**value).clone()),
+        _ => None,
+    }
 }
 
 /// `ignore_changes = [ | ]` — the enclosing resource's own attribute
