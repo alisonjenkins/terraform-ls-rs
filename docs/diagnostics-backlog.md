@@ -5,6 +5,8 @@ Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially r
 
 **Counts (after dedup): 13 bugs, 11 missing features, 14 improvements.** Effort = rough size (S/M/L); confidence from the assessing agent.
 
+**Status:** all 13 bugs fixed; the high-value features and improvements are done. The remaining 5 items are marked **won't fix** (`- [~]`) — each is low-value, has a workaround, or is FP-prone for the payoff; see the per-item rationale. Legend: `[x]` done, `[~]` won't fix, `[ ]` open (none).
+
 ---
 
 ## Bugs
@@ -93,7 +95,8 @@ Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially r
     `count`/`for_each` are skipped as meta-args with no validation, and each/count/self are blanket-excluded from reference classification, so three ERROR-class mistakes get no feedback: both count and for_each on one block; `for_each` over a list literal; `each.*`/`count.*`/`self.*` used where the enclosing block lacks the meta-arg/context.
     **Proposal:** In validate_block, flag both-count-and-for_each (ERROR on the second) and `for_each = [...]` (WARNING + `toset()` quick-fix). Add a context-threading body walker (not the flat helper) flagging each/count traversals whose enclosing block lacks the meta-arg, and self.* outside provisioner/connection/lifecycle; propagate scope into nested/dynamic blocks.
 
-- [ ] **Used resource/data type has no matching required_providers entry (missing provider source)** (medium, effort M, confidence med) — `unused_required_providers.rs` (inverse exists, not this direction)
+- [~] **Used resource/data type has no matching required_providers entry (missing provider source)** (medium, effort M, confidence med) — `unused_required_providers.rs` (inverse exists, not this direction)
+    **Won't fix:** FP-prone — needs a curated hashicorp-provider allowlist that lags provider releases; tier-2 schema warnings + `terraform init` already surface most cases.
     The server flags unused required_providers but not the inverse: a resource/data whose provider local has no required_providers entry. For non-hashicorp providers this breaks `terraform init`; `resource "datadog_monitor"` with no source gets no warning.
     **Proposal:** Add `missing_required_provider_diagnostics`: a `declared_provider_locals()` accessor aggregating required_providers across siblings; for each used local not declared AND not a well-known hashicorp/builtin name, emit WARNING on the first such resource. Gate to root modules.
 
@@ -109,7 +112,8 @@ Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially r
     No way to remap severities (demote noisy rules to HINT/off, promote a deprecation to ERROR in CI), unlike terraform-ls and tflint.
     **Proposal:** Add `rule_overrides: HashMap<&'static str, RuleSetting>` (off/hint/info/warning/error) keyed by stable rule id; apply in a single post-pass in `compute_diagnostics_with_lookup` keyed off `source` + a new stable `code` field added to ~45 emit sites.
 
-- [ ] **Diagnostic-only split families (azurerm/google/vault) could offer scaffolding code actions** (low, effort M, confidence high) — `deprecated_{azurerm,google,vault}_blocks.rs`
+- [~] **Diagnostic-only split families (azurerm/google/vault) could offer scaffolding code actions** (low, effort M, confidence high) — `deprecated_{azurerm,google,vault}_blocks.rs`
+    **Won't fix:** Low value (3 rules); the diagnostics already explain the migration, and per-rule config can downgrade/disable them.
     azurerm VM split, google dataflow split, vault_generic_secret are diagnostic-only (target not auto-inferable) and give prose but nothing actionable. The framework already emits commented-out scaffolding (s3/k8s paths).
     **Proposal:** Add an Instance-scope action per split rule inserting commented-out skeletons of both candidate replacements with a "pick one, delete the other" header. Scaffold content is new code (existing helpers target `moved {}`, not resource skeletons); reuse the make_X_for_diag/at_cursor dispatch + gate plumbing.
 
@@ -121,7 +125,8 @@ Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially r
 
 ## Improvements
 
-- [ ] **AWS `aws_alb*` alias family flagged deprecated though the provider does not mark it** (medium, effort M, confidence high) — `deprecated_aws_renames.rs:45-98`
+- [~] **AWS `aws_alb*` alias family flagged deprecated though the provider does not mark it** (medium, effort M, confidence high) — `deprecated_aws_renames.rs:45-98`
+    **Won't fix:** Workaround exists: `rules: {terraform_aws_renames: "hint"}`. A proper default-severity field would touch every DeprecationRule literal — disproportionate.
     The five `aws_alb*` rules emit a permanent, unsuppressable stylistic WARNING on valid current code; these aliases are still fully supported and not provider-flagged deprecated (contrast aws_s3_bucket_object).
     **Proposal:** Add a `severity` field to `DeprecationRule` and downgrade the alb-alias family to HINT/INFO (keep the auto-fix). Threading the field through ~18 rule literals + 2 emit sites + tests is the bulk.
 
@@ -153,7 +158,8 @@ Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially r
     Every did_change/did_save unconditionally recomputes all open peers, even for value/comment/indentation edits, multiplying per-keystroke cost by open-peer count for no benefit.
     **Proposal:** Capture the active doc's def+ref symbol set (via collect_doc_keys) + a terraform/required_providers fingerprint before vs after apply_change; skip the peer pass when unchanged. The set must include required_version, required_providers, resource type prefixes — not just var/local/module/output decls.
 
-- [ ] **Tier-2 schema-deprecation message gives no replacement; attribute path lacks is_hardcoded guard** (low, effort S, confidence high) — `schema_validation.rs:168-185, 228-240`
+- [~] **Tier-2 schema-deprecation message gives no replacement; attribute path lacks is_hardcoded guard** (low, effort S, confidence high) — `schema_validation.rs:168-185, 228-240`
+    **Won't fix:** Audit deemed the double-warn risk theoretical; the schema `description` is general docs prose, not a migration string — appending it would add noise.
     Block/attribute-level tier-2 deprecation diagnostics emit a fixed generic string and discard the schema's own `description`; the attribute path skips the `is_hardcoded_deprecation` guard the block path has.
     **Proposal:** Append the schema description (when present and distinct), add `DiagnosticTag::DEPRECATED`, add the is_hardcoded guard to the attribute path for parity. (`description` is general docs prose, not a migration string — guard for noise.)
 
@@ -173,7 +179,8 @@ Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially r
     The hand-rolled tokenizer recognizes a key only before `=`; HCL also accepts `:` (`{ a: 1, a: 2 }`), so those duplicates go undetected.
     **Proposal:** Accept `:` in addition to `=` at the two key-terminator checks. Longer term, derive key spans from parsed Object keys to shrink the bespoke-lexer surface.
 
-- [ ] **naming_convention is hardcoded to snake_case with no configurable format/regex** (low, effort M, confidence high) — `naming_convention.rs:103`
+- [~] **naming_convention is hardcoded to snake_case with no configurable format/regex** (low, effort M, confidence high) — `naming_convention.rs:103`
+    **Won't fix:** Already opt-in + INFORMATION; needs a `regex` dependency + nested-config plumbing for marginal value.
     Hardcodes `[a-z][a-z0-9_]*` with no per-block-type override, unlike tflint's configurable format/custom regex. Already opt-in + INFORMATION, so harm is bounded.
     **Proposal:** Add a `naming_convention` config sub-object (default + per-block-type overrides accepting snake_case|mixed_snake_case|{custom regex}). Needs nested config plumbing + a regex dep (regex::Regex isn't Eq, conflicting with Config's derive — store pattern string + lazy-compile).
 
