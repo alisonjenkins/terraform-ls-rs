@@ -196,6 +196,31 @@ async fn resource_body_suggests_attributes_from_schema() {
 }
 
 #[tokio::test]
+async fn expression_context_offers_for_and_ternary_scaffolds() {
+    // At a bare expression position the menu should lead with the
+    // comprehension / conditional scaffolds.
+    let u = uri("file:///a.tf");
+    let src = "locals {\n  x = \n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(1, 6)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(
+        ls.iter().any(|l| l.starts_with("for (list")),
+        "list comprehension scaffold offered; got {ls:?}"
+    );
+    assert!(
+        ls.iter().any(|l| l.starts_with("ternary")),
+        "ternary scaffold offered; got {ls:?}"
+    );
+}
+
+#[tokio::test]
 async fn required_attributes_sort_above_optional() {
     // `ami` is required; `instance_type` / `tags` are optional. The
     // required attr must carry a lower sort_text bucket so it surfaces

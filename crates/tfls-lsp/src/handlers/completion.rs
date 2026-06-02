@@ -191,7 +191,13 @@ pub async fn completion(
             resource_type,
             attr_name,
         } => attribute_value_items(backend, &resource_type, &attr_name),
-        CompletionContext::FunctionCall => function_name_items(backend),
+        CompletionContext::FunctionCall => {
+            // Lead with for/ternary comprehension scaffolds (sorted on top
+            // via `00_`), then the alphabetical function list.
+            let mut items = expression_scaffold_items();
+            items.extend(function_name_items(backend));
+            items
+        }
         CompletionContext::ProviderFunctionNamespace => {
             provider_function_namespace_items(backend, &uri)
         }
@@ -1895,6 +1901,43 @@ fn attribute_detail(attr: &tfls_schema::AttributeSchema) -> String {
     } else {
         parts.join(", ")
     }
+}
+
+/// Comprehension / conditional scaffolds offered at expression-start
+/// positions. These mirror the constructs users reach for constantly
+/// (`[for …]`, `{ for … }`, `cond ? a : b`) but which no function-name
+/// completion can supply. Sorted ahead of functions via `00_`.
+fn expression_scaffold_items() -> Vec<CompletionItem> {
+    const SNIPPETS: &[(&str, &str, &str)] = &[
+        (
+            "for (list comprehension)",
+            "[for ${1:item} in ${2:list} : ${3:item}]",
+            "list comprehension",
+        ),
+        (
+            "for (map comprehension)",
+            "{ for ${1:k}, ${2:v} in ${3:map} : ${1:k} => ${2:v} }",
+            "map comprehension",
+        ),
+        (
+            "ternary (conditional)",
+            "${1:condition} ? ${2:true_val} : ${3:false_val}",
+            "conditional expression",
+        ),
+    ];
+    SNIPPETS
+        .iter()
+        .enumerate()
+        .map(|(i, (label, snippet, detail))| CompletionItem {
+            label: (*label).to_string(),
+            kind: Some(CompletionItemKind::SNIPPET),
+            detail: Some((*detail).to_string()),
+            sort_text: Some(format!("00_{i}")),
+            insert_text: Some((*snippet).to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        })
+        .collect()
 }
 
 fn function_name_items(backend: &Backend) -> Vec<CompletionItem> {
