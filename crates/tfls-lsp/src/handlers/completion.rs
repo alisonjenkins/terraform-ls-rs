@@ -422,8 +422,17 @@ pub fn resource_scaffold_snippet(type_name: &str, backend: &Backend, kind: &str)
             .collect();
         required.sort_by_key(|(name, _)| name.as_str());
         had_required = !required.is_empty();
-        for (name, _) in &required {
-            snippet.push_str(&format!("  {name} = \"${{{tab}}}\"\n"));
+        for (name, attr) in &required {
+            // Type-aware placeholder so a required number/bool/list/object
+            // doesn't insert a quoted string and immediately error
+            // (matches nested_block_scaffold_snippet).
+            let placeholder = match classify_schema_type(attr.r#type.as_ref()) {
+                SchemaTypeKind::String => format!("\"${{{tab}}}\""),
+                SchemaTypeKind::Sequence => format!("[${{{tab}}}]"),
+                SchemaTypeKind::Mapping => format!("{{\n    ${{{tab}}}\n  }}"),
+                SchemaTypeKind::Scalar => format!("${{{tab}}}"),
+            };
+            snippet.push_str(&format!("  {name} = {placeholder}\n"));
             tab += 1;
         }
     }
@@ -1851,6 +1860,11 @@ fn function_name_items(backend: &Backend) -> Vec<CompletionItem> {
         .state
         .functions
         .iter()
+        // Skip provider-defined functions — their key is the registry-
+        // namespaced form (`provider::hashicorp::aws::arn_parse`), which
+        // isn't valid HCL as a plain call. They're surfaced correctly via
+        // the ProviderFunctionNamespace / ProviderFunctionName contexts.
+        .filter(|entry| !entry.key().starts_with("provider::"))
         .map(|entry| {
             let name = entry.key().clone();
             let sig = entry.value();

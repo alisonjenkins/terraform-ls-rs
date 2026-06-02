@@ -914,6 +914,9 @@ mod tests {
             let attr = AttributeSchema {
                 required: *required,
                 optional: !*required,
+                // These fixtures model string attributes (name/location/…),
+                // so the scaffold quotes their placeholders.
+                r#type: sonic_rs::from_str::<sonic_rs::Value>("\"string\"").ok(),
                 ..Default::default()
             };
             block.attributes.insert(name.to_string(), attr);
