@@ -139,7 +139,15 @@ fn spawn_lock_file_poller(
     std::thread::Builder::new()
         .name("tfls-lock-poller".to_string())
         .spawn(move || {
+            // Prime `seen` with the workspace's current lock files BEFORE
+            // the loop. Otherwise the first scan classifies every
+            // pre-existing `.terraform.lock.hcl` as new (`None => true`)
+            // and emits a `LockFileChanged` for each — triggering an
+            // expensive schema re-fetch per module on every startup of an
+            // already-initialised workspace. We only want post-startup
+            // changes.
             let mut seen: HashMap<PathBuf, SystemTime> = HashMap::new();
+            scan_lock_files(&root, &mut seen);
             loop {
                 if stop.load(Ordering::Acquire) {
                     break;
