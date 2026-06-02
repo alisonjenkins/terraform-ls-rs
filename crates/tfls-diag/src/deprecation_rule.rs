@@ -398,6 +398,7 @@ pub fn extract_required_provider_version(
     body: &Body,
     provider_name: &str,
 ) -> Option<String> {
+    let canonical = provider_ns_name(provider_name);
     for structure in body.iter() {
         let Some(tf_block) = structure.as_block() else {
             continue;
@@ -416,28 +417,30 @@ pub fn extract_required_provider_version(
                 let Some(attr) = entry.as_attribute() else {
                     continue;
                 };
-                if attr.key.as_str() != provider_name {
+                let local_key = attr.key.as_str();
+                // Short form: `<key> = "constraint"`. Source is implicit
+                // `hashicorp/<key>`; match canonically so an aliased key
+                // (e.g. `awscloud = "~> 4.0"`) still resolves, and a fork
+                // doesn't.
+                if let Some(s) = read_string_value(&attr.value) {
+                    if entry_matches_provider(local_key, None, &canonical) {
+                        return Some(s);
+                    }
                     continue;
                 }
-                if let Some(s) = read_string_value(&attr.value) {
-                    return Some(s);
-                }
                 if let Expression::Object(obj) = &attr.value {
+                    let mut version = None;
+                    let mut source = None;
                     for (k, v) in obj.iter() {
-                        let key_matches = match k {
-                            hcl_edit::expr::ObjectKey::Ident(id) => id.as_str() == "version",
-                            hcl_edit::expr::ObjectKey::Expression(
-                                Expression::Variable(var),
-                            ) => var.value().as_str() == "version",
-                            hcl_edit::expr::ObjectKey::Expression(
-                                Expression::String(s),
-                            ) => s.value().as_str() == "version",
-                            _ => false,
-                        };
-                        if key_matches {
-                            if let Some(s) = read_string_value(v.expr()) {
-                                return Some(s);
-                            }
+                        match object_key_name(k) {
+                            Some("version") => version = read_string_value(v.expr()),
+                            Some("source") => source = read_string_value(v.expr()),
+                            _ => {}
+                        }
+                    }
+                    if entry_matches_provider(local_key, source.as_deref(), &canonical) {
+                        if let Some(v) = version {
+                            return Some(v);
                         }
                     }
                 }
@@ -445,6 +448,43 @@ pub fn extract_required_provider_version(
         }
     }
     None
+}
+
+/// The `namespace/name` of an `ObjectKey`, lowercased, when it's a plain
+/// identifier / quoted string.
+fn object_key_name(k: &hcl_edit::expr::ObjectKey) -> Option<&str> {
+    match k {
+        hcl_edit::expr::ObjectKey::Ident(id) => Some(id.as_str()),
+        hcl_edit::expr::ObjectKey::Expression(Expression::Variable(var)) => {
+            Some(var.value().as_str())
+        }
+        hcl_edit::expr::ObjectKey::Expression(Expression::String(s)) => Some(s.value().as_str()),
+        _ => None,
+    }
+}
+
+/// Reduce a provider address or short name to its lowercased
+/// `namespace/name`. Drops any registry host prefix and an implicit
+/// `hashicorp` namespace for bare names: `aws` → `hashicorp/aws`,
+/// `registry.terraform.io/hashicorp/aws` → `hashicorp/aws`.
+fn provider_ns_name(s: &str) -> String {
+    let parts: Vec<&str> = s.split('/').filter(|p| !p.is_empty()).collect();
+    match parts.as_slice() {
+        [name] => format!("hashicorp/{}", name.to_ascii_lowercase()),
+        [.., ns, name] => format!("{}/{}", ns.to_ascii_lowercase(), name.to_ascii_lowercase()),
+        _ => s.to_ascii_lowercase(),
+    }
+}
+
+/// Whether a `required_providers` entry refers to the gate's provider,
+/// matched by canonical source (explicit `source`, else the implicit
+/// `hashicorp/<local key>`) rather than the local key name.
+fn entry_matches_provider(local_key: &str, explicit_source: Option<&str>, canonical: &str) -> bool {
+    let resolved = match explicit_source {
+        Some(src) => provider_ns_name(src),
+        None => provider_ns_name(local_key),
+    };
+    resolved == canonical
 }
 
 /// Extract the `source = "..."` attribute declared for
@@ -685,6 +725,52 @@ mod tests {
         let body = parse_source(concat!(
             "terraform {\n  required_providers {\n",
             "    aws = { source = \"hashicorp/aws\", version = \"5.42.0\" }\n",
+            "  }\n}\n",
+        ))
+        .body
+        .expect("parses");
+        assert_eq!(
+            extract_required_provider_version(&body, "aws"),
+            Some("5.42.0".into())
+        );
+    }
+
+    #[test]
+    fn extract_required_provider_version_matches_aliased_local_by_source() {
+        // Provider declared under a non-canonical local key but with the
+        // canonical source — must still resolve for the `aws` gate.
+        let body = parse_source(concat!(
+            "terraform {\n  required_providers {\n",
+            "    awscloud = { source = \"hashicorp/aws\", version = \"5.42.0\" }\n",
+            "  }\n}\n",
+        ))
+        .body
+        .expect("parses");
+        assert_eq!(
+            extract_required_provider_version(&body, "aws"),
+            Some("5.42.0".into())
+        );
+    }
+
+    #[test]
+    fn extract_required_provider_version_excludes_fork_source() {
+        // Local key `aws` but a forked source — the hashicorp/aws gate
+        // must NOT match it.
+        let body = parse_source(concat!(
+            "terraform {\n  required_providers {\n",
+            "    aws = { source = \"mycorp/aws\", version = \"5.42.0\" }\n",
+            "  }\n}\n",
+        ))
+        .body
+        .expect("parses");
+        assert_eq!(extract_required_provider_version(&body, "aws"), None);
+    }
+
+    #[test]
+    fn extract_required_provider_version_host_qualified_source() {
+        let body = parse_source(concat!(
+            "terraform {\n  required_providers {\n",
+            "    aws = { source = \"registry.terraform.io/hashicorp/aws\", version = \"5.42.0\" }\n",
             "  }\n}\n",
         ))
         .body
