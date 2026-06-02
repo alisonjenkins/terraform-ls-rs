@@ -320,6 +320,16 @@ pub fn cursor_slot(input: &str, byte_offset: usize) -> CursorSlot {
     }
 
     let (op, op_len) = detect_operator(trimmed);
+    // Half-typed operator — all operator characters but not yet a complete
+    // operator token (e.g. `~` before its `>`). Keep offering operators
+    // rather than collapsing to a version token whose labels don't match.
+    if op_len < trimmed.len()
+        && trimmed
+            .bytes()
+            .all(|b| matches!(b, b'~' | b'>' | b'<' | b'=' | b'!'))
+    {
+        return CursorSlot::AtOperator;
+    }
     let after_op = &trimmed[op_len..];
     // Catch `>= ` style — operator present, user now typing version.
     let (version_pre_ws, version_text_rel) = split_ws_and_rest(after_op);
@@ -658,6 +668,20 @@ mod tests {
             }
             other => panic!("got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cursor_slot_half_typed_operator_stays_at_operator() {
+        // A lone `~` is the start of `~>`, not a version token.
+        for s in ["~", "!", ">", ">="] {
+            // `>` and `>=` are complete operators → after-operator/at-operator,
+            // never InsideVersion.
+            assert!(
+                !matches!(cursor_slot(s, s.len()), CursorSlot::InsideVersion { .. }),
+                "`{s}` wrongly classified as inside-version"
+            );
+        }
+        assert!(matches!(cursor_slot("~", 1), CursorSlot::AtOperator));
     }
 
     #[test]

@@ -1035,23 +1035,11 @@ async fn provider_version_items_from_registry(source: Option<&str>) -> Vec<Compl
             ..Default::default()
         });
     }
-    let mut seen_mm: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for vi in &versions {
-        if let Some(mm) = major_minor(&vi.version) {
-            seen_mm.insert(mm);
-        }
-    }
-    for mm in seen_mm.into_iter().rev().take(5) {
-        let label = format!("~> {mm}");
-        items.push(CompletionItem {
-            label: label.clone(),
-            kind: Some(CompletionItemKind::SNIPPET),
-            detail: Some("pessimistic (compatible) constraint".to_string()),
-            insert_text: Some(label),
-            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
-            ..Default::default()
-        });
-    }
+    // No `~> MM` operator templates here: this builder only serves the
+    // AfterOperator / InsideVersion slots (the user already typed an
+    // operator or version digits), where prepending another operator
+    // would produce `>= ~> 4.71`. Operator flavours live in the
+    // AtOperator path (prefilled_provider_version_items).
     items
 }
 
@@ -1181,23 +1169,7 @@ async fn tool_version_items_from_github() -> Vec<CompletionItem> {
             ..Default::default()
         });
     }
-    let mut seen_mm: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for vi in &versions {
-        if let Some(mm) = major_minor(&vi.version) {
-            seen_mm.insert(mm);
-        }
-    }
-    for mm in seen_mm.into_iter().rev().take(5) {
-        let label = format!("~> {mm}");
-        items.push(CompletionItem {
-            label: label.clone(),
-            kind: Some(CompletionItemKind::SNIPPET),
-            detail: Some("pessimistic (compatible) constraint".to_string()),
-            insert_text: Some(label),
-            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
-            ..Default::default()
-        });
-    }
+    // Operator templates omitted — see provider_version_items_from_registry.
     items
 }
 
@@ -1255,23 +1227,7 @@ async fn module_version_items_from_registry(source: Option<&str>) -> Vec<Complet
             ..Default::default()
         });
     }
-    let mut seen_mm: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for vi in &versions {
-        if let Some(mm) = major_minor(&vi.version) {
-            seen_mm.insert(mm);
-        }
-    }
-    for mm in seen_mm.into_iter().rev().take(5) {
-        let label = format!("~> {mm}");
-        items.push(CompletionItem {
-            label: label.clone(),
-            kind: Some(CompletionItemKind::SNIPPET),
-            detail: Some("pessimistic (compatible) constraint".to_string()),
-            insert_text: Some(label),
-            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
-            ..Default::default()
-        });
-    }
+    // Operator templates omitted — see provider_version_items_from_registry.
     items
 }
 
