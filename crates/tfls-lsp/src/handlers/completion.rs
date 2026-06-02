@@ -222,14 +222,18 @@ pub async fn completion(
             required_provider_source_value_items().await
         }
         CompletionContext::RequiredProviderVersionValue { source, cursor_partial } => {
-            required_provider_version_value_items(source.as_deref(), &cursor_partial).await
+            let items =
+                required_provider_version_value_items(source.as_deref(), &cursor_partial).await;
+            stamp_version_replace(items, pos, &cursor_partial)
         }
         CompletionContext::RequiredVersionValue { cursor_partial } => {
-            required_version_value_items(&cursor_partial).await
+            let items = required_version_value_items(&cursor_partial).await;
+            stamp_version_replace(items, pos, &cursor_partial)
         }
         CompletionContext::VariableTypeValue => variable_type_value_items(),
         CompletionContext::ModuleVersionValue { source, cursor_partial } => {
-            module_version_value_items(source.as_deref(), &cursor_partial).await
+            let items = module_version_value_items(source.as_deref(), &cursor_partial).await;
+            stamp_version_replace(items, pos, &cursor_partial)
         }
         CompletionContext::BuiltinNestedBody { path } => {
             let filter = compute_body_filter(doc.parsed.body.as_ref(), offset);
@@ -2837,6 +2841,43 @@ fn index_key_items(
 /// (identifier chars, hyphens, or quotes) plus a trailing `]` if one
 /// is on the same line. The emitted text always includes its own `]`,
 /// so an existing `]` is replaced rather than duplicated.
+/// Attach a `text_edit` to version-completion items so accepting one
+/// REPLACES the partially-typed version token instead of inserting after
+/// it. Without this, typing `version = "5.9|"` and accepting `5.94.0`
+/// yields `5.95.94.0` on clients that don't strip the typed prefix.
+/// Only the `InsideVersion` slot (the user is typing version digits) needs
+/// a replace; at/after an operator the items append at the cursor.
+fn stamp_version_replace(
+    items: Vec<CompletionItem>,
+    pos: Position,
+    cursor_partial: &str,
+) -> Vec<CompletionItem> {
+    use tfls_core::version_constraint::{CursorSlot, cursor_slot};
+    let partial_len = match cursor_slot(cursor_partial, cursor_partial.len()) {
+        // Version tokens are ASCII, so char count == UTF-16 CU count.
+        CursorSlot::InsideVersion { partial, .. } => partial.chars().count() as u32,
+        _ => 0,
+    };
+    if partial_len == 0 {
+        return items;
+    }
+    let range = Range {
+        start: Position::new(pos.line, pos.character.saturating_sub(partial_len)),
+        end: pos,
+    };
+    items
+        .into_iter()
+        .map(|mut it| {
+            let new_text = it.insert_text.take().unwrap_or_else(|| it.label.clone());
+            if it.filter_text.is_none() {
+                it.filter_text = Some(it.label.clone());
+            }
+            it.text_edit = Some(CompletionTextEdit::Edit(TextEdit { range, new_text }));
+            it
+        })
+        .collect()
+}
+
 fn compute_index_replace_range(line: &str, pos: Position) -> Range {
     // `pos.character` is a UTF-16 code-unit column; convert to a byte
     // index for the slice/scan math, then convert the resulting byte
@@ -2895,6 +2936,41 @@ fn byte_to_utf16_cu(line: &str, byte: usize) -> usize {
         acc += c.len_utf16();
     }
     acc
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod stamp_version_replace_tests {
+    use super::*;
+
+    fn item(label: &str) -> CompletionItem {
+        CompletionItem {
+            label: label.to_string(),
+            insert_text: Some(label.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn inside_version_replaces_typed_partial() {
+        // `version = "5.9|"` — cursor at column 14, partial "5.9".
+        let out = stamp_version_replace(vec![item("5.94.0")], Position::new(0, 14), "5.9");
+        let te = match &out[0].text_edit {
+            Some(CompletionTextEdit::Edit(e)) => e,
+            other => panic!("expected text_edit, got {other:?}"),
+        };
+        assert_eq!((te.range.start.character, te.range.end.character), (11, 14));
+        assert_eq!(te.new_text, "5.94.0");
+        assert!(out[0].insert_text.is_none(), "insert_text cleared in favour of text_edit");
+    }
+
+    #[test]
+    fn after_operator_does_not_set_text_edit() {
+        // `version = ">= |"` — nothing to replace; append at cursor.
+        let out = stamp_version_replace(vec![item("5.94.0")], Position::new(0, 14), ">= ");
+        assert!(out[0].text_edit.is_none());
+        assert!(out[0].insert_text.is_some());
+    }
 }
 
 #[cfg(test)]
