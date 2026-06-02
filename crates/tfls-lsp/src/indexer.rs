@@ -710,6 +710,24 @@ async fn publish_for_path(
         .await;
 }
 
+/// Recompute and republish diagnostics for every currently-open
+/// document. Used after a `workspace/didChangeConfiguration` so a
+/// runtime toggle (e.g. `styleRules`) takes effect on open buffers
+/// immediately rather than waiting for the next edit. Push-mode
+/// clients get a direct publish per open doc (toggling a rule off
+/// recomputes fewer diagnostics, overwriting the stale set); pull-mode
+/// clients are nudged via `workspace/diagnostic/refresh`.
+pub(crate) async fn republish_open_docs(state: &StateStore, client: &tower_lsp::Client) {
+    let open: Vec<tower_lsp::lsp_types::Url> =
+        state.open_docs.iter().map(|u| u.clone()).collect();
+    for uri in open {
+        if let Ok(path) = uri.to_file_path() {
+            publish_for_path(state, client, &path).await;
+        }
+    }
+    maybe_refresh_diagnostics(state, Some(client)).await;
+}
+
 /// Push fresh diagnostics for every document loaded under `dir`
 /// (recursively — direct children AND submodules). Used by the
 /// `LockFileChanged` watcher arm and the `FetchSchemas` job

@@ -294,7 +294,7 @@ pub async fn did_close(backend: &Backend, params: DidCloseTextDocumentParams) {
 /// otherwise defers to pull-mode. Only peer buffers (not
 /// `changed_uri` itself — `publish_current_diagnostics` covers
 /// that) get the push.
-async fn publish_peer_diagnostics(backend: &Backend, changed_uri: &Url) {
+pub(crate) async fn publish_peer_diagnostics(backend: &Backend, changed_uri: &Url) {
     let Some(module_dir) = crate::handlers::util::parent_dir(changed_uri) else {
         return;
     };

@@ -24,6 +24,13 @@ pub async fn did_change_configuration(
     };
     backend.state.config.update_from_json(&sonic);
     tracing::info!("applied didChangeConfiguration");
+
+    // Config can change which diagnostics fire (e.g. the `styleRules`
+    // toggle, formatStyle). Recompute + republish open buffers so the
+    // change is live — otherwise the toggle silently no-ops until the
+    // user edits each file, and stale diagnostics linger after toggling
+    // a rule off.
+    crate::indexer::republish_open_docs(&backend.state, &backend.client).await;
 }
 
 pub async fn did_change_watched_files(backend: &Backend, params: DidChangeWatchedFilesParams) {
@@ -40,6 +47,15 @@ pub async fn did_change_watched_files(backend: &Backend, params: DidChangeWatche
             }
             FileChangeType::DELETED => {
                 backend.state.remove_document(&event.uri);
+                // Clear the deleted file's published diagnostics (they'd
+                // otherwise linger in the client forever), then refresh
+                // open peers in the same dir — deleting e.g. variables.tf
+                // invalidates sibling reference resolution.
+                backend
+                    .client
+                    .publish_diagnostics(event.uri.clone(), Vec::new(), None)
+                    .await;
+                crate::handlers::document::publish_peer_diagnostics(backend, &event.uri).await;
             }
             _ => {}
         }
