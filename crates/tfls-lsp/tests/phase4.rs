@@ -170,6 +170,10 @@ async fn opinionated_format_then_diagnostics_align_to_new_buffer() {
     //   resource -> locals -> variable (block-kind ordering rules).
     // Plus per-kind alphabetisation of `unused_z` / `unused_a`.
     let src = "\
+provider \"aws\" {
+  region = \"us-east-1\"
+}
+
 variable \"unused_z\" {
   type = string
 }
@@ -246,6 +250,38 @@ locals {
         &formatted,
         &diags_after,
         pre_expectations,
+    );
+}
+
+#[tokio::test]
+async fn reusable_module_inputs_not_flagged_unused() {
+    // A standalone module with an unused-looking input variable but NO
+    // provider/backend config is a reusable module — its inputs are the
+    // interface, consumed by (un-indexed) callers. Must not flag the
+    // variable as unused. An unused LOCAL still flags.
+    let u = uri("file:///mod/main.tf");
+    let backend = fresh_backend(
+        "variable \"iface\" { type = string }\nlocals { dead = 1 }\n",
+        &u,
+    );
+    let diags = compute_diagnostics(&backend.state, &u);
+    let msgs: Vec<_> = diags.iter().map(|d| d.message.clone()).collect();
+    assert!(
+        !msgs.iter().any(|m| m.contains("variable `iface`")),
+        "reusable-module input must not be flagged: {msgs:?}"
+    );
+
+    // Same module but with a provider block → applyable root → flag it.
+    let u2 = uri("file:///mod2/main.tf");
+    let backend2 = fresh_backend(
+        "provider \"aws\" { region = \"us-east-1\" }\nvariable \"iface\" { type = string }\n",
+        &u2,
+    );
+    let diags2 = compute_diagnostics(&backend2.state, &u2);
+    assert!(
+        diags2.iter().any(|d| d.message.contains("variable `iface`")),
+        "applyable root must flag the unused variable: {:?}",
+        diags2.iter().map(|d| &d.message).collect::<Vec<_>>()
     );
 }
 

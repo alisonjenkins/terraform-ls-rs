@@ -1505,6 +1505,14 @@ impl tfls_diag::ModuleGraphLookup for ModuleGraphAdapter<'_> {
         }
         true
     }
+
+    fn is_applyable_root(&self) -> bool {
+        self.is_root_module()
+            && crate::handlers::module_snapshot::module_has_applyable_config(
+                self.state,
+                self.module_dir,
+            )
+    }
 }
 
 /// Resolve a module `source = "..."` string relative to the calling

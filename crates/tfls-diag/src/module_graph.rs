@@ -32,6 +32,18 @@ pub trait ModuleGraphLookup {
     /// "unused" from the module's own point of view.
     fn is_root_module(&self) -> bool;
 
+    /// True if the module is a directly-applyable root — it configures
+    /// a provider (`provider "x" {}`) or declares a backend. A module
+    /// designed for reuse receives its providers and never declares a
+    /// backend, so the absence of both marks it reusable. Gates the
+    /// unused-VARIABLE check specifically: flagging a reusable module's
+    /// input variables as unused is a false positive (they're its
+    /// interface). Defaults to [`Self::is_root_module`] for impls that
+    /// don't distinguish.
+    fn is_applyable_root(&self) -> bool {
+        self.is_root_module()
+    }
+
     /// True if any `terraform {}` block anywhere in the module
     /// declares `required_version`. Terraform merges all
     /// `terraform {}` blocks at plan time, so one declaration

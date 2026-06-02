@@ -24,6 +24,12 @@ pub struct ModuleSnapshot {
     pub primary_terraform_uri: Option<Url>,
     pub present_files: HashSet<String>,
     pub is_root: bool,
+    /// `true` when the module configures a provider or declares a
+    /// backend — i.e. it's a directly-applyable root, not a module
+    /// designed for reuse. Gates the unused-VARIABLE check so a
+    /// standalone reusable module (opened directly, callers external)
+    /// doesn't flood every input as "declared but not used".
+    pub has_applyable_config: bool,
 }
 
 impl ModuleSnapshot {
@@ -53,6 +59,12 @@ impl ModuleSnapshot {
         let mut providers_with_version: HashSet<String> = HashSet::new();
         let mut used_provider_locals: HashSet<String> = HashSet::new();
         let mut terraform_uri_candidates: Vec<String> = Vec::new();
+        // Whether the module CONFIGURES a provider or a backend — the
+        // hallmark of a directly-applyable root. A reusable module
+        // receives its providers and never declares a backend, so the
+        // absence of both marks it as a module-for-reuse (don't flag its
+        // input variables as unused).
+        let mut has_applyable_config = false;
 
         for doc in state.documents.iter() {
             if !in_module(doc.key(), module_dir) {
@@ -78,6 +90,13 @@ impl ModuleSnapshot {
                         }
                         // Track URI for "primary terraform doc" logic.
                         terraform_uri_candidates.push(doc.key().as_str().to_string());
+                        // A `backend` / `cloud` block makes this an
+                        // applyable root (state lives somewhere concrete).
+                        if block.body.iter().filter_map(|s| s.as_block()).any(|b| {
+                            matches!(b.ident.as_str(), "backend" | "cloud")
+                        }) {
+                            has_applyable_config = true;
+                        }
                         // Providers declared in required_providers entries.
                         for inner in block.body.iter() {
                             let Some(rp_block) = inner.as_block() else {
@@ -133,6 +152,9 @@ impl ModuleSnapshot {
                         }
                     }
                     "provider" => {
+                        // Configuring a provider is a root-only concern;
+                        // reusable modules receive providers from callers.
+                        has_applyable_config = true;
                         if let Some(label) = block.labels.first() {
                             let name = match label {
                                 hcl_edit::structure::BlockLabel::String(s) => {
@@ -219,6 +241,7 @@ impl ModuleSnapshot {
             primary_terraform_uri,
             present_files,
             is_root,
+            has_applyable_config,
         }
     }
 
@@ -372,6 +395,44 @@ fn is_root_via_set(module_dir: Option<&Path>, referenced: &HashSet<PathBuf>) -> 
     }
 }
 
+/// Whether the module at `module_dir` configures a provider or declares
+/// a backend anywhere across its files — i.e. it's a directly-applyable
+/// root rather than a module for reuse. Used by the per-call
+/// `ModuleGraphAdapter`; `ModuleSnapshot::build` computes the same flag
+/// inline during its single pass.
+pub(crate) fn module_has_applyable_config(
+    state: &StateStore,
+    module_dir: Option<&Path>,
+) -> bool {
+    for doc in state.documents.iter() {
+        if !in_module(doc.key(), module_dir) {
+            continue;
+        }
+        let Some(body) = doc.parsed.body.as_ref() else {
+            continue;
+        };
+        for structure in body.iter() {
+            let Some(block) = structure.as_block() else {
+                continue;
+            };
+            match block.ident.as_str() {
+                "provider" => return true,
+                "terraform"
+                    if block
+                        .body
+                        .iter()
+                        .filter_map(|s| s.as_block())
+                        .any(|b| matches!(b.ident.as_str(), "backend" | "cloud")) =>
+                {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
 fn compute_is_root(state: &StateStore, module_dir: Option<&Path>) -> bool {
     let Some(dir) = module_dir else {
         return true;
@@ -463,6 +524,13 @@ impl tfls_diag::ModuleGraphLookup for CachedModuleLookup<'_> {
 
     fn is_root_module(&self) -> bool {
         self.snapshot.is_root
+    }
+
+    fn is_applyable_root(&self) -> bool {
+        // Root AND configures a provider/backend — a reusable module
+        // opened directly is "root" (no indexed caller) but not
+        // applyable, so its input variables aren't flagged unused.
+        self.snapshot.is_root && self.snapshot.has_applyable_config
     }
 
     fn module_has_required_version(&self) -> bool {
@@ -619,5 +687,45 @@ mod tests {
 
         let snap = ModuleSnapshot::build(&store, Some(&root), None);
         assert!(snap.is_root, "standalone module must be root");
+        // No provider/backend config — a reusable module, not applyable.
+        assert!(
+            !snap.has_applyable_config,
+            "var-only module isn't an applyable root"
+        );
+    }
+
+    #[test]
+    fn has_applyable_config_detects_provider_and_backend() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+
+        let with_provider = make_store_with(&[(
+            root.join("main.tf"),
+            "provider \"aws\" { region = \"us-east-1\" }\nvariable \"x\" {}\n",
+        )]);
+        assert!(
+            ModuleSnapshot::build(&with_provider, Some(&root), None).has_applyable_config,
+            "a provider block marks the module applyable"
+        );
+
+        let with_backend = make_store_with(&[(
+            root.join("main.tf"),
+            "terraform {\n  backend \"local\" {}\n}\nvariable \"x\" {}\n",
+        )]);
+        assert!(
+            ModuleSnapshot::build(&with_backend, Some(&root), None).has_applyable_config,
+            "a backend block marks the module applyable"
+        );
+
+        // Module that only DECLARES required_providers (no config) stays
+        // non-applyable — reusable modules declare required_providers too.
+        let reqonly = make_store_with(&[(
+            root.join("main.tf"),
+            "terraform {\n  required_providers {\n    aws = { source = \"hashicorp/aws\" }\n  }\n}\nvariable \"x\" {}\n",
+        )]);
+        assert!(
+            !ModuleSnapshot::build(&reqonly, Some(&root), None).has_applyable_config,
+            "required_providers alone is not applyable config"
+        );
     }
 }

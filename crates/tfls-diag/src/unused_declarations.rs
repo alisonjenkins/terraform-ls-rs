@@ -51,6 +51,13 @@ fn check_variable(
     if lookup.variable_is_referenced(&name) {
         return;
     }
+    // A reusable module's input variables are its interface — they're
+    // "unused" from the module's own point of view but consumed by
+    // (possibly un-indexed) callers. Only flag unused variables in a
+    // directly-applyable root (configures a provider / has a backend).
+    if !lookup.is_applyable_root() {
+        return;
+    }
     push(
         out,
         rope,
@@ -154,6 +161,7 @@ mod tests {
         used_locals: HashSet<&'static str>,
         used_data: HashSet<(&'static str, &'static str)>,
         is_root: bool,
+        applyable: bool,
     }
 
     impl ModuleGraphLookup for FakeLookup {
@@ -174,6 +182,9 @@ mod tests {
         }
         fn is_root_module(&self) -> bool {
             self.is_root
+        }
+        fn is_applyable_root(&self) -> bool {
+            self.applyable
         }
         fn module_has_required_version(&self) -> bool {
             true
@@ -198,7 +209,48 @@ mod tests {
             used_locals: HashSet::new(),
             used_data: HashSet::new(),
             is_root,
+            // Default: an applyable root (the common test case).
+            applyable: is_root,
         }
+    }
+
+    #[test]
+    fn reusable_module_does_not_flag_unused_variables() {
+        // is_root (no indexed caller) but NOT applyable (no provider /
+        // backend) — a standalone reusable module. Its input variables
+        // are its interface, not unused. Unused LOCALS still flag.
+        let lookup = FakeLookup {
+            used_vars: HashSet::new(),
+            used_locals: HashSet::new(),
+            used_data: HashSet::new(),
+            is_root: true,
+            applyable: false,
+        };
+        let d = diags(
+            "variable \"iface\" { type = string }\nlocals { dead = 1 }\n",
+            lookup,
+        );
+        assert!(
+            d.iter().all(|x| !x.message.contains("variable `iface`")),
+            "reusable-module input must not be flagged unused: {d:?}"
+        );
+        assert!(
+            d.iter().any(|x| x.message.contains("local `dead`")),
+            "unused locals should still flag in a reusable module: {d:?}"
+        );
+    }
+
+    #[test]
+    fn applyable_root_flags_unused_variables() {
+        let lookup = FakeLookup {
+            used_vars: HashSet::new(),
+            used_locals: HashSet::new(),
+            used_data: HashSet::new(),
+            is_root: true,
+            applyable: true,
+        };
+        let d = diags("variable \"x\" { type = string }\n", lookup);
+        assert!(d.iter().any(|x| x.message.contains("variable `x`")), "got: {d:?}");
     }
 
     #[test]
@@ -222,6 +274,7 @@ mod tests {
                 used_locals: HashSet::new(),
                 used_data: HashSet::new(),
                 is_root: true,
+                applyable: true,
             },
         );
         assert!(d.is_empty(), "got: {d:?}");
@@ -282,6 +335,7 @@ locals {
                 used_locals: ["_dr_region_short_map"].into_iter().collect(),
                 used_data: HashSet::new(),
                 is_root: true,
+                applyable: true,
             },
         );
         assert_eq!(d.len(), 1, "got: {d:?}");
@@ -316,6 +370,7 @@ locals {
                 used_locals: ["x"].into_iter().collect(),
                 used_data: HashSet::new(),
                 is_root: true,
+                applyable: true,
             },
         );
         assert!(d.is_empty(), "got: {d:?}");
@@ -340,6 +395,7 @@ locals {
                 used_locals: HashSet::new(),
                 used_data: [("aws_ami", "ubuntu")].into_iter().collect(),
                 is_root: true,
+                applyable: true,
             },
         );
         assert!(d.is_empty(), "got: {d:?}");
