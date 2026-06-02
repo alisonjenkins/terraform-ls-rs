@@ -1068,11 +1068,12 @@ async fn required_version_value_items(cursor_partial: &str) -> Vec<CompletionIte
     }
 }
 
-/// Mirror of [`prefilled_provider_version_items`] for the Terraform
-/// + OpenTofu CLI release catalogue. Pins the latest release at
-/// sort-key `0000_latest`; offers `~> MAJOR.MINOR` /
-/// `>= LATEST` flavours; then the operator scaffolds; then every
-/// known exact release for users who want to scroll-and-pick.
+/// Mirror of [`prefilled_provider_version_items`] for the combined
+/// Terraform and OpenTofu CLI release catalogue. Pins the latest
+/// release at sort-key `0000_latest`, then offers the pessimistic and
+/// lower-bound flavours (`~> MAJOR.MINOR`, `>= LATEST`), then the
+/// operator scaffolds, then every known exact release for users who
+/// want to scroll-and-pick.
 async fn prefilled_tool_version_items() -> Vec<CompletionItem> {
     let Ok(client) = tfls_provider_protocol::tool_versions::build_http_client() else {
         return constraint_operator_items();
