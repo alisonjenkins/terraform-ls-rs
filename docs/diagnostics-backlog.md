@@ -129,7 +129,7 @@ Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially r
     unused_declarations (and typed_variables gating) only fire on root modules, decided by walking indexed `state.documents` for a `module` caller. Opening a standalone shared-module dir (caller outside the workspace) wrongly flags it root, flagging every exposed input as unused.
     **Proposal:** Make root detection tolerant of un-indexed callers — don't flag when no caller is found unless the dir is the workspace root, use lexical path normalisation instead of canonicalize, or gate behind a config opt-in for non-workspace-root dirs.
 
-- [ ] **Deprecation and unused-declaration diagnostics never set DiagnosticTag** (medium, effort S, confidence high) — `deprecation_rule.rs:187-193,249-255`; `unused_declarations.rs:134`; schema_validation deprecated paths
+- [x] **Deprecation and unused-declaration diagnostics never set DiagnosticTag** (medium, effort S, confidence high) — `deprecation_rule.rs:187-193,249-255`; `unused_declarations.rs:134`; schema_validation deprecated paths
     No diagnostic sets `tags`, so deprecations get a plain squiggle instead of strike-through and unused decls aren't greyed out — free standard UX thrown away.
     **Proposal:** Add `DiagnosticTag::DEPRECATED` to deprecation emitters (diagnostics_from_table/from_rule + schema-driven deprecated paths) and `DiagnosticTag::UNNECESSARY` to unused_declarations/unused_required_providers.
 
