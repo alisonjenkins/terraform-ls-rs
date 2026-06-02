@@ -235,6 +235,28 @@ async fn attribute_value_refs_sort_before_functions() {
 }
 
 #[tokio::test]
+async fn for_binding_offers_collection_element_fields() {
+    // `[for s in var.servers : s.|]` should offer the fields of the
+    // list's element type (declared on the variable).
+    let u = uri("file:///a.tf");
+    let src = "variable \"servers\" {\n  \
+               type = list(object({ name = string, port = number }))\n}\n\
+               locals {\n  names = [for s in var.servers : s.xxx]\n}\n";
+    let backend = fresh_backend(src, &u);
+    // Cursor right after `s.` (before xxx) on line 4.
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(4, 36)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"name".to_string()), "got {ls:?}");
+    assert!(ls.contains(&"port".to_string()), "got {ls:?}");
+}
+
+#[tokio::test]
 async fn each_value_field_offers_element_fields() {
     let u = uri("file:///a.tf");
     // Trailing `xxx` so the (otherwise incomplete) traversal parses and

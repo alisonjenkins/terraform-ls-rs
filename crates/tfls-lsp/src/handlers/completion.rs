@@ -240,6 +240,9 @@ pub async fn completion(
         CompletionContext::EachAttr { path } => {
             each_attr_items(backend, &uri, doc.parsed.body.as_ref(), offset, &path)
         }
+        CompletionContext::ForBindingRef { root, path } => {
+            drill_collection_element_fields(backend, &uri, &root, &path)
+        }
         CompletionContext::ProviderFunctionNamespace => {
             provider_function_namespace_items(backend, &uri)
         }
@@ -2105,14 +2108,25 @@ fn each_attr_items(
         "module" => IndexRootRef::Module { module_name: ty },
         _ => return Vec::new(),
     };
-    let Some(collection) = shape_for_root(backend, uri, &root) else {
+    drill_collection_element_fields(backend, uri, &root, path)
+}
+
+/// Resolve the collection shape rooted at `root`, unwrap one level to its
+/// element type, walk the `.field` chain in `path`, and offer the object
+/// fields at the end. Shared by `each.value.<…>` and `for`-binding
+/// drill-down — both name an element of a collection.
+fn drill_collection_element_fields(
+    backend: &Backend,
+    uri: &Url,
+    root: &IndexRootRef,
+    path: &[String],
+) -> Vec<CompletionItem> {
+    let Some(collection) = shape_for_root(backend, uri, root) else {
         return Vec::new();
     };
-    // `each.value` is one element of the collection — unwrap a level.
     let Some(element) = for_each_element_shape(&collection) else {
         return Vec::new();
     };
-    // Walk the remaining `.field` chain.
     let steps: Vec<PathStep> = path.iter().map(|p| PathStep::Attr(p.clone())).collect();
     let Some(VariableType::Object(fields)) = walk_shape(&element, &steps) else {
         return Vec::new();
@@ -2122,7 +2136,7 @@ fn each_attr_items(
         .map(|k| CompletionItem {
             label: k.clone(),
             kind: Some(CompletionItemKind::FIELD),
-            detail: Some("each.value field".to_string()),
+            detail: Some("element field".to_string()),
             insert_text: Some(k.clone()),
             insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
             ..Default::default()

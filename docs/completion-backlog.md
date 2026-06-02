@@ -83,7 +83,7 @@ Workflow: `completion-deep-dive`. 48 agents, ~2.5M tokens. Bugs adversarially re
   After `<resource>.<name>.` (ResourceAttr/DataSourceAttr/SelfRef) only schema.block.attributes are offered; nested blocks (root_block_device, network_interface, subnet_mapping, …) are valid referenceable targets but never suggested. Same gap for `self.<nested_block>`. (Subsumes the low-severity duplicate of this finding.)
   **Proposal:** After collecting attribute items, also iterate `schema.block.block_types` and push one FIELD/STRUCT item per nested-block name (detail "nested block"), optionally hinting an index from nesting_mode; filter config-only blocks (lifecycle/timeouts) that aren't valid reference targets.
 
-- [ ] **for-expression loop variables misclassified as resource-type references** (low, effort L, confidence high) — crates/tfls-core/src/completion.rs:721 (reference_prefix_context), match arm `[t] => ResourceRef` line 786
+- [x] **for-expression loop variables misclassified as resource-type references** (low, effort L, confidence high) — crates/tfls-core/src/completion.rs:721 (reference_prefix_context), match arm `[t] => ResourceRef` line 786
   `[for x in var.list : x.|]` classifies as ResourceRef{resource_type:"x"} since `x` isn't a builtin prefix; downstream this almost always yields an empty menu, so for-binding field completion never works.
   **Proposal:** Scan the enclosing bracket/brace group for `for <ident>[, <ident2>] in` binders before the cursor; treat those names as locally-bound, suppress the ResourceRef misclassification, and (ideally) infer the iterated collection's element shape to offer fields (new ForBindingRef).
 

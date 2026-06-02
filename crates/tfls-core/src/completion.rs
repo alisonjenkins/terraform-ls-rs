@@ -214,6 +214,15 @@ pub enum CompletionContext {
     /// after `value` (empty for `each.value.|`).
     EachAttr { path: Vec<String> },
 
+    /// Cursor is at `<binder>.<path>` where `<binder>` is bound by an
+    /// enclosing `for <binder> in <collection> : …` expression. `root`
+    /// is the collection reference; `path` is the field chain after the
+    /// binder. Resolved by drilling into the collection's element shape.
+    ForBindingRef {
+        root: IndexRootRef,
+        path: Vec<String>,
+    },
+
     /// Cursor is at a bare expression value (`= |`) inside a block that
     /// is NOT a resource/data block — e.g. `output { value = | }`,
     /// `locals { x = | }`, a `module` input. We have no schema-typed
@@ -1017,15 +1026,150 @@ fn reference_prefix_context(before: &str) -> Option<CompletionContext> {
             resource_type: (*t).to_string(),
             name: (*n).to_string(),
         }),
-        [t] if !is_builtin_prefix(t) => Some(CompletionContext::ResourceRef {
+        // A single bare ident (`x.|`) or `x.field.|` normally classifies
+        // as a resource reference — but if `x` is bound by an enclosing
+        // `for x in … :` it's a loop variable, not a resource type.
+        [t] if !is_builtin_prefix(t) => for_binding_ref(before, &segs)
+            .or(Some(CompletionContext::ResourceRef {
+                resource_type: (*t).to_string(),
+            })),
+        [t, n] if !is_builtin_prefix(t) => for_binding_ref(before, &segs)
+            .or(Some(CompletionContext::ResourceAttr {
+                resource_type: (*t).to_string(),
+                name: (*n).to_string(),
+            })),
+        _ => None,
+    }
+}
+
+/// Parse a collection-expression traversal (`var.servers`,
+/// `local.cfg`, `aws_x.y`) into an [`IndexRootRef`]. Trailing bracket
+/// indexers are stripped (`var.list[0]` → `var.list`).
+fn collection_root_from_expr(expr: &str) -> Option<IndexRootRef> {
+    let expr = strip_trailing_bracket_groups(expr.trim());
+    let segments = traversal_segments_reverse(expr);
+    let segs: Vec<&str> = segments.iter().map(|s| s.as_str()).collect();
+    match segs.as_slice() {
+        ["var", name] => Some(IndexRootRef::Variable { name: (*name).to_string() }),
+        ["local", name] => Some(IndexRootRef::Local { name: (*name).to_string() }),
+        ["module", name] => Some(IndexRootRef::Module { module_name: (*name).to_string() }),
+        ["data", t, n] if !is_builtin_prefix(t) => Some(IndexRootRef::DataSource {
             resource_type: (*t).to_string(),
+            name: (*n).to_string(),
         }),
-        [t, n] if !is_builtin_prefix(t) => Some(CompletionContext::ResourceAttr {
+        [t, n] if !is_builtin_prefix(t) => Some(IndexRootRef::Resource {
             resource_type: (*t).to_string(),
             name: (*n).to_string(),
         }),
         _ => None,
     }
+}
+
+/// If the head segment is a `for` loop binder in scope, classify the
+/// reference as a [`ForBindingRef`] (drill into the collection's element
+/// shape). Returns `Some(Unknown)` for the key binder of a `for k, v in`
+/// (a string — nothing to drill) or an unresolvable collection, so the
+/// caller doesn't fall back to a bogus resource-reference menu. Returns
+/// `None` when the head isn't a loop binder at all.
+fn for_binding_ref(before: &str, segs: &[&str]) -> Option<CompletionContext> {
+    let head = *segs.first()?;
+    let (binders, collection) = enclosing_for_binder(before)?;
+    if !binders.iter().any(|b| b == head) {
+        return None;
+    }
+    // `for v in …` → v is the element; `for k, v in …` → k is the key
+    // (string), v is the element.
+    let is_value = match binders.len() {
+        1 => binders[0] == head,
+        _ => binders.get(1).is_some_and(|v| v == head),
+    };
+    if is_value {
+        if let Some(root) = collection_root_from_expr(&collection) {
+            let path: Vec<String> = segs[1..].iter().map(|s| (*s).to_string()).collect();
+            return Some(CompletionContext::ForBindingRef { root, path });
+        }
+    }
+    // Key binder, or a collection we can't resolve — suppress the
+    // resource-reference fallback rather than offer a bogus menu.
+    Some(CompletionContext::Unknown)
+}
+
+/// Find the nearest enclosing `for <binders> in <collection> :` before
+/// the cursor, returning the binder idents and the collection
+/// expression text. Scans from the last `for` keyword backwards.
+fn enclosing_for_binder(before: &str) -> Option<(Vec<String>, String)> {
+    let bytes = before.as_bytes();
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut search_end = before.len();
+    while let Some(idx) = before[..search_end].rfind("for") {
+        let boundary_before = idx == 0 || !is_ident(bytes[idx - 1] as char);
+        let after = idx + 3;
+        let boundary_after = after >= before.len() || !is_ident(bytes[after] as char);
+        if boundary_before && boundary_after {
+            if let Some(binder) = parse_for_header(&before[after..]) {
+                return Some(binder);
+            }
+        }
+        if idx == 0 {
+            break;
+        }
+        search_end = idx;
+    }
+    None
+}
+
+/// Parse the `<binders> in <collection> :` portion that follows a `for`
+/// keyword. Returns the binder idents and the collection text.
+fn parse_for_header(after_for: &str) -> Option<(Vec<String>, String)> {
+    // Locate the ` in ` keyword (token-bounded).
+    let in_pos = find_token(after_for, "in")?;
+    let binder_str = &after_for[..in_pos];
+    let rest = &after_for[in_pos + 2..];
+    // Collection runs from after `in` to the first top-level `:`.
+    let colon = top_level_colon(rest)?;
+    let collection = rest[..colon].trim().to_string();
+    let binders: Vec<String> = binder_str
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if binders.is_empty() || collection.is_empty() {
+        return None;
+    }
+    Some((binders, collection))
+}
+
+/// Byte offset of the `in` keyword token in `s`, or `None`.
+fn find_token(s: &str, token: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut from = 0;
+    while let Some(rel) = s[from..].find(token) {
+        let idx = from + rel;
+        let before_ok = idx == 0 || !is_ident(bytes[idx - 1] as char);
+        let after = idx + token.len();
+        let after_ok = after >= s.len() || !is_ident(bytes[after] as char);
+        if before_ok && after_ok {
+            return Some(idx);
+        }
+        from = idx + token.len();
+    }
+    None
+}
+
+/// Byte offset of the first `:` not nested inside brackets/braces/parens
+/// (the for-expression result separator), or `None`.
+fn top_level_colon(s: &str) -> Option<usize> {
+    let mut depth: i32 = 0;
+    for (i, c) in s.char_indices() {
+        match c {
+            '[' | '{' | '(' => depth += 1,
+            ']' | '}' | ')' => depth = (depth - 1).max(0),
+            ':' if depth == 0 => return Some(i),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Walk back through any balanced `[...]` groups at the end of `s`,
@@ -2174,6 +2318,48 @@ mod tests {
     fn function_call_after_open_paren() {
         let src = "resource \"x\" \"y\" {\n  value = foo(";
         assert_eq!(at_end(src), CompletionContext::FunctionCall);
+    }
+
+    #[test]
+    fn for_binding_value_classifies_as_for_binding_ref() {
+        let src = "locals {\n  x = [for s in var.servers : s.";
+        match at_end(src) {
+            CompletionContext::ForBindingRef { root, path } => {
+                assert_eq!(root, IndexRootRef::Variable { name: "servers".to_string() });
+                assert!(path.is_empty());
+            }
+            other => panic!("expected ForBindingRef, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn for_binding_not_misclassified_as_resource_ref() {
+        // Regression: `s.` inside a for-expr must NOT become
+        // ResourceRef{resource_type:"s"}.
+        let src = "locals {\n  x = [for s in var.servers : s.";
+        assert!(!matches!(
+            at_end(src),
+            CompletionContext::ResourceRef { .. }
+        ));
+    }
+
+    #[test]
+    fn for_binding_key_does_not_drill() {
+        // `for k, v in map : k.` — k is the string key, not drillable;
+        // must be suppressed (Unknown), not a resource ref.
+        let src = "locals {\n  x = {for k, v in var.m : k.";
+        assert_eq!(at_end(src), CompletionContext::Unknown);
+    }
+
+    #[test]
+    fn for_binding_value_in_two_binder_form() {
+        let src = "locals {\n  x = {for k, v in var.m : k => v.";
+        match at_end(src) {
+            CompletionContext::ForBindingRef { root, .. } => {
+                assert_eq!(root, IndexRootRef::Variable { name: "m".to_string() });
+            }
+            other => panic!("expected ForBindingRef, got {other:?}"),
+        }
     }
 
     #[test]
