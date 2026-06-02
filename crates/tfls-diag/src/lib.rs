@@ -30,6 +30,7 @@ pub mod references;
 pub mod required_providers_version;
 pub mod required_version_presence;
 pub mod schema_validation;
+pub mod sensitive_output;
 pub mod standard_module_structure;
 pub mod syntax;
 pub mod typed_variables;
@@ -93,6 +94,7 @@ pub use references::{undefined_reference_diagnostics, undefined_reference_diagno
 pub use required_providers_version::required_providers_version_diagnostics;
 pub use required_version_presence::required_version_presence_diagnostics;
 pub use schema_validation::resource_diagnostics;
+pub use sensitive_output::{sensitive_output_diagnostics, sensitive_variable_names};
 pub use standard_module_structure::standard_module_structure_diagnostics;
 pub use syntax::diagnostics_for_parse_errors;
 pub use typed_variables::typed_variables_diagnostics;

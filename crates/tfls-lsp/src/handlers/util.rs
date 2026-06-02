@@ -76,6 +76,31 @@ pub(crate) fn module_supports_locals_replacement(
 /// Returns `None` when no constraint is declared in the
 /// module — caller should treat that as "every rule fires"
 /// (absence of evidence; can't suppress).
+/// Names of `variable "X" { sensitive = true }` declared anywhere in the
+/// active module's directory. Aggregated across siblings because a
+/// sensitive variable is typically declared in `variables.tf` while the
+/// leaking `output` lives in `outputs.tf`.
+pub(crate) fn module_sensitive_variables(
+    state: &StateStore,
+    primary_uri: &Url,
+) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let Some(target_dir) = parent_dir(primary_uri) else {
+        return out;
+    };
+    for entry in state.documents.iter() {
+        let uri = entry.key();
+        let Ok(path) = uri.to_file_path() else { continue };
+        if path.parent() != Some(&target_dir) {
+            continue;
+        }
+        if let Some(body) = entry.value().parsed.body.as_ref() {
+            out.extend(tfls_diag::sensitive_variable_names(body));
+        }
+    }
+    out
+}
+
 pub(crate) fn module_constraint_for_provider(
     state: &StateStore,
     primary_uri: &Url,

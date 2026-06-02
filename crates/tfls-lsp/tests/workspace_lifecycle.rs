@@ -37,6 +37,34 @@ async fn duplicate_variable_published_as_error() {
     client.shutdown().await;
 }
 
+/// A sensitive variable declared in one file leaking into a plain output
+/// in another file must be flagged — exercising the module-wide
+/// sensitive-variable aggregation.
+#[tokio::test]
+async fn sensitive_var_leaking_into_output_across_files() {
+    let mut client = TestClient::new();
+    client.initialize(None).await;
+
+    let vars_uri = "file:///mod/variables.tf";
+    let out_uri = "file:///mod/outputs.tf";
+
+    client
+        .did_open(vars_uri, "variable \"pw\" { sensitive = true }\n")
+        .await;
+    client.settle(100).await;
+    client
+        .did_open(out_uri, "output \"p\" { value = var.pw }\n")
+        .await;
+    client.settle(200).await;
+
+    let diags = client.last_diagnostics(out_uri).await;
+    assert!(
+        any_message_contains(&diags, "exposes a sensitive value"),
+        "expected a sensitive-output error, got {diags:?}"
+    );
+    client.shutdown().await;
+}
+
 /// Toggling `styleRules` on via didChangeConfiguration must recompute and
 /// republish open buffers — without the user editing them. A
 /// `documented_variables` (style-pack) diagnostic is the probe: it only

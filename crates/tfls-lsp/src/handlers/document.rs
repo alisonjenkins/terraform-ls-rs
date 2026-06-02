@@ -544,6 +544,15 @@ pub fn compute_diagnostics_with_lookup(
         // error). Cross-file duplicates within a module are a separate,
         // index-driven follow-up.
         out.extend(tfls_diag::duplicate_definition_diagnostics(body, &doc.rope));
+        // Sensitive variable leaking into a non-sensitive output. The
+        // sensitive-variable set is aggregated across the module (vars
+        // and outputs usually live in different files).
+        let sensitive_vars = crate::handlers::util::module_sensitive_variables(state, uri);
+        out.extend(tfls_diag::sensitive_output_diagnostics(
+            body,
+            &doc.rope,
+            &sensitive_vars,
+        ));
         // Provider-defined function calls (Terraform 1.8+). Lives
         // outside `tfls-diag` because it needs `StateStore` access
         // for `required_providers` peer-walk + `state.functions`
