@@ -27,7 +27,16 @@ pub fn server_capabilities() -> ServerCapabilities {
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
         completion_provider: Some(CompletionOptions {
-            trigger_characters: Some(vec![".".to_string(), "\"".to_string()]),
+            // `.` attribute/namespace, `"` block labels, `[` index-key
+            // completion (`aws_x.y["…"]`). `:`/`$` are deliberately
+            // omitted — a single `:` fires on every ternary / for-colon
+            // and `$` on every interpolation char, and the handler would
+            // pay a full classify before producing nothing useful.
+            trigger_characters: Some(vec![
+                ".".to_string(),
+                "\"".to_string(),
+                "[".to_string(),
+            ]),
             resolve_provider: Some(false),
             ..Default::default()
         }),
@@ -111,5 +120,25 @@ pub fn server_capabilities() -> ServerCapabilities {
             }
         })),
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn advertises_index_bracket_trigger() {
+        let caps = server_capabilities();
+        let triggers = caps
+            .completion_provider
+            .and_then(|c| c.trigger_characters)
+            .unwrap_or_default();
+        for expected in [".", "\"", "["] {
+            assert!(
+                triggers.iter().any(|t| t == expected),
+                "missing trigger {expected:?}; got {triggers:?}"
+            );
+        }
     }
 }
