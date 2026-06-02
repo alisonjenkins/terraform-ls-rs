@@ -62,6 +62,26 @@ const TOP_LEVEL_SNIPPETS: &[(&str, &str, &str)] = &[
     ),
     ("terraform", "terraform {\n  $0\n}", "Terraform block"),
     ("locals", "locals {\n  $0\n}", "Locals block"),
+    (
+        "import",
+        "import {\n  to = ${1}\n  id = \"${2}\"\n}",
+        "Import block (Terraform 1.5+)",
+    ),
+    (
+        "moved",
+        "moved {\n  from = ${1}\n  to   = ${2}\n}",
+        "Moved block (Terraform 1.1+)",
+    ),
+    (
+        "removed",
+        "removed {\n  from = ${1}\n  lifecycle {\n    destroy = ${2:false}\n  }\n}",
+        "Removed block (Terraform 1.7+)",
+    ),
+    (
+        "check",
+        "check \"${1:name}\" {\n  assert {\n    condition     = ${2}\n    error_message = \"${3}\"\n  }\n}",
+        "Check block (Terraform 1.5+)",
+    ),
 ];
 
 pub async fn completion(
@@ -232,6 +252,22 @@ pub async fn completion(
             builtin_body_items(builtin_blocks::OUTPUT_BLOCK, &filter)
         }
         CompletionContext::LocalsBlockBody => Vec::new(),
+        CompletionContext::ImportBlockBody => {
+            let filter = compute_body_filter(doc.parsed.body.as_ref(), offset);
+            builtin_body_items(builtin_blocks::IMPORT_BLOCK, &filter)
+        }
+        CompletionContext::MovedBlockBody => {
+            let filter = compute_body_filter(doc.parsed.body.as_ref(), offset);
+            builtin_body_items(builtin_blocks::MOVED_BLOCK, &filter)
+        }
+        CompletionContext::RemovedBlockBody => {
+            let filter = compute_body_filter(doc.parsed.body.as_ref(), offset);
+            builtin_body_items(builtin_blocks::REMOVED_BLOCK, &filter)
+        }
+        CompletionContext::CheckBlockBody => {
+            let filter = compute_body_filter(doc.parsed.body.as_ref(), offset);
+            builtin_body_items(builtin_blocks::CHECK_BLOCK, &filter)
+        }
         CompletionContext::ProviderBlockBody { name } => {
             let filter = compute_body_filter(doc.parsed.body.as_ref(), offset);
             provider_block_body_items(backend, &name, &filter)

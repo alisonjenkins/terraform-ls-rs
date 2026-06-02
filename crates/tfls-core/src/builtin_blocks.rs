@@ -246,6 +246,108 @@ pub const MODULE_BLOCK: BuiltinSchema = BuiltinSchema {
     blocks: &[],
 };
 
+// --- `import { ... }` (Terraform 1.5+) ------------------------------------
+
+pub const IMPORT_BLOCK: BuiltinSchema = BuiltinSchema {
+    attrs: &[
+        BuiltinAttr {
+            name: "to",
+            required: true,
+            detail: "Resource address to import into, e.g. `aws_instance.web`",
+        },
+        BuiltinAttr {
+            name: "id",
+            required: true,
+            detail: "Provider-specific ID of the existing object to import",
+        },
+        BuiltinAttr {
+            name: "provider",
+            required: false,
+            detail: "Provider configuration (alias) to use for the import",
+        },
+        BuiltinAttr {
+            name: "for_each",
+            required: false,
+            detail: "Import multiple instances (Terraform 1.7+)",
+        },
+    ],
+    blocks: &[],
+};
+
+// --- `moved { ... }` (Terraform 1.1+) -------------------------------------
+
+pub const MOVED_BLOCK: BuiltinSchema = BuiltinSchema {
+    attrs: &[
+        BuiltinAttr {
+            name: "from",
+            required: true,
+            detail: "Old resource address the state was recorded under",
+        },
+        BuiltinAttr {
+            name: "to",
+            required: true,
+            detail: "New resource address to move the state to",
+        },
+    ],
+    blocks: &[],
+};
+
+// --- `removed { ... }` (Terraform 1.7+) -----------------------------------
+
+pub const REMOVED_BLOCK: BuiltinSchema = BuiltinSchema {
+    attrs: &[BuiltinAttr {
+        name: "from",
+        required: true,
+        detail: "Resource address being removed from configuration (kept in state)",
+    }],
+    blocks: &[BuiltinBlock {
+        name: "lifecycle",
+        detail: "Removal behaviour (`destroy = false` keeps the real object)",
+        label_placeholder: None,
+        required_attrs: &[],
+        schema_fn: Some(removed_lifecycle_schema),
+    }],
+};
+
+pub const REMOVED_LIFECYCLE_BLOCK: BuiltinSchema = BuiltinSchema {
+    attrs: &[BuiltinAttr {
+        name: "destroy",
+        required: false,
+        detail: "When false, Terraform forgets the object instead of destroying it",
+    }],
+    blocks: &[],
+};
+fn removed_lifecycle_schema() -> BuiltinSchema { REMOVED_LIFECYCLE_BLOCK }
+
+// --- `check "x" { ... }` (Terraform 1.5+) ---------------------------------
+
+pub const CHECK_BLOCK: BuiltinSchema = BuiltinSchema {
+    attrs: &[],
+    blocks: &[
+        BuiltinBlock {
+            name: "assert",
+            detail: "Condition + error_message the check asserts",
+            label_placeholder: None,
+            required_attrs: &[
+                RequiredAttr { name: "condition", quoted: false },
+                RequiredAttr { name: "error_message", quoted: true },
+            ],
+            schema_fn: Some(assert_schema),
+        },
+        BuiltinBlock {
+            name: "data",
+            detail: "Scoped data source the check can read",
+            label_placeholder: Some("type"),
+            required_attrs: &[],
+            // Provider-defined data source body — no static schema.
+            schema_fn: None,
+        },
+    ],
+};
+
+pub const ASSERT_BLOCK: BuiltinSchema = VALIDATION_BLOCK;
+fn assert_schema() -> BuiltinSchema { ASSERT_BLOCK }
+
 // --- `required_providers { NAME = { ... } }` entry value ------------------
 
 /// Attributes that live inside the object literal assigned to a

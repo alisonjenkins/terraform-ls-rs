@@ -45,6 +45,19 @@ pub enum CompletionContext {
     /// intentionally returns nothing here.
     LocalsBlockBody,
 
+    /// Cursor is inside a top-level `import { ... }` block (Terraform 1.5+).
+    ImportBlockBody,
+
+    /// Cursor is inside a top-level `moved { ... }` block (Terraform 1.1+).
+    MovedBlockBody,
+
+    /// Cursor is inside a top-level `removed { ... }` block (Terraform 1.7+).
+    RemovedBlockBody,
+
+    /// Cursor is inside a top-level `check "<name>" { ... }` block
+    /// (Terraform 1.5+).
+    CheckBlockBody,
+
     /// Cursor is inside a top-level `provider "<name>" { ... }` block.
     /// Attribute completion comes from the provider schema's
     /// `provider: Schema` field, mirroring resource bodies.
@@ -1658,6 +1671,10 @@ pub fn resolve_nested_schema(
         "module" => builtin_blocks::MODULE_BLOCK,
         "resource" => builtin_blocks::RESOURCE_ROOT_SCHEMA,
         "data" => builtin_blocks::DATA_ROOT_SCHEMA,
+        "import" => builtin_blocks::IMPORT_BLOCK,
+        "moved" => builtin_blocks::MOVED_BLOCK,
+        "removed" => builtin_blocks::REMOVED_BLOCK,
+        "check" => builtin_blocks::CHECK_BLOCK,
         _ => return None,
     };
     for step in iter {
@@ -1728,6 +1745,12 @@ fn classify_block_header(header_source: &str) -> Option<CompletionContext> {
         "terraform" => return Some(CompletionContext::TerraformBlockBody),
         "locals" => return Some(CompletionContext::LocalsBlockBody),
         "required_providers" => return Some(CompletionContext::RequiredProvidersBody),
+        // Top-level lifecycle blocks. `import`/`moved`/`removed` are
+        // unlabeled; `check "name"` carries a label but its body schema
+        // doesn't depend on it.
+        "import" => return Some(CompletionContext::ImportBlockBody),
+        "moved" => return Some(CompletionContext::MovedBlockBody),
+        "removed" => return Some(CompletionContext::RemovedBlockBody),
         // `cloud`, `provider_meta` and unlabelled nested blocks under
         // `terraform {}` aren't classified here — they're treated as
         // unknown nested blocks so `enclosing_block_context` keeps
@@ -1748,6 +1771,7 @@ fn classify_block_header(header_source: &str) -> Option<CompletionContext> {
         ("variable", Some(name)) => Some(CompletionContext::VariableBlockBody { name }),
         ("output", Some(name)) => Some(CompletionContext::OutputBlockBody { name }),
         ("provider", Some(name)) => Some(CompletionContext::ProviderBlockBody { name }),
+        ("check", Some(_)) => Some(CompletionContext::CheckBlockBody),
         // `backend` is intentionally NOT matched here. It's nested
         // inside `terraform { }` and the path-based resolver handles
         // it uniformly — the walker collects `backend "s3"` as a
@@ -2053,6 +2077,41 @@ mod tests {
     fn function_call_after_open_paren() {
         let src = "resource \"x\" \"y\" {\n  value = foo(";
         assert_eq!(at_end(src), CompletionContext::FunctionCall);
+    }
+
+    #[test]
+    fn import_block_body_classified() {
+        assert_eq!(at_end("import {\n  "), CompletionContext::ImportBlockBody);
+    }
+
+    #[test]
+    fn moved_block_body_classified() {
+        assert_eq!(at_end("moved {\n  "), CompletionContext::MovedBlockBody);
+    }
+
+    #[test]
+    fn removed_block_body_classified() {
+        assert_eq!(at_end("removed {\n  "), CompletionContext::RemovedBlockBody);
+    }
+
+    #[test]
+    fn check_block_body_classified() {
+        assert_eq!(
+            at_end("check \"health\" {\n  "),
+            CompletionContext::CheckBlockBody
+        );
+    }
+
+    #[test]
+    fn removed_lifecycle_nested_resolves() {
+        // Inside `removed { lifecycle { | } }` the nested schema resolves
+        // to the lifecycle body (offering `destroy`).
+        let schema = resolve_nested_schema(&[
+            BlockStep { keyword: "removed".to_string(), label: None },
+            BlockStep { keyword: "lifecycle".to_string(), label: None },
+        ])
+        .expect("removed.lifecycle schema");
+        assert!(schema.attrs.iter().any(|a| a.name == "destroy"));
     }
 
     #[test]

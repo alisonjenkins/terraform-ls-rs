@@ -235,6 +235,41 @@ async fn attribute_value_refs_sort_before_functions() {
 }
 
 #[tokio::test]
+async fn top_level_offers_lifecycle_blocks() {
+    let u = uri("file:///a.tf");
+    let src = "\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(0, 0)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    for kw in ["import", "moved", "removed", "check"] {
+        assert!(ls.contains(&kw.to_string()), "{kw} block offered; got {ls:?}");
+    }
+}
+
+#[tokio::test]
+async fn import_block_body_offers_to_and_id() {
+    let u = uri("file:///a.tf");
+    let src = "import {\n\n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(1, 0)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"to".to_string()), "got {ls:?}");
+    assert!(ls.contains(&"id".to_string()), "got {ls:?}");
+}
+
+#[tokio::test]
 async fn tfvars_key_position_offers_declared_variables() {
     // In a .tfvars file the key position should offer the module's
     // declared variable names (not HCL block snippets), skipping ones
