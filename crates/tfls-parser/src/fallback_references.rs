@@ -55,6 +55,10 @@ pub fn extract_references_fallback(source: &str, uri: &Url, rope: &Rope) -> Vec<
     // range without closing the string. `interp_depth` tracks
     // open `${` inside the current string.
     let mut interp_depth: u32 = 0;
+    // A string literal nested INSIDE an interpolation, e.g. the `"var.x"`
+    // in `"${lookup(m, "var.x")}"`. Its bytes are literal text, not code,
+    // so we must skip them — otherwise they're mined as phantom refs.
+    let mut nested_string = false;
     let mut i = 0;
     while i < bytes.len() {
         let b = bytes[i];
@@ -100,7 +104,25 @@ pub fn extract_references_fallback(source: &str, uri: &Url, rope: &Rope) -> Vec<
         // brace nesting so we know when to revert to string
         // mode.
         if interp_depth > 0 {
+            if nested_string {
+                // Skip the literal bytes of a string nested in the
+                // interpolation until its closing quote.
+                match b {
+                    b'\\' if i + 1 < bytes.len() => i += 2,
+                    b'"' => {
+                        nested_string = false;
+                        i += 1;
+                    }
+                    _ => i += 1,
+                }
+                continue;
+            }
             match b {
+                b'"' => {
+                    nested_string = true;
+                    i += 1;
+                    continue;
+                }
                 b'{' => {
                     interp_depth += 1;
                     i += 1;
@@ -254,6 +276,24 @@ mod tests {
         assert!(r
             .iter()
             .any(|r| matches!(&r.kind, ReferenceKind::Local { name } if name == "region")));
+    }
+
+    #[test]
+    fn ignores_traversal_inside_nested_string_in_interpolation() {
+        // `var.phantom` lives inside a string literal nested in the
+        // interpolation — it is literal text, not a reference.
+        let r = refs("value = \"${lookup(local.m, \"var.phantom\")}\"\n");
+        assert!(
+            !r.iter()
+                .any(|r| matches!(&r.kind, ReferenceKind::Variable { name } if name == "phantom")),
+            "phantom ref mined from nested string: {r:?}"
+        );
+        // The real reference inside the interpolation is still found.
+        assert!(
+            r.iter()
+                .any(|r| matches!(&r.kind, ReferenceKind::Local { name } if name == "m")),
+            "real interpolation ref missing: {r:?}"
+        );
     }
 
     #[test]
