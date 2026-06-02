@@ -191,6 +191,21 @@ Set via either:
 
 Storage lives on `tfls_state::Config::format_style`; LSP handlers (`textDocument/formatting`, `rangeFormatting`, `onTypeFormatting`) read the live snapshot per-request via `state.config.snapshot()`. Unknown values keep the previous setting.
 
+## Per-rule diagnostic config
+
+Any diagnostic rule can be disabled or have its severity remapped via the `rules` config object (initializationOptions or `workspace/didChangeConfiguration`):
+
+```json
+{ "terraform-ls-rs": { "rules": {
+    "terraform_naming_convention": "off",
+    "terraform_duplicate_definition": "hint"
+} } }
+```
+
+Values: `off` (suppress), `hint`, `info`, `warning`, `error`. Keyed by the diagnostic's stable `code`. Each rule's output is tagged with a `terraform_<rule>` code at its `compute_diagnostics_with_lookup` call site (in `crates/tfls-lsp/src/handlers/document.rs`, via the `tag()` wrapper); a final `apply_rule_overrides` post-pass (before dedup) drops `off` codes and remaps the rest. Storage: `tfls_state::Config::rule_overrides` (`Arc<HashMap<String, RuleSeverity>>`, replaced wholesale per update so dropping a key restores the default). Live-toggle works because `did_change_configuration` already republishes open docs.
+
+Adding a code to a new rule = wrap its call site with `tag("terraform_<id>", …)`. Untagged diagnostics pass through unaffected.
+
 ## Code-action scopes
 
 Every multi-target code action (unwrap interpolation, convert lookup, set variable types, refine `type = any`, declare undefined variables, move outputs to `outputs.tf`, move variables to `variables.tf`, convert `null_resource` to `terraform_data`, convert `data "template_file"` to `templatefile()`) is offered at multiple scopes via `crates/tfls-lsp/src/handlers/code_action_scope.rs`. Diagnostic-only deprecation rules (`data "template_dir"`, `data "null_data_source"`) plug into the same framework but emit no fix.

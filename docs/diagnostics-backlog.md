@@ -101,11 +101,11 @@ Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially r
     `depends_on` accepting arbitrary expressions (rather than bare `resource.name` / `module.name` references) goes unflagged.
     **Proposal:** Add the `depends_on`-must-be-bare-ref check alongside the each/count-out-of-scope walker; implement as a dedicated body walk since the parser drops each/count References.
 
-- [ ] **Style rules are an all-or-nothing toggle — no per-rule enable/disable** (medium, effort M, confidence high) — `tfls-state/src/config.rs:66`; `document.rs:584`
+- [x] **Style rules are an all-or-nothing toggle — no per-rule enable/disable** (medium, effort M, confidence high) — `tfls-state/src/config.rs:66`; `document.rs:584`
     `styleRules` is one bool flipping four rules together, while typed_variables/variable_default_type/standard_module_structure are hardwired on. Teams wanting one rule but not another (tflint's `rule "name" { enabled = ... }`) have no recourse.
     **Proposal:** Add a per-rule `rules: HashMap<&'static str, RuleSetting{enabled, severity}>` from initializationOptions/didChangeConfiguration, keep `styleRules` as a bulk default, consult the map at each emit site keyed by a new stable `code`. (Shares the stable-code prerequisite with per-rule severity.)
 
-- [ ] **No per-rule severity configuration — every diagnostic hardcodes its DiagnosticSeverity** (medium, effort L, confidence high) — `tfls-state/src/config.rs:45-71`; all rule files
+- [x] **No per-rule severity configuration — every diagnostic hardcodes its DiagnosticSeverity** (medium, effort L, confidence high) — `tfls-state/src/config.rs:45-71`; all rule files
     No way to remap severities (demote noisy rules to HINT/off, promote a deprecation to ERROR in CI), unlike terraform-ls and tflint.
     **Proposal:** Add `rule_overrides: HashMap<&'static str, RuleSetting>` (off/hint/info/warning/error) keyed by stable rule id; apply in a single post-pass in `compute_diagnostics_with_lookup` keyed off `source` + a new stable `code` field added to ~45 emit sites.
 
