@@ -247,6 +247,20 @@ fn validate_block<H: UpgradeHintLookup>(
                         ..Default::default()
                     });
                 }
+                // A purely-computed attribute (computed, not optional, not
+                // required) is read-only — exported by the provider, never
+                // settable. `computed + optional` stays settable.
+                if attr.computed && !attr.optional && !attr.required {
+                    out.push(Diagnostic {
+                        range: *range,
+                        severity: Some(DiagnosticSeverity::ERROR),
+                        source: Some("terraform-ls-rs".to_string()),
+                        message: format!(
+                            "attribute `{name}` is read-only (computed) and cannot be set"
+                        ),
+                        ..Default::default()
+                    });
+                }
             }
             None => {
                 // Terraform meta-arguments (count, for_each, provider,
@@ -1007,6 +1021,57 @@ mod tests {
         let rope = Rope::from_str(src);
         let body = parse_source(src).body.expect("parses");
         resource_diagnostics(&body, &rope, &uri(), schemas)
+    }
+
+    fn schemas_with_computed_attr() -> ProviderSchemas {
+        sonic_rs::from_str(
+            r#"{
+                "format_version": "1.0",
+                "provider_schemas": {
+                    "registry.terraform.io/hashicorp/aws": {
+                        "provider": { "version": 0, "block": {} },
+                        "resource_schemas": {
+                            "aws_thing": {
+                                "version": 1,
+                                "block": {
+                                    "attributes": {
+                                        "arn": { "type": "string", "computed": true },
+                                        "name": { "type": "string", "optional": true },
+                                        "id_opt": { "type": "string", "optional": true, "computed": true }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("parse")
+    }
+
+    #[test]
+    fn flags_setting_read_only_attribute() {
+        let schemas = schemas_with_computed_attr();
+        let d = diags_with(&schemas, "resource \"aws_thing\" \"x\" {\n  arn = \"a\"\n}\n");
+        let ro = d
+            .iter()
+            .find(|d| d.message.contains("read-only (computed)"))
+            .expect("read-only diagnostic");
+        assert_eq!(ro.severity, Some(DiagnosticSeverity::ERROR));
+    }
+
+    #[test]
+    fn allows_setting_optional_computed_attribute() {
+        let schemas = schemas_with_computed_attr();
+        let d = diags_with(&schemas, "resource \"aws_thing\" \"x\" {\n  id_opt = \"a\"\n}\n");
+        assert!(d.iter().all(|d| !d.message.contains("read-only")), "got: {d:?}");
+    }
+
+    #[test]
+    fn allows_setting_normal_optional_attribute() {
+        let schemas = schemas_with_computed_attr();
+        let d = diags_with(&schemas, "resource \"aws_thing\" \"x\" {\n  name = \"a\"\n}\n");
+        assert!(d.iter().all(|d| !d.message.contains("read-only")), "got: {d:?}");
     }
 
     fn schemas_with_enum_attr() -> ProviderSchemas {
