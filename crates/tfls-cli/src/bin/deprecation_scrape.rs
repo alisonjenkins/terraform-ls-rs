@@ -97,6 +97,10 @@ enum Format {
 #[derive(Debug, Clone)]
 struct DepBlock {
     provider: String,
+    /// Registry namespace (`hashicorp`, `integrations`, `cloudflare`, …),
+    /// parsed from the `host/namespace/name` schema key. Needed to build a
+    /// correct registry-doc URL for third-party providers.
+    namespace: String,
     kind: BlockKind,
     type_name: String,
     description: Option<String>,
@@ -240,6 +244,7 @@ fn collect_deprecations(
 
     for (provider_addr, schema) in &schemas.provider_schemas {
         let local_name = local_provider_name(provider_addr);
+        let namespace = provider_namespace(provider_addr);
         if let Some(filter) = only_provider_local {
             if local_name != filter {
                 continue;
@@ -250,6 +255,7 @@ fn collect_deprecations(
             if res.block.deprecated {
                 blocks.push(DepBlock {
                     provider: local_name.to_string(),
+                    namespace: namespace.to_string(),
                     kind: BlockKind::Resource,
                     type_name: type_name.clone(),
                     description: nonempty(&res.block.description),
@@ -275,6 +281,7 @@ fn collect_deprecations(
             if ds.block.deprecated {
                 blocks.push(DepBlock {
                     provider: local_name.to_string(),
+                    namespace: namespace.to_string(),
                     kind: BlockKind::DataSource,
                     type_name: type_name.clone(),
                     description: nonempty(&ds.block.description),
@@ -314,16 +321,28 @@ fn local_provider_name(addr: &str) -> &str {
     addr.rsplit('/').next().unwrap_or(addr)
 }
 
+/// Parse the registry namespace from a `host/namespace/name` schema key.
+/// Falls back to `hashicorp` when the address has no namespace segment.
+fn provider_namespace(addr: &str) -> &str {
+    let segments: Vec<&str> = addr.split('/').filter(|s| !s.is_empty()).collect();
+    match segments.len() {
+        0 | 1 => "hashicorp",
+        // `namespace/name` or `host/namespace/name` — namespace is the
+        // segment immediately before the name.
+        n => segments[n - 2],
+    }
+}
+
 fn nonempty(s: &Option<String>) -> Option<String> {
     s.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()).map(String::from)
 }
 
-fn registry_url(provider_addr_local: &str, kind: BlockKind, type_name: &str) -> String {
+fn registry_url(namespace: &str, provider_addr_local: &str, kind: BlockKind, type_name: &str) -> String {
     let slug = type_name
         .strip_prefix(&format!("{provider_addr_local}_"))
         .unwrap_or(type_name);
     format!(
-        "https://registry.terraform.io/providers/hashicorp/{provider_addr_local}/latest/docs/{}/{slug}",
+        "https://registry.terraform.io/providers/{namespace}/{provider_addr_local}/latest/docs/{}/{slug}",
         kind.registry_url_segment()
     )
 }
@@ -348,7 +367,7 @@ fn emit_markdown(
                 current_provider = &b.provider;
                 println!("## `{current_provider}`\n");
             }
-            let url = registry_url(&b.provider, b.kind, &b.type_name);
+            let url = registry_url(&b.namespace, &b.provider, b.kind, &b.type_name);
             println!("- **{}** `{}`", b.kind.label_word(), b.type_name);
             println!("  - docs: {url}");
             if let Some(desc) = &b.description {
@@ -403,7 +422,7 @@ fn emit_json(
         blocks
             .iter()
             .map(|b| {
-                let url = registry_url(&b.provider, b.kind, &b.type_name);
+                let url = registry_url(&b.namespace, &b.provider, b.kind, &b.type_name);
                 sonic_rs::json!({
                     "provider": b.provider,
                     "kind": b.kind.block_kind_str(),
@@ -447,7 +466,7 @@ fn emit_json(
 /// `HARDCODED_DEPRECATION_LABELS`.
 fn emit_scaffold(b: &DepBlock) {
     let mod_name = format!("deprecated_{}", b.type_name);
-    let url = registry_url(&b.provider, b.kind, &b.type_name);
+    let url = registry_url(&b.namespace, &b.provider, b.kind, &b.type_name);
     let kind_word = b.kind.label_word();
 
     println!("// File: crates/tfls-diag/src/{mod_name}.rs");
