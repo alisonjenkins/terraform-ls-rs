@@ -176,6 +176,17 @@ pub struct StateStore {
     /// watcher having delivered an event yet (cold-read first
     /// access right after `terraform init`).
     pub locks_mtime: FxDashMap<std::path::PathBuf, std::time::SystemTime>,
+
+    /// Serializes the document↔index mutators (`upsert_document`,
+    /// `reparse_document`, `remove_document`). The `documents` map and the
+    /// `definitions_by_name`/`references_by_name` secondary indexes are
+    /// separate DashMaps, so a multi-step mutation across them is only
+    /// per-shard atomic. These mutators run concurrently from the worker
+    /// task, the file watcher, and `did_change`/`did_save` on
+    /// `spawn_blocking`; without this lock, interleaving on the same URI
+    /// could leave orphaned index locations or partially-cleared indexes.
+    /// Held only for the brief index rebuild — not across I/O.
+    index_lock: std::sync::Mutex<()>,
 }
 
 impl StateStore {
@@ -559,8 +570,15 @@ impl StateStore {
             .and_then(|p| p.data_source_schemas.get(type_name).cloned())
     }
 
+    /// Lock the index-maintenance mutex, recovering from poisoning (we
+    /// never panic while holding it, so the inner `()` is always valid).
+    fn lock_indexes(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.index_lock.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Insert (or replace) a document and rebuild its indexes.
     pub fn upsert_document(&self, doc: DocumentState) {
+        let _guard = self.lock_indexes();
         let uri = doc.uri.clone();
         self.remove_from_indexes(&uri);
         self.add_to_indexes(&doc);
@@ -569,6 +587,7 @@ impl StateStore {
 
     /// Re-analyse an existing document in place and refresh its indexes.
     pub fn reparse_document(&self, uri: &Url) {
+        let _guard = self.lock_indexes();
         self.remove_from_indexes(uri);
         if let Some(mut doc) = self.documents.get_mut(uri) {
             doc.reparse();
@@ -578,6 +597,7 @@ impl StateStore {
 
     /// Remove a document from the store and from indexes.
     pub fn remove_document(&self, uri: &Url) -> Option<DocumentState> {
+        let _guard = self.lock_indexes();
         self.remove_from_indexes(uri);
         self.documents.remove(uri).map(|(_, d)| d)
     }
