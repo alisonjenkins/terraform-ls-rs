@@ -20,14 +20,13 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - os: macos-14
-            target: aarch64-apple-darwin
-          - os: macos-13
-            target: x86_64-apple-darwin
-          # Windows is intentionally excluded: the provider-plugin
-          # transport (crates/tfls-provider-protocol) speaks unix-domain
-          # sockets (tokio::net::UnixStream), which Terraform uses on
-          # unix; Windows providers use TCP, which isn't implemented yet.
+          # macOS targets are intentionally excluded: GitHub-hosted macOS
+          # runners are billed at a steep multiplier and the free pool is
+          # frequently starved (jobs queue for ~an hour). Windows is also
+          # excluded — the provider-plugin transport
+          # (crates/tfls-provider-protocol) speaks unix-domain sockets
+          # (tokio::net::UnixStream), which Terraform uses on unix;
+          # Windows providers use TCP, which isn't implemented yet.
     steps:
       - uses: actions/checkout@v4
 
