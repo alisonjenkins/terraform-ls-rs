@@ -125,7 +125,7 @@ Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially r
     The five `aws_alb*` rules emit a permanent, unsuppressable stylistic WARNING on valid current code; these aliases are still fully supported and not provider-flagged deprecated (contrast aws_s3_bucket_object).
     **Proposal:** Add a `severity` field to `DeprecationRule` and downgrade the alb-alias family to HINT/INFO (keep the auto-fix). Threading the field through ~18 rule literals + 2 emit sites + tests is the bulk.
 
-- [ ] **Shared/reusable modules misclassified as root → false "declared but not used" floods** (medium, effort M, confidence high) — `document.rs:1266`; `module_snapshot.rs:340/322`
+- [x] **Shared/reusable modules misclassified as root → false "declared but not used" floods** (medium, effort M, confidence high) — `document.rs:1266`; `module_snapshot.rs:340/322`
     unused_declarations (and typed_variables gating) only fire on root modules, decided by walking indexed `state.documents` for a `module` caller. Opening a standalone shared-module dir (caller outside the workspace) wrongly flags it root, flagging every exposed input as unused.
     **Proposal:** Make root detection tolerant of un-indexed callers — don't flag when no caller is found unless the dir is the workspace root, use lexical path normalisation instead of canonicalize, or gate behind a config opt-in for non-workspace-root dirs.
 
