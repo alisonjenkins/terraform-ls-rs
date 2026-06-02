@@ -235,6 +235,26 @@ async fn attribute_value_refs_sort_before_functions() {
 }
 
 #[tokio::test]
+async fn output_value_offers_reference_roots() {
+    // A bare `output { value = | }` should surface declared var/local
+    // references plus namespace roots — not just functions.
+    let u = uri("file:///a.tf");
+    let src = "variable \"foo\" {}\nlocals { bar = 1 }\noutput \"o\" {\n  value = \n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(3, 10)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"var.foo".to_string()), "var ref offered; got {ls:?}");
+    assert!(ls.contains(&"local.bar".to_string()), "local ref offered; got {ls:?}");
+    assert!(ls.contains(&"path".to_string()), "namespace root offered; got {ls:?}");
+}
+
+#[tokio::test]
 async fn expression_context_offers_for_and_ternary_scaffolds() {
     // At a bare expression position the menu should lead with the
     // comprehension / conditional scaffolds.

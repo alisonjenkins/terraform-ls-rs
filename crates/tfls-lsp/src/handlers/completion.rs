@@ -198,6 +198,7 @@ pub async fn completion(
             items.extend(function_name_items(backend));
             items
         }
+        CompletionContext::ExpressionRoot => expression_root_items(backend, &uri),
         CompletionContext::ProviderFunctionNamespace => {
             provider_function_namespace_items(backend, &uri)
         }
@@ -1983,6 +1984,66 @@ fn expression_scaffold_items() -> Vec<CompletionItem> {
         .collect()
 }
 
+/// Reference-root completion for a bare expression value in a block with
+/// no schema-typed attribute (output `value`, `locals`, module inputs).
+/// Offers comprehension scaffolds, the declared `var.` / `local.` /
+/// `module.` names, the namespace roots (`each`, `path`, `self`,
+/// `data`, `terraform`), and the function list — everything that can
+/// legally start an expression there.
+fn expression_root_items(backend: &Backend, uri: &Url) -> Vec<CompletionItem> {
+    let mut items = expression_scaffold_items();
+    let mut sort_index = 0u32;
+
+    let mut push_ref = |label: String, detail: &str, kind: CompletionItemKind, idx: &mut u32| {
+        items.push(CompletionItem {
+            sort_text: Some(format!("1{:04}_{label}", *idx)),
+            label,
+            kind: Some(kind),
+            detail: Some(detail.to_string()),
+            ..Default::default()
+        });
+        *idx += 1;
+    };
+
+    for name in backend.state.all_variable_names() {
+        push_ref(format!("var.{name}"), "variable", CompletionItemKind::VARIABLE, &mut sort_index);
+    }
+    for name in backend.state.all_local_names() {
+        push_ref(format!("local.{name}"), "local", CompletionItemKind::VARIABLE, &mut sort_index);
+    }
+    for name in module_names_in_scope(backend, uri) {
+        push_ref(format!("module.{name}"), "module", CompletionItemKind::MODULE, &mut sort_index);
+    }
+
+    // Namespace root keywords — insert the root with a trailing dot so the
+    // follow-up keystroke re-triggers the namespaced completion.
+    for (root, detail) in [
+        ("each", "for_each iteration namespace"),
+        ("count", "count.index namespace"),
+        ("path", "path.module / path.root / path.cwd"),
+        ("self", "current resource (inside provisioners)"),
+        ("terraform", "terraform.workspace namespace"),
+    ] {
+        items.push(CompletionItem {
+            label: root.to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some(detail.to_string()),
+            sort_text: Some(format!("2_{root}")),
+            insert_text: Some(format!("{root}.")),
+            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+            ..Default::default()
+        });
+    }
+
+    // Functions last (trailing bucket), alphabetical among themselves.
+    items.extend(function_name_items(backend).into_iter().map(|mut item| {
+        item.sort_text = Some(format!("9_{}", item.label));
+        item
+    }));
+
+    items
+}
+
 fn function_name_items(backend: &Backend) -> Vec<CompletionItem> {
     let mut items: Vec<CompletionItem> = backend
         .state
@@ -2604,6 +2665,22 @@ fn builtin_namespace_item(label: &str, doc: &str) -> CompletionItem {
         })),
         ..Default::default()
     }
+}
+
+/// Sorted, de-duplicated declared `module "<name>"` block names across
+/// the current directory.
+fn module_names_in_scope(backend: &Backend, uri: &Url) -> Vec<String> {
+    let dir = parent_dir(uri);
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    for entry in backend.state.documents.iter() {
+        if !doc_in_dir(entry.key(), dir.as_deref()) {
+            continue;
+        }
+        for n in entry.value().symbols.modules.keys() {
+            names.insert(n.clone());
+        }
+    }
+    names.into_iter().collect()
 }
 
 /// Gather a sorted, de-duplicated list of names from every `.tf` file

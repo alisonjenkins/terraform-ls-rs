@@ -186,6 +186,14 @@ pub enum CompletionContext {
     /// start — offer function names.
     FunctionCall,
 
+    /// Cursor is at a bare expression value (`= |`) inside a block that
+    /// is NOT a resource/data block — e.g. `output { value = | }`,
+    /// `locals { x = | }`, a `module` input. We have no schema-typed
+    /// attribute to anchor on, so offer the full set of reference roots
+    /// (var/local/module/each/path/data/self/resource addresses) plus
+    /// functions and comprehension scaffolds.
+    ExpressionRoot,
+
     /// Cursor is after `provider::` — expect a provider local name
     /// (Terraform 1.8+ provider-defined function call syntax).
     ProviderFunctionNamespace,
@@ -745,6 +753,12 @@ fn expression_context(before: &str) -> Option<CompletionContext> {
         if let Some(ctx) = attribute_value_context(trimmed) {
             return Some(ctx);
         }
+        // `attr = |` but the enclosing block isn't resource/data (it's
+        // output / locals / a module input). There's no schema-typed
+        // attribute to anchor on, but reference roots + functions are
+        // still valid here — offer the broad expression-root menu rather
+        // than functions only.
+        return Some(CompletionContext::ExpressionRoot);
     }
 
     Some(CompletionContext::FunctionCall)
@@ -2042,6 +2056,30 @@ mod tests {
     }
 
     #[test]
+    fn bare_value_in_output_block_is_expression_root() {
+        // `output { value = | }` has no schema-typed attribute, so the
+        // broad reference-root menu (var/local/module/functions) applies.
+        let src = "output \"x\" {\n  value = ";
+        assert_eq!(at_end(src), CompletionContext::ExpressionRoot);
+    }
+
+    #[test]
+    fn bare_value_in_locals_block_is_expression_root() {
+        let src = "locals {\n  x = ";
+        assert_eq!(at_end(src), CompletionContext::ExpressionRoot);
+    }
+
+    #[test]
+    fn bare_value_in_resource_stays_attribute_value() {
+        // Resource/data keep the schema-typed AttributeValue path.
+        let src = "resource \"aws_instance\" \"y\" {\n  ami = ";
+        assert!(matches!(
+            at_end(src),
+            CompletionContext::AttributeValue { .. }
+        ));
+    }
+
+    #[test]
     fn function_call_after_comma() {
         let src = "resource \"x\" \"y\" {\n  value = foo(a, ";
         assert_eq!(at_end(src), CompletionContext::FunctionCall);
@@ -2275,15 +2313,16 @@ mod tests {
             "  validation {\n",
             "    condition = ",
         );
-        // Inside `validation {` body, no resource — falls through
-        // to FunctionCall via expression_context. Important: the
-        // raw `{` inside the heredoc body must NOT be treated as
-        // a block opener that confuses the walk.
+        // Inside `validation {` body, no resource — `condition = |` is a
+        // bare expression value, so expression_context returns
+        // ExpressionRoot. Important: the raw `{` inside the heredoc body
+        // must NOT be treated as a block opener that confuses the walk
+        // (which would otherwise mislabel the context).
         let ctx = at_end(src);
         assert!(
             matches!(
                 ctx,
-                CompletionContext::FunctionCall | CompletionContext::Unknown
+                CompletionContext::ExpressionRoot | CompletionContext::Unknown
             ),
             "got: {ctx:?}"
         );
