@@ -472,11 +472,23 @@ fn nested_block_scaffold_snippet(name: &str, block: &tfls_schema::BlockSchema) -
 }
 
 pub fn resource_scaffold_snippet(type_name: &str, backend: &Backend, kind: &str) -> String {
-    let schema = if kind == "data" {
-        backend.state.data_source_schema(type_name)
+    // Borrow the Schema out of the provider's Arc rather than deep-cloning
+    // it via resource_schema(): the type-menu builds a scaffold for every
+    // one of ~1000-1400 types per keystroke, and a full Schema clone each
+    // time is the dominant cost. find_*_schema returns an Arc (one cheap
+    // refcount bump) we can read the required attrs from in place.
+    let provider = if kind == "data" {
+        backend.state.find_data_source_schema(type_name)
     } else {
-        backend.state.resource_schema(type_name)
+        backend.state.find_resource_schema(type_name)
     };
+    let schema = provider.as_ref().and_then(|p| {
+        if kind == "data" {
+            p.data_source_schemas.get(type_name)
+        } else {
+            p.resource_schemas.get(type_name)
+        }
+    });
 
     let mut snippet = format!("{type_name}\" \"${{1:name}}\" {{\n");
     let mut tab = 2;

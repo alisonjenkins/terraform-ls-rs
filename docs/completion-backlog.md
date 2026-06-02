@@ -89,7 +89,7 @@ Workflow: `completion-deep-dive`. 48 agents, ~2.5M tokens. Bugs adversarially re
 
 ## Improvements
 
-- [ ] **Resource/data type completion clones the full provider schema per keystroke and never sets isIncomplete** (medium, effort M, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:265 (resource_type_items) / 401 (resource_scaffold_snippet); dispatcher :247
+- [x] **Resource/data type completion clones the full provider schema per keystroke and never sets isIncomplete** (medium, effort M, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:265 (resource_type_items) / 401 (resource_scaffold_snippet); dispatcher :247
   ResourceType/DataSourceType calls resource_scaffold_snippet for each of ~1000-1400 types, each doing `resource_schema(...).cloned()` on the owned Schema — thousands of full clones + snippet bodies per keystroke, returned as a complete Array. Real cost cliff on large providers.
   **Proposal:** Build bare-label items first; either lazily attach the scaffold via completionItem/resolve (enable resolve_provider) or return `List{is_incomplete:true}` with a capped page. At minimum add a borrow-based schema accessor so the scaffold reads required attrs without cloning Schema.
 
