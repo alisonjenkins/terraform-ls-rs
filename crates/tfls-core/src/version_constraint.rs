@@ -411,14 +411,26 @@ fn satisfies_one(c: &Constraint, candidate: &str, candidate_key: &VersionKey) ->
         // Malformed constraint version — reject rather than mismatch.
         return false;
     };
+    // go-version semantics: a pre-release candidate satisfies a RANGE
+    // constraint only when the operand is itself a pre-release on the
+    // same core (major.minor.patch). Otherwise a registry beta/rc would
+    // silently satisfy a plain `>= X` and suppress the no-matching-
+    // version warning. Exact `=` / `!=` keep their literal semantics.
+    let pre_excluded = candidate_key.stability == 0
+        && constraint_key.stability == 1
+        && (candidate_key.major != constraint_key.major
+            || candidate_key.minor != constraint_key.minor
+            || candidate_key.patch != constraint_key.patch);
     match c.op {
         ConstraintOp::Eq => candidate == c.version,
         ConstraintOp::Ne => candidate != c.version,
-        ConstraintOp::Gt => candidate_key > &constraint_key,
-        ConstraintOp::Gte => candidate_key >= &constraint_key,
-        ConstraintOp::Lt => candidate_key < &constraint_key,
-        ConstraintOp::Lte => candidate_key <= &constraint_key,
-        ConstraintOp::Pessimistic => pessimistic_matches(&c.version, candidate_key),
+        ConstraintOp::Gt => !pre_excluded && candidate_key > &constraint_key,
+        ConstraintOp::Gte => !pre_excluded && candidate_key >= &constraint_key,
+        ConstraintOp::Lt => !pre_excluded && candidate_key < &constraint_key,
+        ConstraintOp::Lte => !pre_excluded && candidate_key <= &constraint_key,
+        ConstraintOp::Pessimistic => {
+            !pre_excluded && pessimistic_matches(&c.version, candidate_key)
+        }
     }
 }
 
@@ -449,6 +461,16 @@ fn pessimistic_matches(constraint_version: &str, candidate_key: &VersionKey) -> 
     }
 }
 
+/// One dot-separated identifier of a pre-release tag (`-rc.2` → `[rc, 2]`).
+/// Per semver / go-version, numeric identifiers compare numerically and
+/// have LOWER precedence than alphanumeric ones — so `Num` is declared
+/// before `Text`, giving the derived `Ord` `Num(_) < Text(_)`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum PreSegment {
+    Num(u64),
+    Text(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct VersionKey {
     major: i64,
@@ -456,7 +478,11 @@ struct VersionKey {
     patch: i64,
     /// Stable (`1`) sorts after pre-release (`0`) so `1.0.0` > `1.0.0-rc`.
     stability: i32,
-    pre_id: String,
+    /// Dot-split pre-release identifiers, compared field-by-field. The
+    /// derived `Vec` ordering also gives semver's "larger set wins when
+    /// the shared prefix is equal" rule (`[rc] < [rc, 1]`). Empty for a
+    /// stable version (but `stability` separates those first).
+    pre: Vec<PreSegment>,
 }
 
 fn version_key(v: &str) -> Option<VersionKey> {
@@ -470,12 +496,33 @@ fn version_key(v: &str) -> Option<VersionKey> {
     let minor: i64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let patch: i64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let stability = if pre.is_some() { 0 } else { 1 };
+    // Strip any build-metadata (`+...`) off the pre-release tag, then
+    // split on `.` and classify each identifier numeric vs alphanumeric.
+    let pre_segments = match pre {
+        Some(p) => {
+            let p = p.split('+').next().unwrap_or(p);
+            p.split('.')
+                .filter(|s| !s.is_empty())
+                .map(|seg| {
+                    if seg.bytes().all(|b| b.is_ascii_digit()) {
+                        match seg.parse::<u64>() {
+                            Ok(n) => PreSegment::Num(n),
+                            Err(_) => PreSegment::Text(seg.to_string()),
+                        }
+                    } else {
+                        PreSegment::Text(seg.to_string())
+                    }
+                })
+                .collect()
+        }
+        None => Vec::new(),
+    };
     Some(VersionKey {
         major,
         minor,
         patch,
         stability,
-        pre_id: pre.unwrap_or("").to_string(),
+        pre: pre_segments,
     })
 }
 
@@ -625,6 +672,52 @@ mod tests {
         assert!(satisfies_all(&p.constraints, "1.5.0"));
         assert!(!satisfies_all(&p.constraints, "0.9.0"));
         assert!(!satisfies_all(&p.constraints, "2.0.0"));
+    }
+
+    #[test]
+    fn prerelease_ordering_compares_numeric_dotted_segments() {
+        // Dotted numeric pre-release identifiers compare numerically, not
+        // lexically: `rc.2` < `rc.10` (string compare would invert it).
+        assert_eq!(
+            compare_versions("1.0.0-rc.2", "1.0.0-rc.10"),
+            Some(std::cmp::Ordering::Less)
+        );
+        // A larger set of fields wins when the prefix is equal.
+        assert_eq!(
+            compare_versions("1.0.0-rc", "1.0.0-rc.1"),
+            Some(std::cmp::Ordering::Less)
+        );
+        // Numeric identifiers rank below alphanumeric.
+        assert_eq!(
+            compare_versions("1.0.0-1", "1.0.0-alpha"),
+            Some(std::cmp::Ordering::Less)
+        );
+        // Pre-release always below the matching stable release.
+        assert_eq!(
+            compare_versions("1.0.0-rc.1", "1.0.0"),
+            Some(std::cmp::Ordering::Less)
+        );
+    }
+
+    #[test]
+    fn prerelease_candidate_excluded_from_stable_range() {
+        // A registry beta must NOT satisfy a plain `>= 5.99.0` (go-version
+        // semantics) — otherwise the "no published version matches"
+        // warning is falsely suppressed.
+        let p = parse(">= 5.99.0");
+        assert!(!satisfies_all(&p.constraints, "6.0.0-beta1"));
+        assert!(satisfies_all(&p.constraints, "6.0.0"));
+    }
+
+    #[test]
+    fn prerelease_candidate_allowed_when_operand_is_prerelease_same_core() {
+        // Opting in via a pre-release operand on the same core admits it.
+        let p = parse(">= 6.0.0-beta1");
+        assert!(satisfies_all(&p.constraints, "6.0.0-beta2"));
+        // ...but a beta on a DIFFERENT core is still excluded from a
+        // stable operand.
+        let p2 = parse(">= 6.0.0");
+        assert!(!satisfies_all(&p2.constraints, "6.1.0-beta1"));
     }
 
     #[test]
