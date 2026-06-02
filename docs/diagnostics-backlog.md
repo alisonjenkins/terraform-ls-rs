@@ -81,15 +81,15 @@ Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially r
     Terraform errors when a `sensitive = true` variable or schema-sensitive attribute flows into an `output` not marked sensitive — a security-relevant gap. The server has the data but no rule correlates them.
     **Proposal:** Add `sensitive_output_diagnostics`: build a sensitive-source set (vars `sensitive = true`, schema-sensitive attr paths), walk each `output`, and if it lacks `sensitive = true` but references a sensitive source via expr_walk, emit ERROR + a `sensitive = true` quick-fix. Stage variable-half first; handle `nonsensitive(...)` and locals propagation.
 
-- [ ] **Required nested blocks (min_items >= 1) are never validated** (medium, effort M, confidence high) — `schema_validation.rs:287-300`
+- [x] **Required nested blocks (min_items >= 1) are never validated** (medium, effort M, confidence high) — `schema_validation.rs:287-300`
     The missing-required loop iterates only `schema.block.attributes`; `NestedBlockSchema.min_items`/`max_items` are never consulted, so omitting a mandatory nested block (or exceeding max_items) passes clean.
     **Proposal:** After the attribute loop, iterate `schema.block.block_types`, counting nested-block idents (a `dynamic "<label>"` satisfies min_items). Emit `missing required block` when min_items>=1 and count==0 with no matching dynamic; `too many "<name>" blocks (max N)` when count > max_items > 0.
 
-- [ ] **No attribute type checking / allowed_values enum validation despite schema carrying both** (medium, effort M, confidence high) — `schema_validation.rs` (validate_block); `types.rs:57,94`
+- [~] **No attribute type checking / allowed_values enum validation despite schema carrying both** (enum half DONE; structural type-check remains) (medium, effort M, confidence high) — `schema_validation.rs` (validate_block); `types.rs:57,94`
     `AttributeSchema.r#type` and registry-mined `allowed_values` are populated but only power hover/completion. `instance_type = 5` or `volume_type = "gp9"` produces no diagnostic.
     **Proposal:** For literal-only values (skip traversals/templates to avoid FPs, and skip scalar string↔number/bool coercion), flag structural primitive/collection mismatches against the cty type, and flag string literals not in `allowed_values` when `Some` (WARNING — docs-mined enums lag). Pair the enum check with a nearest-valid-value quick-fix.
 
-- [ ] **No diagnostic for count/for_each misuse and `each.*`/`count.*`/`self.*` out of scope** (medium, effort M, confidence high) — `schema_validation.rs:242-247`; `references.rs:196`; `expr_walk.rs`
+- [x] **No diagnostic for count/for_each misuse and `each.*`/`count.*`/`self.*` out of scope** (medium, effort M, confidence high) — `schema_validation.rs:242-247`; `references.rs:196`; `expr_walk.rs`
     `count`/`for_each` are skipped as meta-args with no validation, and each/count/self are blanket-excluded from reference classification, so three ERROR-class mistakes get no feedback: both count and for_each on one block; `for_each` over a list literal; `each.*`/`count.*`/`self.*` used where the enclosing block lacks the meta-arg/context.
     **Proposal:** In validate_block, flag both-count-and-for_each (ERROR on the second) and `for_each = [...]` (WARNING + `toset()` quick-fix). Add a context-threading body walker (not the flat helper) flagging each/count traversals whose enclosing block lacks the meta-arg, and self.* outside provisioner/connection/lifecycle; propagate scope into nested/dynamic blocks.
 
@@ -97,7 +97,7 @@ Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially r
     The server flags unused required_providers but not the inverse: a resource/data whose provider local has no required_providers entry. For non-hashicorp providers this breaks `terraform init`; `resource "datadog_monitor"` with no source gets no warning.
     **Proposal:** Add `missing_required_provider_diagnostics`: a `declared_provider_locals()` accessor aggregating required_providers across siblings; for each used local not declared AND not a well-known hashicorp/builtin name, emit WARNING on the first such resource. Gate to root modules.
 
-- [ ] **depends_on entries must be bare resource/module refs, not arbitrary expressions — unvalidated** (medium, effort M, confidence high) — `references.rs:21`; `tfls-parser/src/references.rs:199`
+- [x] **depends_on entries must be bare resource/module refs, not arbitrary expressions — unvalidated** (medium, effort M, confidence high) — `references.rs:21`; `tfls-parser/src/references.rs:199`
     `depends_on` accepting arbitrary expressions (rather than bare `resource.name` / `module.name` references) goes unflagged.
     **Proposal:** Add the `depends_on`-must-be-bare-ref check alongside the each/count-out-of-scope walker; implement as a dedicated body walk since the parser drops each/count References.
 
