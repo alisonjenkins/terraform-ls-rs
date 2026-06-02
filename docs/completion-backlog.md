@@ -79,7 +79,7 @@ Workflow: `completion-deep-dive`. 48 agents, ~2.5M tokens. Bugs adversarially re
   `each.value.|` strips to `["each","value"]` and falls to Unknown because the `[t,n]` arm is guarded by `!is_builtin_prefix(t)` and `each` is builtin; yet for_each element shapes are already inferred/stored. One of the most common reference patterns yields nothing.
   **Proposal:** Add CompletionContext::EachAttr{path} classified from `["each","value", rest..]`; resolve the enclosing block's for_each address, unwrap one level (Map→value / Set/List→element / Object→field) from the stored collection shape, and walk_shape along rest to offer object fields (mirror index_key_items). Cover data/module for_each variants.
 
-- [ ] **Resource/data attribute reference completion omits nested block names (block_types)** (medium, effort S, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:2523-2553 (resource_attr_items)
+- [x] **Resource/data attribute reference completion omits nested block names (block_types)** (medium, effort S, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:2523-2553 (resource_attr_items)
   After `<resource>.<name>.` (ResourceAttr/DataSourceAttr/SelfRef) only schema.block.attributes are offered; nested blocks (root_block_device, network_interface, subnet_mapping, …) are valid referenceable targets but never suggested. Same gap for `self.<nested_block>`. (Subsumes the low-severity duplicate of this finding.)
   **Proposal:** After collecting attribute items, also iterate `schema.block.block_types` and push one FIELD/STRUCT item per nested-block name (detail "nested block"), optionally hinting an index from nesting_mode; filter config-only blocks (lifecycle/timeouts) that aren't valid reference targets.
 
@@ -93,35 +93,35 @@ Workflow: `completion-deep-dive`. 48 agents, ~2.5M tokens. Bugs adversarially re
   ResourceType/DataSourceType calls resource_scaffold_snippet for each of ~1000-1400 types, each doing `resource_schema(...).cloned()` on the owned Schema — thousands of full clones + snippet bodies per keystroke, returned as a complete Array. Real cost cliff on large providers.
   **Proposal:** Build bare-label items first; either lazily attach the scaffold via completionItem/resolve (enable resolve_provider) or return `List{is_incomplete:true}` with a capped page. At minimum add a borrow-based schema accessor so the scaffold reads required attrs without cloning Schema.
 
-- [ ] **Schema body completion does not surface required attributes above optional ones** (medium, effort S, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:1375-1393,1432; builtin_body_items :558
+- [x] **Schema body completion does not surface required attributes above optional ones** (medium, effort S, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:1375-1393,1432; builtin_body_items :558
   Attribute items have no sort_text and are flat-sorted by label, intermixing required and optional; users hunt for the must-fill fields (e.g. aws_instance.ami) among dozens of optionals.
   **Proposal:** Set required-first sort_text buckets (`0_{name}` required, `1_{name}` optional) in both builders; give nested-block/meta items their own later buckets so unprefixed labels don't sort ahead.
 
-- [ ] **After-operator/inside-version completions return the full unfiltered version list every keystroke** (medium, effort S, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:996-1043, 1148-1189, 1213-1262 (and the InsideVersion arms discarding `partial`)
+- [x] **After-operator/inside-version completions return the full unfiltered version list every keystroke** (medium, effort S, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:996-1043, 1148-1189, 1213-1262 (and the InsideVersion arms discarding `partial`)
   The registry builders ignore the typed `partial`, emitting every version (1000+ for aws) each keystroke; no filter_text. Wasteful serialization, and clients without label-prefix matching show the unfiltered menu. (Merged with the duplicate "lists every version" finding.)
   **Proposal:** Thread `partial` into the three builders and pre-filter `versions` to `starts_with(partial)` (preserving descending order; keep matching `~> MM` templates), falling back to the full list when empty; optionally cap to top-N newest plus matches.
 
-- [ ] **Top-level block completion menu offers `dynamic`/blocks past max_items** (medium, effort S, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:1399-1405 (resource_body_items)
+- [x] **Top-level block completion menu offers `dynamic`/blocks past max_items** (medium, effort S, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:1399-1405 (resource_body_items)
   resource_body_items suppresses re-offered nested blocks only on NestingMode::Single, ignoring max_items, so a List/Set + max_items=1 block already present is still offered as repeatable. (Keep only this part; drop the dynamic-suppression sub-idea — a `dynamic` over a 0/1-element collection is a valid idiom the validator deliberately exempts.)
   **Proposal:** Extend compute_body_filter to count occurrences per block name and suppress when `present_count >= max_items`; leave `dynamic` always offered.
 
-- [ ] **`provider`/`required_version` value completion preselects higher-major pre-releases as "latest"** (low, effort S, confidence high) — crates/tfls-provider-protocol/src/registry_versions.rs:738-767; crates/tfls-lsp/src/handlers/completion.rs:919-937,1089
+- [x] **`provider`/`required_version` value completion preselects higher-major pre-releases as "latest"** (low, effort S, confidence high) — crates/tfls-provider-protocol/src/registry_versions.rs:738-767; crates/tfls-lsp/src/handlers/completion.rs:919-937,1089
   prefilled_provider_version_items/prefilled_tool_version_items take `versions.first()` as latest; since semver_key ranks major-dominant, `6.0.0-beta1` outranks stable `5.99.0`, so a beta gets preselected and pinned in the `~> 6.0`/`>= …` defaults. (Module path is unaffected; no user-facing toggle needed.)
   **Proposal:** Pick the latest STABLE version (`find(|v| !v.version.contains('-')).or_else(first)`) for the preselected `0000_latest` default and the operator flavours, matching cached_latest_version's existing policy; keep pre-releases in the full list.
 
-- [ ] **Deprecated attributes/blocks offered with no de-prioritization** (low, effort S, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:1363-1393 (resource_body_items), 1821-1843 (attribute_detail)
+- [x] **Deprecated attributes/blocks offered with no de-prioritization** (low, effort S, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:1363-1393 (resource_body_items), 1821-1843 (attribute_detail)
   AttributeSchema/BlockSchema.deprecated only appends "deprecated" to detail; items still appear at equal priority with no CompletionItemTag::DEPRECATED and no sort penalty, steering users into deprecated fields.
   **Proposal:** When deprecated, set `tags: Some(vec![CompletionItemTag::DEPRECATED])` and a lower sort bucket (add CompletionItemTag to the lsp_types import); do not skip them (legacy configs still need to complete pre-existing deprecated fields).
 
-- [ ] **`dynamic` content menu does not respect target block's max_items** (low, effort S, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:1644-1681 (dynamic_body_items / resource_body_items nested-block loop)
+- [x] **`dynamic` content menu does not respect target block's max_items** (low, effort S, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:1644-1681 (dynamic_body_items / resource_body_items nested-block loop)
   Narrowed scope: the resource_body_items nested-block loop offers blocks usable via `dynamic` without max_items awareness (same root as the max_items bug). Menu polish; diagnostics already flag exceeding max_items.
   **Proposal:** Once count-aware max_items suppression exists, apply it to the nested-block names offered as `dynamic` targets so the menu matches what Terraform accepts; do not suppress the `dynamic` keyword itself.
 
-- [ ] **attribute_value_items mixes sort_text'd refs with un-sorted function items, scrambling order** (low, effort S, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:2278 (esp. :2360)
+- [x] **attribute_value_items mixes sort_text'd refs with un-sorted function items, scrambling order** (low, effort S, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:2278 (esp. :2360)
   Enum/resource/data/var/local items get `{NNNN}_` sort_text, then appended function_name_items carry none, so alphabetical function labels interleave with the prefixed refs (LSP falls back to label sort), losing the "refs first, functions fallback" ordering.
   **Proposal:** At the line-2360 append site, re-stamp the function items with a high sort bucket (e.g. `9999_`+name) continuing sort_index — not inside function_name_items (which is reused standalone for FunctionCall where alphabetical is correct).
 
-- [ ] **No `for`/ternary expression scaffolding snippets in expression context** (low, effort S, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:182 (FunctionCall → function_name_items)
+- [x] **No `for`/ternary expression scaffolding snippets in expression context** (low, effort S, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:182 (FunctionCall → function_name_items)
   Expression positions return only function names; no list-for/map-for comprehension or conditional snippets that users reach for constantly. (Drop `for_each`/`dynamic` from scope — those are meta-arg/block, already handled.)
   **Proposal:** Prepend a static SNIPPET set when ctx==FunctionCall with `00_` sort prefixes: `[for ${1:item} in ${2:list} : ${3:item}]`, `{ for ${1:k}, ${2:v} in ${3:map} : ${1:k} => ${2:v} }`, `${1:cond} ? ${2:a} : ${3:b}` (mirror TOP_LEVEL_SNIPPETS).
 
@@ -133,7 +133,7 @@ Workflow: `completion-deep-dive`. 48 agents, ~2.5M tokens. Bugs adversarially re
   Each completion builds a fresh reqwest client (dropped at fn end, losing pool reuse) and there's no in-flight coalescing, so cold-cache rapid typing fires overlapping full fan-out fetches (largely mitigated by existing did_open/initialize prefetch and the disk cache).
   **Proposal:** Hold a shared reqwest::Client on Backend; add an in-flight coalescer (DashMap<(ns,name), Shared<Arc<…>>> or a Mutex-guarded request map) gated by is_provider_cached so concurrent completions for the same provider await one fetch.
 
-- [ ] **Every completion request does a full rope.to_string() before classifying** (low, effort S, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:84
+- [x] **Every completion request does a full rope.to_string() before classifying** (low, effort S, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:84
   completion() materializes the whole document each keystroke though classify_context only reads `&source[..byte_offset]`.
   **Proposal:** Materialize only the prefix (`rope.byte_slice(..offset).to_string()`) and pass it to classify_context (offset == len); also materialize a small post-cursor slice (to end-of-line) for label_closed_after, which reads `&text[offset..]`.
 
