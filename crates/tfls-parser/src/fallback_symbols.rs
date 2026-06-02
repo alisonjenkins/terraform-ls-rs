@@ -272,8 +272,20 @@ fn scan_locals_body(
     let mut at_key_position = true;
     let mut in_string = false;
     let mut in_line_comment = false;
+    let mut in_block_comment = false;
     while i < bytes.len() && depth > 0 {
         let b = bytes[i];
+        if in_block_comment {
+            // A `}` inside `/* … */` must NOT decrement depth, else the
+            // scan terminates early and drops locals after the comment.
+            if b == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                in_block_comment = false;
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
         if in_line_comment {
             if b == b'\n' {
                 in_line_comment = false;
@@ -310,6 +322,14 @@ fn scan_locals_body(
             b'#' => {
                 in_line_comment = true;
                 i += 1;
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                in_block_comment = true;
+                i += 2;
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                in_line_comment = true;
+                i += 2;
             }
             b'\n' | b',' if depth == 1 => {
                 at_key_position = true;
@@ -361,14 +381,14 @@ fn span_to_range(rope: &Rope, span: &std::ops::Range<usize>) -> Range {
 }
 
 fn byte_to_lsp(rope: &Rope, byte: usize) -> Position {
+    // Delegate to the crate-wide converter so fallback symbol ranges use
+    // BYTE columns, matching `position.rs` (and `fallback_references`).
+    // The previous char-scalar column diverged for lines with multibyte
+    // chars before a label, shifting goto-definition / rename / symbol
+    // columns in text-fallback mode.
     let clamped = byte.min(rope.len_bytes());
-    let char_idx = rope.byte_to_char(clamped);
-    let line = rope.char_to_line(char_idx);
-    let line_start_char = rope.line_to_char(line);
-    Position {
-        line: line as u32,
-        character: (char_idx - line_start_char) as u32,
-    }
+    crate::position::byte_offset_to_lsp_position(rope, clamped)
+        .unwrap_or(Position { line: 0, character: 0 })
 }
 
 #[cfg(test)]
@@ -444,6 +464,19 @@ locals {
         assert!(t.locals.contains_key("b"));
         assert!(t.locals.contains_key("c"));
         assert!(!t.locals.contains_key("nested"));
+    }
+
+    #[test]
+    fn locals_block_comment_does_not_swallow_later_entries() {
+        // A `}` inside `/* … */` must not terminate the locals scan early.
+        let src = "locals {\n  a = 1\n  /* closing brace } here */\n  b = 2\n}\n";
+        let t = extract(src);
+        assert!(t.locals.contains_key("a"), "got: {:?}", t.locals.keys().collect::<Vec<_>>());
+        assert!(
+            t.locals.contains_key("b"),
+            "local after block comment was dropped: {:?}",
+            t.locals.keys().collect::<Vec<_>>()
+        );
     }
 
     #[test]
