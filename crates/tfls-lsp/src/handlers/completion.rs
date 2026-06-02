@@ -81,7 +81,18 @@ pub async fn completion(
             return Ok(None);
         }
     };
-    let text = doc.rope.to_string();
+    // classify_context only reads `&text[..offset]` and label_closed_after
+    // only reads up to the next newline after the cursor — so materialize
+    // just through the end of the cursor's line, not the whole document.
+    // On a large file with the cursor anywhere but the last line this
+    // avoids stringifying the entire post-cursor body each keystroke.
+    let line_idx = pos.line as usize;
+    let line_end = if line_idx + 1 < doc.rope.len_lines() {
+        doc.rope.line_to_byte(line_idx + 1)
+    } else {
+        doc.rope.len_bytes()
+    };
+    let text = doc.rope.byte_slice(..line_end).to_string();
     let ctx = classify_context(&text, offset);
 
     let label_closed = label_closed_after(&text, offset);
