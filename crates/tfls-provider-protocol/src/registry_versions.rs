@@ -937,6 +937,15 @@ async fn write_cache(path: &Path, versions: &[String]) {
 mod tests {
     use super::*;
 
+    /// Serializes the tests that mutate the process-global
+    /// `XDG_CACHE_HOME`. `cargo test` runs a binary's tests in parallel
+    /// threads; without this, one test's `set_var` clobbers another's
+    /// cache root mid-body (write to one root, fetch from another),
+    /// producing flaky failures. `tokio::sync::Mutex` is held across
+    /// `.await` cleanly (unlike a std mutex, which trips
+    /// `await_holding_lock`).
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[test]
     fn sanitise_strips_path_separators() {
         // `/` in a component becomes `_`, preventing a single value
@@ -1052,16 +1061,13 @@ mod tests {
     /// fetch fails fast and the fallback path fires.
     #[tokio::test]
     async fn stale_cache_serves_during_outage() {
+        // Serialize against other tests that mutate `XDG_CACHE_HOME`.
+        let _env = ENV_LOCK.lock().await;
         // Point the cache root at a fresh temp dir so the test doesn't
         // race with the real user's cache.
         let tmp = std::env::temp_dir().join(format!("tfls-test-{}", std::process::id()));
-        // Safety: this test is the only consumer of these env vars
-        // in this test binary. Tokio's `current_thread` runtime won't
-        // run tests concurrently in the same process for this file;
-        // the tfls-lsp lib test crate runs separately. Even if races
-        // mattered, the cache-root resolution only looks at env at
-        // call time.
-        // SAFETY: single-threaded test, called before spawning anything.
+        // SAFETY: `ENV_LOCK` guarantees no other test in this binary is
+        // reading or writing `XDG_CACHE_HOME` while we hold it.
         unsafe {
             std::env::set_var("XDG_CACHE_HOME", &tmp);
         }
@@ -1089,10 +1095,12 @@ mod tests {
 
     #[tokio::test]
     async fn no_cache_no_network_returns_error() {
+        // Serialize against other tests that mutate `XDG_CACHE_HOME`.
+        let _env = ENV_LOCK.lock().await;
         // Isolated cache root so we don't stumble onto an unrelated
         // existing entry.
         let tmp = std::env::temp_dir().join(format!("tfls-test-nocache-{}", std::process::id()));
-        // SAFETY: see stale_cache_serves_during_outage.
+        // SAFETY: `ENV_LOCK` guarantees exclusive access while held.
         unsafe {
             std::env::set_var("XDG_CACHE_HOME", &tmp);
         }
