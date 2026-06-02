@@ -916,6 +916,55 @@ fn scan_format_cached(
     edit
 }
 
+/// `terraform_fmt` — INFORMATION diagnostic when the document isn't
+/// formatted to the active style (minimal = `terraform fmt`/`tofu fmt`
+/// parity, opinionated = full tf-format). Reuses the cached format scan
+/// so an already-formatted, unchanged buffer is a no-op. Ranges at the
+/// first line that differs from the formatted output; pairs with the
+/// existing format code action. Default-on; disable / retune via the
+/// per-rule config (`{"rules": {"terraform_fmt": "off"}}`).
+pub(crate) fn formatting_diagnostic(
+    doc: &DocumentState,
+    style: tfls_state::FormatStyle,
+) -> Option<Diagnostic> {
+    let edit = scan_format_cached(doc, style)?; // `None` ⇒ already formatted.
+    let formatted = &edit.new_text;
+    let original = doc.rope.to_string();
+
+    // First line whose content differs — a friendlier anchor than line 0.
+    let line = original
+        .lines()
+        .zip(formatted.lines())
+        .position(|(a, b)| a != b)
+        .unwrap_or_else(|| {
+            original
+                .lines()
+                .count()
+                .min(formatted.lines().count())
+                .saturating_sub(1)
+        });
+    let line_len = original
+        .lines()
+        .nth(line)
+        .map(|l| l.chars().count())
+        .unwrap_or(0);
+
+    let style_name = match style {
+        tfls_state::FormatStyle::Minimal => "terraform fmt",
+        tfls_state::FormatStyle::Opinionated => "opinionated tf-format",
+    };
+    Some(Diagnostic {
+        range: Range {
+            start: Position::new(line as u32, 0),
+            end: Position::new(line as u32, line_len as u32),
+        },
+        severity: Some(DiagnosticSeverity::INFORMATION),
+        source: Some("terraform-ls-rs".to_string()),
+        message: format!("File is not formatted ({style_name} style); run the formatter."),
+        ..Default::default()
+    })
+}
+
 /// Format-as-code-action across scopes. Reads the live
 /// `format_style` once at invocation; switching mid-action
 /// would be confusing. Custom title format because the standard

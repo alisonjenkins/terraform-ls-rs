@@ -16,6 +16,69 @@ mod support;
 
 use support::{TestClient, any_message_contains, contains_undefined_var};
 
+/// An unformatted file gets a `terraform_fmt` INFORMATION diagnostic;
+/// editing it to/from formatted re-evaluates (the format cache clears on
+/// every edit, so a change that breaks formatting is picked up).
+#[tokio::test]
+async fn formatting_diagnostic_tracks_edits() {
+    let mut client = TestClient::new();
+    client.initialize(None).await;
+    let uri = "file:///mod/main.tf";
+
+    // Open already-formatted content — no fmt diagnostic.
+    client.did_open(uri, "variable \"x\" {\n  default = \"a\"\n}\n").await;
+    client.settle(150).await;
+    assert!(
+        !any_message_contains(&client.last_diagnostics(uri).await, "is not formatted"),
+        "formatted file should have no fmt diagnostic"
+    );
+
+    // Edit into an UNFORMATTED state (`default="a"` — missing spaces).
+    client
+        .did_change_full(uri, 2, "variable \"x\" { default=\"a\" }\n")
+        .await;
+    client.settle(150).await;
+    let d = client.last_diagnostics(uri).await;
+    let fmt = d
+        .iter()
+        .find(|x| {
+            x.get("message")
+                .and_then(|m| m.as_str())
+                .is_some_and(|m| m.contains("is not formatted"))
+        })
+        .expect("unformatted edit must surface a fmt diagnostic");
+    assert_eq!(fmt.get("severity").and_then(|s| s.as_i64()), Some(3), "INFORMATION severity");
+
+    // Edit back to formatted — the diagnostic clears.
+    client
+        .did_change_full(uri, 3, "variable \"x\" {\n  default = \"a\"\n}\n")
+        .await;
+    client.settle(150).await;
+    assert!(
+        !any_message_contains(&client.last_diagnostics(uri).await, "is not formatted"),
+        "re-formatted file should clear the fmt diagnostic"
+    );
+
+    // It is disable-able via the per-rule config.
+    client
+        .did_change_full(uri, 4, "variable \"x\" { default=\"a\" }\n")
+        .await;
+    client.settle(150).await;
+    assert!(any_message_contains(&client.last_diagnostics(uri).await, "is not formatted"));
+    client
+        .did_change_configuration(serde_json::json!({
+            "terraform-ls-rs": { "rules": { "terraform_fmt": "off" } }
+        }))
+        .await;
+    client.settle(200).await;
+    assert!(
+        !any_message_contains(&client.last_diagnostics(uri).await, "is not formatted"),
+        "terraform_fmt: off must suppress it"
+    );
+
+    client.shutdown().await;
+}
+
 /// A per-rule override of `off` suppresses that rule's diagnostics; a
 /// severity override remaps them — both live via didChangeConfiguration.
 #[tokio::test]

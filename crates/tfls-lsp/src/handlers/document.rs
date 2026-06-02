@@ -532,6 +532,14 @@ pub fn compute_diagnostics_with_lookup(
         diagnostics_for_parse_errors(&doc.parsed.errors),
     );
 
+    // Unformatted-file check against the active style. Body-independent
+    // (reuses the cached format scan); a no-op when already formatted or
+    // when the formatter can't parse the file.
+    let fmt_style = state.config.snapshot().format_style;
+    if let Some(fmt) = crate::handlers::code_action::formatting_diagnostic(&doc, fmt_style) {
+        out.extend(tag("terraform_fmt", vec![fmt]));
+    }
+
     let module_dir = crate::handlers::util::parent_dir(uri);
     out.extend(tag(
         "terraform_undefined_reference",

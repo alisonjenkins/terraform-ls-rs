@@ -191,6 +191,10 @@ Set via either:
 
 Storage lives on `tfls_state::Config::format_style`; LSP handlers (`textDocument/formatting`, `rangeFormatting`, `onTypeFormatting`) read the live snapshot per-request via `state.config.snapshot()`. Unknown values keep the previous setting.
 
+### Unformatted-file diagnostic (`terraform_fmt`)
+
+`compute_diagnostics_with_lookup` emits an INFORMATION diagnostic when a buffer isn't formatted to the active `formatStyle` (minimal = `terraform fmt`/`tofu fmt` parity, opinionated = full tf-format). Implemented by `handlers::code_action::formatting_diagnostic`, which reuses `scan_format_cached` (the per-doc `format_cache`, keyed by `(version, FormatStyle::marker)`) — so an already-formatted, unedited buffer is a no-op, and any edit clears the cache (`apply_change` sets it to `None`) so a change that breaks formatting is picked up on the next compute. Ranges at the first differing line; pairs with the existing format code action. A file that doesn't parse yields no fmt diagnostic (the formatter errors; the syntax-error diagnostic covers it). Default-on; disable or retune via the per-rule config (`{"rules": {"terraform_fmt": "off"}}`).
+
 ## Per-rule diagnostic config
 
 Any diagnostic rule can be disabled or have its severity remapped via the `rules` config object (initializationOptions or `workspace/didChangeConfiguration`):
