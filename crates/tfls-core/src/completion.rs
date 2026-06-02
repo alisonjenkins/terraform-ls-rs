@@ -1565,10 +1565,11 @@ fn enclosing_block_context(before: &str) -> Option<CompletionContext> {
                         }
                         // Resource/data/provider bodies carry their
                         // own dispatch — only route through the
-                        // built-in resolver when the nested path
-                        // starts with `lifecycle`, which is the one
-                        // built-in-schema nested block we model
-                        // inside those.
+                        // built-in resolver when the nested path starts
+                        // with a meta-block we model with a static
+                        // schema (`lifecycle`, `connection`,
+                        // `provisioner`). Everything else stays on the
+                        // provider-schema descent path.
                         let is_provider_schema_root = matches!(
                             top_ctx,
                             CompletionContext::ResourceBody { .. }
@@ -1580,7 +1581,10 @@ fn enclosing_block_context(before: &str) -> Option<CompletionContext> {
                                 .last()
                                 .map(|s| s.keyword.as_str())
                                 .unwrap_or("");
-                            if outermost_nested != "lifecycle" {
+                            if !matches!(
+                                outermost_nested,
+                                "lifecycle" | "connection" | "provisioner"
+                            ) {
                                 return Some(top_ctx);
                             }
                         }
@@ -1679,11 +1683,18 @@ pub fn resolve_nested_schema(
     };
     for step in iter {
         let block = schema.blocks.iter().find(|b| b.name == step.keyword)?;
-        schema = if block.name == "backend" {
-            let label = step.label.as_deref()?;
-            builtin_blocks::backend_schema(label)?
-        } else {
-            block.body_schema()?
+        schema = match block.name {
+            "backend" => {
+                let label = step.label.as_deref()?;
+                builtin_blocks::backend_schema(label)?
+            }
+            // `provisioner "<label>"` body depends on the label
+            // (local-exec / remote-exec / file).
+            "provisioner" => {
+                let label = step.label.as_deref()?;
+                builtin_blocks::provisioner_schema(label)?
+            }
+            _ => block.body_schema()?,
         };
     }
     Some(schema)
@@ -2100,6 +2111,38 @@ mod tests {
             at_end("check \"health\" {\n  "),
             CompletionContext::CheckBlockBody
         );
+    }
+
+    #[test]
+    fn resource_connection_nested_resolves() {
+        let schema = resolve_nested_schema(&[
+            BlockStep { keyword: "resource".to_string(), label: Some("aws_instance".to_string()) },
+            BlockStep { keyword: "connection".to_string(), label: None },
+        ])
+        .expect("resource.connection schema");
+        assert!(schema.attrs.iter().any(|a| a.name == "host"));
+        assert!(schema.attrs.iter().any(|a| a.name == "private_key"));
+    }
+
+    #[test]
+    fn resource_provisioner_local_exec_resolves_by_label() {
+        let schema = resolve_nested_schema(&[
+            BlockStep { keyword: "resource".to_string(), label: Some("aws_instance".to_string()) },
+            BlockStep { keyword: "provisioner".to_string(), label: Some("local-exec".to_string()) },
+        ])
+        .expect("provisioner local-exec schema");
+        assert!(schema.attrs.iter().any(|a| a.name == "command"));
+        assert!(schema.attrs.iter().any(|a| a.name == "working_dir"));
+    }
+
+    #[test]
+    fn resource_provisioner_file_resolves_by_label() {
+        let schema = resolve_nested_schema(&[
+            BlockStep { keyword: "resource".to_string(), label: Some("aws_instance".to_string()) },
+            BlockStep { keyword: "provisioner".to_string(), label: Some("file".to_string()) },
+        ])
+        .expect("provisioner file schema");
+        assert!(schema.attrs.iter().any(|a| a.name == "destination"));
     }
 
     #[test]

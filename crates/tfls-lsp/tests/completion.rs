@@ -235,6 +235,41 @@ async fn attribute_value_refs_sort_before_functions() {
 }
 
 #[tokio::test]
+async fn connection_block_body_offers_transport_attrs() {
+    let u = uri("file:///a.tf");
+    let src = "resource \"aws_instance\" \"web\" {\n  connection {\n\n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 0)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"host".to_string()), "got {ls:?}");
+    assert!(ls.contains(&"private_key".to_string()), "got {ls:?}");
+}
+
+#[tokio::test]
+async fn provisioner_local_exec_body_offers_command() {
+    let u = uri("file:///a.tf");
+    let src =
+        "resource \"aws_instance\" \"web\" {\n  provisioner \"local-exec\" {\n\n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 0)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"command".to_string()), "got {ls:?}");
+    assert!(ls.contains(&"working_dir".to_string()), "got {ls:?}");
+}
+
+#[tokio::test]
 async fn top_level_offers_lifecycle_blocks() {
     let u = uri("file:///a.tf");
     let src = "\n";

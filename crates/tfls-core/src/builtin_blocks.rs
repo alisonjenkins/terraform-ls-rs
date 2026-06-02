@@ -763,19 +763,120 @@ pub const LIFECYCLE_DATA_BLOCK: BuiltinSchema = BuiltinSchema {
 };
 fn lifecycle_data_schema() -> BuiltinSchema { LIFECYCLE_DATA_BLOCK }
 
+// --- `connection { ... }` (provisioner transport) -------------------------
+
+pub const CONNECTION_BLOCK: BuiltinSchema = BuiltinSchema {
+    attrs: &[
+        BuiltinAttr { name: "type", required: false, detail: "Transport: `ssh` (default) or `winrm`" },
+        BuiltinAttr { name: "user", required: false, detail: "Username to connect as" },
+        BuiltinAttr { name: "password", required: false, detail: "Password (or WinRM password)" },
+        BuiltinAttr { name: "host", required: true, detail: "Address of the target host" },
+        BuiltinAttr { name: "port", required: false, detail: "Port to connect to (default 22 ssh / 5985 winrm)" },
+        BuiltinAttr { name: "timeout", required: false, detail: "Connection timeout, e.g. `\"5m\"`" },
+        BuiltinAttr { name: "private_key", required: false, detail: "PEM-encoded private key for ssh auth" },
+        BuiltinAttr { name: "certificate", required: false, detail: "PEM-encoded certificate to sign the key" },
+        BuiltinAttr { name: "agent", required: false, detail: "Use the local ssh agent for auth" },
+        BuiltinAttr { name: "agent_identity", required: false, detail: "Preferred identity from the ssh agent" },
+        BuiltinAttr { name: "host_key", required: false, detail: "Expected host key to verify against" },
+        BuiltinAttr { name: "script_path", required: false, detail: "Remote path to upload provisioning scripts to" },
+        BuiltinAttr { name: "target_platform", required: false, detail: "`unix` (default) or `windows`" },
+        BuiltinAttr { name: "bastion_host", required: false, detail: "Bastion/jump host to connect through" },
+        BuiltinAttr { name: "bastion_port", required: false, detail: "Port on the bastion host" },
+        BuiltinAttr { name: "bastion_user", required: false, detail: "Username for the bastion host" },
+        BuiltinAttr { name: "bastion_private_key", required: false, detail: "Private key for the bastion host" },
+        BuiltinAttr { name: "bastion_host_key", required: false, detail: "Expected host key of the bastion" },
+    ],
+    blocks: &[],
+};
+fn connection_schema() -> BuiltinSchema { CONNECTION_BLOCK }
+
+/// Meta-attrs + `connection` block shared by every provisioner kind.
+const PROVISIONER_CONNECTION_BLOCK: BuiltinBlock = BuiltinBlock {
+    name: "connection",
+    detail: "Transport for reaching the resource (ssh / winrm)",
+    label_placeholder: None,
+    required_attrs: &[],
+    schema_fn: Some(connection_schema),
+};
+
+pub const PROVISIONER_LOCAL_EXEC_BLOCK: BuiltinSchema = BuiltinSchema {
+    attrs: &[
+        BuiltinAttr { name: "command", required: true, detail: "Command to execute on the machine running Terraform" },
+        BuiltinAttr { name: "working_dir", required: false, detail: "Directory to run the command in" },
+        BuiltinAttr { name: "interpreter", required: false, detail: "Interpreter list, e.g. `[\"/bin/bash\", \"-c\"]`" },
+        BuiltinAttr { name: "environment", required: false, detail: "Map of env vars for the command" },
+        BuiltinAttr { name: "when", required: false, detail: "`create` (default) or `destroy`" },
+        BuiltinAttr { name: "on_failure", required: false, detail: "`fail` (default) or `continue`" },
+        BuiltinAttr { name: "quiet", required: false, detail: "Suppress echoing the command to output" },
+    ],
+    blocks: &[],
+};
+
+pub const PROVISIONER_REMOTE_EXEC_BLOCK: BuiltinSchema = BuiltinSchema {
+    attrs: &[
+        BuiltinAttr { name: "inline", required: false, detail: "List of commands to run (mutually exclusive with script/scripts)" },
+        BuiltinAttr { name: "script", required: false, detail: "Local script path to copy and run" },
+        BuiltinAttr { name: "scripts", required: false, detail: "List of local script paths to copy and run" },
+        BuiltinAttr { name: "when", required: false, detail: "`create` (default) or `destroy`" },
+        BuiltinAttr { name: "on_failure", required: false, detail: "`fail` (default) or `continue`" },
+    ],
+    blocks: &[PROVISIONER_CONNECTION_BLOCK],
+};
+
+pub const PROVISIONER_FILE_BLOCK: BuiltinSchema = BuiltinSchema {
+    attrs: &[
+        BuiltinAttr { name: "source", required: false, detail: "Local file/dir to upload (mutually exclusive with content)" },
+        BuiltinAttr { name: "content", required: false, detail: "Literal content to write at destination" },
+        BuiltinAttr { name: "destination", required: true, detail: "Remote path to upload to" },
+        BuiltinAttr { name: "when", required: false, detail: "`create` (default) or `destroy`" },
+        BuiltinAttr { name: "on_failure", required: false, detail: "`fail` (default) or `continue`" },
+    ],
+    blocks: &[PROVISIONER_CONNECTION_BLOCK],
+};
+
+/// Resolve a `provisioner "<label>"` body schema by its label. Unknown
+/// labels (custom provisioners) fall back to the local-exec shape's
+/// shared meta-args.
+pub fn provisioner_schema(label: &str) -> Option<BuiltinSchema> {
+    Some(match label {
+        "local-exec" => PROVISIONER_LOCAL_EXEC_BLOCK,
+        "remote-exec" => PROVISIONER_REMOTE_EXEC_BLOCK,
+        "file" => PROVISIONER_FILE_BLOCK,
+        _ => return None,
+    })
+}
+
 /// Synthetic schema used when the resolver needs to descend into a
-/// `resource "X" "Y" { lifecycle { … } }` path. Only the `lifecycle`
-/// child is modelled here — resource bodies themselves route through
+/// `resource "X" "Y" { lifecycle { … } }` (or `connection` /
+/// `provisioner`) path. Resource bodies themselves route through
 /// provider schemas, not this file.
 pub const RESOURCE_ROOT_SCHEMA: BuiltinSchema = BuiltinSchema {
     attrs: &[],
-    blocks: &[BuiltinBlock {
-        name: "lifecycle",
-        detail: "Lifecycle rules (create_before_destroy, prevent_destroy, ignore_changes, …)",
-        label_placeholder: None,
-        required_attrs: &[],
-        schema_fn: Some(lifecycle_resource_schema),
-    }],
+    blocks: &[
+        BuiltinBlock {
+            name: "lifecycle",
+            detail: "Lifecycle rules (create_before_destroy, prevent_destroy, ignore_changes, …)",
+            label_placeholder: None,
+            required_attrs: &[],
+            schema_fn: Some(lifecycle_resource_schema),
+        },
+        BuiltinBlock {
+            name: "connection",
+            detail: "Transport for provisioners reaching the resource (ssh / winrm)",
+            label_placeholder: None,
+            required_attrs: &[],
+            schema_fn: Some(connection_schema),
+        },
+        BuiltinBlock {
+            name: "provisioner",
+            detail: "Run an action on resource create/destroy (local-exec / remote-exec / file)",
+            label_placeholder: Some("local-exec"),
+            required_attrs: &[],
+            // Body schema depends on the label — resolved via
+            // `provisioner_schema(label)` in resolve_nested_schema.
+            schema_fn: None,
+        },
+    ],
 };
 
 /// Same idea for `data` blocks.
