@@ -124,12 +124,12 @@ fn extract_top_level_keys(slice: &str, slice_base: usize) -> Vec<(String, std::o
                     Some(v) => v,
                     None => break,
                 };
-                // After the string, skip whitespace and look for `=`.
+                // After the key, skip whitespace and look for `=` or `:` (HCL accepts both).
                 let mut j = end;
                 while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
                     j += 1;
                 }
-                if j < bytes.len() && bytes[j] == b'=' {
+                if j < bytes.len() && (bytes[j] == b'=' || bytes[j] == b':') {
                     out.push((content, slice_base + i..slice_base + end));
                     at_key_position = false;
                 }
@@ -179,7 +179,7 @@ fn extract_top_level_keys(slice: &str, slice_base: usize) -> Vec<(String, std::o
                 while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
                     j += 1;
                 }
-                if j < bytes.len() && bytes[j] == b'=' {
+                if j < bytes.len() && (bytes[j] == b'=' || bytes[j] == b':') {
                     out.push((
                         ident.to_string(),
                         slice_base + start..slice_base + i,
@@ -425,6 +425,20 @@ mod tests {
     fn silent_for_unique_keys() {
         let d = diags(r#"locals { x = { a = 1, b = 2, c = 3 } }"#);
         assert!(d.is_empty(), "got: {d:?}");
+    }
+
+    #[test]
+    fn flags_duplicate_colon_style_keys() {
+        // HCL also accepts `:` as the key/value separator.
+        let d = diags(r#"locals { x = { a: 1, a: 2 } }"#);
+        assert_eq!(d.len(), 1, "got: {d:?}");
+        assert!(d[0].message.contains("`a`"), "got: {}", d[0].message);
+    }
+
+    #[test]
+    fn flags_duplicate_quoted_colon_style_keys() {
+        let d = diags(r#"locals { x = { "a": 1, "a": 2 } }"#);
+        assert_eq!(d.len(), 1, "got: {d:?}");
     }
 
     #[test]
