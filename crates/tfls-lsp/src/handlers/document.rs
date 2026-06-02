@@ -270,6 +270,23 @@ pub async fn did_change(backend: &Backend, params: DidChangeTextDocumentParams) 
         state.reparse_document(&uri_c);
     })
     .await;
+
+    // In-flight coalescing: tower-lsp runs notification handlers
+    // concurrently, so fast typing can overlap several did_change tasks
+    // for the same buffer. If a newer edit has already landed, this one
+    // is stale — skip its compute, publish, and peer pass entirely; the
+    // newer handler will produce the up-to-date result. Avoids redundant
+    // O(module) work per superseded keystroke.
+    let superseded = backend
+        .state
+        .documents
+        .get(&uri)
+        .is_some_and(|d| d.version != version);
+    if superseded {
+        tracing::debug!(uri = %uri, version, "did_change: superseded by a newer edit, skipping");
+        return;
+    }
+
     publish_current_diagnostics(backend, &uri, Some(version)).await;
     // Re-run the version-cache prefetch in case this edit
     // introduced a new constraint target (typed `required_version`
