@@ -14,6 +14,6 @@ pub use fetcher::{SchemaFetcher, fetch_functions_from_cli, fetch_schema_from_cli
 pub use functions::{FunctionParameter, FunctionSignature, FunctionsSchema};
 pub use functions_cache::{bundled as bundled_functions, load_functions};
 pub use types::{
-    AttributeSchema, BlockSchema, NestedBlockSchema, NestingMode, ProviderSchema, ProviderSchemas,
-    Schema,
+    AttributeSchema, BlockSchema, CtyCategory, NestedBlockSchema, NestingMode, ProviderSchema,
+    ProviderSchemas, Schema,
 };

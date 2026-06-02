@@ -122,6 +122,35 @@ pub struct NestedBlockSchema {
 /// inspect it as needed.
 pub type SchemaType = sonic_rs::Value;
 
+/// Broad shape of a cty type, for coarse structural validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CtyCategory {
+    /// `string` / `number` / `bool`.
+    Primitive,
+    /// `list` / `set` / `tuple` / `map` / `object`.
+    Collection,
+}
+
+impl AttributeSchema {
+    /// Classify this attribute's declared cty type as primitive or
+    /// collection. `None` for `dynamic`/unrecognised shapes or a missing
+    /// type — callers should skip those (no static check possible).
+    pub fn cty_category(&self) -> Option<CtyCategory> {
+        use sonic_rs::JsonValueTrait;
+        let t = self.r#type.as_ref()?;
+        if let Some(s) = t.as_str() {
+            return match s {
+                "string" | "number" | "bool" => Some(CtyCategory::Primitive),
+                _ => None,
+            };
+        }
+        match t.get(0).and_then(|v| v.as_str())? {
+            "list" | "set" | "tuple" | "map" | "object" => Some(CtyCategory::Collection),
+            _ => None,
+        }
+    }
+}
+
 impl ProviderSchemas {
     /// Look up a resource schema by unqualified type name (e.g. `aws_instance`).
     ///

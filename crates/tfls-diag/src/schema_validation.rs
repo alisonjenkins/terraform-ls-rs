@@ -209,6 +209,27 @@ fn block_label_str(label: &BlockLabel) -> Option<&str> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ValueLiteral {
+    Primitive,
+    Array,
+    Object,
+}
+
+/// Classify a literal value's shape, or `None` for non-literals
+/// (variables, traversals, function calls, templates, null) which can't
+/// be statically checked.
+fn value_literal_kind(e: &Expression) -> Option<ValueLiteral> {
+    match e {
+        Expression::String(_) | Expression::Number(_) | Expression::Bool(_) => {
+            Some(ValueLiteral::Primitive)
+        }
+        Expression::Array(_) => Some(ValueLiteral::Array),
+        Expression::Object(_) => Some(ValueLiteral::Object),
+        _ => None,
+    }
+}
+
 fn validate_block<H: UpgradeHintLookup>(
     block: &Block,
     rope: &Rope,
@@ -286,6 +307,48 @@ fn validate_block<H: UpgradeHintLookup>(
                 });
             }
         }
+    }
+
+    // Structural type checking — conservative. Only flags a LITERAL whose
+    // broad category clearly mismatches the attribute's cty type: a
+    // primitive type given an array/object literal, or a collection type
+    // given a primitive literal. Skips expressions (vars, traversals,
+    // function calls, templates) and primitive↔primitive (Terraform
+    // coerces string/number/bool). The goal is clear mistakes
+    // (`tags = "x"`, `instance_type = ["a"]`), never a false positive.
+    for structure in block.body.iter() {
+        let Some(attr) = structure.as_attribute() else {
+            continue;
+        };
+        let name = attr.key.as_str();
+        let Some(schema_attr) = schema.block.attributes.get(name) else {
+            continue;
+        };
+        let Some(cty) = schema_attr.cty_category() else {
+            continue;
+        };
+        let Some(lit) = value_literal_kind(&attr.value) else {
+            continue;
+        };
+        let mismatch = match (cty, lit) {
+            (tfls_schema::CtyCategory::Primitive, ValueLiteral::Array | ValueLiteral::Object) => {
+                Some("expects a single value, not a collection")
+            }
+            (tfls_schema::CtyCategory::Collection, ValueLiteral::Primitive) => {
+                Some("expects a collection, not a single value")
+            }
+            _ => None,
+        };
+        let Some(reason) = mismatch else { continue };
+        let span = attr.value.span().unwrap_or(0..0);
+        let range = hcl_span_to_lsp_range(rope, span).unwrap_or_default();
+        out.push(Diagnostic {
+            range,
+            severity: Some(DiagnosticSeverity::ERROR),
+            source: Some("terraform-ls-rs".to_string()),
+            message: format!("type mismatch for `{name}` — {reason}"),
+            ..Default::default()
+        });
     }
 
     // Allowed-value (enum) validation. `allowed_values` is mined from the
@@ -1072,6 +1135,67 @@ mod tests {
         let schemas = schemas_with_computed_attr();
         let d = diags_with(&schemas, "resource \"aws_thing\" \"x\" {\n  name = \"a\"\n}\n");
         assert!(d.iter().all(|d| !d.message.contains("read-only")), "got: {d:?}");
+    }
+
+    fn schemas_with_typed_attrs() -> ProviderSchemas {
+        sonic_rs::from_str(
+            r#"{
+                "format_version": "1.0",
+                "provider_schemas": {
+                    "registry.terraform.io/hashicorp/aws": {
+                        "provider": { "version": 0, "block": {} },
+                        "resource_schemas": {
+                            "aws_thing": {
+                                "version": 1,
+                                "block": {
+                                    "attributes": {
+                                        "name":     { "type": "string", "optional": true },
+                                        "tags":     { "type": ["map", "string"], "optional": true },
+                                        "subnets":  { "type": ["list", "string"], "optional": true }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("parse")
+    }
+
+    #[test]
+    fn flags_collection_literal_for_primitive_type() {
+        let schemas = schemas_with_typed_attrs();
+        let d = diags_with(&schemas, "resource \"aws_thing\" \"x\" {\n  name = [\"a\"]\n}\n");
+        let m = d
+            .iter()
+            .find(|d| d.message.contains("type mismatch for `name`"))
+            .expect("type-mismatch diagnostic");
+        assert_eq!(m.severity, Some(DiagnosticSeverity::ERROR));
+    }
+
+    #[test]
+    fn flags_primitive_literal_for_collection_type() {
+        let schemas = schemas_with_typed_attrs();
+        let d = diags_with(&schemas, "resource \"aws_thing\" \"x\" {\n  tags = \"oops\"\n}\n");
+        assert!(d.iter().any(|d| d.message.contains("type mismatch for `tags`")), "got: {d:?}");
+    }
+
+    #[test]
+    fn accepts_matching_literals() {
+        let schemas = schemas_with_typed_attrs();
+        let d = diags_with(
+            &schemas,
+            "resource \"aws_thing\" \"x\" {\n  name = \"ok\"\n  tags = { a = \"b\" }\n  subnets = [\"s1\"]\n}\n",
+        );
+        assert!(d.iter().all(|d| !d.message.contains("type mismatch")), "got: {d:?}");
+    }
+
+    #[test]
+    fn skips_type_check_for_non_literal_value() {
+        let schemas = schemas_with_typed_attrs();
+        let d = diags_with(&schemas, "resource \"aws_thing\" \"x\" {\n  tags = var.tags\n}\n");
+        assert!(d.iter().all(|d| !d.message.contains("type mismatch")), "got: {d:?}");
     }
 
     fn schemas_with_enum_attr() -> ProviderSchemas {
