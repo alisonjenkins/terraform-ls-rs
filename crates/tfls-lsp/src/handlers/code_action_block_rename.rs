@@ -189,7 +189,17 @@ const ALL_BLOCK_RENAMES: &[BlockRenameSpec] = &[
     k8s_v1("kubernetes_persistent_volume_claim"),
     k8s_v1("kubernetes_service_account"),
     k8s_v1("kubernetes_stateful_set"),
-    k8s_v1("kubernetes_daemonset"),
+    // Irregular: the versioned type is `kubernetes_daemon_set_v1`
+    // (underscore between daemon/set), NOT `kubernetes_daemonset_v1`.
+    // Spell it out so resolved_to doesn't synthesise a non-existent type.
+    BlockRenameSpec {
+        block_kind: "resource",
+        from: "kubernetes_daemonset",
+        to: "kubernetes_daemon_set_v1",
+        gate_provider: "kubernetes",
+        gate_threshold: "3.0.0",
+        state_migration: StateMigration::Manual,
+    },
     k8s_v1("kubernetes_job"),
     k8s_v1("kubernetes_cron_job"),
     k8s_v1("kubernetes_network_policy"),
@@ -221,7 +231,10 @@ const fn k8s_v1(from: &'static str) -> BlockRenameSpec {
         from,
         to: "",
         gate_provider: "kubernetes",
-        gate_threshold: "2.0.0",
+        // Unversioned types are deprecated as of kubernetes provider 3.0.0
+        // (the `_v1` variants exist from 2.7.0, but the old names remain
+        // first-class until 3.0). Gating lower fires on supported config.
+        gate_threshold: "3.0.0",
         state_migration: StateMigration::Manual,
     }
 }
@@ -1286,9 +1299,11 @@ fn resolve_target_strategy(
 mod tests {
     use super::*;
 
-    /// Every `kubernetes_*` spec must produce a `_v1`
-    /// resolved-to name. Other specs spell theirs out
-    /// explicitly. Catches typos in `k8s_v1` calls.
+    /// Every `kubernetes_*` spec must resolve to a `_v1`-suffixed
+    /// name. The shorthand specs synthesise `<from>_v1`; specs with
+    /// an irregular target (e.g. `kubernetes_daemonset` →
+    /// `kubernetes_daemon_set_v1`) spell it out. Catches typos in
+    /// `k8s_v1` calls and synthesised non-existent types.
     #[test]
     fn k8s_specs_resolve_to_v1_suffix() {
         for spec in ALL_BLOCK_RENAMES {
@@ -1296,8 +1311,25 @@ mod tests {
                 continue;
             }
             let to = resolved_to(spec);
-            assert_eq!(to, format!("{}_v1", spec.from), "spec {spec:?}");
+            assert!(to.ends_with("_v1"), "spec {spec:?} does not resolve to a _v1 type");
+            // Shorthand specs (empty `to`) synthesise `<from>_v1`;
+            // explicit specs must keep their spelled-out target.
+            let expected = if spec.to.is_empty() {
+                format!("{}_v1", spec.from)
+            } else {
+                spec.to.to_string()
+            };
+            assert_eq!(to, expected, "spec {spec:?}");
         }
+    }
+
+    #[test]
+    fn daemonset_resolves_to_correct_irregular_type() {
+        let spec = ALL_BLOCK_RENAMES
+            .iter()
+            .find(|s| s.from == "kubernetes_daemonset")
+            .expect("daemonset spec present");
+        assert_eq!(resolved_to(spec), "kubernetes_daemon_set_v1");
     }
 
     /// Every AWS spec spells out a non-empty `to` field.

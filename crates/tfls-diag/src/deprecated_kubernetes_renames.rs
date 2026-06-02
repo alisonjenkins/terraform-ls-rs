@@ -63,11 +63,13 @@ const fn rename_rule(from: &'static str) -> DeprecationRule {
         label: from,
         gate: Gate::ProviderVersion {
             provider: "kubernetes",
-            threshold: "2.0.0",
+            threshold: "3.0.0",
         },
         message: "Kubernetes resource type is deprecated in favour of its API-versioned variant \
-                  (kubernetes provider 2.0+). Replace with the `_v1`-suffixed type — schema is \
-                  identical, references need updating in tandem.",
+                  (kubernetes provider 3.0+). Replace with the `_v1`-suffixed type and update \
+                  references in tandem. Most variants share the schema, but some narrow it (e.g. \
+                  the horizontal_pod_autoscaler v1 metric shape) — run `terraform plan` to confirm \
+                  before applying.",
     }
 }
 
@@ -194,11 +196,24 @@ mod tests {
     fn fires_under_modern_kubernetes_constraint() {
         let src = concat!(
             "terraform {\n  required_providers {\n",
-            "    kubernetes = { source = \"hashicorp/kubernetes\", version = \"~> 2.20\" }\n",
+            "    kubernetes = { source = \"hashicorp/kubernetes\", version = \"~> 3.0\" }\n",
             "  }\n}\n",
             "resource \"kubernetes_pod\" \"x\" {\n  metadata {\n    name = \"x\"\n  }\n}\n",
         );
         assert_eq!(diags(src).len(), 1);
+    }
+
+    #[test]
+    fn suppressed_under_pre_3_0_kubernetes_constraint() {
+        // Unversioned types are still first-class until provider 3.0; a
+        // 2.x pin must NOT fire (regression: gate was wrongly 2.0.0).
+        let src = concat!(
+            "terraform {\n  required_providers {\n",
+            "    kubernetes = { source = \"hashicorp/kubernetes\", version = \"~> 2.20\" }\n",
+            "  }\n}\n",
+            "resource \"kubernetes_pod\" \"x\" {\n  metadata {\n    name = \"x\"\n  }\n}\n",
+        );
+        assert!(diags(src).is_empty(), "got: {:?}", diags(src));
     }
 
     #[test]
