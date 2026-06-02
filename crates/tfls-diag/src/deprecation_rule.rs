@@ -18,7 +18,7 @@
 use hcl_edit::expr::Expression;
 use hcl_edit::repr::Span;
 use hcl_edit::structure::{Body, BlockLabel};
-use lsp_types::{Diagnostic, DiagnosticSeverity};
+use lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag};
 use ropey::Rope;
 use tfls_parser::hcl_span_to_lsp_range;
 
@@ -189,6 +189,7 @@ pub fn diagnostics_for_module(
             severity: Some(DiagnosticSeverity::WARNING),
             source: Some("terraform-ls-rs".to_string()),
             message: rule.message.to_string(),
+            tags: Some(vec![DiagnosticTag::DEPRECATED]),
             ..Default::default()
         });
     }
@@ -251,6 +252,7 @@ pub fn diagnostics_from_table(
             severity: Some(DiagnosticSeverity::WARNING),
             source: Some("terraform-ls-rs".to_string()),
             message: rule.message.to_string(),
+            tags: Some(vec![DiagnosticTag::DEPRECATED]),
             ..Default::default()
         });
     }

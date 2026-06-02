@@ -10,7 +10,7 @@
 use hcl_edit::expr::Expression;
 use hcl_edit::repr::Span;
 use hcl_edit::structure::{Block, BlockLabel, Body};
-use lsp_types::{Diagnostic, DiagnosticSeverity};
+use lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag};
 use ropey::Rope;
 use tfls_parser::hcl_span_to_lsp_range;
 
@@ -131,6 +131,8 @@ fn push(
         severity: Some(DiagnosticSeverity::WARNING),
         source: Some("terraform-ls-rs".to_string()),
         message,
+        // Greys the declaration out in the editor (it's unused).
+        tags: Some(vec![DiagnosticTag::UNNECESSARY]),
         ..Default::default()
     });
 }
@@ -207,6 +209,8 @@ mod tests {
         );
         assert_eq!(d.len(), 1, "got: {d:?}");
         assert!(d[0].message.contains("`x`"), "got: {}", d[0].message);
+        // Greyed out via the UNNECESSARY tag.
+        assert_eq!(d[0].tags, Some(vec![DiagnosticTag::UNNECESSARY]));
     }
 
     #[test]

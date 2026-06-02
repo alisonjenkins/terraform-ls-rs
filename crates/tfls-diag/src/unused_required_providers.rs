@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use hcl_edit::repr::Span;
 use hcl_edit::structure::Body;
-use lsp_types::{Diagnostic, DiagnosticSeverity};
+use lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag};
 use ropey::Rope;
 use tfls_parser::hcl_span_to_lsp_range;
 
@@ -51,6 +51,7 @@ pub fn unused_required_providers_diagnostics(
                     message: format!(
                         "provider `{name}` is declared in required_providers but not used"
                     ),
+                    tags: Some(vec![DiagnosticTag::UNNECESSARY]),
                     ..Default::default()
                 });
             }

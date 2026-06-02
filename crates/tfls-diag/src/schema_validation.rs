@@ -180,6 +180,7 @@ pub fn resource_diagnostics_with_hints<L: SchemaLookup, H: UpgradeHintLookup>(
                         "{kind_word} `{type_name}` is deprecated by its provider. \
                          Check the provider's release notes for the recommended replacement."
                     ),
+                    tags: Some(vec![lsp_types::DiagnosticTag::DEPRECATED]),
                     ..Default::default()
                 });
             }
@@ -242,6 +243,7 @@ fn validate_block<H: UpgradeHintLookup>(
                         severity: Some(DiagnosticSeverity::WARNING),
                         source: Some("terraform-ls-rs".to_string()),
                         message: format!("attribute `{name}` is deprecated"),
+                        tags: Some(vec![lsp_types::DiagnosticTag::DEPRECATED]),
                         ..Default::default()
                     });
                 }
