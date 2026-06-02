@@ -99,21 +99,65 @@ mod tests {
     }
 
     #[test]
-    fn flags_number_type_with_string_default() {
+    fn accepts_string_default_for_number_type() {
+        // Terraform losslessly converts string<->number; `default = "5"`
+        // for `type = number` is valid and accepted by `terraform plan`.
+        // We only know the static type, so we accept conservatively
+        // (worst case: a missed error like `"hi"`, never a false positive).
         let d = diags(r#"variable "x" {
           type    = number
-          default = "hi"
+          default = "5"
+        }"#);
+        assert!(d.is_empty(), "got: {d:?}");
+    }
+
+    #[test]
+    fn accepts_number_default_for_string_type() {
+        let d = diags(r#"variable "x" {
+          type    = string
+          default = 5
+        }"#);
+        assert!(d.is_empty(), "got: {d:?}");
+    }
+
+    #[test]
+    fn accepts_string_default_for_bool_type() {
+        let d = diags(r#"variable "x" {
+          type    = bool
+          default = "true"
+        }"#);
+        assert!(d.is_empty(), "got: {d:?}");
+    }
+
+    #[test]
+    fn flags_number_type_with_collection_default() {
+        // string<->number coercion does NOT extend to a collection: a
+        // list default for a number type is still a clear mistake.
+        let d = diags(r#"variable "x" {
+          type    = number
+          default = [1, 2]
         }"#);
         assert_eq!(d.len(), 1, "got: {d:?}");
     }
 
     #[test]
-    fn flags_list_string_with_mixed_array() {
+    fn flags_list_string_with_incompatible_array() {
+        // `[1, 2]` coerces to strings (valid Terraform); an object
+        // element is the genuinely-incompatible case still flagged.
+        let d = diags(r#"variable "x" {
+          type    = list(string)
+          default = [{}, {}]
+        }"#);
+        assert_eq!(d.len(), 1, "got: {d:?}");
+    }
+
+    #[test]
+    fn accepts_list_string_with_numeric_array() {
         let d = diags(r#"variable "x" {
           type    = list(string)
           default = [1, 2]
         }"#);
-        assert_eq!(d.len(), 1, "got: {d:?}");
+        assert!(d.is_empty(), "got: {d:?}");
     }
 
     #[test]
@@ -261,9 +305,10 @@ mod tests {
 
     #[test]
     fn flags_object_field_type_mismatch() {
+        // `a = 1` would coerce to string; a collection value does not.
         let d = diags(r#"variable "x" {
           type    = object({ a = string })
-          default = { a = 1 }
+          default = { a = [1, 2] }
         }"#);
         assert_eq!(d.len(), 1, "got: {d:?}");
         assert!(

@@ -788,11 +788,35 @@ pub fn merge_observations(obs: &[VariableType]) -> Option<VariableType> {
 ///   anything other than `Any` must be present — `optional(…)`
 ///   fields parse as `Any` (see [`parse_type_expr`]) and are thus
 ///   allowed to be absent without a false positive.
+/// Whether a value of primitive type `actual` satisfies a declared
+/// primitive type, accounting for Terraform's automatic primitive
+/// conversions. Terraform losslessly converts between `string` and
+/// `number`, and between `string` and `bool` (e.g. `type = number`
+/// with `default = "5"`, or `type = bool` with `default = "true"`, are
+/// both accepted by `terraform plan`). `number` and `bool` do NOT
+/// inter-convert. We only know the static type here, not the literal,
+/// so we accept the conversion conservatively — the worst case is a
+/// missed error (`default = "abc"` for a `number`), never a false
+/// positive on valid config.
+fn primitives_compatible(a: Primitive, b: Primitive) -> bool {
+    use Primitive::*;
+    matches!(
+        (a, b),
+        (String, String)
+            | (Number, Number)
+            | (Bool, Bool)
+            | (String, Number)
+            | (Number, String)
+            | (String, Bool)
+            | (Bool, String)
+    )
+}
+
 pub fn satisfies(declared: &VariableType, actual: &VariableType) -> bool {
     use VariableType::*;
     match (declared, actual) {
         (Any, _) | (_, Any) => true,
-        (Primitive(a), Primitive(b)) => a == b,
+        (Primitive(a), Primitive(b)) => primitives_compatible(*a, *b),
         (List(inner), Tuple(items)) | (Set(inner), Tuple(items)) => {
             items.iter().all(|it| satisfies(inner, it))
         }
@@ -1171,22 +1195,37 @@ mod tests {
     }
 
     #[test]
-    fn satisfies_wrong_primitive_is_mismatch() {
-        assert!(!satisfies(&decl("string"), &shape("42")));
-        assert!(!satisfies(&decl("number"), &shape(r#""hi""#)));
-        assert!(!satisfies(&decl("bool"), &shape(r#""true""#)));
+    fn satisfies_string_number_bool_coerce() {
+        // Terraform auto-converts string<->number and string<->bool, so
+        // these are accepted (we only know static types, not literals).
+        assert!(satisfies(&decl("string"), &shape("42")));
+        assert!(satisfies(&decl("number"), &shape(r#""5""#)));
+        assert!(satisfies(&decl("string"), &shape("true")));
+        assert!(satisfies(&decl("bool"), &shape(r#""true""#)));
+    }
+
+    #[test]
+    fn satisfies_number_bool_do_not_coerce() {
+        // number<->bool is NOT a Terraform conversion.
+        assert!(!satisfies(&decl("number"), &shape("true")));
+        assert!(!satisfies(&decl("bool"), &shape("42")));
     }
 
     #[test]
     fn satisfies_list_of_string_accepts_string_array() {
         assert!(satisfies(&decl("list(string)"), &shape(r#"["a", "b"]"#)));
-        assert!(!satisfies(&decl("list(string)"), &shape("[1, 2]")));
+        // `[1, 2]` coerces (Terraform converts numbers to strings); a
+        // collection element is the genuinely-incompatible case.
+        assert!(satisfies(&decl("list(string)"), &shape("[1, 2]")));
+        assert!(!satisfies(&decl("list(string)"), &shape("[{}]")));
     }
 
     #[test]
     fn satisfies_set_of_number_accepts_numeric_array() {
         assert!(satisfies(&decl("set(number)"), &shape("[1, 2]")));
-        assert!(!satisfies(&decl("set(number)"), &shape(r#"["a"]"#)));
+        // `["5"]` coerces string->number; an object element does not.
+        assert!(satisfies(&decl("set(number)"), &shape(r#"["5"]"#)));
+        assert!(!satisfies(&decl("set(number)"), &shape("[{}]")));
     }
 
     #[test]
@@ -1195,9 +1234,11 @@ mod tests {
             &decl("map(string)"),
             &shape(r#"{ a = "x", b = "y" }"#)
         ));
+        // `b = 1` coerces to string; a nested object value does not.
+        assert!(satisfies(&decl("map(string)"), &shape(r#"{ a = "x", b = 1 }"#)));
         assert!(!satisfies(
             &decl("map(string)"),
-            &shape(r#"{ a = "x", b = 1 }"#)
+            &shape(r#"{ a = "x", b = {} }"#)
         ));
     }
 
@@ -1207,9 +1248,12 @@ mod tests {
             &decl("object({ a = string, b = number })"),
             &shape(r#"{ a = "x", b = 1 }"#)
         ));
+        // `a = 1` coerces to string; a collection value for a string
+        // field does not.
+        assert!(satisfies(&decl("object({ a = string })"), &shape(r#"{ a = 1 }"#)));
         assert!(!satisfies(
             &decl("object({ a = string })"),
-            &shape(r#"{ a = 1 }"#)
+            &shape(r#"{ a = [1] }"#)
         ));
     }
 
