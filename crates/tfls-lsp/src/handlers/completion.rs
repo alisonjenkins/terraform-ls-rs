@@ -319,8 +319,12 @@ pub async fn completion(
             required_provider_source_value_items().await
         }
         CompletionContext::RequiredProviderVersionValue { source, cursor_partial } => {
-            let items =
-                required_provider_version_value_items(source.as_deref(), &cursor_partial).await;
+            let items = required_provider_version_value_items(
+                &backend.http_client,
+                source.as_deref(),
+                &cursor_partial,
+            )
+            .await;
             stamp_version_replace(items, pos, &cursor_partial)
         }
         CompletionContext::RequiredVersionValue { cursor_partial } => {
@@ -329,7 +333,12 @@ pub async fn completion(
         }
         CompletionContext::VariableTypeValue => variable_type_value_items(),
         CompletionContext::ModuleVersionValue { source, cursor_partial } => {
-            let items = module_version_value_items(source.as_deref(), &cursor_partial).await;
+            let items = module_version_value_items(
+                &backend.http_client,
+                source.as_deref(),
+                &cursor_partial,
+            )
+            .await;
             stamp_version_replace(items, pos, &cursor_partial)
         }
         CompletionContext::BuiltinNestedBody { path } => {
@@ -990,6 +999,7 @@ fn constraint_operator_items() -> Vec<CompletionItem> {
 /// without having to type a digit first; mid-version we just list
 /// the matching exact versions.
 async fn required_provider_version_value_items(
+    client: &reqwest::Client,
     source: Option<&str>,
     cursor_partial: &str,
 ) -> Vec<CompletionItem> {
@@ -1002,7 +1012,7 @@ async fn required_provider_version_value_items(
             // remaining exact versions. If the registry fetch failed
             // (cold cache, network down) we still show operators —
             // better than empty.
-            let mut items = prefilled_provider_version_items(source).await;
+            let mut items = prefilled_provider_version_items(client, source).await;
             if items.is_empty() {
                 items = constraint_operator_items();
             }
@@ -1010,7 +1020,7 @@ async fn required_provider_version_value_items(
         }
         CursorSlot::AfterOperator(_) | CursorSlot::InsideVersion { .. } => {
             let vp = version_partial_of(&slot);
-            let mut items = provider_version_items_from_registry(source, vp).await;
+            let mut items = provider_version_items_from_registry(client, source, vp).await;
             if items.is_empty() {
                 items = constraint_operator_items();
             }
@@ -1024,16 +1034,16 @@ async fn required_provider_version_value_items(
 /// scaffolds, then all known versions. Sort-keys keep the latest
 /// flavours pinned at the top regardless of how the client
 /// alphabetises operator + version labels.
-async fn prefilled_provider_version_items(source: Option<&str>) -> Vec<CompletionItem> {
+async fn prefilled_provider_version_items(
+    client: &reqwest::Client,
+    source: Option<&str>,
+) -> Vec<CompletionItem> {
     let Some((ns, name)) = source.and_then(parse_source) else {
         // No source → can't fetch — fall back to operator-only.
         return constraint_operator_items();
     };
-    let Ok(client) = tfls_provider_protocol::registry_versions::build_http_client() else {
-        return constraint_operator_items();
-    };
     let versions = match tfls_provider_protocol::registry_versions::fetch_versions(
-        &client, &ns, &name,
+        client, &ns, &name,
     )
     .await
     {
@@ -1140,17 +1150,15 @@ fn version_partial_of(slot: &tfls_core::version_constraint::CursorSlot) -> &str 
 /// Pull exact-version items for a given provider source from the
 /// Terraform + OpenTofu registries, pre-filtered to the typed prefix.
 async fn provider_version_items_from_registry(
+    client: &reqwest::Client,
     source: Option<&str>,
     version_partial: &str,
 ) -> Vec<CompletionItem> {
     let Some((ns, name)) = source.and_then(parse_source) else {
         return Vec::new();
     };
-    let Ok(client) = tfls_provider_protocol::registry_versions::build_http_client() else {
-        return Vec::new();
-    };
     let versions = match tfls_provider_protocol::registry_versions::fetch_versions(
-        &client, &ns, &name,
+        client, &ns, &name,
     )
     .await
     {
@@ -1337,6 +1345,7 @@ async fn tool_version_items_from_github(version_partial: &str) -> Vec<Completion
 /// module registry versions after an operator (when the module's
 /// `source` is a registry path like `ns/name/provider`).
 async fn module_version_value_items(
+    client: &reqwest::Client,
     source: Option<&str>,
     cursor_partial: &str,
 ) -> Vec<CompletionItem> {
@@ -1346,7 +1355,8 @@ async fn module_version_value_items(
         CursorSlot::AtOperator | CursorSlot::Trailing => constraint_operator_items(),
         CursorSlot::AfterOperator(_) | CursorSlot::InsideVersion { .. } => {
             let mut items =
-                module_version_items_from_registry(source, version_partial_of(&slot)).await;
+                module_version_items_from_registry(client, source, version_partial_of(&slot))
+                    .await;
             if items.is_empty() {
                 items = constraint_operator_items();
             }
@@ -1356,17 +1366,15 @@ async fn module_version_value_items(
 }
 
 async fn module_version_items_from_registry(
+    client: &reqwest::Client,
     source: Option<&str>,
     version_partial: &str,
 ) -> Vec<CompletionItem> {
     let Some((ns, name, provider)) = source.and_then(parse_module_source) else {
         return Vec::new();
     };
-    let Ok(client) = tfls_provider_protocol::registry_versions::build_http_client() else {
-        return Vec::new();
-    };
     let versions = match tfls_provider_protocol::registry_versions::fetch_module_versions(
-        &client, &ns, &name, &provider,
+        client, &ns, &name, &provider,
     )
     .await
     {

@@ -37,8 +37,21 @@ pub struct Backend {
     pub client: Client,
     pub state: Arc<StateStore>,
     pub jobs: Arc<JobQueue>,
+    /// Shared HTTP client for registry version lookups. Built once and
+    /// cloned (cheap — the connection pool lives behind an Arc) so rapid
+    /// completion keystrokes reuse one pool instead of constructing a
+    /// fresh client (and TLS config) per request.
+    pub http_client: reqwest::Client,
     /// Handles for spawned worker/watcher tasks, aborted on shutdown.
     tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+}
+
+/// Build the shared registry HTTP client, falling back to a default
+/// client if the configured builder fails (offline / TLS init issue) so
+/// completion never hard-fails on construction.
+fn shared_http_client() -> reqwest::Client {
+    tfls_provider_protocol::registry_versions::build_http_client()
+        .unwrap_or_else(|_| reqwest::Client::new())
 }
 
 impl Backend {
@@ -47,6 +60,7 @@ impl Backend {
             client,
             state: Arc::new(StateStore::new()),
             jobs: Arc::new(JobQueue::new()),
+            http_client: shared_http_client(),
             tasks: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -59,6 +73,7 @@ impl Backend {
             client,
             state,
             jobs,
+            http_client: shared_http_client(),
             tasks: Arc::new(Mutex::new(Vec::new())),
         }
     }

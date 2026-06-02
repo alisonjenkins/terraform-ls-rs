@@ -129,7 +129,7 @@ Workflow: `completion-deep-dive`. 48 agents, ~2.5M tokens. Bugs adversarially re
   classify_block_header_from requires resource/data, so bare `output "x" { value = | }` (and locals/module-input `=`) falls to FunctionCall and offers only functions — no reference roots. (Once `var.`/`local.`/`module.` is typed, the rich path already fires; the gap is the bare expression-start position.)
   **Proposal:** Add a CompletionContext returned by expression_context for non-resource/data enclosing blocks that offers reference ROOT keywords (var/local/module/each/path, resource type names, data) plus functions, reusing existing enumeration helpers; preserve the resource/data AttributeValue path.
 
-- [ ] **No de-duplication / single-flight for concurrent registry fetches on rapid keystrokes** (low, effort M, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:866-893, 1050-1069; crates/tfls-provider-protocol/src/registry_versions.rs:96-130
+- [x] **No de-duplication / single-flight for concurrent registry fetches on rapid keystrokes** (low, effort M, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:866-893, 1050-1069; crates/tfls-provider-protocol/src/registry_versions.rs:96-130
   Each completion builds a fresh reqwest client (dropped at fn end, losing pool reuse) and there's no in-flight coalescing, so cold-cache rapid typing fires overlapping full fan-out fetches (largely mitigated by existing did_open/initialize prefetch and the disk cache).
   **Proposal:** Hold a shared reqwest::Client on Backend; add an in-flight coalescer (DashMap<(ns,name), Shared<Arc<…>>> or a Mutex-guarded request map) gated by is_provider_cached so concurrent completions for the same provider await one fetch.
 
@@ -137,6 +137,6 @@ Workflow: `completion-deep-dive`. 48 agents, ~2.5M tokens. Bugs adversarially re
   completion() materializes the whole document each keystroke though classify_context only reads `&source[..byte_offset]`.
   **Proposal:** Materialize only the prefix (`rope.byte_slice(..offset).to_string()`) and pass it to classify_context (offset == len); also materialize a small post-cursor slice (to end-of-line) for label_closed_after, which reads `&text[offset..]`.
 
-- [ ] **Missing `[`/`:`/`$` trigger characters for index/provider-function/interpolation contexts; `"` fires on name labels** (low, effort M, confidence high) — crates/tfls-lsp/src/capabilities.rs:30
+- [x] **Missing `[`/`:`/`$` trigger characters for index/provider-function/interpolation contexts; `"` fires on name labels** (low, effort M, confidence high) — crates/tfls-lsp/src/capabilities.rs:30
   trigger_characters are only `.` and `"`; IndexKeyRef (`["`), provider-function (`provider::`), and interpolation (`${`) contexts never auto-pop, and `"` fires a wasted classify+full rope.to_string() on every quote (including resource name labels).
   **Proposal:** Add `[` (cleanest) and consider `:`/`$`; to keep cost sane, bail classify cheaply before the rope.to_string() on common `:`/`$` keystrokes that won't produce items. Add tests routing each new trigger to its intended context.
