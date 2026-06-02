@@ -945,7 +945,15 @@ async fn prefilled_provider_version_items(source: Option<&str>) -> Vec<Completio
             return constraint_operator_items();
         }
     };
-    let Some(latest) = versions.first() else {
+    // Preselect the latest STABLE release as the default — `versions` is
+    // major-dominant descending, so `first()` would pin a higher-major
+    // pre-release (e.g. `6.0.0-beta1` over stable `5.99.0`). Fall back to
+    // the absolute latest only when every version is a pre-release.
+    let Some(latest) = versions
+        .iter()
+        .find(|v| !v.version.contains('-'))
+        .or_else(|| versions.first())
+    else {
         return constraint_operator_items();
     };
     let latest_v = latest.version.clone();
@@ -1103,7 +1111,13 @@ async fn prefilled_tool_version_items() -> Vec<CompletionItem> {
                 return constraint_operator_items();
             }
         };
-    let Some(latest) = versions.first() else {
+    // Latest STABLE release as the preselected default (skip pre-releases
+    // unless that's all that exists) — see prefilled_provider_version_items.
+    let Some(latest) = versions
+        .iter()
+        .find(|v| !v.version.contains('-'))
+        .or_else(|| versions.first())
+    else {
         return constraint_operator_items();
     };
     let latest_v = latest.version.clone();
