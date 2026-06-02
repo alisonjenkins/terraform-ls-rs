@@ -95,6 +95,10 @@ pub async fn code_action(
                 {
                     actions.push(CodeActionOrCommand::CodeAction(action));
                 }
+            } else if is_deprecated_index(diag) {
+                if let Some(action) = make_convert_legacy_index_action(&uri, diag, &rope) {
+                    actions.push(CodeActionOrCommand::CodeAction(action));
+                }
             } else if is_deprecated_null_resource(diag) {
                 if let Some(action) =
                     make_replace_null_resource_for_diag(&backend.state, &uri, diag, body, &rope)
@@ -2426,6 +2430,47 @@ fn is_deprecated_lookup(diag: &Diagnostic) -> bool {
         && diag
             .message
             .contains("two-argument `lookup()` is deprecated")
+}
+
+fn is_deprecated_index(diag: &Diagnostic) -> bool {
+    diag.source.as_deref() == Some("terraform-ls-rs")
+        && diag.message.contains("legacy attribute-style index")
+}
+
+/// Quick-fix for the legacy numeric index warning: rewrite the `.N`
+/// traversal operator (covered by the diagnostic range) to `[N]`.
+fn make_convert_legacy_index_action(
+    uri: &Url,
+    diag: &Diagnostic,
+    rope: &Rope,
+) -> Option<CodeAction> {
+    let start = tfls_parser::lsp_position_to_byte_offset(rope, diag.range.start).ok()?;
+    let end = tfls_parser::lsp_position_to_byte_offset(rope, diag.range.end).ok()?;
+    let text = rope.byte_slice(start..end).to_string();
+    let digits = text.trim().trim_start_matches('.');
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let new_text = format!("[{digits}]");
+    let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    changes.insert(
+        uri.clone(),
+        vec![TextEdit {
+            range: diag.range,
+            new_text: new_text.clone(),
+        }],
+    );
+    Some(CodeAction {
+        title: format!("Convert `.{digits}` to `{new_text}`"),
+        kind: Some(CodeActionKind::QUICKFIX),
+        diagnostics: Some(vec![diag.clone()]),
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        is_preferred: Some(true),
+        ..Default::default()
+    })
 }
 
 fn is_unknown_provider_local(diag: &Diagnostic) -> bool {
