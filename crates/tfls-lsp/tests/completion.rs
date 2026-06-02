@@ -61,6 +61,15 @@ fn install_aws_schema(backend: &Backend) {
                                             "device_name": { "type": "string", "required": true }
                                         }
                                     }
+                                },
+                                "metadata_options": {
+                                    "nesting_mode": "list",
+                                    "max_items": 1,
+                                    "block": {
+                                        "attributes": {
+                                            "http_tokens": { "type": "string", "optional": true }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -184,6 +193,33 @@ async fn resource_body_suggests_attributes_from_schema() {
     assert!(ls.contains(&"ami".to_string()));
     assert!(ls.contains(&"instance_type".to_string()));
     assert!(ls.contains(&"tags".to_string()));
+}
+
+#[tokio::test]
+async fn nested_block_at_max_items_is_suppressed() {
+    // `metadata_options` is a List block with max_items=1. Once one is
+    // present it must not be re-offered, but an unbounded list block
+    // (`ebs_block_device`) still is.
+    let u = uri("file:///a.tf");
+    let src = "resource \"aws_instance\" \"x\" {\n  metadata_options {}\n  \n}\n";
+    let backend = fresh_backend(src, &u);
+    install_aws_schema(&backend);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 2)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(
+        !ls.contains(&"metadata_options".to_string()),
+        "max_items=1 block re-offered after one present: {ls:?}"
+    );
+    assert!(
+        ls.contains(&"ebs_block_device".to_string()),
+        "unbounded list block should still be offered: {ls:?}"
+    );
 }
 
 #[tokio::test]

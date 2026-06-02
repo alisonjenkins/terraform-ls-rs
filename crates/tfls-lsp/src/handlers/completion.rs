@@ -5,7 +5,7 @@
 //! (`InsertTextFormat::SNIPPET`) so the client can offer tabstop
 //! navigation through placeholders.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use hcl_edit::repr::Span;
 use hcl_edit::structure::{Block, Body};
@@ -556,7 +556,7 @@ fn builtin_body_items(
         })
         .collect();
     for b in schema.blocks {
-        if filter.present_blocks.contains(b.name) {
+        if filter.block_present(b.name) {
             continue;
         }
         items.push(CompletionItem {
@@ -1410,11 +1410,16 @@ fn resource_body_items(
             .block_types
             .iter()
             .filter(|(name, nb)| {
-                // Suggest repeatable nested blocks even when one is
-                // already present; skip only schema-`single` blocks
-                // that have already been placed.
-                nb.nesting_mode != NestingMode::Single
-                    || !filter.present_blocks.contains(name.as_str())
+                // Suppress a nested block that's at its cardinality limit:
+                // a `single` block already placed, or a List/Set block
+                // already present `max_items` times (providers encode
+                // "max one" as List/Set + max_items=1, e.g.
+                // root_block_device). max_items == 0 means unbounded.
+                let count = filter.block_count(name);
+                if nb.nesting_mode == NestingMode::Single {
+                    return count == 0;
+                }
+                nb.max_items == 0 || count < nb.max_items as usize
             })
             .map(|(name, nb)| CompletionItem {
                 label: name.clone(),
@@ -1437,8 +1442,7 @@ fn resource_body_items(
                 .filter(|item| !filter.present_attrs.contains(&item.label)),
         );
         items.extend(meta_block_items(kind).into_iter().filter(|item| {
-            !(is_singleton_meta_block(kind, &item.label)
-                && filter.present_blocks.contains(&item.label))
+            !(is_singleton_meta_block(kind, &item.label) && filter.block_present(&item.label))
         }));
     }
 
@@ -1452,7 +1456,19 @@ fn resource_body_items(
 #[derive(Default)]
 struct BodyFilter {
     present_attrs: HashSet<String>,
-    present_blocks: HashSet<String>,
+    /// Count of each literal nested block already present (a `dynamic`
+    /// block keys on `"dynamic"`, not its target, so it never counts
+    /// toward the target's max_items).
+    present_blocks: HashMap<String, usize>,
+}
+
+impl BodyFilter {
+    fn block_present(&self, name: &str) -> bool {
+        self.present_blocks.contains_key(name)
+    }
+    fn block_count(&self, name: &str) -> usize {
+        self.present_blocks.get(name).copied().unwrap_or(0)
+    }
 }
 
 fn compute_body_filter(body_opt: Option<&Body>, offset: usize) -> BodyFilter {
@@ -1467,7 +1483,9 @@ fn compute_body_filter(body_opt: Option<&Body>, offset: usize) -> BodyFilter {
         if let Some(attr) = structure.as_attribute() {
             out.present_attrs.insert(attr.key.as_str().to_string());
         } else if let Some(nested) = structure.as_block() {
-            out.present_blocks.insert(nested.ident.as_str().to_string());
+            *out.present_blocks
+                .entry(nested.ident.as_str().to_string())
+                .or_insert(0) += 1;
         }
     }
     out
@@ -1674,7 +1692,7 @@ fn dynamic_body_items(filter: &BodyFilter) -> Vec<CompletionItem> {
         })
         .collect();
 
-    if !filter.present_blocks.contains("content") {
+    if !filter.block_present("content") {
         items.push(CompletionItem {
             label: "content".to_string(),
             kind: Some(CompletionItemKind::STRUCT),
