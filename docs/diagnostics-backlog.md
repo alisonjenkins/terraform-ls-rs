@@ -145,7 +145,7 @@ Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially r
     deprecated_lookup/interpolation have quick-fixes; these three are diagnostic-only despite mechanical fixes (`.N`→`[N]`, `x==[]`→`length(x)==0`, remove overridden duplicate key).
     **Proposal:** Add scan_X functions + emit_scoped_actions wiring. Legacy-index and length() are pure text rewrites; the duplicate-key fix needs new entry-span computation (the diagnostic records only key-name spans).
 
-- [ ] **Final dedup stringifies severity via Debug formatting in the hot loop** (low, effort S, confidence high) — `document.rs:601-630`
+- [x] **Final dedup stringifies severity via Debug formatting in the hot loop** (low, effort S, confidence high) — `document.rs:601-630`
     The per-call dedup allocates per diagnostic: `format!("{s:?}")` on a Copy enum plus source/message clones into the FxHashSet key, on every compute call.
     **Proposal:** Key on the Copy `DiagnosticSeverity` directly and borrow `&str` for source/message in the retain closure — allocation-free.
 
