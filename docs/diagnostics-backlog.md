@@ -33,15 +33,15 @@ Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially r
     `used_provider_locals` never inspects the `providers = { x = x }` meta-argument on `module` blocks, so a root declaring a provider purely to pass it down gets a false "declared but not used" — on the recommended multi-provider composition pattern.
     **Proposal:** Add a `"module"` arm in both collection sites iterating the `providers` object, running `extract_provider_local` on key and value head idents, inserting both.
 
-- [ ] **Pre-release version ordering is string-compared, producing wrong constraint results** (medium, effort M, confidence high) — `tfls-core/src/version_constraint.rs:454-486`
+- [x] **Pre-release version ordering is string-compared, producing wrong constraint results** (medium, effort M, confidence high) — `tfls-core/src/version_constraint.rs:454-486`
     `VersionKey` derives Ord with `pre_id: String` last, so `1.0.0-rc10` byte-sorts below `1.0.0-rc2`. Any constraint crossing a numeric pre-release boundary can reach the wrong conclusion. Reachable via rc/beta releases.
     **Proposal:** Replace `pre_id: String` with `Vec<PreSegment{Num(u64),Text(String)}>` + semver-rule Ord (numeric compared numerically, numeric < alphanumeric, fewer fields < more).
 
-- [ ] **No-match version warning never fires for private registry sources; provider-source host dropped** (medium, effort M, confidence high) — `version_constraint.rs:345-369`
+- [x] **No-match version warning never fires for private registry sources; provider-source host dropped** (medium, effort M, confidence high) — `version_constraint.rs:345-369`
     `parse_provider_source` discards the host, so `app.terraform.io/org/foo` queries the PUBLIC registry for `org/foo`. `parse_module_source_parts` rejects 4-segment host-prefixed module sources entirely, inconsistent with module_version_presence.
     **Proposal:** Carry optional host through `ConstraintSource` into the cache key (separate or explicitly-skipped private catalogs). Accept the 4-segment host-prefixed module form.
 
-- [ ] **comment_syntax false-positives on `//` and `http://` inside heredocs** (medium, effort M, confidence high) — `comment_syntax.rs:12`
+- [x] **comment_syntax false-positives on `//` and `http://` inside heredocs** (medium, effort M, confidence high) — `comment_syntax.rs:12`
     The byte scanner has no heredoc state, so `//` inside `<<EOF ... EOF` bodies (URLs, shell, JS in user_data/command/policy) triggers a "use `#`" diagnostic pointing inside literal string data. Fires only when `style_rules` on, but a clear false positive.
     **Proposal:** Add heredoc tracking (capture terminator, suppress comment scanning until the terminator line, handle `<<-` and quoted terminators), or collect heredoc spans from the AST and skip those byte ranges.
 
@@ -57,7 +57,7 @@ Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially r
     On delete the handler calls `remove_document` and stops: published diagnostics for the deleted file linger in the client forever, and sibling buffers keep stale reference resolution. Contrast `did_close`, which publishes an empty set.
     **Proposal:** On DELETED also publish an empty diagnostic set for the URI and enqueue a peer recompute for the parent dir.
 
-- [ ] **Provider-version gate matches on local provider name only, ignoring source** (low, effort M, confidence med) — `deprecation_rule.rs:397-448` + `util.rs:79`
+- [x] **Provider-version gate matches on local provider name only, ignoring source** (low, effort M, confidence med) — `deprecation_rule.rs:397-448` + `util.rs:79`
     ProviderVersion gates resolve by local key name (literally `aws`), never `source`. An aliased local (`awscloud = { source = "hashicorp/aws" }`) misses the lookup; a local `aws` pointing at a fork is treated as canonical. The lock path resolves via source, so the two can disagree.
     **Proposal:** Match the rule's provider by canonical source address (hashicorp/<name> with short-form defaulting) so constraint and lock gates agree.
 
@@ -65,7 +65,7 @@ Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially r
     The `Expression::Object` arm recurses only into values, dropping `ObjectKey::Expression` keys. Every expr-walk rule misses patterns in computed-key position (`{ (lookup(var.m,"k")) = 1 }`), contradicting the module's "no expression position is missed".
     **Proposal:** `if let ObjectKey::Expression(k) = key { visit_expr(k, visit); }` before visiting the value. Add a test; correct the doc-comment.
 
-- [ ] **satisfies_all admits pre-release candidates that go-version would exclude** (low, effort S, confidence high) — `tfls-core/src/version_constraint.rs:353-425`
+- [x] **satisfies_all admits pre-release candidates that go-version would exclude** (low, effort S, confidence high) — `tfls-core/src/version_constraint.rs:353-425`
     A pre-release with a higher core than a stable constraint (`6.0.0-beta1` vs `>= 5.99.0`) satisfies it, though go-version rejects pre-releases unless the matching operand carries one on the same core. Since the cached registry list includes pre-releases, the "no published version matches" warning can be falsely suppressed.
     **Proposal:** In `satisfies_one`, when the candidate is a pre-release and the matched operand has none, return false unless the candidate's (major,minor,patch) core exactly equals the constraint's core.
 
