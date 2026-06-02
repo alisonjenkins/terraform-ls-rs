@@ -772,13 +772,48 @@ async fn publish_for_dir(state: &StateStore, client: &tower_lsp::Client, dir: &P
             None
         })
         .collect();
+
+    // Group by parent dir and build ONE ModuleSnapshot per dir, reused
+    // for every doc in it. The per-doc `compute_diagnostics` path builds
+    // a fresh adapter that re-walks the module's siblings each call —
+    // O(N²) over a dir of N files. A shared snapshot makes it O(N).
+    let mut by_module: std::collections::HashMap<Option<PathBuf>, Vec<tower_lsp::lsp_types::Url>> =
+        std::collections::HashMap::new();
     for uri in uris {
         if state.should_skip_push_diagnostics(&uri) {
             continue;
         }
-        let version = state.documents.get(&uri).map(|d| d.version);
-        let diagnostics = crate::handlers::document::compute_diagnostics(state, &uri);
-        client.publish_diagnostics(uri, diagnostics, version).await;
+        let parent = crate::handlers::util::parent_dir(&uri);
+        by_module.entry(parent).or_default().push(uri);
+    }
+    let referenced_dirs = crate::handlers::module_snapshot::referenced_dirs_in_workspace(state);
+
+    for (module_dir, module_uris) in by_module {
+        let snapshot = crate::handlers::module_snapshot::ModuleSnapshot::build(
+            state,
+            module_dir.as_deref(),
+            Some(&referenced_dirs),
+        );
+        for uri in module_uris {
+            let version = state.documents.get(&uri).map(|d| d.version);
+            let current_file = uri
+                .path_segments()
+                .and_then(|mut it| it.next_back())
+                .unwrap_or("")
+                .to_string();
+            let lookup = crate::handlers::module_snapshot::CachedModuleLookup {
+                snapshot: &snapshot,
+                state,
+                current_uri: &uri,
+            };
+            let diagnostics = crate::handlers::document::compute_diagnostics_with_lookup(
+                state,
+                &uri,
+                &lookup,
+                &current_file,
+            );
+            client.publish_diagnostics(uri, diagnostics, version).await;
+        }
     }
 }
 
