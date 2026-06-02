@@ -257,6 +257,71 @@ async fn nested_block_at_max_items_is_suppressed() {
 }
 
 #[tokio::test]
+async fn deprecated_attribute_is_tagged_and_sinks_in_sort() {
+    // A provider-flagged deprecated attribute must still be offered
+    // (legacy configs need it) but carry the DEPRECATED tag and a late
+    // sort bucket so it doesn't sit beside live options.
+    let u = uri("file:///a.tf");
+    let src = "resource \"widget\" \"x\" {\n\n}\n";
+    let backend = fresh_backend(src, &u);
+    let schema: ProviderSchemas = sonic_rs::from_str(
+        r#"{
+        "format_version": "1.0",
+        "provider_schemas": {
+            "registry.terraform.io/acme/widget": {
+                "provider": { "version": 0, "block": {} },
+                "resource_schemas": {
+                    "widget": {
+                        "version": 1,
+                        "block": {
+                            "attributes": {
+                                "name":   { "type": "string", "required": true },
+                                "legacy": { "type": "string", "optional": true, "deprecated": true }
+                            }
+                        }
+                    }
+                },
+                "data_source_schemas": {}
+            }
+        }
+    }"#,
+    )
+    .expect("parse schema");
+    backend.state.install_schemas(schema);
+
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(1, 0)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let items = match resp {
+        CompletionResponse::Array(a) => a,
+        CompletionResponse::List(l) => l.items,
+    };
+    let legacy = items
+        .iter()
+        .find(|i| i.label == "legacy")
+        .expect("deprecated attr still offered");
+    assert_eq!(
+        legacy.tags.as_deref(),
+        Some(&[lsp_types::CompletionItemTag::DEPRECATED][..]),
+        "deprecated attr should carry DEPRECATED tag"
+    );
+    let name_st = items
+        .iter()
+        .find(|i| i.label == "name")
+        .and_then(|i| i.sort_text.clone())
+        .unwrap_or_default();
+    let legacy_st = legacy.sort_text.clone().unwrap_or_default();
+    assert!(
+        legacy_st.starts_with("8_") && name_st < legacy_st,
+        "deprecated must sink below live attrs: name={name_st:?} legacy={legacy_st:?}"
+    );
+}
+
+#[tokio::test]
 async fn resource_body_excludes_pure_computed_attributes() {
     // Regression: attributes with `computed = true` and neither
     // `required` nor `optional` are pure provider outputs and cannot

@@ -10,8 +10,9 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use hcl_edit::repr::Span;
 use hcl_edit::structure::{Block, Body};
 use lsp_types::{
-    CompletionItem, CompletionItemKind, CompletionParams, CompletionResponse, CompletionTextEdit,
-    Documentation, InsertTextFormat, MarkupContent, MarkupKind, Position, Range, TextEdit, Url,
+    CompletionItem, CompletionItemKind, CompletionItemTag, CompletionParams, CompletionResponse,
+    CompletionTextEdit, Documentation, InsertTextFormat, MarkupContent, MarkupKind, Position, Range,
+    TextEdit, Url,
 };
 use tfls_core::{
     BlockKind, CompletionContext, IndexRootRef, META_ATTRS, PathStep, ResourceAddress,
@@ -1366,7 +1367,20 @@ fn resource_body_items(
             // Required attrs sort above optional ones so the must-fill
             // fields (e.g. aws_instance.ami) sit at the top of the menu
             // instead of being buried alphabetically among optionals.
-            sort_text: Some(format!("{}_{name}", if attr.required { 0 } else { 1 })),
+            // Deprecated attrs sink to a late bucket and carry the
+            // DEPRECATED tag (clients strike them through) — kept, not
+            // dropped, so legacy configs can still complete them.
+            sort_text: Some(format!(
+                "{}_{name}",
+                if attr.deprecated {
+                    8
+                } else if attr.required {
+                    0
+                } else {
+                    1
+                }
+            )),
+            tags: deprecated_tags(attr.deprecated),
             detail: Some(attribute_detail(attr)),
             documentation: attr.description.as_ref().map(|d| {
                 Documentation::MarkupContent(MarkupContent {
@@ -1399,9 +1413,15 @@ fn resource_body_items(
             .map(|(name, nb)| CompletionItem {
                 label: name.clone(),
                 kind: Some(CompletionItemKind::STRUCT),
-                detail: Some("nested block".to_string()),
-                // Nested blocks sort after attributes (bucket 2).
-                sort_text: Some(format!("2_{name}")),
+                detail: Some(if nb.block.deprecated {
+                    "nested block — deprecated".to_string()
+                } else {
+                    "nested block".to_string()
+                }),
+                // Nested blocks sort after attributes (bucket 2);
+                // deprecated ones sink to bucket 9.
+                sort_text: Some(format!("{}_{name}", if nb.block.deprecated { 9 } else { 2 })),
+                tags: deprecated_tags(nb.block.deprecated),
                 insert_text: Some(nested_block_scaffold_snippet(name, &nb.block)),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..Default::default()
@@ -1831,6 +1851,12 @@ fn variable_insert_text(name: &str, ty: Option<&VariableType>) -> String {
         }
         _ => format!("{name} = ${{1}}"),
     }
+}
+
+/// `Some(vec![DEPRECATED])` when the item is deprecated, else `None`.
+/// Clients render the DEPRECATED tag as a strikethrough on the label.
+fn deprecated_tags(deprecated: bool) -> Option<Vec<CompletionItemTag>> {
+    deprecated.then(|| vec![CompletionItemTag::DEPRECATED])
 }
 
 fn attribute_detail(attr: &tfls_schema::AttributeSchema) -> String {
