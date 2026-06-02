@@ -230,8 +230,14 @@ fn write_value(
             out.push_str("{\n");
             for (k, v) in obj {
                 indent_push(out, indent + 1);
-                out.push_str(k);
-                out.push_str(" = ");
+                // Quote object-expression keys. A JSON map key can be any
+                // string (`"eu-west-1"`, `"with space"`, `"123"`); emitted
+                // bare it produces un-parseable HCL and fails the whole
+                // document's body to `None`. Quoting is always valid for
+                // object-literal keys.
+                out.push('"');
+                out.push_str(&escape_string(k));
+                out.push_str("\" = ");
                 write_value(out, v, indent + 1)?;
                 out.push('\n');
             }
@@ -311,6 +317,25 @@ mod tests {
             .expect("has block");
         assert_eq!(block.ident.as_str(), "resource");
         assert_eq!(block.labels.len(), 2);
+    }
+
+    #[test]
+    fn non_identifier_object_keys_round_trip() {
+        // A map value keyed by region names / spaces / digits must still
+        // yield a parseable body — bare keys would fail it to `None`.
+        let parsed = parse_json_source(
+            r#"{
+                "locals": {
+                    "regions": {
+                        "eu-west-1": "a",
+                        "with space": "b",
+                        "123": "c"
+                    }
+                }
+            }"#,
+        );
+        assert!(parsed.body.is_some(), "got errors: {:?}", parsed.errors);
+        assert!(!parsed.has_errors(), "got: {:?}", parsed.errors);
     }
 
     #[test]
