@@ -422,17 +422,24 @@ pub fn compute_diagnostics_with_lookup(
         return Vec::new();
     };
 
-    let mut out = diagnostics_for_parse_errors(&doc.parsed.errors);
+    let mut out = tag(
+        "terraform_syntax",
+        diagnostics_for_parse_errors(&doc.parsed.errors),
+    );
 
     let module_dir = crate::handlers::util::parent_dir(uri);
-    out.extend(undefined_reference_diagnostics(&doc.references, |kind| {
-        is_defined_in_module(state, module_dir.as_deref(), kind)
-    }));
+    out.extend(tag(
+        "terraform_undefined_reference",
+        undefined_reference_diagnostics(&doc.references, |kind| {
+            is_defined_in_module(state, module_dir.as_deref(), kind)
+        }),
+    ));
 
     if let Some(body) = doc.parsed.body.as_ref() {
         let lookup = StateStoreSchemaLookup { state };
         let hints = RegistryDocsHints { state };
-        out.extend(
+        out.extend(tag(
+            "terraform_schema_validation",
             tfls_diag::schema_validation::resource_diagnostics_with_hints(
                 body,
                 &doc.rope,
@@ -440,62 +447,62 @@ pub fn compute_diagnostics_with_lookup(
                 &lookup,
                 Some(&hints),
             ),
-        );
+        ));
         let cache_lookup = OnDiskVersionCache;
-        out.extend(tfls_diag::constraint_diagnostics(
+        out.extend(tag("terraform_constraint", tfls_diag::constraint_diagnostics(
             body,
             &doc.rope,
             &cache_lookup,
-        ));
-        out.extend(tfls_diag::variable_default_type_diagnostics(
+        )));
+        out.extend(tag("terraform_variable_default_type", tfls_diag::variable_default_type_diagnostics(
             body, &doc.rope,
-        ));
+        )));
         // Pass the module-graph lookup so typed-variables can
         // suppress its warning on variables that are ALSO
         // unused — fixing the type on a soon-to-be-deleted
         // variable wastes the user's time. Lookup is only
         // consulted on root modules, matching
         // `unused_declarations`'s own gating.
-        out.extend(tfls_diag::typed_variables_diagnostics(
+        out.extend(tag("terraform_typed_variables", tfls_diag::typed_variables_diagnostics(
             body,
             &doc.rope,
             Some(graph),
-        ));
-        out.extend(tfls_diag::module_version_presence_diagnostics(body, &doc.rope));
-        out.extend(tfls_diag::module_pinned_source_diagnostics(body, &doc.rope));
-        out.extend(tfls_diag::module_shallow_clone_diagnostics(body, &doc.rope));
-        out.extend(tfls_diag::workspace_remote_diagnostics(body, &doc.rope));
-        out.extend(tfls_diag::deprecated_index_diagnostics(body, &doc.rope));
-        out.extend(tfls_diag::deprecated_interpolation_diagnostics(body, &doc.rope));
-        out.extend(tfls_diag::deprecated_lookup_diagnostics(body, &doc.rope));
+        )));
+        out.extend(tag("terraform_module_version_presence", tfls_diag::module_version_presence_diagnostics(body, &doc.rope)));
+        out.extend(tag("terraform_module_pinned_source", tfls_diag::module_pinned_source_diagnostics(body, &doc.rope)));
+        out.extend(tag("terraform_module_shallow_clone", tfls_diag::module_shallow_clone_diagnostics(body, &doc.rope)));
+        out.extend(tag("terraform_workspace_remote", tfls_diag::workspace_remote_diagnostics(body, &doc.rope)));
+        out.extend(tag("terraform_deprecated_index", tfls_diag::deprecated_index_diagnostics(body, &doc.rope)));
+        out.extend(tag("terraform_deprecated_interpolation", tfls_diag::deprecated_interpolation_diagnostics(body, &doc.rope)));
+        out.extend(tag("terraform_deprecated_lookup", tfls_diag::deprecated_lookup_diagnostics(body, &doc.rope)));
         // Module-aware gating: a `terraform { required_version }`
         // block typically lives in `versions.tf`, not the file we're
         // scanning, so we aggregate every sibling's constraint before
         // deciding whether to flag `null_resource` / `template_file`
         // blocks here.
         let null_resource_supported = module_supports_terraform_data(state, uri);
-        out.extend(tfls_diag::deprecated_null_resource_diagnostics_for_module(
+        out.extend(tag("terraform_deprecated_null_resource", tfls_diag::deprecated_null_resource_diagnostics_for_module(
             body,
             &doc.rope,
             null_resource_supported,
-        ));
+        )));
         let templatefile_supported = module_supports_templatefile(state, uri);
-        out.extend(tfls_diag::deprecated_template_file_diagnostics_for_module(
+        out.extend(tag("terraform_deprecated_template_file", tfls_diag::deprecated_template_file_diagnostics_for_module(
             body,
             &doc.rope,
             templatefile_supported,
-        ));
-        out.extend(tfls_diag::deprecated_template_dir_diagnostics_for_module(
+        )));
+        out.extend(tag("terraform_deprecated_template_dir", tfls_diag::deprecated_template_dir_diagnostics_for_module(
             body,
             &doc.rope,
             templatefile_supported,
-        ));
+        )));
         let locals_supported = module_supports_locals_replacement(state, uri);
-        out.extend(tfls_diag::deprecated_null_data_source_diagnostics_for_module(
+        out.extend(tag("terraform_deprecated_null_data_source", tfls_diag::deprecated_null_data_source_diagnostics_for_module(
             body,
             &doc.rope,
             locals_supported,
-        ));
+        )));
         // Provider-version-gated rule tables. Per provider:
         // pull module-aggregated `required_providers.<name>.version`
         // once, build a `rule_supported` closure that tests each
@@ -504,108 +511,117 @@ pub fn compute_diagnostics_with_lookup(
         // per provider — captured by `run_provider_table` below.
         let aws_constraint = module_constraint_for_provider(state, uri, "aws");
         let aws_locked = module_locked_provider_version(state, uri, "aws");
-        out.extend(tfls_diag::aws_renames_diagnostics_for_module(
+        out.extend(tag("terraform_aws_renames", tfls_diag::aws_renames_diagnostics_for_module(
             body,
             &doc.rope,
             &provider_rule_filter(&aws_constraint, aws_locked.as_ref()),
-        ));
+        )));
         let kubernetes_constraint =
             module_constraint_for_provider(state, uri, "kubernetes");
         let kubernetes_locked = module_locked_provider_version(state, uri, "kubernetes");
-        out.extend(tfls_diag::kubernetes_renames_diagnostics_for_module(
+        out.extend(tag("terraform_kubernetes_renames", tfls_diag::kubernetes_renames_diagnostics_for_module(
             body,
             &doc.rope,
             &provider_rule_filter(&kubernetes_constraint, kubernetes_locked.as_ref()),
-        ));
+        )));
         let azurerm_constraint = module_constraint_for_provider(state, uri, "azurerm");
         let azurerm_locked = module_locked_provider_version(state, uri, "azurerm");
-        out.extend(tfls_diag::azurerm_blocks_diagnostics_for_module(
+        out.extend(tag("terraform_azurerm_blocks", tfls_diag::azurerm_blocks_diagnostics_for_module(
             body,
             &doc.rope,
             &provider_rule_filter(&azurerm_constraint, azurerm_locked.as_ref()),
-        ));
+        )));
         let google_constraint = module_constraint_for_provider(state, uri, "google");
         let google_locked = module_locked_provider_version(state, uri, "google");
-        out.extend(tfls_diag::google_blocks_diagnostics_for_module(
+        out.extend(tag("terraform_google_blocks", tfls_diag::google_blocks_diagnostics_for_module(
             body,
             &doc.rope,
             &provider_rule_filter(&google_constraint, google_locked.as_ref()),
-        ));
+        )));
         let vault_constraint = module_constraint_for_provider(state, uri, "vault");
         let vault_locked = module_locked_provider_version(state, uri, "vault");
-        out.extend(tfls_diag::vault_blocks_diagnostics_for_module(
+        out.extend(tag("terraform_vault_blocks", tfls_diag::vault_blocks_diagnostics_for_module(
             body,
             &doc.rope,
             &provider_rule_filter(&vault_constraint, vault_locked.as_ref()),
-        ));
-        out.extend(tfls_diag::empty_list_equality_diagnostics(body, &doc.rope));
-        out.extend(tfls_diag::map_duplicate_keys_diagnostics(body, &doc.rope));
+        )));
+        out.extend(tag("terraform_empty_list_equality", tfls_diag::empty_list_equality_diagnostics(body, &doc.rope)));
+        out.extend(tag("terraform_map_duplicate_keys", tfls_diag::map_duplicate_keys_diagnostics(body, &doc.rope)));
         // Same-file duplicate definitions (a hard `terraform validate`
         // error). Cross-file duplicates within a module are a separate,
         // index-driven follow-up.
-        out.extend(tfls_diag::duplicate_definition_diagnostics(body, &doc.rope));
+        out.extend(tag("terraform_duplicate_definition", tfls_diag::duplicate_definition_diagnostics(body, &doc.rope)));
         // count/for_each meta-argument misuse.
-        out.extend(tfls_diag::meta_argument_diagnostics(body, &doc.rope));
+        out.extend(tag("terraform_meta_argument", tfls_diag::meta_argument_diagnostics(body, &doc.rope)));
         // Sensitive variable leaking into a non-sensitive output. The
         // sensitive-variable set is aggregated across the module (vars
         // and outputs usually live in different files).
         let sensitive_vars = crate::handlers::util::module_sensitive_variables(state, uri);
-        out.extend(tfls_diag::sensitive_output_diagnostics(
+        out.extend(tag("terraform_sensitive_output", tfls_diag::sensitive_output_diagnostics(
             body,
             &doc.rope,
             &sensitive_vars,
-        ));
+        )));
         // Provider-defined function calls (Terraform 1.8+). Lives
         // outside `tfls-diag` because it needs `StateStore` access
         // for `required_providers` peer-walk + `state.functions`
         // lookup.
-        out.extend(
+        out.extend(tag(
+            "terraform_provider_function",
             crate::handlers::diagnostic_provider_fn::provider_function_call_diagnostics(
                 state,
                 uri,
                 doc.value(),
             ),
-        );
+        ));
 
         // Cross-file / module-scoped rules. `graph` is either the
         // fresh per-call adapter (from `compute_diagnostics`) or a
         // cached snapshot (from the bulk-scan path).
-        out.extend(tfls_diag::required_version_presence_diagnostics(
+        out.extend(tag("terraform_required_version_presence", tfls_diag::required_version_presence_diagnostics(
             body, &doc.rope, graph,
-        ));
+        )));
         // Lock-vs-constraint drift: user bumped a `version`
         // constraint but didn't `terraform init -upgrade` — the
         // lock file still pins the OLD version that no longer
         // satisfies the new constraint. Catch silently-broken
         // states before `terraform plan` chokes.
-        out.extend(lock_vs_constraint_diagnostics(state, uri, body, &doc.rope));
-        out.extend(tfls_diag::required_providers_version_diagnostics(
-            body, &doc.rope, graph,
+        out.extend(tag(
+            "terraform_lock_constraint_drift",
+            lock_vs_constraint_diagnostics(state, uri, body, &doc.rope),
         ));
-        out.extend(tfls_diag::unused_declarations_diagnostics(
+        out.extend(tag("terraform_required_providers_version", tfls_diag::required_providers_version_diagnostics(
             body, &doc.rope, graph,
-        ));
-        out.extend(tfls_diag::unused_required_providers_diagnostics(
+        )));
+        out.extend(tag("terraform_unused_declarations", tfls_diag::unused_declarations_diagnostics(
             body, &doc.rope, graph,
-        ));
+        )));
+        out.extend(tag("terraform_unused_required_providers", tfls_diag::unused_required_providers_diagnostics(
+            body, &doc.rope, graph,
+        )));
 
         // Pass 3 — opt-in style pack. standard_module_structure belongs
         // here too: it warns on every variable/output when
         // variables.tf/outputs.tf is absent, i.e. on the common
         // single-file `main.tf` module, so it must not fire by default.
         if state.config.snapshot().style_rules {
-            out.extend(tfls_diag::standard_module_structure_diagnostics(
+            out.extend(tag("terraform_standard_module_structure", tfls_diag::standard_module_structure_diagnostics(
                 body,
                 &doc.rope,
                 current_file,
                 graph,
-            ));
-            out.extend(tfls_diag::documented_variables_diagnostics(body, &doc.rope));
-            out.extend(tfls_diag::documented_outputs_diagnostics(body, &doc.rope));
-            out.extend(tfls_diag::naming_convention_diagnostics(body, &doc.rope));
-            out.extend(tfls_diag::comment_syntax_diagnostics(&doc.rope));
+            )));
+            out.extend(tag("terraform_documented_variables", tfls_diag::documented_variables_diagnostics(body, &doc.rope)));
+            out.extend(tag("terraform_documented_outputs", tfls_diag::documented_outputs_diagnostics(body, &doc.rope)));
+            out.extend(tag("terraform_naming_convention", tfls_diag::naming_convention_diagnostics(body, &doc.rope)));
+            out.extend(tag("terraform_comment_syntax", tfls_diag::comment_syntax_diagnostics(&doc.rope)));
         }
     }
+
+    // Per-rule severity overrides + suppression (the `rules` config).
+    // Applied before dedup so an `off` rule drops out entirely and a
+    // remapped severity dedups on its final value.
+    apply_rule_overrides(&mut out, &state.config.snapshot().rule_overrides);
 
     // Defensive dedup: same (range, severity, source, message)
     // tuple is by definition the same diagnostic. Some emission
@@ -648,6 +664,54 @@ pub fn compute_diagnostics_with_lookup(
     }
 
     out
+}
+
+/// Set a stable rule `code` on every diagnostic that lacks one, then
+/// return them. Used to wrap each rule's output so per-rule config can
+/// target it. The first code wins (rules don't overwrite a code an inner
+/// helper already set).
+fn tag(code: &'static str, diags: Vec<lsp_types::Diagnostic>) -> Vec<lsp_types::Diagnostic> {
+    diags
+        .into_iter()
+        .map(|mut d| {
+            if d.code.is_none() {
+                d.code = Some(lsp_types::NumberOrString::String(code.to_string()));
+            }
+            d
+        })
+        .collect()
+}
+
+/// Apply the user's per-rule severity overrides: drop diagnostics whose
+/// rule is set to `off`, remap the severity of the rest. Diagnostics
+/// without a code, or whose code has no override, pass through unchanged.
+fn apply_rule_overrides(
+    out: &mut Vec<lsp_types::Diagnostic>,
+    overrides: &std::collections::HashMap<String, tfls_state::RuleSeverity>,
+) {
+    use tfls_state::RuleSeverity;
+    if overrides.is_empty() {
+        return;
+    }
+    out.retain_mut(|d| {
+        let Some(lsp_types::NumberOrString::String(code)) = &d.code else {
+            return true;
+        };
+        match overrides.get(code) {
+            None => true,
+            Some(RuleSeverity::Off) => false,
+            Some(sev) => {
+                d.severity = Some(match sev {
+                    RuleSeverity::Hint => lsp_types::DiagnosticSeverity::HINT,
+                    RuleSeverity::Info => lsp_types::DiagnosticSeverity::INFORMATION,
+                    RuleSeverity::Warning => lsp_types::DiagnosticSeverity::WARNING,
+                    RuleSeverity::Error => lsp_types::DiagnosticSeverity::ERROR,
+                    RuleSeverity::Off => unreachable!("handled above"),
+                });
+                true
+            }
+        }
+    });
 }
 
 /// Reads the already-populated on-disk caches used by the completion

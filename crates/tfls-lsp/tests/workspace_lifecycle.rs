@@ -16,6 +16,60 @@ mod support;
 
 use support::{TestClient, any_message_contains, contains_undefined_var};
 
+/// A per-rule override of `off` suppresses that rule's diagnostics; a
+/// severity override remaps them — both live via didChangeConfiguration.
+#[tokio::test]
+async fn per_rule_override_suppresses_and_remaps() {
+    let mut client = TestClient::new();
+    client.initialize(None).await;
+
+    let uri = "file:///mod/main.tf";
+    client
+        .did_open(uri, "variable \"x\" {}\nvariable \"x\" {}\n")
+        .await;
+    client.settle(150).await;
+
+    // Baseline: duplicate-definition error fires by default.
+    let baseline = client.last_diagnostics(uri).await;
+    assert!(
+        any_message_contains(&baseline, "duplicate variable `x`"),
+        "baseline expected, got {baseline:?}"
+    );
+
+    // Remap to a hint (severity 4).
+    client
+        .did_change_configuration(serde_json::json!({
+            "terraform-ls-rs": { "rules": { "terraform_duplicate_definition": "hint" } }
+        }))
+        .await;
+    client.settle(200).await;
+    let remapped = client.last_diagnostics(uri).await;
+    let dup = remapped
+        .iter()
+        .find(|d| {
+            d.get("message")
+                .and_then(|m| m.as_str())
+                .is_some_and(|m| m.contains("duplicate variable"))
+        })
+        .expect("duplicate diagnostic still present after remap");
+    assert_eq!(dup.get("severity").and_then(|s| s.as_i64()), Some(4), "expected HINT severity");
+
+    // Now turn it off entirely.
+    client
+        .did_change_configuration(serde_json::json!({
+            "terraform-ls-rs": { "rules": { "terraform_duplicate_definition": "off" } }
+        }))
+        .await;
+    client.settle(200).await;
+    let off = client.last_diagnostics(uri).await;
+    assert!(
+        !any_message_contains(&off, "duplicate variable"),
+        "rule set to off must be suppressed, got {off:?}"
+    );
+
+    client.shutdown().await;
+}
+
 /// A same-file duplicate definition is a hard `terraform validate` error;
 /// the server must publish it by default (not behind any opt-in).
 #[tokio::test]

@@ -42,6 +42,31 @@ impl FormatStyle {
 
 /// All tunable runtime settings in one place. Clone is cheap —
 /// settings are scalars or short strings.
+/// A per-rule severity override the user sets via `rules` config:
+/// `{ "rules": { "terraform_naming_convention": "off" } }`. Maps a rule
+/// `code` to a new severity, or `Off` to suppress it entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleSeverity {
+    Off,
+    Hint,
+    Info,
+    Warning,
+    Error,
+}
+
+impl RuleSeverity {
+    pub fn from_str_lossy(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" | "ignore" | "disabled" | "false" => Some(Self::Off),
+            "hint" => Some(Self::Hint),
+            "info" | "information" => Some(Self::Info),
+            "warn" | "warning" => Some(Self::Warning),
+            "error" => Some(Self::Error),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     /// Max wall-clock time for an invocation of
@@ -68,6 +93,11 @@ pub struct Config {
     /// `workspace/didChangeConfiguration` (key: `formatStyle`).
     /// Default [`FormatStyle::Minimal`].
     pub format_style: FormatStyle,
+    /// Per-rule severity overrides keyed by diagnostic `code`
+    /// (e.g. `terraform_naming_convention`). Set via the `rules` config
+    /// object. `Arc` so a `snapshot()` clone stays cheap. Empty by
+    /// default — every rule keeps its built-in severity.
+    pub rule_overrides: std::sync::Arc<std::collections::HashMap<String, RuleSeverity>>,
 }
 
 impl Default for Config {
@@ -80,6 +110,7 @@ impl Default for Config {
             stale_version_days: 180,
             style_rules: false,
             format_style: FormatStyle::default(),
+            rule_overrides: std::sync::Arc::new(std::collections::HashMap::new()),
         }
     }
 }
@@ -146,6 +177,20 @@ impl ConfigCell {
                 tracing::warn!(value = v, "unknown formatStyle value — keeping previous");
             }
         }
+        // Per-rule severity overrides: `{ "rules": { "<code>": "off" } }`.
+        // Replaces the whole map so removing a key in a later
+        // didChangeConfiguration restores that rule's default.
+        if let Some(rules) = obj.get("rules").cloned().and_then(|v| v.into_object()) {
+            let mut map = std::collections::HashMap::new();
+            for (code, val) in rules.iter() {
+                if let Some(sev) = val.as_str().and_then(RuleSeverity::from_str_lossy) {
+                    map.insert(code.to_string(), sev);
+                } else {
+                    tracing::warn!(rule = code, "unknown rule severity — ignoring");
+                }
+            }
+            guard.rule_overrides = std::sync::Arc::new(map);
+        }
     }
 }
 
@@ -180,6 +225,31 @@ mod tests {
         assert_eq!(snap.cli_binary, "terraform");
         assert_eq!(snap.cli_timeout, Duration::from_secs(30));
         assert_eq!(snap.watch_debounce, Duration::from_millis(250));
+    }
+
+    #[test]
+    fn update_parses_rule_overrides() {
+        let cell = ConfigCell::default();
+        let value: sonic_rs::Value = sonic_rs::from_str(
+            r#"{"terraform-ls-rs": { "rules": {
+                "terraform_naming_convention": "off",
+                "terraform_deprecated_interpolation": "error",
+                "bogus_rule": "nonsense"
+            }}}"#,
+        )
+        .expect("parse");
+        cell.update_from_json(&value);
+        let snap = cell.snapshot();
+        assert_eq!(
+            snap.rule_overrides.get("terraform_naming_convention"),
+            Some(&RuleSeverity::Off)
+        );
+        assert_eq!(
+            snap.rule_overrides.get("terraform_deprecated_interpolation"),
+            Some(&RuleSeverity::Error)
+        );
+        // Invalid severity value is ignored, not stored.
+        assert!(!snap.rule_overrides.contains_key("bogus_rule"));
     }
 
     #[test]
