@@ -559,6 +559,8 @@ fn builtin_body_items(
                 } else {
                     CompletionItemKind::PROPERTY
                 }),
+                // Required attrs first (bucket 0), optional next (1).
+                sort_text: Some(format!("{}_{}", if a.required { 0 } else { 1 }, a.name)),
                 detail: Some(a.detail.to_string()),
                 insert_text: Some(insert_text),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
@@ -573,13 +575,15 @@ fn builtin_body_items(
         items.push(CompletionItem {
             label: b.name.to_string(),
             kind: Some(CompletionItemKind::STRUCT),
+            // Nested blocks after attributes (bucket 2).
+            sort_text: Some(format!("2_{}", b.name)),
             detail: Some(b.detail.to_string()),
             insert_text: Some(render_block_snippet(b)),
             insert_text_format: Some(InsertTextFormat::SNIPPET),
             ..Default::default()
         });
     }
-    items.sort_by(|a, b| a.label.cmp(&b.label));
+    items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
     items
 }
 
@@ -1359,6 +1363,10 @@ fn resource_body_items(
             } else {
                 CompletionItemKind::PROPERTY
             }),
+            // Required attrs sort above optional ones so the must-fill
+            // fields (e.g. aws_instance.ami) sit at the top of the menu
+            // instead of being buried alphabetically among optionals.
+            sort_text: Some(format!("{}_{name}", if attr.required { 0 } else { 1 })),
             detail: Some(attribute_detail(attr)),
             documentation: attr.description.as_ref().map(|d| {
                 Documentation::MarkupContent(MarkupContent {
@@ -1392,6 +1400,8 @@ fn resource_body_items(
                 label: name.clone(),
                 kind: Some(CompletionItemKind::STRUCT),
                 detail: Some("nested block".to_string()),
+                // Nested blocks sort after attributes (bucket 2).
+                sort_text: Some(format!("2_{name}")),
                 insert_text: Some(nested_block_scaffold_snippet(name, &nb.block)),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..Default::default()
@@ -1413,7 +1423,14 @@ fn resource_body_items(
         }));
     }
 
-    items.sort_by(|a, b| a.label.cmp(&b.label));
+    // Meta items carry no sort_text — drop them into the last bucket so
+    // their unprefixed labels don't sort ahead of schema attributes.
+    for item in &mut items {
+        if item.sort_text.is_none() {
+            item.sort_text = Some(format!("3_{}", item.label));
+        }
+    }
+    items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
     items
 }
 

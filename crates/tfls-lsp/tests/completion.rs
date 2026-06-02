@@ -196,6 +196,40 @@ async fn resource_body_suggests_attributes_from_schema() {
 }
 
 #[tokio::test]
+async fn required_attributes_sort_above_optional() {
+    // `ami` is required; `instance_type` / `tags` are optional. The
+    // required attr must carry a lower sort_text bucket so it surfaces
+    // at the top of the menu rather than alphabetically among optionals.
+    let u = uri("file:///a.tf");
+    let src = "resource \"aws_instance\" \"web\" {\n\n}\n";
+    let backend = fresh_backend(src, &u);
+    install_aws_schema(&backend);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(1, 0)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let items = match resp {
+        CompletionResponse::Array(a) => a,
+        CompletionResponse::List(l) => l.items,
+    };
+    let st = |label: &str| {
+        items
+            .iter()
+            .find(|i| i.label == label)
+            .and_then(|i| i.sort_text.clone())
+            .unwrap_or_default()
+    };
+    let ami = st("ami");
+    let inst = st("instance_type");
+    assert!(ami.starts_with("0_"), "required ami in bucket 0, got {ami:?}");
+    assert!(inst.starts_with("1_"), "optional instance_type in bucket 1, got {inst:?}");
+    assert!(ami < inst, "required must sort before optional");
+}
+
+#[tokio::test]
 async fn nested_block_at_max_items_is_suppressed() {
     // `metadata_options` is a List block with max_items=1. Once one is
     // present it must not be re-offered, but an unbounded list block
