@@ -5,6 +5,7 @@
 //! - **Error**:   unknown attribute (not in schema)
 //! - **Warning**: deprecated attribute in use
 
+use hcl_edit::expr::Expression;
 use hcl_edit::repr::Span;
 use hcl_edit::structure::{Block, BlockLabel, Body};
 use lsp_types::{Diagnostic, DiagnosticSeverity, Url};
@@ -269,6 +270,44 @@ fn validate_block<H: UpgradeHintLookup>(
                 });
             }
         }
+    }
+
+    // Allowed-value (enum) validation. `allowed_values` is mined from the
+    // registry's prose (best-effort, can lag a release), so a mismatch is
+    // a WARNING and only checked for plain string literals — vars,
+    // interpolations and other expressions can't be statically resolved.
+    for structure in block.body.iter() {
+        let Some(attr) = structure.as_attribute() else {
+            continue;
+        };
+        let name = attr.key.as_str();
+        let Some(schema_attr) = schema.block.attributes.get(name) else {
+            continue;
+        };
+        let Some(allowed) = schema_attr.allowed_values.as_ref() else {
+            continue;
+        };
+        let Expression::String(s) = &attr.value else {
+            continue;
+        };
+        let value = s.value().as_str();
+        if allowed.iter().any(|a| a == value) {
+            continue;
+        }
+        let span = attr.value.span().unwrap_or(0..0);
+        let range = hcl_span_to_lsp_range(rope, span).unwrap_or_default();
+        let opts = allowed
+            .iter()
+            .map(|a| format!("`{a}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push(Diagnostic {
+            range,
+            severity: Some(DiagnosticSeverity::WARNING),
+            source: Some("terraform-ls-rs".to_string()),
+            message: format!("invalid value `{value}` for `{name}` — expected one of {opts}"),
+            ..Default::default()
+        });
     }
 
     // Validate meta-blocks (lifecycle, provisioner, connection,
@@ -943,6 +982,61 @@ mod tests {
         let rope = Rope::from_str(src);
         let body = parse_source(src).body.expect("parses");
         resource_diagnostics(&body, &rope, &uri(), schemas)
+    }
+
+    fn schemas_with_enum_attr() -> ProviderSchemas {
+        sonic_rs::from_str(
+            r#"{
+                "format_version": "1.0",
+                "provider_schemas": {
+                    "registry.terraform.io/hashicorp/aws": {
+                        "provider": { "version": 0, "block": {} },
+                        "resource_schemas": {
+                            "aws_thing": {
+                                "version": 1,
+                                "block": {
+                                    "attributes": {
+                                        "tier": {
+                                            "type": "string",
+                                            "optional": true,
+                                            "allowed_values": ["standard", "premium"]
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("parse")
+    }
+
+    #[test]
+    fn flags_invalid_enum_value() {
+        let schemas = schemas_with_enum_attr();
+        let d = diags_with(&schemas, "resource \"aws_thing\" \"x\" {\n  tier = \"gold\"\n}\n");
+        let bad = d
+            .iter()
+            .find(|d| d.message.contains("invalid value `gold`"))
+            .expect("enum diagnostic");
+        assert_eq!(bad.severity, Some(DiagnosticSeverity::WARNING));
+        assert!(bad.message.contains("`standard`") && bad.message.contains("`premium`"));
+    }
+
+    #[test]
+    fn accepts_valid_enum_value() {
+        let schemas = schemas_with_enum_attr();
+        let d = diags_with(&schemas, "resource \"aws_thing\" \"x\" {\n  tier = \"premium\"\n}\n");
+        assert!(d.iter().all(|d| !d.message.contains("invalid value")), "got: {d:?}");
+    }
+
+    #[test]
+    fn skips_enum_check_for_non_literal_value() {
+        // A var reference can't be statically checked — no false positive.
+        let schemas = schemas_with_enum_attr();
+        let d = diags_with(&schemas, "resource \"aws_thing\" \"x\" {\n  tier = var.tier\n}\n");
+        assert!(d.iter().all(|d| !d.message.contains("invalid value")), "got: {d:?}");
     }
 
     fn schemas_with_nested_blocks() -> ProviderSchemas {
