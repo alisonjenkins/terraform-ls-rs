@@ -85,7 +85,7 @@ Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially r
     The missing-required loop iterates only `schema.block.attributes`; `NestedBlockSchema.min_items`/`max_items` are never consulted, so omitting a mandatory nested block (or exceeding max_items) passes clean.
     **Proposal:** After the attribute loop, iterate `schema.block.block_types`, counting nested-block idents (a `dynamic "<label>"` satisfies min_items). Emit `missing required block` when min_items>=1 and count==0 with no matching dynamic; `too many "<name>" blocks (max N)` when count > max_items > 0.
 
-- [~] **No attribute type checking / allowed_values enum validation despite schema carrying both** (enum half DONE; structural type-check remains) (medium, effort M, confidence high) — `schema_validation.rs` (validate_block); `types.rs:57,94`
+- [x] **No attribute type checking / allowed_values enum validation despite schema carrying both** (enum + structural type-check) (medium, effort M, confidence high) — `schema_validation.rs` (validate_block); `types.rs:57,94`
     `AttributeSchema.r#type` and registry-mined `allowed_values` are populated but only power hover/completion. `instance_type = 5` or `volume_type = "gp9"` produces no diagnostic.
     **Proposal:** For literal-only values (skip traversals/templates to avoid FPs, and skip scalar string↔number/bool coercion), flag structural primitive/collection mismatches against the cty type, and flag string literals not in `allowed_values` when `Some` (WARNING — docs-mined enums lag). Pair the enum check with a nearest-valid-value quick-fix.
 
@@ -157,7 +157,7 @@ Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially r
     Block/attribute-level tier-2 deprecation diagnostics emit a fixed generic string and discard the schema's own `description`; the attribute path skips the `is_hardcoded_deprecation` guard the block path has.
     **Proposal:** Append the schema description (when present and distinct), add `DiagnosticTag::DEPRECATED`, add the is_hardcoded guard to the attribute path for parity. (`description` is general docs prose, not a migration string — guard for noise.)
 
-- [ ] **Unknown-attribute check never flags assigning a computed-only (read-only) attribute** (low, effort S, confidence high) — `schema_validation.rs:241-263`
+- [x] **Unknown-attribute check never flags assigning a computed-only (read-only) attribute** (low, effort S, confidence high) — `schema_validation.rs:241-263`
     The `Some(attr)` arm only checks `attr.deprecated`; assigning a `computed && !optional && !required` attribute (read-only) is silently accepted.
     **Proposal:** In the Some(attr) arm, when `attr.computed && !attr.optional && !attr.required`, emit ERROR "attribute `X` is read-only (computed) and cannot be set". Guard against computed+optional.
 
@@ -169,7 +169,7 @@ Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially r
     The doc says "All rules are diagnostic-only at present", but the block-rename framework now covers the alb-aliased family and aws_s3_bucket_object/objects.
     **Proposal:** Update the module doc to reflect block-rename auto-fix coverage; note aws_kinesis_analytics_application emits no real `moved` block.
 
-- [ ] **map_duplicate_keys misses colon/JSON-style object entries** (low, effort S, confidence high) — `map_duplicate_keys.rs:66-201`
+- [x] **map_duplicate_keys misses colon/JSON-style object entries** (low, effort S, confidence high) — `map_duplicate_keys.rs:66-201`
     The hand-rolled tokenizer recognizes a key only before `=`; HCL also accepts `:` (`{ a: 1, a: 2 }`), so those duplicates go undetected.
     **Proposal:** Accept `:` in addition to `=` at the two key-terminator checks. Longer term, derive key spans from parsed Object keys to shrink the bespoke-lexer surface.
 
