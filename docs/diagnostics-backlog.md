@@ -9,27 +9,27 @@ Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially r
 
 ## Bugs
 
-- [ ] **Kubernetes `_v1` auto-fix produces non-existent type `kubernetes_daemonset_v1`** (high, effort S, confidence high) — `code_action_block_rename.rs:240` + `deprecated_kubernetes_renames.rs:48`
+- [x] **Kubernetes `_v1` auto-fix produces non-existent type `kubernetes_daemonset_v1`** (high, effort S, confidence high) — `code_action_block_rename.rs:240` + `deprecated_kubernetes_renames.rs:48`
     `resolved_to` synthesises `<from>_v1`, yielding `kubernetes_daemonset_v1`, but the real registry type is `kubernetes_daemon_set_v1`. The quick-fix rewrites the block + refs to a type that does not exist, so the config fails `terraform validate`/`plan`.
     **Proposal:** Special-case `kubernetes_daemonset` → `kubernetes_daemon_set_v1` (or spell out `to` explicitly per spec, mirroring the AWS table). Other family members verified correct.
 
-- [ ] **variable_default_type emits ERROR for valid Terraform primitive coercion (string↔number↔bool)** (high, effort S, confidence high) — `variable_default_type.rs:52` (via `tfls-core/src/variable_type.rs:795`)
+- [x] **variable_default_type emits ERROR for valid Terraform primitive coercion (string↔number↔bool)** (high, effort S, confidence high) — `variable_default_type.rs:52` (via `tfls-core/src/variable_type.rs:795`)
     `satisfies()` compares primitives by strict equality with no coercion table, so `type = number, default = "5"`, `type = string, default = 5`, `type = bool, default = "true"` — all accepted by `terraform plan` — are flagged as hard ERROR diagnostics.
     **Proposal:** Add Terraform's primitive conversion rules to the (Primitive, Primitive) arm: treat string↔number and string↔bool as compatible (worst case = a missed error, not a false positive). At minimum downgrade uncertain cases ERROR→WARNING.
 
-- [ ] **exactly_one_of never warns when ZERO members are set** (medium, effort S, confidence high) — `schema_validation.rs:358-376`
+- [x] **exactly_one_of never warns when ZERO members are set** (medium, effort S, confidence high) — `schema_validation.rs:358-376`
     The handler only fires when two members are both present; setting zero members passes silently, though Terraform requires exactly one. Asymmetric with at_least_one_of.
     **Proposal:** Add a per-group pass (mirroring at_least_one_of's `seen_groups`) counting present members, warn when count is 0; keep the existing >1 warning. Dedup by sorted group.
 
-- [ ] **Kubernetes rename gate threshold 2.0.0 is wrong; deprecation happens at provider 3.0.0** (medium, effort S, confidence high) — `deprecated_kubernetes_renames.rs:66` + `code_action_block_rename.rs:231`
+- [x] **Kubernetes rename gate threshold 2.0.0 is wrong; deprecation happens at provider 3.0.0** (medium, effort S, confidence high) — `deprecated_kubernetes_renames.rs:66` + `code_action_block_rename.rs:231`
     Rules gate on `kubernetes >= 2.0.0`, but unversioned types aren't deprecated until v3.0.0 and the `_v1` variants only exist from v2.7.0. On provider 2.0–2.6 the warning fires for fully-supported types and offers a migration to a nonexistent target.
     **Proposal:** Bump both thresholds to `3.0.0`; adjust message text "2.0+"→"3.0+".
 
-- [ ] **empty_list_equality emits wrong replacement + false semantic claim for the `!=` case** (medium, effort S, confidence high) — `empty_list_equality.rs:37-42`
+- [x] **empty_list_equality emits wrong replacement + false semantic claim for the `!=` case** (medium, effort S, confidence high) — `empty_list_equality.rs:37-42`
     For `x != []` the message says "always false; use `length(x) >= 0`" — both wrong: `x != []` is always TRUE, and `length(x) >= 0` is vacuously always-true. Following the advice converts a meaningful inequality into a constant `true`. The `==` branch is correct.
     **Proposal:** Branch the message on the operator. For `!=`: "always true; use `length(x) > 0`". Regression test asserting the `!=` message contains `> 0` and `true`.
 
-- [ ] **Provider passed to a child module via `module { providers = {...} }` flagged as unused** (medium, effort S, confidence high) — `document.rs:1345` + `module_snapshot.rs:113-147`
+- [x] **Provider passed to a child module via `module { providers = {...} }` flagged as unused** (medium, effort S, confidence high) — `document.rs:1345` + `module_snapshot.rs:113-147`
     `used_provider_locals` never inspects the `providers = { x = x }` meta-argument on `module` blocks, so a root declaring a provider purely to pass it down gets a false "declared but not used" — on the recommended multi-provider composition pattern.
     **Proposal:** Add a `"module"` arm in both collection sites iterating the `providers` object, running `extract_provider_local` on key and value head idents, inserting both.
 
@@ -45,15 +45,15 @@ Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially r
     The byte scanner has no heredoc state, so `//` inside `<<EOF ... EOF` bodies (URLs, shell, JS in user_data/command/policy) triggers a "use `#`" diagnostic pointing inside literal string data. Fires only when `style_rules` on, but a clear false positive.
     **Proposal:** Add heredoc tracking (capture terminator, suppress comment scanning until the terminator line, handle `<<-` and quoted terminators), or collect heredoc spans from the AST and skip those byte ranges.
 
-- [ ] **standard_module_structure fires by default and flags the common single-file root module** (medium, effort S, confidence high) — `standard_module_structure.rs:81`; ungated in `document.rs:576`
+- [x] **standard_module_structure fires by default and flags the common single-file root module** (medium, effort S, confidence high) — `standard_module_structure.rs:81`; ungated in `document.rs:576`
     NOT behind the `style_rules` opt-in (unlike siblings) and warns on every `variable`/`output` whenever variables.tf/outputs.tf is absent — i.e. on the common single-file `main.tf`. tflint keeps the equivalent in its opt-in `all` preset.
     **Proposal:** Gate behind `style_rules`, or only fire when the expected file exists elsewhere in the module (suppress the file-missing-entirely branch).
 
-- [ ] **didChangeConfiguration updates config but never re-publishes — live styleRules toggle no-ops** (medium, effort S, confidence high) — `workspace.rs:11-27`
+- [x] **didChangeConfiguration updates config but never re-publishes — live styleRules toggle no-ops** (medium, effort S, confidence high) — `workspace.rs:11-27`
     `did_change_configuration` calls `update_from_json` and returns without recomputing. Toggling `styleRules: true` produces zero new diagnostics until the user edits each buffer; stale style diagnostics persist after toggling off — breaking the documented live-toggle.
     **Proposal:** After `update_from_json`, call `maybe_refresh_diagnostics` + a push-mode republish over `state.open_docs`; optionally only when a diagnostic-affecting key changed.
 
-- [ ] **did_change_watched_files DELETED removes the doc but never clears its diagnostics nor refreshes peers** (medium, effort S, confidence high) — `workspace.rs:41-44`
+- [x] **did_change_watched_files DELETED removes the doc but never clears its diagnostics nor refreshes peers** (medium, effort S, confidence high) — `workspace.rs:41-44`
     On delete the handler calls `remove_document` and stops: published diagnostics for the deleted file linger in the client forever, and sibling buffers keep stale reference resolution. Contrast `did_close`, which publishes an empty set.
     **Proposal:** On DELETED also publish an empty diagnostic set for the URI and enqueue a peer recompute for the parent dir.
 
@@ -61,7 +61,7 @@ Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially r
     ProviderVersion gates resolve by local key name (literally `aws`), never `source`. An aliased local (`awscloud = { source = "hashicorp/aws" }`) misses the lookup; a local `aws` pointing at a fork is treated as canonical. The lock path resolves via source, so the two can disagree.
     **Proposal:** Match the rule's provider by canonical source address (hashicorp/<name> with short-form defaulting) so constraint and lock gates agree.
 
-- [ ] **Expression walker never visits computed object keys** (low, effort S, confidence high) — `expr_walk.rs:60-65`
+- [x] **Expression walker never visits computed object keys** (low, effort S, confidence high) — `expr_walk.rs:60-65`
     The `Expression::Object` arm recurses only into values, dropping `ObjectKey::Expression` keys. Every expr-walk rule misses patterns in computed-key position (`{ (lookup(var.m,"k")) = 1 }`), contradicting the module's "no expression position is missed".
     **Proposal:** `if let ObjectKey::Expression(k) = key { visit_expr(k, visit); }` before visiting the value. Add a test; correct the doc-comment.
 
