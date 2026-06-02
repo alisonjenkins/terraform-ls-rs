@@ -196,6 +196,45 @@ async fn resource_body_suggests_attributes_from_schema() {
 }
 
 #[tokio::test]
+async fn attribute_value_refs_sort_before_functions() {
+    // In an attribute value, reference items (var/local/resource) must
+    // sort ahead of the appended function list, not interleave with it.
+    let u = uri("file:///a.tf");
+    let src = "variable \"foo\" {}\nresource \"aws_instance\" \"x\" {\n  instance_type = \n}\n";
+    let backend = fresh_backend(src, &u);
+    install_aws_schema(&backend);
+    let sig: tfls_schema::FunctionSignature =
+        sonic_rs::from_str("{}").expect("empty function sig");
+    backend.state.merge_functions([("upper".to_string(), sig)]);
+
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 18)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let items = match resp {
+        CompletionResponse::Array(a) => a,
+        CompletionResponse::List(l) => l.items,
+    };
+    let var_st = items
+        .iter()
+        .find(|i| i.label == "var.foo")
+        .and_then(|i| i.sort_text.clone())
+        .expect("var.foo offered");
+    let fn_st = items
+        .iter()
+        .find(|i| i.label == "upper")
+        .and_then(|i| i.sort_text.clone())
+        .expect("upper function offered");
+    assert!(
+        fn_st.starts_with('9') && var_st < fn_st,
+        "refs must sort before functions: var={var_st:?} fn={fn_st:?}"
+    );
+}
+
+#[tokio::test]
 async fn expression_context_offers_for_and_ternary_scaffolds() {
     // At a bare expression position the menu should lead with the
     // comprehension / conditional scaffolds.

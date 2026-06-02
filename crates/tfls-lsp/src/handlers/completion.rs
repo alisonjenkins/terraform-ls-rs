@@ -2460,7 +2460,14 @@ fn attribute_value_items(
     }
 
     // Also include functions for cases like `coalesce(var.x, "default")`.
-    items.extend(function_name_items(backend));
+    // function_name_items carries no sort_text, so the refs above (which
+    // do) would interleave with alphabetical function labels once a client
+    // falls back to label sort. Re-stamp the functions into a trailing
+    // bucket so refs stay first and functions remain the fallback tail.
+    items.extend(function_name_items(backend).into_iter().map(|mut item| {
+        item.sort_text = Some(format!("9{sort_index:04}_{}", item.label));
+        item
+    }));
 
     items
 }
