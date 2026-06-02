@@ -31,8 +31,20 @@ pub async fn code_action(
     params: CodeActionParams,
 ) -> jsonrpc::Result<Option<CodeActionResponse>> {
     let uri = params.text_document.uri.clone();
-    let Some(doc) = backend.state.documents.get(&uri) else {
-        return Ok(None);
+
+    // Snapshot the bits we need out of the shard guard, then drop it
+    // IMMEDIATELY. Several builders below (`make_unknown_provider_*`,
+    // `module_supports_terraform_data`, the cursor `make_replace_*`
+    // family) re-enter `state.documents` via `.get()`/`.iter()`. Holding
+    // this shard's read guard across those calls deadlocks against a
+    // concurrent `did_change`/upsert writer queued on the same shard
+    // (parking_lot RwLock is write-preferring, so our re-acquired read
+    // blocks behind the waiting writer while the writer waits on us).
+    let (body, rope, symbols) = {
+        let Some(doc) = backend.state.documents.get(&uri) else {
+            return Ok(None);
+        };
+        (doc.parsed.body.clone(), doc.rope.clone(), doc.symbols.clone())
     };
 
     let mut actions: Vec<CodeActionOrCommand> = Vec::new();
@@ -40,7 +52,7 @@ pub async fn code_action(
     tracing::info!(
         uri = %uri,
         diag_count = params.context.diagnostics.len(),
-        body_some = doc.parsed.body.is_some(),
+        body_some = body.is_some(),
         diags = ?params.context.diagnostics.iter().map(|d| (
             d.severity, d.source.as_deref().unwrap_or(""), d.message.clone()
         )).collect::<Vec<_>>(),
@@ -52,11 +64,11 @@ pub async fn code_action(
     // through to the scoped variants below — Module/Workspace
     // scope can still surface fixes from sibling docs that did
     // parse.
-    if let Some(body) = doc.parsed.body.as_ref() {
+    if let Some(body) = body.as_ref() {
         for diag in &params.context.diagnostics {
             if is_missing_required(diag) {
                 if let Some(action) =
-                    make_insert_required_action(backend, &uri, diag, body, &doc.rope)
+                    make_insert_required_action(backend, &uri, diag, body, &rope)
                 {
                     actions.push(CodeActionOrCommand::CodeAction(action));
                 }
@@ -65,27 +77,27 @@ pub async fn code_action(
                     &uri,
                     diag,
                     body,
-                    &doc.rope,
-                    &doc.symbols,
+                    &rope,
+                    &symbols,
                     &backend.state,
                 ) {
                     actions.push(CodeActionOrCommand::CodeAction(action));
                 }
             } else if is_deprecated_interpolation(diag) {
                 if let Some(action) =
-                    make_unwrap_interpolation_action(&uri, diag, &doc.rope)
+                    make_unwrap_interpolation_action(&uri, diag, &rope)
                 {
                     actions.push(CodeActionOrCommand::CodeAction(action));
                 }
             } else if is_deprecated_lookup(diag) {
                 if let Some(action) =
-                    make_convert_lookup_to_index_action(&uri, diag, body, &doc.rope)
+                    make_convert_lookup_to_index_action(&uri, diag, body, &rope)
                 {
                     actions.push(CodeActionOrCommand::CodeAction(action));
                 }
             } else if is_deprecated_null_resource(diag) {
                 if let Some(action) =
-                    make_replace_null_resource_for_diag(&backend.state, &uri, diag, body, &doc.rope)
+                    make_replace_null_resource_for_diag(&backend.state, &uri, diag, body, &rope)
                 {
                     actions.push(CodeActionOrCommand::CodeAction(action));
                 }
@@ -95,7 +107,7 @@ pub async fn code_action(
                     &uri,
                     diag,
                     body,
-                    &doc.rope,
+                    &rope,
                 )
             {
                 // Generic block-rename family (AWS / Kubernetes
@@ -110,7 +122,7 @@ pub async fn code_action(
                         &backend.state,
                         &uri,
                         diag,
-                        &doc,
+                        &rope,
                     )
                     .into_iter()
                     .map(CodeActionOrCommand::CodeAction),
@@ -121,7 +133,7 @@ pub async fn code_action(
                         &backend.state,
                         &uri,
                         diag,
-                        &doc,
+                        &rope,
                     )
                     .into_iter()
                     .map(CodeActionOrCommand::CodeAction),
@@ -135,9 +147,9 @@ pub async fn code_action(
     // independently of `params.context.diagnostics` so the user
     // can invoke it from a generic source-action menu without
     // having to position the cursor on a specific diagnostic.
-    if let Some(body) = doc.parsed.body.as_ref() {
+    if let Some(body) = body.as_ref() {
         if let Some(action) =
-            make_fix_all_variable_types_action(&uri, body, &doc.rope, &doc.symbols, &backend.state)
+            make_fix_all_variable_types_action(&uri, body, &rope, &symbols, &backend.state)
         {
             actions.push(CodeActionOrCommand::CodeAction(action));
         }
@@ -150,13 +162,13 @@ pub async fn code_action(
     // ranges intersect the cursor, so an action gated purely on
     // the diag would never appear when the user is on the block
     // label or interior — even though the diag is firing.
-    if let Some(body) = doc.parsed.body.as_ref() {
+    if let Some(body) = body.as_ref() {
         if let Some(action) = make_insert_variable_type_action_at_cursor(
             &uri,
             params.range.start,
             body,
-            &doc.rope,
-            &doc.symbols,
+            &rope,
+            &symbols,
             &backend.state,
         ) {
             // Avoid stacking two identical actions when the diag-driven
@@ -172,13 +184,13 @@ pub async fn code_action(
     }
 
     // Cursor-driven `data "template_file"` → `templatefile()` rewrite.
-    if let Some(body) = doc.parsed.body.as_ref() {
+    if let Some(body) = body.as_ref() {
         if let Some(action) = make_replace_template_file_at_cursor(
             &backend.state,
             &uri,
             params.range.start,
             body,
-            &doc.rope,
+            &rope,
         ) {
             let already = actions.iter().any(|a| match a {
                 CodeActionOrCommand::CodeAction(ca) => ca.title == action.title,
@@ -194,14 +206,14 @@ pub async fn code_action(
     // when the cursor sits inside a deprecated provider type
     // (AWS rename family or Kubernetes _v1 family). Emits a
     // single-block fix with name-filtered reference rewrites.
-    if let Some(body) = doc.parsed.body.as_ref() {
+    if let Some(body) = body.as_ref() {
         if let Some(action) =
             crate::handlers::code_action_block_rename::make_replace_block_at_cursor(
                 &backend.state,
                 &uri,
                 params.range.start,
                 body,
-                &doc.rope,
+                &rope,
             )
         {
             let already = actions.iter().any(|a| match a {
@@ -218,14 +230,14 @@ pub async fn code_action(
     // Surfaces the Instance variant when the cursor sits inside
     // a `resource "null_resource" "X" { … }` block; broader
     // scopes are emitted below via `emit_scoped_actions`.
-    if let Some(body) = doc.parsed.body.as_ref() {
+    if let Some(body) = body.as_ref() {
         if module_supports_terraform_data(&backend.state, &uri) {
             if let Some(action) = make_replace_null_resource_at_cursor(
                 &backend.state,
                 &uri,
                 params.range.start,
                 body,
-                &doc.rope,
+                &rope,
             ) {
                 let already = actions.iter().any(|a| match a {
                     CodeActionOrCommand::CodeAction(ca) => ca.title == action.title,
@@ -238,11 +250,8 @@ pub async fn code_action(
         }
     }
 
-    // Drop the per-doc shard guard before iterating again under
-    // `for_each_doc_in_scope` (which acquires its own guards on
-    // `state.documents`).
-    drop(doc);
-
+    // (The per-doc shard guard was already dropped at the top, before any
+    // builder that re-enters `state.documents`.)
     let selection = if range_is_empty(&params.range) {
         None
     } else {
@@ -2439,13 +2448,12 @@ fn make_unknown_provider_local_quickfixes(
     state: &tfls_state::StateStore,
     uri: &Url,
     diag: &Diagnostic,
-    doc: &tfls_state::DocumentState,
+    rope: &Rope,
 ) -> Vec<CodeAction> {
-    let local_range =
-        match locate_provider_local_range(&doc.rope, &doc.rope.to_string(), &diag.range) {
-            Some(r) => r,
-            None => return Vec::new(),
-        };
+    let local_range = match locate_provider_local_range(rope, &rope.to_string(), &diag.range) {
+        Some(r) => r,
+        None => return Vec::new(),
+    };
     let candidates = collect_required_providers_locals(state, uri);
     let bad = match diag.message.split('`').nth(1) {
         Some(s) => s.to_string(),
@@ -2484,10 +2492,10 @@ fn make_unknown_provider_function_quickfixes(
     state: &tfls_state::StateStore,
     uri: &Url,
     diag: &Diagnostic,
-    doc: &tfls_state::DocumentState,
+    rope: &Rope,
 ) -> Vec<CodeAction> {
-    let text = doc.rope.to_string();
-    let fn_range = match locate_provider_fn_range(&doc.rope, &text, &diag.range) {
+    let text = rope.to_string();
+    let fn_range = match locate_provider_fn_range(rope, &text, &diag.range) {
         Some(r) => r,
         None => return Vec::new(),
     };
