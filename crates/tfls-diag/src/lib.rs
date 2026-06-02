@@ -1,6 +1,7 @@
 //! Diagnostics engine for terraform-ls-rs.
 
 pub mod comment_syntax;
+pub mod cyclic_locals;
 pub mod deprecated_index;
 pub mod deprecated_interpolation;
 pub mod deprecated_lookup;
@@ -42,6 +43,7 @@ pub mod version_constraint;
 pub mod workspace_remote;
 
 pub use comment_syntax::comment_syntax_diagnostics;
+pub use cyclic_locals::cyclic_locals_diagnostics;
 pub use deprecated_index::deprecated_index_diagnostics;
 pub use deprecated_interpolation::deprecated_interpolation_diagnostics;
 pub use deprecated_lookup::deprecated_lookup_diagnostics;

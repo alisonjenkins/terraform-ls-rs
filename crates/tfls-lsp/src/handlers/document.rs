@@ -553,6 +553,8 @@ pub fn compute_diagnostics_with_lookup(
         out.extend(tag("terraform_duplicate_definition", tfls_diag::duplicate_definition_diagnostics(body, &doc.rope)));
         // count/for_each meta-argument misuse.
         out.extend(tag("terraform_meta_argument", tfls_diag::meta_argument_diagnostics(body, &doc.rope)));
+        // Dependency cycles among `local` values (a hard Terraform error).
+        out.extend(tag("terraform_cyclic_locals", tfls_diag::cyclic_locals_diagnostics(body, &doc.rope)));
         // Sensitive variable leaking into a non-sensitive output. The
         // sensitive-variable set is aggregated across the module (vars
         // and outputs usually live in different files).
