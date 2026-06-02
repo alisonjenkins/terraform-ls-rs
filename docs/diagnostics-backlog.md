@@ -133,11 +133,11 @@ Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially r
     No diagnostic sets `tags`, so deprecations get a plain squiggle instead of strike-through and unused decls aren't greyed out — free standard UX thrown away.
     **Proposal:** Add `DiagnosticTag::DEPRECATED` to deprecation emitters (diagnostics_from_table/from_rule + schema-driven deprecated paths) and `DiagnosticTag::UNNECESSARY` to unused_declarations/unused_required_providers.
 
-- [ ] **did_change has no debounce or in-flight coalescing — every keystroke runs full compute + recomputes all open peers** (medium, effort M, confidence high) — `document.rs:162-229`; `config.rs:51`
+- [x] **did_change has no debounce or in-flight coalescing** (in-flight coalescing + conditional peer recompute done; timer-debounce deferred) (medium, effort M, confidence high) — `document.rs:162-229`; `config.rs:51`
     Each keystroke reparses, computes diagnostics for the active doc, then runs full-module `compute_diagnostics` for every other open buffer (O(K × N²) module compute), with no version-staleness guard. `watch_debounce` is watcher-only.
     **Proposal:** Per-uri debounce (dedicated config value, cancel pending compute on newer change), version-stamp publishes to drop stale `spawn_blocking` results, defer peer recompute to the debounce trailing edge.
 
-- [ ] **Background ReparseDocument / publish_for_path / publish_for_dir use O(N²) per-call compute instead of a cached ModuleSnapshot** (medium, effort M, confidence high) — `indexer.rs:369,707,762`
+- [x] **Background publish_for_dir uses O(N²) per-call compute instead of a cached ModuleSnapshot** (publish_for_dir done) (medium, effort M, confidence high) — `indexer.rs:369,707,762`
     `publish_for_dir` loops every doc under a dir calling the per-call variant — the O(N²) the doc-comment warns against — so after FetchSchemas/LockFileChanged on a large module every file rebuilds the full aggregate.
     **Proposal:** Group uris by parent dir, build one ModuleSnapshot per dir (as scan_files_parallel does), call `compute_diagnostics_with_lookup`. Preserve canonical/submodule dir-matching.
 
@@ -149,7 +149,7 @@ Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially r
     The per-call dedup allocates per diagnostic: `format!("{s:?}")` on a Copy enum plus source/message clones into the FxHashSet key, on every compute call.
     **Proposal:** Key on the Copy `DiagnosticSeverity` directly and borrow `&str` for source/message in the retain closure — allocation-free.
 
-- [ ] **publish_peer_diagnostics recomputes peers even when the active edit can't affect cross-file state** (low, effort M, confidence high) — `document.rs:228,245,297-361`
+- [x] **publish_peer_diagnostics recomputes peers even when the active edit can't affect cross-file state** (low, effort M, confidence high) — `document.rs:228,245,297-361`
     Every did_change/did_save unconditionally recomputes all open peers, even for value/comment/indentation edits, multiplying per-keystroke cost by open-peer count for no benefit.
     **Proposal:** Capture the active doc's def+ref symbol set (via collect_doc_keys) + a terraform/required_providers fingerprint before vs after apply_change; skip the peer pass when unchanged. The set must include required_version, required_providers, resource type prefixes — not just var/local/module/output decls.
 
