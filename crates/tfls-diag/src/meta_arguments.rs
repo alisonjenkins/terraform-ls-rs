@@ -12,6 +12,9 @@
 //!   `toset(...)` hint.
 //! - **quoted `depends_on` entries** — `depends_on` takes bare references;
 //!   a string literal (`["aws_instance.web"]`) is rejected. ERROR.
+//! - **`each.*` / `count.*` out of scope** — using `each.key` /
+//!   `count.index` in a block that doesn't declare the matching
+//!   meta-argument is an error. ERROR.
 
 use hcl_edit::expr::Expression;
 use hcl_edit::repr::Span;
@@ -67,6 +70,7 @@ fn check_block(block: &Block, rope: &Rope, out: &mut Vec<Diagnostic>) {
     }
 
     // `for_each` over a tuple/list literal — wrong type (needs map/set).
+    let has_for_each = for_each.is_some();
     if let Some((fe_range, value)) = for_each {
         if matches!(value, Expression::Array(_)) {
             out.push(Diagnostic {
@@ -80,6 +84,41 @@ fn check_block(block: &Block, rope: &Rope, out: &mut Vec<Diagnostic>) {
             });
         }
     }
+
+    // `each.*` / `count.*` are only in scope when the block declares the
+    // corresponding meta-argument. They remain valid anywhere in the
+    // block body — including nested blocks — so a body-wide expression
+    // walk is correct (a nested `dynamic` iterator has its own name and
+    // never collides with `each` / `count`).
+    let has_count = count_range.is_some();
+    crate::expr_walk::for_each_expression(&block.body, |expr| {
+        let Expression::Traversal(t) = expr else {
+            return;
+        };
+        let Expression::Variable(v) = &t.expr else {
+            return;
+        };
+        let (sym, ok) = match v.as_str() {
+            "each" => ("each", has_for_each),
+            "count" => ("count", has_count),
+            _ => return,
+        };
+        if ok {
+            return;
+        }
+        let range = expr
+            .span()
+            .and_then(|sp| hcl_span_to_lsp_range(rope, sp).ok())
+            .unwrap_or_default();
+        let needs = if sym == "each" { "for_each" } else { "count" };
+        out.push(Diagnostic {
+            range,
+            severity: Some(DiagnosticSeverity::ERROR),
+            source: Some("terraform-ls-rs".to_string()),
+            message: format!("`{sym}.*` is only valid in a block with `{needs}` set"),
+            ..Default::default()
+        });
+    });
 }
 
 fn attr_range(attr: &hcl_edit::structure::Attribute, rope: &Rope) -> Option<Range> {
@@ -163,6 +202,46 @@ mod tests {
     fn silent_for_for_each_over_map() {
         let d = diags("resource \"aws_instance\" \"x\" {\n  for_each = var.instances\n}\n");
         assert!(d.is_empty(), "got: {d:?}");
+    }
+
+    #[test]
+    fn flags_each_without_for_each() {
+        let d = diags("resource \"aws_instance\" \"x\" {\n  name = each.key\n}\n");
+        let bad = d
+            .iter()
+            .find(|d| d.message.contains("`each.*` is only valid"))
+            .expect("each-out-of-scope diagnostic");
+        assert_eq!(bad.severity, Some(DiagnosticSeverity::ERROR));
+    }
+
+    #[test]
+    fn allows_each_with_for_each() {
+        let d = diags(
+            "resource \"aws_instance\" \"x\" {\n  for_each = var.m\n  name = each.key\n}\n",
+        );
+        assert!(d.iter().all(|d| !d.message.contains("only valid")), "got: {d:?}");
+    }
+
+    #[test]
+    fn flags_count_index_without_count() {
+        let d = diags("resource \"aws_instance\" \"x\" {\n  name = count.index\n}\n");
+        assert!(d.iter().any(|d| d.message.contains("`count.*` is only valid")), "got: {d:?}");
+    }
+
+    #[test]
+    fn allows_count_index_with_count() {
+        let d = diags(
+            "resource \"aws_instance\" \"x\" {\n  count = 3\n  name = \"web-${count.index}\"\n}\n",
+        );
+        assert!(d.iter().all(|d| !d.message.contains("only valid")), "got: {d:?}");
+    }
+
+    #[test]
+    fn flags_each_in_nested_block_without_for_each() {
+        let d = diags(
+            "resource \"aws_instance\" \"x\" {\n  ebs_block_device {\n    volume_id = each.value\n  }\n}\n",
+        );
+        assert!(d.iter().any(|d| d.message.contains("`each.*` is only valid")), "got: {d:?}");
     }
 
     #[test]
