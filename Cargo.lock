@@ -2895,7 +2895,7 @@ dependencies = [
 
 [[package]]
 name = "tfls-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "futures",
@@ -2922,7 +2922,7 @@ dependencies = [
 
 [[package]]
 name = "tfls-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "hcl-edit",
@@ -2938,7 +2938,7 @@ dependencies = [
 
 [[package]]
 name = "tfls-diag"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "hcl-edit",
@@ -2954,7 +2954,7 @@ dependencies = [
 
 [[package]]
 name = "tfls-format"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tf-format",
  "tfls-state",
@@ -2963,7 +2963,7 @@ dependencies = [
 
 [[package]]
 name = "tfls-lsp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "criterion",
@@ -2972,6 +2972,7 @@ dependencies = [
  "hcl-edit",
  "lsp-types",
  "rayon",
+ "reqwest",
  "ropey",
  "rustc-hash",
  "semver",
@@ -2996,7 +2997,7 @@ dependencies = [
 
 [[package]]
 name = "tfls-parser"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "hcl-edit",
@@ -3011,7 +3012,7 @@ dependencies = [
 
 [[package]]
 name = "tfls-provider-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "dirs",
@@ -3044,7 +3045,7 @@ dependencies = [
 
 [[package]]
 name = "tfls-schema"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "flate2",
@@ -3059,7 +3060,7 @@ dependencies = [
 
 [[package]]
 name = "tfls-state"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "dashmap 6.2.1",
@@ -3080,7 +3081,7 @@ dependencies = [
 
 [[package]]
 name = "tfls-walker"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "notify",
