@@ -113,7 +113,7 @@ Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially r
     azurerm VM split, google dataflow split, vault_generic_secret are diagnostic-only (target not auto-inferable) and give prose but nothing actionable. The framework already emits commented-out scaffolding (s3/k8s paths).
     **Proposal:** Add an Instance-scope action per split rule inserting commented-out skeletons of both candidate replacements with a "pick one, delete the other" header. Scaffold content is new code (existing helpers target `moved {}`, not resource skeletons); reuse the make_X_for_diag/at_cursor dispatch + gate plumbing.
 
-- [ ] **No cyclic-reference detection for locals / modules** (low, effort L, confidence high) — `module_graph.rs` (graph exists for referenced-checks only)
+- [x] **No cyclic-reference detection for locals / modules** (same-file locals done; cross-file + modules remain) (low, effort L, confidence high) — `module_graph.rs` (graph exists for referenced-checks only)
     Terraform errors on dependency cycles (`Cycle: local.a, local.b`); self/mutually-referential locals/outputs are invisible. `ModuleGraphLookup` exposes only boolean "is referenced", not edges/topology.
     **Proposal:** Extend the snapshot to expose reference edges, run Tarjan/Kosaraju SCC over locals+outputs per module dir, emit ERROR per SCC>1 member or self-loop with a readable `a -> b -> a` path. Start with locals.
 
