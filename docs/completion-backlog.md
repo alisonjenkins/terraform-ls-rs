@@ -59,7 +59,7 @@ Workflow: `completion-deep-dive`. 48 agents, ~2.5M tokens. Bugs adversarially re
 
 ## Missing features
 
-- [ ] **No completion inside .tfvars files (variable-name keys + value completion)** (medium, effort M, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:66; crates/tfls-core/src/completion.rs:241
+- [x] **No completion inside .tfvars files (variable-name keys + value completion)** (medium, effort M, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:66; crates/tfls-core/src/completion.rs:241
   completion() never checks the file extension; a partial key in tfvars classifies as TopLevel and offers invalid block snippets (resource/variable/…). terraform-ls completes declared variable names as keys (+ value completion). tfvars are already discovered/indexed.
   **Proposal:** Add a `TfvarsKey{partial}`/`TfvarsValue{name}` context (or a uri-extension pre-check); for keys reuse module_symbol_items over sibling `variable` decls emitting `name = ${1}` snippets; for values reuse attribute-enum logic where the variable type's shape is known (best-effort).
 
@@ -125,7 +125,7 @@ Workflow: `completion-deep-dive`. 48 agents, ~2.5M tokens. Bugs adversarially re
   Expression positions return only function names; no list-for/map-for comprehension or conditional snippets that users reach for constantly. (Drop `for_each`/`dynamic` from scope — those are meta-arg/block, already handled.)
   **Proposal:** Prepend a static SNIPPET set when ctx==FunctionCall with `00_` sort prefixes: `[for ${1:item} in ${2:list} : ${3:item}]`, `{ for ${1:k}, ${2:v} in ${3:map} : ${1:k} => ${2:v} }`, `${1:cond} ? ${2:a} : ${3:b}` (mirror TOP_LEVEL_SNIPPETS).
 
-- [ ] **Expression `=` values in output/locals/module blocks only get functions+vars, not full references** (medium, effort M, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:197 (OutputBlockBody) / 178 (AttributeValue); crates/tfls-core/src/completion.rs:670
+- [x] **Expression `=` values in output/locals/module blocks only get functions+vars, not full references** (medium, effort M, confidence high) — crates/tfls-lsp/src/handlers/completion.rs:197 (OutputBlockBody) / 178 (AttributeValue); crates/tfls-core/src/completion.rs:670
   classify_block_header_from requires resource/data, so bare `output "x" { value = | }` (and locals/module-input `=`) falls to FunctionCall and offers only functions — no reference roots. (Once `var.`/`local.`/`module.` is typed, the rich path already fires; the gap is the bare expression-start position.)
   **Proposal:** Add a CompletionContext returned by expression_context for non-resource/data enclosing blocks that offers reference ROOT keywords (var/local/module/each/path, resource type names, data) plus functions, reusing existing enumeration helpers; preserve the resource/data AttributeValue path.
 

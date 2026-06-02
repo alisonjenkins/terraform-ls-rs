@@ -93,6 +93,20 @@ pub async fn completion(
     } else {
         doc.rope.len_bytes()
     };
+
+    // `.tfvars` files are not HCL config — their top level is a flat set
+    // of `variable_name = value` assignments. The block-oriented
+    // classifier would mislabel a partial key as TopLevel and offer
+    // `resource`/`variable`/… block snippets, which are invalid here.
+    // Route them to a dedicated key/value completion instead.
+    if is_tfvars_uri(&uri) {
+        let cur_line_start = doc.rope.line_to_byte(line_idx);
+        let line_prefix = doc.rope.byte_slice(cur_line_start..offset).to_string();
+        let items =
+            tfvars_completion_items(backend, &uri, doc.parsed.body.as_ref(), &line_prefix);
+        return Ok(Some(CompletionResponse::Array(items)));
+    }
+
     let text = doc.rope.byte_slice(..line_end).to_string();
     let ctx = classify_context(&text, offset);
 
@@ -2665,6 +2679,62 @@ fn builtin_namespace_item(label: &str, doc: &str) -> CompletionItem {
         })),
         ..Default::default()
     }
+}
+
+/// True for `*.tfvars` / `*.tfvars.json` variable-definition files.
+fn is_tfvars_uri(uri: &Url) -> bool {
+    let path = uri.path();
+    path.ends_with(".tfvars") || path.ends_with(".tfvars.json")
+}
+
+/// Completion for a `.tfvars` file. At a key position (no `=` yet on the
+/// line) we offer the module's declared variable names that aren't
+/// already assigned, inserting `name = ${1}`. Value positions (after
+/// `=`) yield nothing — the value is a literal we can't reliably
+/// suggest without type-shape inference.
+fn tfvars_completion_items(
+    backend: &Backend,
+    uri: &Url,
+    body: Option<&Body>,
+    line_prefix: &str,
+) -> Vec<CompletionItem> {
+    use std::collections::HashSet;
+    // A `=` earlier on the line means the cursor is in value position.
+    if line_prefix.contains('=') {
+        return Vec::new();
+    }
+    // Keys already assigned in this file — don't re-offer them.
+    let assigned: HashSet<String> = body
+        .map(|b| {
+            b.iter()
+                .filter_map(|s| s.as_attribute().map(|a| a.key.as_str().to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Declared variables across the sibling `.tf` files in this dir.
+    let dir = parent_dir(uri);
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    for entry in backend.state.documents.iter() {
+        if !doc_in_dir(entry.key(), dir.as_deref()) {
+            continue;
+        }
+        for n in entry.value().symbols.variables.keys() {
+            names.insert(n.clone());
+        }
+    }
+    names
+        .into_iter()
+        .filter(|n| !assigned.contains(n))
+        .map(|n| CompletionItem {
+            label: n.clone(),
+            kind: Some(CompletionItemKind::VARIABLE),
+            detail: Some("variable".to_string()),
+            insert_text: Some(format!("{n} = ${{1}}")),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        })
+        .collect()
 }
 
 /// Sorted, de-duplicated declared `module "<name>"` block names across

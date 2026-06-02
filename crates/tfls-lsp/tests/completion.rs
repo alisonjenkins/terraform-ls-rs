@@ -235,6 +235,56 @@ async fn attribute_value_refs_sort_before_functions() {
 }
 
 #[tokio::test]
+async fn tfvars_key_position_offers_declared_variables() {
+    // In a .tfvars file the key position should offer the module's
+    // declared variable names (not HCL block snippets), skipping ones
+    // already assigned in the file.
+    let tf = uri("file:///mod/variables.tf");
+    let tfvars = uri("file:///mod/terraform.tfvars");
+    let backend = fresh_backend("variable \"region\" {}\nvariable \"count\" {}\n", &tf);
+    backend
+        .state
+        .upsert_document(DocumentState::new(tfvars.clone(), "count = 3\n\n", 1));
+
+    // Cursor on the empty second line (key position).
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&tfvars, Position::new(1, 0)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"region".to_string()), "declared var offered; got {ls:?}");
+    assert!(
+        !ls.contains(&"count".to_string()),
+        "already-assigned var suppressed; got {ls:?}"
+    );
+    assert!(
+        !ls.contains(&"resource".to_string()),
+        "no HCL block snippets in tfvars; got {ls:?}"
+    );
+}
+
+#[tokio::test]
+async fn tfvars_value_position_offers_nothing() {
+    let tf = uri("file:///mod/variables.tf");
+    let tfvars = uri("file:///mod/terraform.tfvars");
+    let backend = fresh_backend("variable \"region\" {}\n", &tf);
+    backend
+        .state
+        .upsert_document(DocumentState::new(tfvars.clone(), "region = \n", 1));
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&tfvars, Position::new(0, 9)),
+    )
+    .await
+    .expect("ok")
+    .expect("array response");
+    assert!(labels(resp).is_empty(), "value position yields no suggestions");
+}
+
+#[tokio::test]
 async fn output_value_offers_reference_roots() {
     // A bare `output { value = | }` should surface declared var/local
     // references plus namespace roots — not just functions.
