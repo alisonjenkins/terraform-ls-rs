@@ -5,7 +5,7 @@
 use hcl_edit::expr::{Expression, TraversalOperator};
 use hcl_edit::repr::Span;
 use hcl_edit::structure::Body;
-use lsp_types::{Diagnostic, DiagnosticSeverity};
+use lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag};
 use ropey::Rope;
 use tfls_parser::hcl_span_to_lsp_range;
 
@@ -27,6 +27,7 @@ pub fn deprecated_index_diagnostics(body: &Body, rope: &Rope) -> Vec<Diagnostic>
                         message: format!(
                             "legacy attribute-style index `.{n}` is deprecated; use `[{n}]` instead"
                         ),
+                        tags: Some(vec![DiagnosticTag::DEPRECATED]),
                         ..Default::default()
                     });
                 }

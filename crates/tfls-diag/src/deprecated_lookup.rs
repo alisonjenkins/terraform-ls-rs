@@ -6,7 +6,7 @@
 use hcl_edit::expr::Expression;
 use hcl_edit::repr::Span;
 use hcl_edit::structure::Body;
-use lsp_types::{Diagnostic, DiagnosticSeverity};
+use lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag};
 use ropey::Rope;
 use tfls_parser::hcl_span_to_lsp_range;
 
@@ -35,6 +35,7 @@ pub fn deprecated_lookup_diagnostics(body: &Body, rope: &Rope) -> Vec<Diagnostic
             source: Some("terraform-ls-rs".to_string()),
             message: "two-argument `lookup()` is deprecated; pass a default as the third argument"
                 .to_string(),
+            tags: Some(vec![DiagnosticTag::DEPRECATED]),
             ..Default::default()
         });
     });

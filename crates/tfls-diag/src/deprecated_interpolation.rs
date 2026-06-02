@@ -7,7 +7,7 @@ use hcl_edit::expr::Expression;
 use hcl_edit::repr::Span;
 use hcl_edit::structure::Body;
 use hcl_edit::template::Element;
-use lsp_types::{Diagnostic, DiagnosticSeverity};
+use lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag};
 use ropey::Rope;
 use tfls_parser::hcl_span_to_lsp_range;
 
@@ -39,6 +39,7 @@ pub fn deprecated_interpolation_diagnostics(body: &Body, rope: &Rope) -> Vec<Dia
             source: Some("terraform-ls-rs".to_string()),
             message: "interpolation-only expressions are deprecated; use the expression directly"
                 .to_string(),
+            tags: Some(vec![DiagnosticTag::DEPRECATED]),
             ..Default::default()
         });
     });
