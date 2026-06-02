@@ -99,6 +99,12 @@ pub async fn code_action(
                 if let Some(action) = make_convert_legacy_index_action(&uri, diag, &rope) {
                     actions.push(CodeActionOrCommand::CodeAction(action));
                 }
+            } else if is_empty_list_equality(diag) {
+                if let Some(action) =
+                    make_convert_empty_list_equality_action(&uri, diag, &rope)
+                {
+                    actions.push(CodeActionOrCommand::CodeAction(action));
+                }
             } else if is_deprecated_null_resource(diag) {
                 if let Some(action) =
                     make_replace_null_resource_for_diag(&backend.state, &uri, diag, body, &rope)
@@ -2435,6 +2441,65 @@ fn is_deprecated_lookup(diag: &Diagnostic) -> bool {
 fn is_deprecated_index(diag: &Diagnostic) -> bool {
     diag.source.as_deref() == Some("terraform-ls-rs")
         && diag.message.contains("legacy attribute-style index")
+}
+
+fn is_empty_list_equality(diag: &Diagnostic) -> bool {
+    diag.source.as_deref() == Some("terraform-ls-rs")
+        && (diag.message.contains("comparing with `== []`")
+            || diag.message.contains("comparing with `!= []`"))
+}
+
+/// Quick-fix for `x == []` / `x != []`: rewrite to `length(x) == 0` /
+/// `length(x) > 0`. Text-based off the diagnostic range, which covers the
+/// whole binary comparison.
+fn make_convert_empty_list_equality_action(
+    uri: &Url,
+    diag: &Diagnostic,
+    rope: &Rope,
+) -> Option<CodeAction> {
+    let start = tfls_parser::lsp_position_to_byte_offset(rope, diag.range.start).ok()?;
+    let end = tfls_parser::lsp_position_to_byte_offset(rope, diag.range.end).ok()?;
+    let text = rope.byte_slice(start..end).to_string();
+    // Split on the comparison operator; the non-`[]` side is `x`.
+    let (op, replacement_op) = if text.contains("==") {
+        ("==", "==")
+    } else if text.contains("!=") {
+        ("!=", ">")
+    } else {
+        return None;
+    };
+    let (lhs, rhs) = text.split_once(op)?;
+    let (lhs, rhs) = (lhs.trim(), rhs.trim());
+    let operand = if lhs == "[]" {
+        rhs
+    } else if rhs == "[]" {
+        lhs
+    } else {
+        return None;
+    };
+    if operand.is_empty() {
+        return None;
+    }
+    let new_text = format!("length({operand}) {replacement_op} 0");
+    let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    changes.insert(
+        uri.clone(),
+        vec![TextEdit {
+            range: diag.range,
+            new_text: new_text.clone(),
+        }],
+    );
+    Some(CodeAction {
+        title: format!("Convert to `{new_text}`"),
+        kind: Some(CodeActionKind::QUICKFIX),
+        diagnostics: Some(vec![diag.clone()]),
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        is_preferred: Some(true),
+        ..Default::default()
+    })
 }
 
 /// Quick-fix for the legacy numeric index warning: rewrite the `.N`

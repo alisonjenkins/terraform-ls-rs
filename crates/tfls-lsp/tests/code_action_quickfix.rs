@@ -57,3 +57,41 @@ async fn legacy_index_offers_convert_quickfix() {
 
     client.shutdown().await;
 }
+
+/// `x == []` offers a `length(x) == 0` quick-fix; `x != []` offers
+/// `length(x) > 0`.
+#[tokio::test]
+async fn empty_list_equality_offers_length_quickfix() {
+    let mut client = TestClient::new();
+    client.initialize(None).await;
+
+    let uri = "file:///mod/main.tf";
+    client
+        .did_open(uri, "output \"o\" {\n  value = var.ids != []\n}\n")
+        .await;
+    client.settle(200).await;
+
+    let diags = client.last_diagnostics(uri).await;
+    let eq = diags
+        .iter()
+        .find(|d| {
+            d.get("message")
+                .and_then(|m| m.as_str())
+                .is_some_and(|m| m.contains("comparing with `!= []`"))
+        })
+        .expect("empty-list diagnostic published");
+
+    let range = eq.get("range").cloned().expect("range");
+    let resp = client
+        .code_action(uri, range, Value::Array(vec![eq.clone()]))
+        .await;
+    let actions = resp["result"].as_array().cloned().unwrap_or_default();
+    let fix = actions.iter().find(|a| {
+        a.get("title")
+            .and_then(|t| t.as_str())
+            .is_some_and(|t| t.contains("length(var.ids) > 0"))
+    });
+    assert!(fix.is_some(), "expected `length(var.ids) > 0` fix, got {actions:?}");
+
+    client.shutdown().await;
+}
