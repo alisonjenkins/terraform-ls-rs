@@ -235,6 +235,50 @@ async fn attribute_value_refs_sort_before_functions() {
 }
 
 #[tokio::test]
+async fn ignore_changes_offers_resource_attrs_and_all() {
+    let u = uri("file:///a.tf");
+    let src =
+        "resource \"aws_instance\" \"web\" {\n  lifecycle {\n    ignore_changes = [ ]\n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    install_aws_schema(&backend);
+    // Cursor between the brackets.
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 22)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(ls.contains(&"all".to_string()), "got {ls:?}");
+    assert!(ls.contains(&"ami".to_string()), "resource attr offered; got {ls:?}");
+    assert!(
+        !ls.iter().any(|l| l == "jsonencode"),
+        "no function names in ignore_changes; got {ls:?}"
+    );
+}
+
+#[tokio::test]
+async fn depends_on_offers_addresses() {
+    let u = uri("file:///a.tf");
+    let src = "resource \"aws_instance\" \"a\" {}\nresource \"aws_instance\" \"b\" {\n  depends_on = [ ]\n}\n";
+    let backend = fresh_backend(src, &u);
+    install_aws_schema(&backend);
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&u, Position::new(2, 16)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
+    let ls = labels(resp);
+    assert!(
+        ls.contains(&"aws_instance.a".to_string()),
+        "resource address offered; got {ls:?}"
+    );
+}
+
+#[tokio::test]
 async fn connection_block_body_offers_transport_attrs() {
     let u = uri("file:///a.tf");
     let src = "resource \"aws_instance\" \"web\" {\n  connection {\n\n  }\n}\n";

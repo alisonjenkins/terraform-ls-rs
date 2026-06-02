@@ -233,6 +233,10 @@ pub async fn completion(
             items
         }
         CompletionContext::ExpressionRoot => expression_root_items(backend, &uri),
+        CompletionContext::IgnoreChangesList { resource_type } => {
+            ignore_changes_items(backend, &resource_type)
+        }
+        CompletionContext::DependsOnList => depends_on_address_items(backend, &uri),
         CompletionContext::ProviderFunctionNamespace => {
             provider_function_namespace_items(backend, &uri)
         }
@@ -2041,6 +2045,59 @@ fn expression_scaffold_items() -> Vec<CompletionItem> {
             sort_text: Some(format!("00_{i}")),
             insert_text: Some((*snippet).to_string()),
             insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// `ignore_changes = [ | ]` — the enclosing resource's own attribute
+/// names (and nested block names), plus the special `all` keyword.
+/// These are bare identifiers, not references or function calls.
+fn ignore_changes_items(backend: &Backend, resource_type: &str) -> Vec<CompletionItem> {
+    let mut items = resource_attr_items(backend, resource_type, /*data=*/ false);
+    items.insert(
+        0,
+        CompletionItem {
+            label: "all".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("ignore changes to every attribute".to_string()),
+            sort_text: Some("0_all".to_string()),
+            insert_text: Some("all".to_string()),
+            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+            ..Default::default()
+        },
+    );
+    items
+}
+
+/// `depends_on = [ | ]` / `replace_triggered_by = [ | ]` — addresses of
+/// every resource, data source, and module declared in the module.
+fn depends_on_address_items(backend: &Backend, uri: &Url) -> Vec<CompletionItem> {
+    let dir = parent_dir(uri);
+    let mut addrs: BTreeSet<String> = BTreeSet::new();
+    for entry in backend.state.documents.iter() {
+        if !doc_in_dir(entry.key(), dir.as_deref()) {
+            continue;
+        }
+        let table = &entry.value().symbols;
+        for addr in table.resources.keys() {
+            addrs.insert(format!("{}.{}", addr.resource_type, addr.name));
+        }
+        for addr in table.data_sources.keys() {
+            addrs.insert(format!("data.{}.{}", addr.resource_type, addr.name));
+        }
+        for name in table.modules.keys() {
+            addrs.insert(format!("module.{name}"));
+        }
+    }
+    addrs
+        .into_iter()
+        .map(|addr| CompletionItem {
+            label: addr.clone(),
+            kind: Some(CompletionItemKind::REFERENCE),
+            detail: Some("address".to_string()),
+            insert_text: Some(addr),
+            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
             ..Default::default()
         })
         .collect()

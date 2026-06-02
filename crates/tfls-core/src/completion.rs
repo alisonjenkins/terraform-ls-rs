@@ -199,6 +199,16 @@ pub enum CompletionContext {
     /// start — offer function names.
     FunctionCall,
 
+    /// Cursor is inside a `lifecycle { ignore_changes = [ | ] }` list.
+    /// The values are bare attribute names of the enclosing resource
+    /// (plus the special `all`), NOT function calls.
+    IgnoreChangesList { resource_type: String },
+
+    /// Cursor is inside a `depends_on = [ | ]` or
+    /// `lifecycle { replace_triggered_by = [ | ] }` list. The values are
+    /// resource / data / module addresses.
+    DependsOnList,
+
     /// Cursor is at a bare expression value (`= |`) inside a block that
     /// is NOT a resource/data block — e.g. `output { value = | }`,
     /// `locals { x = | }`, a `module` input. We have no schema-typed
@@ -300,9 +310,20 @@ pub fn classify_context(source: &str, byte_offset: usize) -> CompletionContext {
         return ctx;
     }
 
-    // Reference prefixes take priority.
+    // Reference prefixes take priority (so `depends_on = [aws_instance.|`
+    // completes the resource name rather than the whole-list menu).
     if let Some(ctx) = reference_prefix_context(before) {
         return ctx;
+    }
+
+    // Meta-argument list interiors (`ignore_changes`, `depends_on`,
+    // `replace_triggered_by`) — bare attribute names / addresses, never
+    // function calls. Checked before expression_context, which would
+    // otherwise treat the `[` as a generic expression start.
+    if !cursor_in_string_literal(before) {
+        if let Some(ctx) = meta_list_context(before) {
+            return ctx;
+        }
     }
 
     // Type-expression position inside a variable block (`variable "x"
@@ -775,6 +796,61 @@ fn expression_context(before: &str) -> Option<CompletionContext> {
     }
 
     Some(CompletionContext::FunctionCall)
+}
+
+/// Byte offset of the outermost still-open `[` in `s`, or `None` if no
+/// list bracket is open at the end. Brace/paren nesting is ignored — we
+/// only care whether the cursor sits inside a `[ … ]` list.
+fn last_unmatched_bracket(s: &str) -> Option<usize> {
+    let mut depth: i32 = 0;
+    let mut pos = None;
+    for (i, c) in s.char_indices() {
+        match c {
+            '[' => {
+                if depth == 0 {
+                    pos = Some(i);
+                }
+                depth += 1;
+            }
+            ']' => {
+                depth -= 1;
+                if depth <= 0 {
+                    depth = 0;
+                    pos = None;
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth > 0 { pos } else { None }
+}
+
+/// Detects the cursor sitting inside a meta-argument list whose elements
+/// are not function calls: `ignore_changes` (bare attribute names of the
+/// enclosing resource), `depends_on` / `replace_triggered_by`
+/// (resource/data/module addresses).
+fn meta_list_context(before: &str) -> Option<CompletionContext> {
+    let open = last_unmatched_bracket(before)?;
+    // The attribute name immediately before the `[`.
+    let header = before[..open].trim_end();
+    let header = header.strip_suffix('=')?;
+    let header = header.trim_end();
+    let attr: String = header
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    match attr.as_str() {
+        "ignore_changes" => {
+            let resource_type = classify_block_header_from(&before[..open])?.1;
+            Some(CompletionContext::IgnoreChangesList { resource_type })
+        }
+        "depends_on" | "replace_triggered_by" => Some(CompletionContext::DependsOnList),
+        _ => None,
+    }
 }
 
 /// When cursor is after `attr_name =`, extract the attribute name from
@@ -2088,6 +2164,43 @@ mod tests {
     fn function_call_after_open_paren() {
         let src = "resource \"x\" \"y\" {\n  value = foo(";
         assert_eq!(at_end(src), CompletionContext::FunctionCall);
+    }
+
+    #[test]
+    fn ignore_changes_list_classifies_with_resource_type() {
+        let src = "resource \"aws_instance\" \"x\" {\n  lifecycle {\n    ignore_changes = [";
+        match at_end(src) {
+            CompletionContext::IgnoreChangesList { resource_type } => {
+                assert_eq!(resource_type, "aws_instance");
+            }
+            other => panic!("expected IgnoreChangesList, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ignore_changes_list_with_partial_element() {
+        let src = "resource \"aws_instance\" \"x\" {\n  lifecycle {\n    ignore_changes = [tag";
+        assert!(matches!(
+            at_end(src),
+            CompletionContext::IgnoreChangesList { .. }
+        ));
+    }
+
+    #[test]
+    fn depends_on_list_classifies() {
+        let src = "resource \"aws_instance\" \"x\" {\n  depends_on = [";
+        assert_eq!(at_end(src), CompletionContext::DependsOnList);
+    }
+
+    #[test]
+    fn depends_on_partial_ref_still_completes_name() {
+        // Once a `.`-ref is being typed, the resource-name path wins so
+        // the user gets name completion, not the whole-list menu.
+        let src = "resource \"aws_instance\" \"x\" {\n  depends_on = [aws_instance.";
+        assert!(matches!(
+            at_end(src),
+            CompletionContext::ResourceRef { .. }
+        ));
     }
 
     #[test]
