@@ -52,7 +52,8 @@ use crate::handlers::code_action_scope::{
 
 /// Per-call cache of provider-version constraint resolution, keyed by
 /// `(module_dir, provider_name)`. Value is the raw constraint string (if
-/// any) plus its parsed minimum version.
+/// any) plus its parsed minimum version. Avoids re-walking sibling files
+/// for the same `(dir, provider)` across a multi-spec rename table.
 type ProviderConstraintCache =
     FxHashMap<(PathBuf, &'static str), (Option<String>, Option<semver::Version>)>;
 

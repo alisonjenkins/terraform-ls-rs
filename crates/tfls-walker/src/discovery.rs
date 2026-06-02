@@ -19,14 +19,44 @@ pub fn is_ignored_dir(name: &str) -> bool {
     IGNORED_DIRS.contains(&name)
 }
 
+/// `(is_dir, is_file)` for a directory entry, **following symlinks**.
+///
+/// `DirEntry::file_type()` reports a symlink as neither a dir nor a file,
+/// so branching on it alone silently drops symlinked modules / tfvars
+/// (common in Terragrunt and monorepo layouts). For a symlink we resolve
+/// the target with `metadata` (which follows the link); a broken link
+/// resolves to `(false, false)` and is skipped.
+fn entry_kind(file_type: std::fs::FileType, path: &Path) -> (bool, bool) {
+    if file_type.is_symlink() {
+        match std::fs::metadata(path) {
+            Ok(meta) => (meta.is_dir(), meta.is_file()),
+            Err(_) => (false, false),
+        }
+    } else {
+        (file_type.is_dir(), file_type.is_file())
+    }
+}
+
+/// Mark `dir` visited by canonical path; returns `false` if it was already
+/// seen. Guards the recursive walkers against symlink cycles now that we
+/// follow directory symlinks.
+fn mark_visited(visited: &mut std::collections::HashSet<PathBuf>, dir: &Path) -> bool {
+    let canon = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    visited.insert(canon)
+}
+
 /// Walk `root` recursively and return all Terraform source files.
 /// Errors when reading a directory are bubbled up with the path that
 /// failed.
 pub fn discover_terraform_files(root: &Path) -> Result<Vec<PathBuf>, WalkerError> {
     let mut out = Vec::new();
     let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
+    let mut visited = std::collections::HashSet::new();
 
     while let Some(dir) = stack.pop() {
+        if !mark_visited(&mut visited, &dir) {
+            continue;
+        }
         let entries = std::fs::read_dir(&dir).map_err(|source| WalkerError::DirectoryRead {
             path: dir.display().to_string(),
             source,
@@ -42,8 +72,9 @@ pub fn discover_terraform_files(root: &Path) -> Result<Vec<PathBuf>, WalkerError
                 path: path.display().to_string(),
                 source,
             })?;
+            let (is_dir, is_file) = entry_kind(file_type, &path);
 
-            if file_type.is_dir() {
+            if is_dir {
                 let name_is_ignored = path
                     .file_name()
                     .and_then(|s| s.to_str())
@@ -52,7 +83,7 @@ pub fn discover_terraform_files(root: &Path) -> Result<Vec<PathBuf>, WalkerError
                 if !name_is_ignored {
                     stack.push(path);
                 }
-            } else if file_type.is_file() && is_terraform_file(&path) {
+            } else if is_file && is_terraform_file(&path) {
                 out.push(path);
             }
         }
@@ -83,7 +114,8 @@ pub fn discover_terraform_files_in_dir(dir: &Path) -> Result<Vec<PathBuf>, Walke
             path: path.display().to_string(),
             source,
         })?;
-        if file_type.is_file() && is_terraform_file(&path) {
+        let (_, is_file) = entry_kind(file_type, &path);
+        if is_file && is_terraform_file(&path) {
             out.push(path);
         }
     }
@@ -148,7 +180,8 @@ pub fn discover_tfvars_files_in_dir(dir: &Path) -> Result<Vec<PathBuf>, WalkerEr
             path: path.display().to_string(),
             source,
         })?;
-        if file_type.is_file() && is_tfvars_file(&path) {
+        let (_, is_file) = entry_kind(file_type, &path);
+        if is_file && is_tfvars_file(&path) {
             out.push(path);
         }
     }
@@ -179,7 +212,11 @@ pub fn discover_tfvars_attributable_to(
 ) -> Result<Vec<PathBuf>, WalkerError> {
     let mut out = Vec::new();
     let mut stack: Vec<(PathBuf, bool)> = vec![(module_dir.to_path_buf(), true)];
+    let mut visited = std::collections::HashSet::new();
     while let Some((dir, is_root)) = stack.pop() {
+        if !mark_visited(&mut visited, &dir) {
+            continue;
+        }
         let entries = std::fs::read_dir(&dir).map_err(|source| WalkerError::DirectoryRead {
             path: dir.display().to_string(),
             source,
@@ -197,7 +234,8 @@ pub fn discover_tfvars_attributable_to(
                 path: path.display().to_string(),
                 source,
             })?;
-            if file_type.is_dir() {
+            let (is_dir, is_file) = entry_kind(file_type, &path);
+            if is_dir {
                 let name_is_ignored = path
                     .file_name()
                     .and_then(|s| s.to_str())
@@ -206,7 +244,7 @@ pub fn discover_tfvars_attributable_to(
                 if !name_is_ignored {
                     subdirs.push(path);
                 }
-            } else if file_type.is_file() {
+            } else if is_file {
                 if is_terraform_file(&path) {
                     has_tf = true;
                 } else if is_tfvars_file(&path) {
@@ -237,7 +275,11 @@ pub fn discover_tfvars_attributable_to(
 pub fn discover_tfvars_files(root: &Path) -> Result<Vec<PathBuf>, WalkerError> {
     let mut out = Vec::new();
     let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
+    let mut visited = std::collections::HashSet::new();
     while let Some(dir) = stack.pop() {
+        if !mark_visited(&mut visited, &dir) {
+            continue;
+        }
         let entries = std::fs::read_dir(&dir).map_err(|source| WalkerError::DirectoryRead {
             path: dir.display().to_string(),
             source,
@@ -252,7 +294,8 @@ pub fn discover_tfvars_files(root: &Path) -> Result<Vec<PathBuf>, WalkerError> {
                 path: path.display().to_string(),
                 source,
             })?;
-            if file_type.is_dir() {
+            let (is_dir, is_file) = entry_kind(file_type, &path);
+            if is_dir {
                 let name_is_ignored = path
                     .file_name()
                     .and_then(|s| s.to_str())
@@ -261,7 +304,7 @@ pub fn discover_tfvars_files(root: &Path) -> Result<Vec<PathBuf>, WalkerError> {
                 if !name_is_ignored {
                     stack.push(path);
                 }
-            } else if file_type.is_file() && is_tfvars_file(&path) {
+            } else if is_file && is_tfvars_file(&path) {
                 out.push(path);
             }
         }
@@ -281,6 +324,52 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("create tmpdir");
         dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn follows_symlinked_dir_and_file() {
+        use std::os::unix::fs::symlink;
+        let base = tmp_dir("symlinks");
+
+        // Real module elsewhere; symlink a dir and a single file into root.
+        let real = base.join("real_module");
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("inner.tf"), "").unwrap();
+        let shared = base.join("shared.tf");
+        fs::write(&shared, "").unwrap();
+
+        let root = base.join("root");
+        fs::create_dir_all(&root).unwrap();
+        symlink(&real, root.join("linked_module")).unwrap();
+        symlink(&shared, root.join("linked.tf")).unwrap();
+
+        let files = discover_terraform_files(&root).expect("walk");
+        let names: Vec<_> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&"inner.tf".to_string()), "symlinked dir not followed: {names:?}");
+        assert!(names.contains(&"linked.tf".to_string()), "symlinked file not found: {names:?}");
+
+        fs::remove_dir_all(base).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_cycle_does_not_hang() {
+        use std::os::unix::fs::symlink;
+        let base = tmp_dir("symlink-cycle");
+        let root = base.join("root");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("main.tf"), "").unwrap();
+        // `root/loop` points back at `root` — must terminate.
+        symlink(&root, root.join("loop")).unwrap();
+
+        let files = discover_terraform_files(&root).expect("walk");
+        assert_eq!(files.len(), 1, "expected just main.tf, got {files:?}");
+
+        fs::remove_dir_all(base).ok();
     }
 
     #[test]

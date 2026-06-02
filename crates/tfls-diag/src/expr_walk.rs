@@ -11,7 +11,7 @@
 
 use hcl_edit::expr::{Expression, ObjectKey};
 use hcl_edit::structure::Body;
-use hcl_edit::template::{Element, StringTemplate};
+use hcl_edit::template::{Directive, Element};
 
 /// Visit every expression in `body`, including those nested inside
 /// block bodies, attributes, arrays, objects, function calls,
@@ -51,8 +51,7 @@ where
         | Expression::Bool(_)
         | Expression::Number(_)
         | Expression::String(_)
-        | Expression::Variable(_)
-        | Expression::HeredocTemplate(_) => {}
+        | Expression::Variable(_) => {}
         Expression::Array(arr) => {
             for item in arr.iter() {
                 visit_expr(item, visit);
@@ -69,7 +68,11 @@ where
                 visit_expr(value.expr(), visit);
             }
         }
-        Expression::StringTemplate(tpl) => visit_template(tpl, visit),
+        Expression::StringTemplate(tpl) => visit_template_elements(tpl.iter(), visit),
+        // Heredoc bodies (`<<-EOT ${...} EOT`) carry interpolations and
+        // directives just like quoted templates. Recurse so no expression
+        // position is missed (matches `tfls-parser::references`).
+        Expression::HeredocTemplate(h) => visit_template_elements(h.template.iter(), visit),
         Expression::Parenthesis(p) => visit_expr(p.inner(), visit),
         Expression::Conditional(c) => {
             visit_expr(&c.cond_expr, visit);
@@ -109,14 +112,30 @@ where
     }
 }
 
-fn visit_template<F>(tpl: &StringTemplate, visit: &mut F)
+fn visit_template_elements<'a, I, F>(elements: I, visit: &mut F)
 where
+    I: IntoIterator<Item = &'a Element>,
     F: FnMut(&Expression),
 {
-    for element in tpl.iter() {
+    for element in elements {
         match element {
+            Element::Literal(_) => {}
             Element::Interpolation(interp) => visit_expr(&interp.expr, visit),
-            Element::Directive(_) | Element::Literal(_) => {}
+            // `%{ if c }...%{ else }...%{ endif }` / `%{ for x in xs }...`
+            // directives carry expressions too.
+            Element::Directive(directive) => match directive.as_ref() {
+                Directive::If(i) => {
+                    visit_expr(&i.if_expr.cond_expr, visit);
+                    visit_template_elements(i.if_expr.template.iter(), visit);
+                    if let Some(else_part) = i.else_expr.as_ref() {
+                        visit_template_elements(else_part.template.iter(), visit);
+                    }
+                }
+                Directive::For(f) => {
+                    visit_expr(&f.for_expr.collection_expr, visit);
+                    visit_template_elements(f.for_expr.template.iter(), visit);
+                }
+            },
         }
     }
 }
@@ -154,6 +173,29 @@ mod tests {
     #[test]
     fn visits_object_value_expression() {
         let src = r#"output "x" { value = { a = var.val } }"#;
+        assert!(visited_vars(src).contains(&"var".to_string()));
+    }
+
+    #[test]
+    fn recurses_into_heredoc_interpolation() {
+        let src = "output \"x\" {\n  value = <<-EOT\n    ${var.greeting}\n  EOT\n}\n";
+        assert!(
+            visited_vars(src).contains(&"var".to_string()),
+            "heredoc interpolation expression was not visited"
+        );
+    }
+
+    #[test]
+    fn recurses_into_heredoc_directive() {
+        let src =
+            "output \"x\" {\n  value = <<-EOT\n    %{ if var.on }${var.body}%{ endif }\n  EOT\n}\n";
+        let vars = visited_vars(src);
+        assert_eq!(vars.iter().filter(|v| *v == "var").count(), 2, "got: {vars:?}");
+    }
+
+    #[test]
+    fn recurses_into_string_template_interpolation() {
+        let src = "output \"x\" { value = \"pre-${var.mid}-post\" }";
         assert!(visited_vars(src).contains(&"var".to_string()));
     }
 }

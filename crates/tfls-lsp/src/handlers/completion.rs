@@ -2842,7 +2842,10 @@ fn compute_index_replace_range(line: &str, pos: Position) -> Range {
     let before = line.get(..col).unwrap_or("");
     let bracket_col = before.rfind('[').map(|b| b + 1).unwrap_or(col);
 
-    let after = &line[col..];
+    // `col` comes from the client's `pos.character` and may sit past EOL
+    // or mid-codepoint (UTF-16 → byte mismatch); `get` avoids a panic on a
+    // non-boundary / out-of-range slice. Mirrors the `before` guard above.
+    let after = line.get(col..).unwrap_or("");
     let mut consumed = 0usize;
     let mut done = false;
     for c in after.chars() {
@@ -2911,6 +2914,23 @@ mod compute_index_replace_range_tests {
         // `aws_vpc.eu[|]` — consume just `]`.
         let (s, e) = range("aws_vpc.eu[]", 11);
         assert_eq!((s, e), (11, 12));
+    }
+
+    #[test]
+    fn cursor_column_past_end_of_line_does_not_panic() {
+        // Client may send a `character` past EOL; must not panic on the
+        // `line[col..]` slice. `var.x[` is 6 bytes; ask for column 20.
+        // Degrades to an empty replace at the cursor — the point is no panic.
+        let (s, e) = range("var.x[", 20);
+        assert_eq!((s, e), (20, 20));
+    }
+
+    #[test]
+    fn cursor_column_mid_codepoint_does_not_panic() {
+        // A multibyte char before the cursor means a UTF-16-derived column
+        // can land mid-codepoint as a byte index; must not panic.
+        let line = "x[\u{00e9}]"; // `x[é]` — `é` is 2 bytes at index 2..4.
+        let _ = range(line, 3); // byte 3 is inside `é`.
     }
 }
 

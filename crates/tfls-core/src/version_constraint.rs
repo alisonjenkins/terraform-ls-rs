@@ -354,7 +354,7 @@ pub fn satisfies_all(constraints: &[Constraint], candidate: &str) -> bool {
     let Some(candidate_key) = version_key(candidate) else {
         return false;
     };
-    constraints.iter().all(|c| satisfies_one(c, candidate, &candidate_key))
+    constraints.iter().all(|c| satisfies_one(c, &candidate_key))
 }
 
 /// Lowest version that satisfies every constraint in the list
@@ -406,7 +406,7 @@ pub fn version_at_least(version: &str, threshold: &str) -> bool {
     )
 }
 
-fn satisfies_one(c: &Constraint, candidate: &str, candidate_key: &VersionKey) -> bool {
+fn satisfies_one(c: &Constraint, candidate_key: &VersionKey) -> bool {
     let Some(constraint_key) = version_key(&c.version) else {
         // Malformed constraint version — reject rather than mismatch.
         return false;
@@ -422,8 +422,12 @@ fn satisfies_one(c: &Constraint, candidate: &str, candidate_key: &VersionKey) ->
             || candidate_key.minor != constraint_key.minor
             || candidate_key.patch != constraint_key.patch);
     match c.op {
-        ConstraintOp::Eq => candidate == c.version,
-        ConstraintOp::Ne => candidate != c.version,
+        // Compare by parsed key, not raw string, so `= 1.2` matches the
+        // registry's `1.2.0` (and `1.2.0` == `1.2.0+build`).
+        ConstraintOp::Eq => candidate_key == &constraint_key,
+        ConstraintOp::Ne => candidate_key != &constraint_key,
+        // Range ops additionally exclude pre-release candidates from a
+        // stable operand (go-version semantics — see `pre_excluded`).
         ConstraintOp::Gt => !pre_excluded && candidate_key > &constraint_key,
         ConstraintOp::Gte => !pre_excluded && candidate_key >= &constraint_key,
         ConstraintOp::Lt => !pre_excluded && candidate_key < &constraint_key,
@@ -491,7 +495,11 @@ fn version_key(v: &str) -> Option<VersionKey> {
         None => (v, None),
     };
     let core = core.split('+').next().unwrap_or(core);
-    let mut parts = core.splitn(3, '.');
+    // Split on every `.` so a 4th segment (`1.2.3.4`) doesn't get folded
+    // into the patch field as the unparseable string `"3.4"` (which would
+    // silently key as patch 0). The patch is taken from the third segment
+    // alone; any further segments are ignored.
+    let mut parts = core.split('.');
     let major: i64 = parts.next()?.parse().ok()?;
     let minor: i64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let patch: i64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -736,6 +744,30 @@ mod tests {
         assert!(satisfies_all(&p.constraints, "1.99.0"));
         assert!(!satisfies_all(&p.constraints, "2.0.0"));
         assert!(!satisfies_all(&p.constraints, "1.1.9"));
+    }
+
+    #[test]
+    fn eq_matches_shorter_constraint_against_full_version() {
+        // `= 1.2` must match the registry's `1.2.0` (key compare, not str).
+        let p = parse("= 1.2");
+        assert!(satisfies_all(&p.constraints, "1.2.0"));
+        assert!(satisfies_all(&p.constraints, "1.2"));
+        assert!(!satisfies_all(&p.constraints, "1.2.1"));
+    }
+
+    #[test]
+    fn ne_matches_shorter_constraint_against_full_version() {
+        let p = parse("!= 1.2");
+        assert!(!satisfies_all(&p.constraints, "1.2.0"));
+        assert!(satisfies_all(&p.constraints, "1.2.1"));
+    }
+
+    #[test]
+    fn four_segment_version_keeps_patch_from_third_segment() {
+        // `1.2.3.4` must not fold `"3.4"` into patch (→ 0). It should
+        // order above `1.2.0` and below `1.2.5`.
+        assert_eq!(compare_versions("1.2.3.4", "1.2.0"), Some(std::cmp::Ordering::Greater));
+        assert_eq!(compare_versions("1.2.3.4", "1.2.5"), Some(std::cmp::Ordering::Less));
     }
 
     #[test]

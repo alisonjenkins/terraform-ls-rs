@@ -392,6 +392,23 @@ fn validate_block<H: UpgradeHintLookup>(
         }
     }
 
+    // Unordered attribute pairs we've already reported a symmetric
+    // violation for. Schemas usually declare `conflicts_with` /
+    // `exactly_one_of` on BOTH members of a pair, so without this the same
+    // logical conflict yields two squiggles (one per end). Mirrors the
+    // `seen_groups` dedupe the `at_least_one_of` block already does.
+    let mut reported_conflicts: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    let mut reported_exactly_one: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    let pair_key = |a: &str, b: &str| -> (String, String) {
+        if a <= b {
+            (a.to_string(), b.to_string())
+        } else {
+            (b.to_string(), a.to_string())
+        }
+    };
+
     // Relational constraints from the schema (CLI JSON emits these for some
     // providers; plugin-protocol doesn't yet, so many blocks will have empty
     // lists and this is a no-op).
@@ -402,6 +419,9 @@ fn validate_block<H: UpgradeHintLookup>(
 
         for other in &attr.conflicts_with {
             if present_attrs.iter().any(|(n, _)| *n == other.as_str()) {
+                if !reported_conflicts.insert(pair_key(name, other)) {
+                    continue;
+                }
                 out.push(Diagnostic {
                     range: *range,
                     severity: Some(DiagnosticSeverity::WARNING),
@@ -433,6 +453,9 @@ fn validate_block<H: UpgradeHintLookup>(
                 continue;
             }
             if present_attrs.iter().any(|(n, _)| *n == other.as_str()) {
+                if !reported_exactly_one.insert(pair_key(name, other)) {
+                    continue;
+                }
                 out.push(Diagnostic {
                     range: *range,
                     severity: Some(DiagnosticSeverity::WARNING),

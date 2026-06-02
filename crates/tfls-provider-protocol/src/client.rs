@@ -155,7 +155,10 @@ pub async fn fetch_provider_functions(
         return Ok(Vec::new());
     }
     let channel = connect_channel(&instance, identity).await?;
-    let mut client = ProviderClientV6::new(channel);
+    // Same full-schema RPC as `fetch_schema_v6`; the response for large
+    // providers (AWS/azurerm/google) far exceeds tonic's 4 MiB default,
+    // so it needs the same 256 MiB decode cap or functions never load.
+    let mut client = ProviderClientV6::new(channel).max_decoding_message_size(256 * 1024 * 1024);
 
     let resp = client
         .get_provider_schema(Request::new(get_provider_schema::Request::default()))
