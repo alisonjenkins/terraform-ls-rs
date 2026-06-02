@@ -73,11 +73,11 @@ Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially r
 
 ## Missing features
 
-- [ ] **No duplicate-definition diagnostic (resource/variable/output/module/data with same address)** (high, effort M, confidence high) — `tfls-diag/` (no rule); `tfls-state/src/store.rs:76`
+- [x] **No duplicate-definition diagnostic (resource/variable/output/module/data with same address)** (high, effort M, confidence high) — `tfls-diag/` (no rule); `tfls-state/src/store.rs:76`
     `terraform validate` errors hard on duplicate declarations (a common copy-paste mistake); the server emits nothing until the CLI. `definitions_by_name` already stores per-(kind,name) location vecs (len>1 = duplicate).
     **Proposal:** Add `duplicate_definition_diagnostics`: same-file raw `body.iter()` scan (per-doc SymbolTable dedups same-file dups, so index-only misses them) + cross-file `definitions_by_name` lookup scoped to the module dir; ERROR on the label range. Keys: resource/data = (type,name); variable/output/module/local/provider-local = name.
 
-- [ ] **Sensitive value leaking into a non-sensitive output is not flagged** (high, effort M, confidence high) — `tfls-diag/` (no rule); sensitive flag at `tfls-schema/src/types.rs:70`
+- [x] **Sensitive value leaking into a non-sensitive output is not flagged** (high, effort M, confidence high) — `tfls-diag/` (no rule); sensitive flag at `tfls-schema/src/types.rs:70`
     Terraform errors when a `sensitive = true` variable or schema-sensitive attribute flows into an `output` not marked sensitive — a security-relevant gap. The server has the data but no rule correlates them.
     **Proposal:** Add `sensitive_output_diagnostics`: build a sensitive-source set (vars `sensitive = true`, schema-sensitive attr paths), walk each `output`, and if it lacks `sensitive = true` but references a sensitive source via expr_walk, emit ERROR + a `sensitive = true` quick-fix. Stage variable-half first; handle `nonsensitive(...)` and locals propagation.
 
