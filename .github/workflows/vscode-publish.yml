@@ -1,0 +1,52 @@
+name: vscode-publish
+
+# Manual, deliberate publish of the VS Code extension to the VS Code
+# Marketplace and Open VSX. Kept separate from release.yml so tagging a
+# release never publishes automatically — run this only once the extension is
+# tested and polished.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag or ref to publish from (e.g. v0.2.3)"
+        required: true
+        type: string
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: vscode-marketplace
+    env:
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Require publish tokens
+        run: |
+          if [ -z "$VSCE_PAT" ] || [ -z "$OVSX_PAT" ]; then
+            echo "::error::VSCE_PAT and OVSX_PAT must be set to publish." >&2
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+
+      - run: npm ci
+
+      - name: Package VSIX
+        run: npx @vscode/vsce package --out "tfls-vscode-${{ inputs.ref }}.vsix"
+
+      - name: Publish to VS Code Marketplace
+        run: npx @vscode/vsce publish --packagePath "tfls-vscode-${{ inputs.ref }}.vsix"
+
+      - name: Publish to Open VSX
+        run: npx ovsx publish "tfls-vscode-${{ inputs.ref }}.vsix" -p "$OVSX_PAT"

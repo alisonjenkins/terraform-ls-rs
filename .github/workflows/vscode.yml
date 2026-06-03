@@ -1,0 +1,46 @@
+name: vscode
+
+# CI for the VS Code extension. Publishing happens in release.yml on a `v*`
+# tag (it must wait for the server binaries to be on the release first).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "editors/vscode/**"
+      - ".github/workflows/vscode.yml"
+  pull_request:
+    paths:
+      - "editors/vscode/**"
+      - ".github/workflows/vscode.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+
+      - run: npm ci
+
+      - name: Type-check
+        run: npm run check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Package (dry build)
+        run: npx @vscode/vsce package --out tfls-vscode-ci.vsix
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tfls-vscode-vsix
+          path: editors/vscode/tfls-vscode-ci.vsix
+          if-no-files-found: error
