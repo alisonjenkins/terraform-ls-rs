@@ -2903,8 +2903,8 @@ dependencies = [
 
 [[package]]
 name = "tf-format"
-version = "0.4.3"
-source = "git+https://github.com/alisonjenkins/tf-format?tag=v0.4.3#a70a9a8ee81e3ceb1f8f92c9dbed08f3252f8c8e"
+version = "0.4.4"
+source = "git+https://github.com/alisonjenkins/tf-format?tag=v0.4.4#a6f96e28b85fcc58f8e3d48d31a107398583bcdc"
 dependencies = [
  "clap",
  "glob",
