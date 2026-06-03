@@ -255,9 +255,13 @@ require('lspconfig').tfls.setup {}
 
 ### VS Code
 
-Install via a generic "LSP client" extension (e.g. `ms-vscode.vscode-lsp`)
-pointed at the `tfls` binary, or build a small wrapper extension that
-spawns `tfls` on stdio. A dedicated extension is not yet published.
+A dedicated extension lives in [`editors/vscode`](editors/vscode). It is in
+**preview** and not yet on the Marketplace — install the `.vsix` attached to a
+[GitHub release](https://github.com/alisonjenkins/terraform-ls-rs/releases)
+(`code --install-extension tfls-vscode-<version>.vsix`). On first activation it
+downloads the matching `tfls` release for your platform (Linux x64, macOS arm64,
+Windows x64), verifies its checksum, and caches it; set
+`terraform-ls-rs.serverPath` to use a local build instead.
 
 ## Development
 
