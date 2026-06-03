@@ -1,0 +1,158 @@
+{
+  "name": "terraform-ls-rs",
+  "displayName": "Terraform / OpenTofu (terraform-ls-rs)",
+  "description": "Terraform & OpenTofu language support powered by the tfls (terraform-ls-rs) language server.",
+  "version": "0.2.3",
+  "publisher": "alisonjenkins",
+  "preview": true,
+  "license": "MPL-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alisonjenkins/terraform-ls-rs",
+    "directory": "editors/vscode"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Formatters",
+    "Linters"
+  ],
+  "keywords": [
+    "terraform",
+    "opentofu",
+    "tofu",
+    "hcl",
+    "language-server"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onLanguage:terraform",
+    "onLanguage:terraform-vars"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "terraform",
+        "aliases": ["Terraform", "terraform", "OpenTofu", "tofu"],
+        "extensions": [".tf", ".tofu"],
+        "filenamePatterns": [
+          "**/*.tf.json",
+          "**/*.tofu.json",
+          "**/*.tftest.hcl",
+          "**/*.tofutest.hcl"
+        ],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "terraform-vars",
+        "aliases": ["Terraform Variables", "terraform-vars"],
+        "extensions": [".tfvars"],
+        "filenamePatterns": ["**/*.tfvars.json"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "terraform-ls-rs.toggleFormatStyle",
+        "title": "Terraform: Toggle Format Style (minimal ↔ opinionated)"
+      },
+      {
+        "command": "terraform-ls-rs.restartServer",
+        "title": "Terraform: Restart Language Server"
+      },
+      {
+        "command": "terraform-ls-rs.showOutputChannel",
+        "title": "Terraform: Show Language Server Output"
+      }
+    ],
+    "configuration": {
+      "title": "Terraform (terraform-ls-rs)",
+      "properties": {
+        "terraform-ls-rs.serverPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Absolute path to a `tfls` binary. Leave empty to download the matching release automatically. A leading `~` is expanded to your home directory."
+        },
+        "terraform-ls-rs.formatStyle": {
+          "type": "string",
+          "enum": ["minimal", "opinionated"],
+          "enumDescriptions": [
+            "`terraform fmt` / `tofu fmt` parity — alignment + spacing only.",
+            "Opinionated formatting — alphabetisation, meta-arg hoisting, object expansion."
+          ],
+          "default": "minimal",
+          "description": "Formatting style applied by the language server."
+        },
+        "terraform-ls-rs.cliEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow the server to shell out to the Terraform/OpenTofu CLI for version-aware features."
+        },
+        "terraform-ls-rs.cliBinary": {
+          "type": "string",
+          "default": "tofu",
+          "description": "Name (on PATH) or path of the CLI binary the server invokes."
+        },
+        "terraform-ls-rs.cliTimeoutSecs": {
+          "type": "number",
+          "default": 60,
+          "description": "Timeout, in seconds, for CLI invocations."
+        },
+        "terraform-ls-rs.watchDebounceMs": {
+          "type": "number",
+          "default": 150,
+          "description": "Debounce, in milliseconds, applied to file-watch events."
+        },
+        "terraform-ls-rs.staleVersionDays": {
+          "type": "number",
+          "default": 180,
+          "description": "Age, in days, after which an installed provider version is flagged as stale."
+        },
+        "terraform-ls-rs.styleRules": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable opinionated style lint rules (in addition to correctness diagnostics)."
+        },
+        "terraform-ls-rs.rules": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "string",
+            "enum": ["off", "hint", "info", "warning", "error"]
+          },
+          "markdownDescription": "Per-rule severity overrides, keyed by rule code. Example: `{ \"terraform_naming_convention\": \"off\" }`."
+        },
+        "terraform-ls-rs.trace.server": {
+          "type": "string",
+          "enum": ["off", "messages", "verbose"],
+          "default": "off",
+          "description": "Trace the JSON-RPC traffic between VS Code and the language server."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "check": "tsc --noEmit",
+    "lint": "eslint src --ext ts",
+    "vscode:prepublish": "node esbuild.js --production"
+  },
+  "dependencies": {
+    "tar": "^7.4.3",
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^7.13.0",
+    "@typescript-eslint/parser": "^7.13.0",
+    "@vscode/vsce": "^2.27.0",
+    "esbuild": "^0.21.5",
+    "eslint": "^8.57.0",
+    "ovsx": "^0.9.1",
+    "typescript": "^5.4.5"
+  }
+}
