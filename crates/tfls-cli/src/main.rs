@@ -59,15 +59,19 @@ fn init_tracing(verbosity: u8) {
 
     // File sink path. Defaults to `$XDG_RUNTIME_DIR/tfls.log`
     // (typically `/run/user/<uid>/tfls.log`) — accessible to the
-    // user but cleared on logout. Falls back to `/tmp/tfls.log`.
-    // Override with `TFLS_LOG_FILE=…`. Critical because tfls
-    // runs under `lspmux` daemon mode where stderr is detached
-    // to `/dev/null` and journald never sees the trace stream.
+    // user but cleared on logout. Falls back to the platform temp
+    // directory (`/tmp` on unix, `%TEMP%` on Windows). Override with
+    // `TFLS_LOG_FILE=…`. Critical because tfls runs under `lspmux`
+    // daemon mode where stderr is detached to `/dev/null` and
+    // journald never sees the trace stream.
     let log_path = std::env::var("TFLS_LOG_FILE").unwrap_or_else(|_| {
         if let Ok(rt) = std::env::var("XDG_RUNTIME_DIR") {
             format!("{rt}/tfls.log")
         } else {
-            "/tmp/tfls.log".to_string()
+            std::env::temp_dir()
+                .join("tfls.log")
+                .to_string_lossy()
+                .into_owned()
         }
     });
     if let Ok(file) = std::fs::OpenOptions::new()
