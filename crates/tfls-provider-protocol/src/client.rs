@@ -198,7 +198,17 @@ async fn connect_channel(
     let tls_config = build_client_config(identity, server_cert_b64)?;
 
     let channel = match instance.info.network {
+        #[cfg(unix)]
         Network::Unix => connect_unix(&instance.info.address, tls_config, instance).await?,
+        // Windows builds have no unix-domain sockets; a provider should never
+        // negotiate one here (Windows Terraform plugins use TCP), but surface a
+        // clear error rather than failing to compile.
+        #[cfg(not(unix))]
+        Network::Unix => {
+            return Err(ProtocolError::UnsupportedTransport {
+                path: instance.path().display().to_string(),
+            });
+        }
         Network::Tcp => connect_tcp(&instance.info.address, tls_config, instance).await?,
     };
     Ok(channel)
@@ -242,6 +252,7 @@ async fn connect_tcp(
     Ok(channel)
 }
 
+#[cfg(unix)]
 async fn connect_unix(
     socket_path: &str,
     tls_config: Arc<rustls::ClientConfig>,

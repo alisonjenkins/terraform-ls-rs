@@ -76,6 +76,11 @@ pub enum ProtocolError {
         source: tonic::transport::Error,
     },
 
+    #[error(
+        "provider {path} negotiated a unix-domain socket, which is unsupported on this platform (Windows providers use TCP)"
+    )]
+    UnsupportedTransport { path: String },
+
     #[error("gRPC call to provider {path} failed: {status}")]
     Rpc {
         path: String,
