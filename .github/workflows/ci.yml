@@ -1,0 +1,45 @@
+name: CI
+
+# Build, lint, format-check and test on every push to main and every PR.
+# Runs through the Nix dev shell so protoc (needed by tonic-build) and the exact
+# toolchain match local dev. We drive cargo inside `nix develop` rather than
+# `nix flake check` because the integration tests read on-disk fixtures that the
+# crane source filter strips from the sandbox.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
+
+      - uses: DeterminateSystems/magic-nix-cache-action@14645543c3b214bedad3b9b49775cb042f4c1fc7 # main
+
+      - name: Check formatting
+        run: nix develop --command cargo fmt --check
+
+      - name: Clippy
+        run: nix develop --command cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run tests
+        run: nix develop --command cargo test --workspace
+
+      - name: cargo deny
+        run: nix develop --command cargo deny check
+
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0

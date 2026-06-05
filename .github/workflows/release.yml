@@ -1,11 +1,21 @@
 name: release
 
 # Build the `tfls` server for each platform, attach the archives to the GitHub
-# Release, then package the VS Code extension VSIX — all on a `v*` tag.
+# Release, then package the VS Code extension VSIX. Driven by release-please:
+# merging the release PR pushes a `v*` tag and release-please.yml dispatches this
+# workflow with that tag (a `v*` push made with GITHUB_TOKEN does not itself
+# trigger workflows, hence the explicit dispatch). A direct `v*` tag push or a
+# manual dispatch also work.
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build and attach artifacts to (e.g. v0.2.3)
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -33,21 +43,23 @@ jobs:
             target: x86_64-pc-windows-msvc
             bin: tfls.exe
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       # tonic-build (crates/tfls-provider-protocol/build.rs) needs protoc
       # to compile the tfplugin5/6 protos.
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: ${{ matrix.target }}
 
@@ -56,9 +68,11 @@ jobs:
 
       - name: Package
         shell: bash
+        env:
+          VERSION: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          staging="tfls-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          staging="tfls-${VERSION}-${{ matrix.target }}"
           mkdir "$staging"
           cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "$staging/"
           cp README.md LICENSE* "$staging/" 2>/dev/null || true
@@ -72,8 +86,9 @@ jobs:
           echo "ASSET=$staging.tar.gz" >> "$GITHUB_ENV"
 
       - name: Attach to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
         with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
           files: |
             ${{ env.ASSET }}
             ${{ env.ASSET }}.sha256
@@ -91,9 +106,11 @@ jobs:
       run:
         working-directory: editors/vscode
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           cache: npm
@@ -107,10 +124,13 @@ jobs:
           npm run lint
 
       - name: Package VSIX
-        run: npx @vscode/vsce package --out "tfls-vscode-${GITHUB_REF_NAME}.vsix"
+        env:
+          VERSION: ${{ inputs.tag || github.ref_name }}
+        run: npx @vscode/vsce package --out "tfls-vscode-${VERSION}.vsix"
 
       - name: Attach VSIX to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
         with:
-          files: editors/vscode/tfls-vscode-${{ github.ref_name }}.vsix
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: editors/vscode/tfls-vscode-${{ inputs.tag || github.ref_name }}.vsix
           fail_on_unmatched_files: true
