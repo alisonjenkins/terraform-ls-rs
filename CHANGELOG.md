@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.0](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.3.0...v0.4.0) (2026-06-05)
+
+
+### Features
+
+* migrate off unmaintained tower-lsp to tower-lsp-server ([c814749](https://github.com/alisonjenkins/terraform-ls-rs/commit/c814749c34d0027882cc06b545c3e74988327eca))
+
+
+### Bug Fixes
+
+* **vscode:** repair + modernise the extension toolchain ([99f8448](https://github.com/alisonjenkins/terraform-ls-rs/commit/99f84485366c825af666fcea55dd0702e3a75af8))
+
 ## [0.3.0](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.2.2...v0.3.0) (2026-06-05)
 
 
