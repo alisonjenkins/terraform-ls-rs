@@ -155,6 +155,6 @@
     "ovsx": "^1.0.0",
     "typescript": "^6.0.0",
     "typescript-eslint": "^8.60.0",
-    "vitest": "^3.0.0"
+    "vitest": "^4.0.0"
   }
 }
