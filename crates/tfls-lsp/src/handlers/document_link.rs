@@ -34,7 +34,7 @@ pub async fn document_link(
         {
             if let Some(link) = registry_link(&provider, "resources", &addr.resource_type) {
                 out.push(DocumentLink {
-                    range: sym.location.range(),
+                    range: sym.name_range,
                     target: Some(tfls_core::uri::url_to_uri(&link)),
                     tooltip: Some(format!(
                         "Open `{}` docs on registry.terraform.io",
@@ -53,7 +53,7 @@ pub async fn document_link(
         {
             if let Some(link) = registry_link(&provider, "data-sources", &addr.resource_type) {
                 out.push(DocumentLink {
-                    range: sym.location.range(),
+                    range: sym.name_range,
                     target: Some(tfls_core::uri::url_to_uri(&link)),
                     tooltip: Some(format!(
                         "Open `{}` docs on registry.terraform.io",
