@@ -1,3 +1,6 @@
+# Pinned to an exact version (not "stable") so a `nix flake update` of the
+# fenix input can't silently change rustfmt/codegen behaviour. Bump
+# deliberately and re-run `cargo fmt` in the same commit.
 [toolchain]
-channel = "stable"
+channel = "1.95.0"
 components = ["rustfmt", "clippy", "rust-src"]
