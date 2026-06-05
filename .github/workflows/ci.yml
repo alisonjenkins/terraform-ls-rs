@@ -1,32 +1,16 @@
 name: CI
 
 # Build, lint, format-check and test on every push to main and every PR.
-# Runs cargo inside `nix develop` (not the hermetic `nix flake check`) so the
-# cargo target dir + sccache cache persist across runs — only changed crates
-# recompile. Path filters keep the job from running when no buildable code
-# changed.
+# The `Test` job always runs (so it can be a required status check without the
+# path-filter deadlock — a skipped required check never reports and blocks
+# merges). It only does real work when buildable code changed; otherwise it
+# short-circuits to success. Cargo runs inside `nix develop` (not the hermetic
+# `nix flake check`) so the cargo target dir + sccache persist across runs and
+# only changed crates recompile.
 on:
   push:
     branches: [main]
-    paths:
-      - "crates/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "flake.nix"
-      - "flake.lock"
-      - "rust-toolchain.toml"
-      - "deny.toml"
-      - ".github/workflows/ci.yml"
   pull_request:
-    paths:
-      - "crates/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "flake.nix"
-      - "flake.lock"
-      - "rust-toolchain.toml"
-      - "deny.toml"
-      - ".github/workflows/ci.yml"
 
 # Cancel superseded runs on the same ref.
 concurrency:
@@ -37,17 +21,46 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: Test
+  changes:
+    name: Detect changes
     runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'flake.nix'
+              - 'flake.lock'
+              - 'rust-toolchain.toml'
+              - 'deny.toml'
+              - '.github/workflows/ci.yml'
+
+  test:
+    name: Test
+    needs: changes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Skip (no Rust changes)
+        if: needs.changes.outputs.rust != 'true'
+        run: echo "No buildable code changed — Test is a no-op success."
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        if: needs.changes.outputs.rust == 'true'
 
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
+        if: needs.changes.outputs.rust == 'true'
 
       # Persist the nix store (toolchain, devshell deps, fetched derivations)
       # across runs. Keyed on the inputs that change the toolchain/devshell.
       - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
+        if: needs.changes.outputs.rust == 'true'
         with:
           primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'rust-toolchain.toml') }}
           restore-prefixes-first-match: nix-${{ runner.os }}-
@@ -62,6 +75,7 @@ jobs:
       # fresh key per commit always saves the latest state; restore-keys fall
       # back to the most recent prior cache.
       - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        if: needs.changes.outputs.rust == 'true'
         with:
           path: |
             ~/.cargo/registry
@@ -74,6 +88,7 @@ jobs:
             cargo-${{ runner.os }}-
 
       - name: Check, lint, test
+        if: needs.changes.outputs.rust == 'true'
         # Drop debuginfo for CI builds (not set in the dev shell, so local
         # debugging keeps it); passed through into `nix develop`.
         env:
