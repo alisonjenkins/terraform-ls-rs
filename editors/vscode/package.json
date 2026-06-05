@@ -68,6 +68,18 @@
         "configuration": "./language-configuration.json"
       }
     ],
+    "grammars": [
+      {
+        "language": "terraform",
+        "scopeName": "source.hcl.terraform",
+        "path": "./syntaxes/terraform.tmGrammar.json"
+      },
+      {
+        "language": "terraform-vars",
+        "scopeName": "source.hcl.terraform",
+        "path": "./syntaxes/terraform.tmGrammar.json"
+      }
+    ],
     "commands": [
       {
         "command": "terraform-ls-rs.toggleFormatStyle",
