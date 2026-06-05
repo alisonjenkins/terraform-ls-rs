@@ -2,7 +2,7 @@
   "name": "terraform-ls-rs",
   "displayName": "Terraform / OpenTofu (terraform-ls-rs)",
   "description": "Terraform & OpenTofu language support powered by the tfls (terraform-ls-rs) language server.",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "publisher": "alisonjenkins",
   "preview": true,
   "license": "MPL-2.0",
@@ -35,8 +35,16 @@
     "languages": [
       {
         "id": "terraform",
-        "aliases": ["Terraform", "terraform", "OpenTofu", "tofu"],
-        "extensions": [".tf", ".tofu"],
+        "aliases": [
+          "Terraform",
+          "terraform",
+          "OpenTofu",
+          "tofu"
+        ],
+        "extensions": [
+          ".tf",
+          ".tofu"
+        ],
         "filenamePatterns": [
           "**/*.tf.json",
           "**/*.tofu.json",
@@ -47,9 +55,16 @@
       },
       {
         "id": "terraform-vars",
-        "aliases": ["Terraform Variables", "terraform-vars"],
-        "extensions": [".tfvars"],
-        "filenamePatterns": ["**/*.tfvars.json"],
+        "aliases": [
+          "Terraform Variables",
+          "terraform-vars"
+        ],
+        "extensions": [
+          ".tfvars"
+        ],
+        "filenamePatterns": [
+          "**/*.tfvars.json"
+        ],
         "configuration": "./language-configuration.json"
       }
     ],
@@ -77,7 +92,10 @@
         },
         "terraform-ls-rs.formatStyle": {
           "type": "string",
-          "enum": ["minimal", "opinionated"],
+          "enum": [
+            "minimal",
+            "opinionated"
+          ],
           "enumDescriptions": [
             "`terraform fmt` / `tofu fmt` parity — alignment + spacing only.",
             "Opinionated formatting — alphabetisation, meta-arg hoisting, object expansion."
@@ -120,13 +138,23 @@
           "default": {},
           "additionalProperties": {
             "type": "string",
-            "enum": ["off", "hint", "info", "warning", "error"]
+            "enum": [
+              "off",
+              "hint",
+              "info",
+              "warning",
+              "error"
+            ]
           },
           "markdownDescription": "Per-rule severity overrides, keyed by rule code. Example: `{ \"terraform_naming_convention\": \"off\" }`."
         },
         "terraform-ls-rs.trace.server": {
           "type": "string",
-          "enum": ["off", "messages", "verbose"],
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
           "default": "off",
           "description": "Trace the JSON-RPC traffic between VS Code and the language server."
         }
