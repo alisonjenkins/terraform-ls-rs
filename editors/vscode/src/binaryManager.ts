@@ -1,34 +1,21 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import * as stream from "node:stream";
 import { promisify } from "node:util";
 import * as tar from "tar";
 import * as vscode from "vscode";
 
+import {
+  assetStem,
+  binaryName,
+  expandHome,
+  parseChecksum,
+  releaseBaseUrl,
+  targetTriple,
+} from "./platform";
+
 const pipeline = promisify(stream.pipeline);
-
-const REPO = "alisonjenkins/terraform-ls-rs";
-
-/** Maps a Node platform/arch pair to the release asset's Rust target triple. */
-const TARGETS: Record<string, string> = {
-  "linux-x64": "x86_64-unknown-linux-gnu",
-  "darwin-arm64": "aarch64-apple-darwin",
-  "win32-x64": "x86_64-pc-windows-msvc",
-};
-
-function binaryName(): string {
-  return process.platform === "win32" ? "tfls.exe" : "tfls";
-}
-
-function targetTriple(): string | undefined {
-  return TARGETS[`${process.platform}-${process.arch}`];
-}
-
-function expandHome(p: string): string {
-  return p.startsWith("~") ? path.join(os.homedir(), p.slice(1)) : p;
-}
 
 async function exists(p: string): Promise<boolean> {
   try {
@@ -104,8 +91,8 @@ async function downloadAndExtract(
   destDir: string,
   output: vscode.OutputChannel,
 ): Promise<void> {
-  const stem = `tfls-v${version}-${triple}`;
-  const base = `https://github.com/${REPO}/releases/download/v${version}`;
+  const stem = assetStem(version, triple);
+  const base = releaseBaseUrl(version);
   const archiveUrl = `${base}/${stem}.tar.gz`;
   const checksumUrl = `${archiveUrl}.sha256`;
 
@@ -116,7 +103,7 @@ async function downloadAndExtract(
   await downloadFile(archiveUrl, archivePath);
 
   output.appendLine(`Verifying checksum ${checksumUrl}`);
-  const expected = (await fetchText(checksumUrl)).trim().split(/\s+/)[0];
+  const expected = parseChecksum(await fetchText(checksumUrl));
   const actual = await sha256(archivePath);
   if (expected.toLowerCase() !== actual.toLowerCase()) {
     await fs.promises.rm(archivePath, { force: true });
