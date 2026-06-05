@@ -29,13 +29,13 @@
           overlays = [ fenix.overlays.default ];
         };
 
-        rustToolchain = pkgs.fenix.stable.withComponents [
-          "cargo"
-          "clippy"
-          "rust-src"
-          "rustc"
-          "rustfmt"
-        ];
+        # Pinned to the exact version in rust-toolchain.toml (reproducible
+        # across `nix flake update`s of fenix). Update the sha256 when bumping
+        # the channel; `nix build` prints the expected hash on mismatch.
+        rustToolchain = pkgs.fenix.fromToolchainFile {
+          file = ./rust-toolchain.toml;
+          sha256 = "sha256-gh/xTkxKHL4eiRXzWv8KP7vfjSk61Iq48x47BEDFgfk=";
+        };
 
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
@@ -63,6 +63,10 @@
           nativeBuildInputs = with pkgs; [
             pkg-config
             protobuf # tonic-build needs protoc for the tfplugin6 protos
+          ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+            # Faster linker; link time dominates clean builds of the many
+            # workspace bin/test targets. Linux only (mold doesn't target macOS).
+            mold
           ];
 
           buildInputs = with pkgs; [
@@ -81,6 +85,16 @@
           # no system CA bundle is present, which the build sandbox lacks — point
           # it at the cacert bundle so `cargoTest` runs offline.
           SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+
+          # Link with mold on Linux (see nativeBuildInputs).
+          RUSTFLAGS = pkgs.lib.optionalString pkgs.stdenv.isLinux
+            "-C link-arg=-fuse-ld=mold";
+
+          # Checks (clippy / test) build the dev+test profiles; debuginfo there
+          # is dead weight — drop it to cut codegen time and artifact size. The
+          # release binary (buildPackage, release profile) is untouched.
+          CARGO_PROFILE_DEV_DEBUG = "0";
+          CARGO_PROFILE_TEST_DEBUG = "0";
         };
 
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -109,8 +123,10 @@
             src = commonArgs.src;
           };
 
-          tfls-tests = craneLib.cargoTest (commonArgs // {
+          tfls-tests = craneLib.cargoNextest (commonArgs // {
             inherit cargoArtifacts;
+            partitions = 1;
+            partitionType = "count";
           });
         };
 
@@ -151,6 +167,9 @@
           env = {
             RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
             RUST_BACKTRACE = "1";
+            # Link with mold locally too (mold is pulled in via inputsFrom).
+            RUSTFLAGS = pkgs.lib.optionalString pkgs.stdenv.isLinux
+              "-C link-arg=-fuse-ld=mold";
             # Wire sccache as the rustc front-end. `cargo` honours
             # `RUSTC_WRAPPER` for every rustc invocation it would
             # otherwise spawn directly.

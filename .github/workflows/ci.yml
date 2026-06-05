@@ -1,14 +1,37 @@
 name: CI
 
 # Build, lint, format-check and test on every push to main and every PR.
-# `nix flake check` runs the build + clippy (-D warnings) + fmt --check + the
-# full test suite as the crane-defined checks in flake.nix (deps are built once
-# and cached). cargo deny runs separately because it fetches the advisory DB
-# over the network and so isn't a sandboxed flake check.
+# Runs cargo inside `nix develop` (not the hermetic `nix flake check`) so the
+# cargo target dir + sccache cache persist across runs — only changed crates
+# recompile. Path filters keep the job from running when no buildable code
+# changed.
 on:
   push:
     branches: [main]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "flake.nix"
+      - "flake.lock"
+      - "rust-toolchain.toml"
+      - "deny.toml"
+      - ".github/workflows/ci.yml"
   pull_request:
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "flake.nix"
+      - "flake.lock"
+      - "rust-toolchain.toml"
+      - "deny.toml"
+      - ".github/workflows/ci.yml"
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -22,13 +45,48 @@ jobs:
 
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
 
-      - uses: DeterminateSystems/magic-nix-cache-action@14645543c3b214bedad3b9b49775cb042f4c1fc7 # main
+      # Persist the nix store (toolchain, devshell deps, fetched derivations)
+      # across runs. Keyed on the inputs that change the toolchain/devshell.
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'rust-toolchain.toml') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          gc-max-store-size-linux: 5G
+          purge: true
+          purge-prefixes: nix-${{ runner.os }}-
+          purge-created: 0
+          purge-primary-key: never
 
-      - name: Flake check (build + clippy + fmt + test)
-        run: nix flake check --print-build-logs
+      # Persist cargo's registry, the sccache object cache and the target dir so
+      # unchanged crates are sccache hits and only changed code recompiles. A
+      # fresh key per commit always saves the latest state; restore-keys fall
+      # back to the most recent prior cache.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cache/sccache
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
+            cargo-${{ runner.os }}-
 
-      - name: cargo deny
-        run: nix develop --command cargo deny check
+      - name: Check, lint, test
+        # Drop debuginfo for CI builds (not set in the dev shell, so local
+        # debugging keeps it); passed through into `nix develop`.
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: |
+          nix develop --command bash -euo pipefail -c '
+            cargo fmt --check
+            cargo clippy --workspace --all-targets -- -D warnings
+            cargo nextest run --workspace
+            cargo deny check
+            sccache --show-stats || true
+          '
 
   dependency-review:
     name: Dependency Review
