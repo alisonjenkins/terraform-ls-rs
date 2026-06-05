@@ -31,12 +31,13 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             bin: tfls
-          # macOS is built on a self-hosted Apple-silicon runner (GitHub-hosted
-          # macOS runners are billed at a steep multiplier and the free pool is
-          # frequently starved). arm64 only.
-          - os: [self-hosted, macOS, ARM64]
-            target: aarch64-apple-darwin
-            bin: tfls
+          # macOS arm64 is DISABLED until a self-hosted Apple-silicon runner is
+          # available again (GitHub-hosted macOS runners are billed at a steep
+          # multiplier). With no runner the job sits queued forever and blocks
+          # the VSIX job (needs: build). Re-enable by uncommenting:
+          # - os: [self-hosted, macOS, ARM64]
+          #   target: aarch64-apple-darwin
+          #   bin: tfls
           # Windows: the provider-plugin transport uses TCP on Windows (unix
           # sockets are cfg-gated to unix), so the server now builds here.
           - os: windows-latest
