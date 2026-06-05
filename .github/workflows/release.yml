@@ -72,6 +72,13 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # rust-toolchain.toml pins an exact channel which OVERRIDES the toolchain
+      # dtolnay set up — so dtolnay's `targets:` adds the std to the wrong
+      # (stable) toolchain. Add the target to the pinned, override-active
+      # toolchain so `core` exists for the cross target.
+      - name: Add target to pinned toolchain
+        run: rustup target add ${{ matrix.target }}
+
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: ${{ matrix.target }}
