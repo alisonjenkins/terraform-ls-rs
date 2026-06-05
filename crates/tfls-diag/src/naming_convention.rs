@@ -34,9 +34,12 @@ fn check_block(block: &Block, rope: &Rope, out: &mut Vec<Diagnostic>) {
                 };
                 let name = attr.key.as_str();
                 if !is_snake_case(name) {
-                    push(out, rope, attr.key.span(), format!(
-                        "local `{name}` should be snake_case"
-                    ));
+                    push(
+                        out,
+                        rope,
+                        attr.key.span(),
+                        format!("local `{name}` should be snake_case"),
+                    );
                 }
             }
         }
@@ -46,10 +49,15 @@ fn check_block(block: &Block, rope: &Rope, out: &mut Vec<Diagnostic>) {
                 let name = label_str(label);
                 if !is_snake_case(&name) {
                     let span = label_span(label);
-                    push(out, rope, span, format!(
-                        "{kind} name `{name}` should be snake_case",
-                        kind = block.ident.as_str()
-                    ));
+                    push(
+                        out,
+                        rope,
+                        span,
+                        format!(
+                            "{kind} name `{name}` should be snake_case",
+                            kind = block.ident.as_str()
+                        ),
+                    );
                 }
             }
         }
@@ -58,10 +66,15 @@ fn check_block(block: &Block, rope: &Rope, out: &mut Vec<Diagnostic>) {
                 let name = label_str(label);
                 if !is_snake_case(&name) {
                     let span = label_span(label);
-                    push(out, rope, span, format!(
-                        "{kind} name `{name}` should be snake_case",
-                        kind = block.ident.as_str()
-                    ));
+                    push(
+                        out,
+                        rope,
+                        span,
+                        format!(
+                            "{kind} name `{name}` should be snake_case",
+                            kind = block.ident.as_str()
+                        ),
+                    );
                 }
             }
         }

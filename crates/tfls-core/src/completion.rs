@@ -99,9 +99,7 @@ pub enum CompletionContext {
     /// directly in the top-level `terraform { }` block. Suggestions
     /// come from Terraform + OpenTofu GitHub release feeds.
     /// `cursor_partial` is used the same way as for provider versions.
-    RequiredVersionValue {
-        cursor_partial: String,
-    },
+    RequiredVersionValue { cursor_partial: String },
 
     /// Cursor is in a type-expression position: the right-hand side
     /// of `variable "x" { type = | }`, or recursively inside a
@@ -682,20 +680,18 @@ fn type_expression_context(before: &str) -> Option<CompletionContext> {
             b'}' => brace -= 1,
             b'[' => bracket += 1,
             b']' => bracket -= 1,
-            b'='
-                if paren == 0 && brace == 0 && bracket == 0 => {
-                    last_eq_at_depth_zero = Some(i);
-                }
+            b'=' if paren == 0 && brace == 0 && bracket == 0 => {
+                last_eq_at_depth_zero = Some(i);
+            }
             // In HCL, a newline at depth 0 terminates an attribute
             // assignment. Without this, once the user writes
             // `type = object({...})` and moves to the next line, the
             // old `=` would still be "active" and the cursor would
             // falsely classify as a type-expression position instead
             // of a body-attribute position.
-            b'\n'
-                if paren == 0 && brace == 0 && bracket == 0 => {
-                    last_eq_at_depth_zero = None;
-                }
+            b'\n' if paren == 0 && brace == 0 && bracket == 0 => {
+                last_eq_at_depth_zero = None;
+            }
             _ => {}
         }
         i += 1;
@@ -757,7 +753,8 @@ fn find_variable_block_open(before: &str) -> Option<usize> {
 
 fn expression_context(before: &str) -> Option<CompletionContext> {
     // Strip any partial identifier the user is typing.
-    let prefix = before.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_' || c == ':' || c == '.');
+    let prefix =
+        before.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_' || c == ':' || c == '.');
     let trimmed = prefix.trim_end();
     if trimmed.is_empty() {
         return None;
@@ -836,7 +833,11 @@ fn last_unmatched_bracket(s: &str) -> Option<usize> {
             _ => {}
         }
     }
-    if depth > 0 { pos } else { None }
+    if depth > 0 {
+        pos
+    } else {
+        None
+    }
 }
 
 /// Detects the cursor sitting inside a meta-argument list whose elements
@@ -953,9 +954,7 @@ fn provider_function_prefix_context(trimmed: &str) -> Option<CompletionContext> 
     // `provider::<local>::` function selector. Walk back over the
     // local-name identifier, then verify the `provider::` prefix.
     let local_end = head.len();
-    let local_start = head
-        .rfind(|c: char| !is_ident_byte(c))
-        .map_or(0, |i| i + 1);
+    let local_start = head.rfind(|c: char| !is_ident_byte(c)).map_or(0, |i| i + 1);
     if local_start == local_end {
         return None;
     }
@@ -1029,15 +1028,17 @@ fn reference_prefix_context(before: &str) -> Option<CompletionContext> {
         // A single bare ident (`x.|`) or `x.field.|` normally classifies
         // as a resource reference — but if `x` is bound by an enclosing
         // `for x in … :` it's a loop variable, not a resource type.
-        [t] if !is_builtin_prefix(t) => for_binding_ref(before, &segs)
-            .or(Some(CompletionContext::ResourceRef {
+        [t] if !is_builtin_prefix(t) => {
+            for_binding_ref(before, &segs).or(Some(CompletionContext::ResourceRef {
                 resource_type: (*t).to_string(),
-            })),
-        [t, n] if !is_builtin_prefix(t) => for_binding_ref(before, &segs)
-            .or(Some(CompletionContext::ResourceAttr {
+            }))
+        }
+        [t, n] if !is_builtin_prefix(t) => {
+            for_binding_ref(before, &segs).or(Some(CompletionContext::ResourceAttr {
                 resource_type: (*t).to_string(),
                 name: (*n).to_string(),
-            })),
+            }))
+        }
         _ => None,
     }
 }
@@ -1050,9 +1051,15 @@ fn collection_root_from_expr(expr: &str) -> Option<IndexRootRef> {
     let segments = traversal_segments_reverse(expr);
     let segs: Vec<&str> = segments.iter().map(|s| s.as_str()).collect();
     match segs.as_slice() {
-        ["var", name] => Some(IndexRootRef::Variable { name: (*name).to_string() }),
-        ["local", name] => Some(IndexRootRef::Local { name: (*name).to_string() }),
-        ["module", name] => Some(IndexRootRef::Module { module_name: (*name).to_string() }),
+        ["var", name] => Some(IndexRootRef::Variable {
+            name: (*name).to_string(),
+        }),
+        ["local", name] => Some(IndexRootRef::Local {
+            name: (*name).to_string(),
+        }),
+        ["module", name] => Some(IndexRootRef::Module {
+            module_name: (*name).to_string(),
+        }),
         ["data", t, n] if !is_builtin_prefix(t) => Some(IndexRootRef::DataSource {
             resource_type: (*t).to_string(),
             name: (*n).to_string(),
@@ -1216,9 +1223,8 @@ fn is_builtin_prefix(s: &str) -> bool {
 fn bracket_index_context(before: &str) -> Option<CompletionContext> {
     // 1) Strip the partial trailing key inside the *current* (unterminated) bracket.
     //    Accept alphanumeric, underscore, hyphen, and quotes (open or close).
-    let stripped = before.trim_end_matches(|c: char| {
-        c.is_alphanumeric() || c == '_' || c == '-' || c == '"'
-    });
+    let stripped =
+        before.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_' || c == '-' || c == '"');
     // 2) The stripped text must end with `[` to indicate we're inside brackets.
     let mut cursor = stripped.strip_suffix('[')?;
 
@@ -1400,7 +1406,11 @@ fn label_index_at_cursor(line: &str) -> Option<usize> {
             in_label = !in_label;
         }
     }
-    if in_label { Some(label_idx) } else { None }
+    if in_label {
+        Some(label_idx)
+    } else {
+        None
+    }
 }
 
 /// Walk back through enclosing blocks looking for a top-level
@@ -1477,10 +1487,7 @@ fn ignored_brace_positions(src: &str) -> Vec<bool> {
                     i += 1;
                     continue;
                 }
-                if (b == b'$' || b == b'%')
-                    && i + 1 < bytes.len()
-                    && bytes[i + 1] == b'{'
-                {
+                if (b == b'$' || b == b'%') && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
                     mask[i + 1] = true;
                     stack.push(Frame::Interp { depth: 1 });
                     i += 2;
@@ -1497,10 +1504,7 @@ fn ignored_brace_positions(src: &str) -> Vec<bool> {
                     i = after;
                     continue;
                 }
-                if (b == b'$' || b == b'%')
-                    && i + 1 < bytes.len()
-                    && bytes[i + 1] == b'{'
-                {
+                if (b == b'$' || b == b'%') && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
                     mask[i + 1] = true;
                     stack.push(Frame::Interp { depth: 1 });
                     i += 2;
@@ -1704,12 +1708,7 @@ fn parse_heredoc_opener(bytes: &[u8], i: usize) -> Option<(Vec<u8>, bool, usize)
 /// the closing tag (optionally indented when `indented == true`)
 /// followed by end-of-line/EOF, return the position right after the
 /// terminating newline.
-fn match_heredoc_closer(
-    bytes: &[u8],
-    i: usize,
-    tag: &[u8],
-    indented: bool,
-) -> Option<usize> {
+fn match_heredoc_closer(bytes: &[u8], i: usize, tag: &[u8], indented: bool) -> Option<usize> {
     if i > 0 && bytes[i - 1] != b'\n' {
         return None;
     }
@@ -1892,9 +1891,7 @@ fn parse_block_opener(header: &str) -> Option<BlockStep> {
 /// Labeled blocks (`backend "s3"`) use their label to pick the right
 /// schema; unlabeled blocks and other labeled blocks without a
 /// label-driven schema route through [`BuiltinBlock::body_schema`].
-pub fn resolve_nested_schema(
-    path: &[BlockStep],
-) -> Option<crate::builtin_blocks::BuiltinSchema> {
+pub fn resolve_nested_schema(path: &[BlockStep]) -> Option<crate::builtin_blocks::BuiltinSchema> {
     use crate::builtin_blocks;
     let mut iter = path.iter();
     let root = iter.next()?;
@@ -2069,10 +2066,7 @@ mod tests {
             scan_body_for_source_attr(" data_source = \"aws_caller_identity\" "),
             None
         );
-        assert_eq!(
-            scan_body_for_source_attr(" config_source = \"x\" "),
-            None
-        );
+        assert_eq!(scan_body_for_source_attr(" config_source = \"x\" "), None);
     }
 
     #[test]
@@ -2146,7 +2140,10 @@ mod tests {
 
     #[test]
     fn cursor_inside_block_comment_is_unknown() {
-        assert_eq!(at_end("/* resource \"x\" \"y\" { "), CompletionContext::Unknown);
+        assert_eq!(
+            at_end("/* resource \"x\" \"y\" { "),
+            CompletionContext::Unknown
+        );
     }
 
     #[test]
@@ -2325,7 +2322,12 @@ mod tests {
         let src = "locals {\n  x = [for s in var.servers : s.";
         match at_end(src) {
             CompletionContext::ForBindingRef { root, path } => {
-                assert_eq!(root, IndexRootRef::Variable { name: "servers".to_string() });
+                assert_eq!(
+                    root,
+                    IndexRootRef::Variable {
+                        name: "servers".to_string()
+                    }
+                );
                 assert!(path.is_empty());
             }
             other => panic!("expected ForBindingRef, got {other:?}"),
@@ -2356,7 +2358,12 @@ mod tests {
         let src = "locals {\n  x = {for k, v in var.m : k => v.";
         match at_end(src) {
             CompletionContext::ForBindingRef { root, .. } => {
-                assert_eq!(root, IndexRootRef::Variable { name: "m".to_string() });
+                assert_eq!(
+                    root,
+                    IndexRootRef::Variable {
+                        name: "m".to_string()
+                    }
+                );
             }
             other => panic!("expected ForBindingRef, got {other:?}"),
         }
@@ -2411,10 +2418,7 @@ mod tests {
         // Once a `.`-ref is being typed, the resource-name path wins so
         // the user gets name completion, not the whole-list menu.
         let src = "resource \"aws_instance\" \"x\" {\n  depends_on = [aws_instance.";
-        assert!(matches!(
-            at_end(src),
-            CompletionContext::ResourceRef { .. }
-        ));
+        assert!(matches!(at_end(src), CompletionContext::ResourceRef { .. }));
     }
 
     #[test]
@@ -2443,8 +2447,14 @@ mod tests {
     #[test]
     fn resource_connection_nested_resolves() {
         let schema = resolve_nested_schema(&[
-            BlockStep { keyword: "resource".to_string(), label: Some("aws_instance".to_string()) },
-            BlockStep { keyword: "connection".to_string(), label: None },
+            BlockStep {
+                keyword: "resource".to_string(),
+                label: Some("aws_instance".to_string()),
+            },
+            BlockStep {
+                keyword: "connection".to_string(),
+                label: None,
+            },
         ])
         .expect("resource.connection schema");
         assert!(schema.attrs.iter().any(|a| a.name == "host"));
@@ -2454,8 +2464,14 @@ mod tests {
     #[test]
     fn resource_provisioner_local_exec_resolves_by_label() {
         let schema = resolve_nested_schema(&[
-            BlockStep { keyword: "resource".to_string(), label: Some("aws_instance".to_string()) },
-            BlockStep { keyword: "provisioner".to_string(), label: Some("local-exec".to_string()) },
+            BlockStep {
+                keyword: "resource".to_string(),
+                label: Some("aws_instance".to_string()),
+            },
+            BlockStep {
+                keyword: "provisioner".to_string(),
+                label: Some("local-exec".to_string()),
+            },
         ])
         .expect("provisioner local-exec schema");
         assert!(schema.attrs.iter().any(|a| a.name == "command"));
@@ -2465,8 +2481,14 @@ mod tests {
     #[test]
     fn resource_provisioner_file_resolves_by_label() {
         let schema = resolve_nested_schema(&[
-            BlockStep { keyword: "resource".to_string(), label: Some("aws_instance".to_string()) },
-            BlockStep { keyword: "provisioner".to_string(), label: Some("file".to_string()) },
+            BlockStep {
+                keyword: "resource".to_string(),
+                label: Some("aws_instance".to_string()),
+            },
+            BlockStep {
+                keyword: "provisioner".to_string(),
+                label: Some("file".to_string()),
+            },
         ])
         .expect("provisioner file schema");
         assert!(schema.attrs.iter().any(|a| a.name == "destination"));
@@ -2477,8 +2499,14 @@ mod tests {
         // Inside `removed { lifecycle { | } }` the nested schema resolves
         // to the lifecycle body (offering `destroy`).
         let schema = resolve_nested_schema(&[
-            BlockStep { keyword: "removed".to_string(), label: None },
-            BlockStep { keyword: "lifecycle".to_string(), label: None },
+            BlockStep {
+                keyword: "removed".to_string(),
+                label: None,
+            },
+            BlockStep {
+                keyword: "lifecycle".to_string(),
+                label: None,
+            },
         ])
         .expect("removed.lifecycle schema");
         assert!(schema.attrs.iter().any(|a| a.name == "destroy"));
@@ -2841,10 +2869,7 @@ mod tests {
 
     #[test]
     fn out_of_bounds_offset_is_unknown() {
-        assert_eq!(
-            classify_context("short", 9999),
-            CompletionContext::Unknown
-        );
+        assert_eq!(classify_context("short", 9999), CompletionContext::Unknown);
     }
 
     // Regression: when the cursor is inside the *second* label of a
@@ -3052,9 +3077,7 @@ mod tests {
 
     #[test]
     fn deep_bracket_path_collected() {
-        let ctx = at_end(
-            "output \"x\" { value = var.regions[\"eu-west-1\"][\"subnet_cidrs\"][",
-        );
+        let ctx = at_end("output \"x\" { value = var.regions[\"eu-west-1\"][\"subnet_cidrs\"][");
         match ctx {
             CompletionContext::IndexKeyRef {
                 root: IndexRootRef::Variable { name },
@@ -3114,10 +3137,7 @@ mod tests {
         // `var.regions.` should still route through VariableAttrRef, not
         // the bracket classifier.
         let ctx = at_end("output \"x\" { value = var.regions.");
-        assert!(matches!(
-            ctx,
-            CompletionContext::VariableAttrRef { .. }
-        ));
+        assert!(matches!(ctx, CompletionContext::VariableAttrRef { .. }));
     }
 
     #[test]

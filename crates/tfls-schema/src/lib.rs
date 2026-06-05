@@ -12,7 +12,7 @@ pub mod types;
 
 pub use builtin_provider::bundled as bundled_builtin_provider;
 pub use error::SchemaError;
-pub use fetcher::{SchemaFetcher, fetch_functions_from_cli, fetch_schema_from_cli};
+pub use fetcher::{fetch_functions_from_cli, fetch_schema_from_cli, SchemaFetcher};
 pub use functions::{FunctionParameter, FunctionSignature, FunctionsSchema};
 pub use functions_cache::{bundled as bundled_functions, load_functions};
 pub use types::{

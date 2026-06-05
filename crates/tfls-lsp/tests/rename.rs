@@ -4,11 +4,11 @@
 
 use tfls_lsp::Backend;
 use tfls_state::DocumentState;
-use tower_lsp::LspService;
 use tower_lsp::lsp_types::{
-    PrepareRenameResponse, Position, RenameParams, TextDocumentIdentifier,
+    Position, PrepareRenameResponse, RenameParams, TextDocumentIdentifier,
     TextDocumentPositionParams, Url, WorkDoneProgressParams,
 };
+use tower_lsp::LspService;
 
 fn uri(s: &str) -> Url {
     Url::parse(s).expect("url")
@@ -237,7 +237,9 @@ async fn rename_provider_local_alias_workspace_wide() {
         &backend,
         RenameParams {
             text_document_position: TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier { uri: main_u.clone() },
+                text_document: TextDocumentIdentifier {
+                    uri: main_u.clone(),
+                },
                 position: Position::new(1, col),
             },
             new_name: "aws_new".to_string(),

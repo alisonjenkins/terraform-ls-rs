@@ -4,16 +4,16 @@
 
 use std::sync::Arc;
 
-use criterion::{Criterion, criterion_group, criterion_main};
-use tfls_lsp::Backend;
+use criterion::{criterion_group, criterion_main, Criterion};
 use tfls_lsp::handlers;
+use tfls_lsp::Backend;
 use tfls_state::{DocumentState, JobQueue, StateStore};
 use tokio::runtime::Runtime;
-use tower_lsp::LspService;
 use tower_lsp::lsp_types::{
     CodeActionContext, CodeActionParams, DocumentSymbolParams, PartialResultParams, Position,
     Range, TextDocumentIdentifier, Url, WorkDoneProgressParams, WorkspaceSymbolParams,
 };
+use tower_lsp::LspService;
 
 /// Build a realistic workspace with many symbols across many files.
 fn populate(state: &StateStore, files: usize, per_file_vars: usize) {

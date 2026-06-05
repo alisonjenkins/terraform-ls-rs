@@ -32,10 +32,9 @@ pub(crate) mod proto_v5 {
 }
 
 pub use discovery::{
-    ProviderBinary, dedupe_providers_keep_highest, dedupe_providers_using_pins,
-    discover_providers,
+    dedupe_providers_keep_highest, dedupe_providers_using_pins, discover_providers, ProviderBinary,
 };
-pub use handshake::{HandshakeInfo, PluginInstance, spawn_and_handshake};
+pub use handshake::{spawn_and_handshake, HandshakeInfo, PluginInstance};
 
 /// Error type for the protocol crate.
 #[derive(Debug, thiserror::Error)]
@@ -82,10 +81,7 @@ pub enum ProtocolError {
     UnsupportedTransport { path: String },
 
     #[error("gRPC call to provider {path} failed: {status}")]
-    Rpc {
-        path: String,
-        status: tonic::Status,
-    },
+    Rpc { path: String, status: tonic::Status },
 
     #[error("failed to decode MessagePack cty type: {0}")]
     CtyDecode(String),
@@ -108,8 +104,7 @@ pub enum ProtocolError {
 ///
 /// `Arc<dyn ...>` so the same callback can be cloned cheaply and
 /// handed to the inner parallel-fetch loop.
-pub type SchemaProgressCallback =
-    std::sync::Arc<dyn Fn(&str, usize, usize) + Send + Sync>;
+pub type SchemaProgressCallback = std::sync::Arc<dyn Fn(&str, usize, usize) + Send + Sync>;
 
 /// Output of the bare plugin-protocol schema fetch — before the
 /// (potentially slow) registry-documentation enrichment runs.
@@ -292,8 +287,10 @@ pub async fn fetch_schemas_from_plugins(
     terraform_dir: &Path,
     on_progress: Option<SchemaProgressCallback>,
 ) -> Result<tfls_schema::ProviderSchemas, ProtocolError> {
-    let RawPluginSchemas { mut schemas, coords } =
-        fetch_schemas_from_plugins_raw(terraform_dir, on_progress).await?;
+    let RawPluginSchemas {
+        mut schemas,
+        coords,
+    } = fetch_schemas_from_plugins_raw(terraform_dir, on_progress).await?;
 
     let enrich_start = std::time::Instant::now();
     match registry_docs::enrich_schemas_with_registry_docs(&mut schemas, &coords).await {

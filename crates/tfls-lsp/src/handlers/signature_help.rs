@@ -300,11 +300,7 @@ pub(crate) fn identifier_at(text: &str, offset: usize) -> Option<(String, std::o
     }
 }
 
-fn render_signature(
-    name: &str,
-    sig: &FunctionSignature,
-    active_parameter: usize,
-) -> SignatureHelp {
+fn render_signature(name: &str, sig: &FunctionSignature, active_parameter: usize) -> SignatureHelp {
     let label = sig.label(name);
 
     // Build parameter labels with character offsets so editors can

@@ -29,9 +29,7 @@
 
 use std::collections::HashMap;
 
-use lsp_types::{
-    CodeAction, CodeActionKind, Diagnostic, Range, TextEdit, Url, WorkspaceEdit,
-};
+use lsp_types::{CodeAction, CodeActionKind, Diagnostic, Range, TextEdit, Url, WorkspaceEdit};
 use tfls_state::{DocumentState, StateStore};
 
 use crate::handlers::util::parent_dir;
@@ -87,12 +85,8 @@ impl Scope {
 /// match the discovery-walker convention — those files are
 /// indexed for module-output resolution, not user-authored
 /// content the user is editing.
-pub fn for_each_doc_in_scope<F>(
-    state: &StateStore,
-    primary_uri: &Url,
-    scope: Scope,
-    mut visit: F,
-) where
+pub fn for_each_doc_in_scope<F>(state: &StateStore, primary_uri: &Url, scope: Scope, mut visit: F)
+where
     F: FnMut(&Url, &DocumentState),
 {
     match scope {
@@ -102,10 +96,14 @@ pub fn for_each_doc_in_scope<F>(
             }
         }
         Scope::Module => {
-            let Some(target_dir) = parent_dir(primary_uri) else { return };
+            let Some(target_dir) = parent_dir(primary_uri) else {
+                return;
+            };
             for entry in state.documents.iter() {
                 let uri = entry.key();
-                let Ok(path) = uri.to_file_path() else { continue };
+                let Ok(path) = uri.to_file_path() else {
+                    continue;
+                };
                 if path.parent() != Some(&target_dir) {
                     continue;
                 }
@@ -168,12 +166,7 @@ pub fn build_scoped_action(
 ///   → `"Unwrap interpolation"`
 /// - `scope_title("Unwrap interpolation", "deprecated interpolation", File, 5)`
 ///   → `"Unwrap 5 deprecated interpolations in this file"`
-pub fn scope_title(
-    template: &str,
-    item_label: &str,
-    scope: Scope,
-    count: usize,
-) -> String {
+pub fn scope_title(template: &str, item_label: &str, scope: Scope, count: usize) -> String {
     if matches!(scope, Scope::Instance) {
         return template.to_string();
     }
@@ -269,7 +262,9 @@ mod tests {
         let t = scope_title(
             "Unwrap interpolation",
             "interp",
-            Scope::Selection { range: r(0, 0, 5, 0) },
+            Scope::Selection {
+                range: r(0, 0, 5, 0),
+            },
             3,
         );
         assert_eq!(t, "Unwrap 3 interps in selection");
@@ -277,10 +272,7 @@ mod tests {
 
     #[test]
     fn kind_namespacing() {
-        assert_eq!(
-            scope_kind(Scope::Instance, "unwrap").as_str(),
-            "quickfix"
-        );
+        assert_eq!(scope_kind(Scope::Instance, "unwrap").as_str(), "quickfix");
         assert_eq!(
             scope_kind(Scope::File, "unwrap").as_str(),
             "source.fixAll.terraform-ls-rs.unwrap"
@@ -294,7 +286,13 @@ mod tests {
             "source.fixAll.terraform-ls-rs.unwrap.workspace"
         );
         assert_eq!(
-            scope_kind(Scope::Selection { range: r(0, 0, 1, 0) }, "unwrap").as_str(),
+            scope_kind(
+                Scope::Selection {
+                    range: r(0, 0, 1, 0)
+                },
+                "unwrap"
+            )
+            .as_str(),
             "quickfix.terraform-ls-rs.unwrap.selection"
         );
     }
@@ -314,15 +312,9 @@ mod tests {
     #[test]
     fn build_action_returns_none_when_empty() {
         let map: rustc_hash::FxHashMap<Url, Vec<TextEdit>> = rustc_hash::FxHashMap::default();
-        assert!(build_scoped_action(
-            Scope::File,
-            map,
-            "Unwrap",
-            "interp",
-            None,
-            "unwrap",
-        )
-        .is_none());
+        assert!(
+            build_scoped_action(Scope::File, map, "Unwrap", "interp", None, "unwrap",).is_none()
+        );
     }
 
     #[test]
@@ -330,14 +322,8 @@ mod tests {
         let mut map: rustc_hash::FxHashMap<Url, Vec<TextEdit>> = rustc_hash::FxHashMap::default();
         let url = Url::parse("file:///x.tf").unwrap();
         map.insert(url, Vec::new());
-        assert!(build_scoped_action(
-            Scope::File,
-            map,
-            "Unwrap",
-            "interp",
-            None,
-            "unwrap",
-        )
-        .is_none());
+        assert!(
+            build_scoped_action(Scope::File, map, "Unwrap", "interp", None, "unwrap",).is_none()
+        );
     }
 }

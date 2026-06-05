@@ -10,7 +10,7 @@ use hcl_edit::repr::Span;
 use hcl_edit::structure::{Block, BlockLabel, Body};
 use lsp_types::{Diagnostic, DiagnosticSeverity, Url};
 use ropey::Rope;
-use tfls_core::{BlockKind, CONDITION_ATTRS, is_meta_attr, lifecycle_attrs, lifecycle_blocks};
+use tfls_core::{is_meta_attr, lifecycle_attrs, lifecycle_blocks, BlockKind, CONDITION_ATTRS};
 use tfls_parser::hcl_span_to_lsp_range;
 use tfls_schema::{BlockSchema, ProviderSchemas, Schema};
 
@@ -411,9 +411,7 @@ fn validate_block<H: UpgradeHintLookup>(
 
     // Missing required.
     for (name, attr) in &schema.block.attributes {
-        if attr.required
-            && !present_attrs.iter().any(|(n, _)| *n == name.as_str())
-        {
+        if attr.required && !present_attrs.iter().any(|(n, _)| *n == name.as_str()) {
             out.push(Diagnostic {
                 range: header_range,
                 severity: Some(DiagnosticSeverity::ERROR),
@@ -450,7 +448,10 @@ fn validate_block<H: UpgradeHintLookup>(
                 message: if nested.min_items == 1 {
                     format!("missing required block `{bname}`")
                 } else {
-                    format!("block `{bname}` requires at least {} entries", nested.min_items)
+                    format!(
+                        "block `{bname}` requires at least {} entries",
+                        nested.min_items
+                    )
                 },
                 ..Default::default()
             });
@@ -517,9 +518,7 @@ fn validate_block<H: UpgradeHintLookup>(
                     range: *range,
                     severity: Some(DiagnosticSeverity::WARNING),
                     source: Some("terraform-ls-rs".to_string()),
-                    message: format!(
-                        "attribute `{name}` requires `{other}` to also be set"
-                    ),
+                    message: format!("attribute `{name}` requires `{other}` to also be set"),
                     ..Default::default()
                 });
             }
@@ -725,9 +724,7 @@ fn validate_dynamic_block(
                     range,
                     severity: Some(DiagnosticSeverity::ERROR),
                     source: Some("terraform-ls-rs".to_string()),
-                    message: format!(
-                        "unknown nested block `{label_owned}` on this resource/data"
-                    ),
+                    message: format!("unknown nested block `{label_owned}` on this resource/data"),
                     ..Default::default()
                 });
             }
@@ -759,9 +756,7 @@ fn validate_dynamic_block(
                 range,
                 severity: Some(DiagnosticSeverity::ERROR),
                 source: Some("terraform-ls-rs".to_string()),
-                message: format!(
-                    "dynamic \"{label_owned}\" missing required `for_each`"
-                ),
+                message: format!("dynamic \"{label_owned}\" missing required `for_each`"),
                 ..Default::default()
             });
         }
@@ -879,27 +874,36 @@ mod tests {
     fn flags_missing_required() {
         let d = diags(r#"resource "aws_instance" "x" { instance_type = "t3.micro" }"#);
         assert!(
-            d.iter().any(|d| d.message.contains("missing required") && d.message.contains("ami")),
+            d.iter()
+                .any(|d| d.message.contains("missing required") && d.message.contains("ami")),
             "got: {d:?}"
         );
     }
 
     #[test]
     fn flags_unknown_attribute() {
-        let d = diags(r#"resource "aws_instance" "x" {
+        let d = diags(
+            r#"resource "aws_instance" "x" {
           ami          = "ami-1"
           instance_type = "t3.micro"
           not_in_schema = true
-        }"#);
-        assert!(d.iter().any(|d| d.message.contains("unknown attribute `not_in_schema`")), "got: {d:?}");
+        }"#,
+        );
+        assert!(
+            d.iter()
+                .any(|d| d.message.contains("unknown attribute `not_in_schema`")),
+            "got: {d:?}"
+        );
     }
 
     #[test]
     fn flags_deprecated_attribute_as_warning() {
-        let d = diags(r#"resource "aws_instance" "x" {
+        let d = diags(
+            r#"resource "aws_instance" "x" {
           ami         = "ami-1"
           legacy_flag = true
-        }"#);
+        }"#,
+        );
         let dep = d
             .iter()
             .find(|d| d.message.contains("deprecated"))
@@ -915,10 +919,12 @@ mod tests {
 
     #[test]
     fn valid_resource_yields_no_diagnostics() {
-        let d = diags(r#"resource "aws_instance" "x" {
+        let d = diags(
+            r#"resource "aws_instance" "x" {
           ami           = "ami-1"
           instance_type = "t3.micro"
-        }"#);
+        }"#,
+        );
         assert!(d.is_empty(), "got: {d:?}");
     }
 
@@ -993,7 +999,11 @@ mod tests {
             .find(|d| d.message.contains("deprecated by its provider"))
             .expect("schema-driven block deprecation diagnostic");
         assert_eq!(dep.severity, Some(DiagnosticSeverity::WARNING));
-        assert!(dep.message.contains("aws_legacy_thing"), "got: {}", dep.message);
+        assert!(
+            dep.message.contains("aws_legacy_thing"),
+            "got: {}",
+            dep.message
+        );
         // Squiggle on the label literal — line 0.
         assert_eq!(dep.range.start.line, 0);
     }
@@ -1010,7 +1020,11 @@ mod tests {
             .find(|d| d.message.contains("deprecated by its provider"))
             .expect("schema-driven block deprecation diagnostic");
         assert!(dep.message.contains("data source"), "got: {}", dep.message);
-        assert!(dep.message.contains("aws_legacy_ds"), "got: {}", dep.message);
+        assert!(
+            dep.message.contains("aws_legacy_ds"),
+            "got: {}",
+            dep.message
+        );
     }
 
     /// Suppressed when the type is covered by a hardcoded rule:
@@ -1030,7 +1044,8 @@ mod tests {
         // schema-validation pipeline for this block (no required
         // attrs missing, no unknown attrs).
         assert!(
-            d.iter().all(|d| !d.message.contains("deprecated by its provider")),
+            d.iter()
+                .all(|d| !d.message.contains("deprecated by its provider")),
             "schema-driven dedup must skip aws_alb; got: {d:?}"
         );
     }
@@ -1115,7 +1130,10 @@ mod tests {
     #[test]
     fn flags_setting_read_only_attribute() {
         let schemas = schemas_with_computed_attr();
-        let d = diags_with(&schemas, "resource \"aws_thing\" \"x\" {\n  arn = \"a\"\n}\n");
+        let d = diags_with(
+            &schemas,
+            "resource \"aws_thing\" \"x\" {\n  arn = \"a\"\n}\n",
+        );
         let ro = d
             .iter()
             .find(|d| d.message.contains("read-only (computed)"))
@@ -1126,15 +1144,27 @@ mod tests {
     #[test]
     fn allows_setting_optional_computed_attribute() {
         let schemas = schemas_with_computed_attr();
-        let d = diags_with(&schemas, "resource \"aws_thing\" \"x\" {\n  id_opt = \"a\"\n}\n");
-        assert!(d.iter().all(|d| !d.message.contains("read-only")), "got: {d:?}");
+        let d = diags_with(
+            &schemas,
+            "resource \"aws_thing\" \"x\" {\n  id_opt = \"a\"\n}\n",
+        );
+        assert!(
+            d.iter().all(|d| !d.message.contains("read-only")),
+            "got: {d:?}"
+        );
     }
 
     #[test]
     fn allows_setting_normal_optional_attribute() {
         let schemas = schemas_with_computed_attr();
-        let d = diags_with(&schemas, "resource \"aws_thing\" \"x\" {\n  name = \"a\"\n}\n");
-        assert!(d.iter().all(|d| !d.message.contains("read-only")), "got: {d:?}");
+        let d = diags_with(
+            &schemas,
+            "resource \"aws_thing\" \"x\" {\n  name = \"a\"\n}\n",
+        );
+        assert!(
+            d.iter().all(|d| !d.message.contains("read-only")),
+            "got: {d:?}"
+        );
     }
 
     fn schemas_with_typed_attrs() -> ProviderSchemas {
@@ -1166,7 +1196,10 @@ mod tests {
     #[test]
     fn flags_collection_literal_for_primitive_type() {
         let schemas = schemas_with_typed_attrs();
-        let d = diags_with(&schemas, "resource \"aws_thing\" \"x\" {\n  name = [\"a\"]\n}\n");
+        let d = diags_with(
+            &schemas,
+            "resource \"aws_thing\" \"x\" {\n  name = [\"a\"]\n}\n",
+        );
         let m = d
             .iter()
             .find(|d| d.message.contains("type mismatch for `name`"))
@@ -1177,8 +1210,15 @@ mod tests {
     #[test]
     fn flags_primitive_literal_for_collection_type() {
         let schemas = schemas_with_typed_attrs();
-        let d = diags_with(&schemas, "resource \"aws_thing\" \"x\" {\n  tags = \"oops\"\n}\n");
-        assert!(d.iter().any(|d| d.message.contains("type mismatch for `tags`")), "got: {d:?}");
+        let d = diags_with(
+            &schemas,
+            "resource \"aws_thing\" \"x\" {\n  tags = \"oops\"\n}\n",
+        );
+        assert!(
+            d.iter()
+                .any(|d| d.message.contains("type mismatch for `tags`")),
+            "got: {d:?}"
+        );
     }
 
     #[test]
@@ -1188,14 +1228,23 @@ mod tests {
             &schemas,
             "resource \"aws_thing\" \"x\" {\n  name = \"ok\"\n  tags = { a = \"b\" }\n  subnets = [\"s1\"]\n}\n",
         );
-        assert!(d.iter().all(|d| !d.message.contains("type mismatch")), "got: {d:?}");
+        assert!(
+            d.iter().all(|d| !d.message.contains("type mismatch")),
+            "got: {d:?}"
+        );
     }
 
     #[test]
     fn skips_type_check_for_non_literal_value() {
         let schemas = schemas_with_typed_attrs();
-        let d = diags_with(&schemas, "resource \"aws_thing\" \"x\" {\n  tags = var.tags\n}\n");
-        assert!(d.iter().all(|d| !d.message.contains("type mismatch")), "got: {d:?}");
+        let d = diags_with(
+            &schemas,
+            "resource \"aws_thing\" \"x\" {\n  tags = var.tags\n}\n",
+        );
+        assert!(
+            d.iter().all(|d| !d.message.contains("type mismatch")),
+            "got: {d:?}"
+        );
     }
 
     fn schemas_with_enum_attr() -> ProviderSchemas {
@@ -1229,7 +1278,10 @@ mod tests {
     #[test]
     fn flags_invalid_enum_value() {
         let schemas = schemas_with_enum_attr();
-        let d = diags_with(&schemas, "resource \"aws_thing\" \"x\" {\n  tier = \"gold\"\n}\n");
+        let d = diags_with(
+            &schemas,
+            "resource \"aws_thing\" \"x\" {\n  tier = \"gold\"\n}\n",
+        );
         let bad = d
             .iter()
             .find(|d| d.message.contains("invalid value `gold`"))
@@ -1241,16 +1293,28 @@ mod tests {
     #[test]
     fn accepts_valid_enum_value() {
         let schemas = schemas_with_enum_attr();
-        let d = diags_with(&schemas, "resource \"aws_thing\" \"x\" {\n  tier = \"premium\"\n}\n");
-        assert!(d.iter().all(|d| !d.message.contains("invalid value")), "got: {d:?}");
+        let d = diags_with(
+            &schemas,
+            "resource \"aws_thing\" \"x\" {\n  tier = \"premium\"\n}\n",
+        );
+        assert!(
+            d.iter().all(|d| !d.message.contains("invalid value")),
+            "got: {d:?}"
+        );
     }
 
     #[test]
     fn skips_enum_check_for_non_literal_value() {
         // A var reference can't be statically checked — no false positive.
         let schemas = schemas_with_enum_attr();
-        let d = diags_with(&schemas, "resource \"aws_thing\" \"x\" {\n  tier = var.tier\n}\n");
-        assert!(d.iter().all(|d| !d.message.contains("invalid value")), "got: {d:?}");
+        let d = diags_with(
+            &schemas,
+            "resource \"aws_thing\" \"x\" {\n  tier = var.tier\n}\n",
+        );
+        assert!(
+            d.iter().all(|d| !d.message.contains("invalid value")),
+            "got: {d:?}"
+        );
     }
 
     fn schemas_with_nested_blocks() -> ProviderSchemas {
@@ -1296,7 +1360,10 @@ mod tests {
         let d = diags_with(&schemas, "resource \"aws_thing\" \"x\" {}\n");
         let miss = d
             .iter()
-            .find(|d| d.message.contains("missing required block `required_block`"))
+            .find(|d| {
+                d.message
+                    .contains("missing required block `required_block`")
+            })
             .expect("missing-required-block diagnostic");
         assert_eq!(miss.severity, Some(DiagnosticSeverity::ERROR));
     }
@@ -1309,7 +1376,8 @@ mod tests {
             "resource \"aws_thing\" \"x\" {\n  required_block {}\n}\n",
         );
         assert!(
-            d.iter().all(|d| !d.message.contains("missing required block")),
+            d.iter()
+                .all(|d| !d.message.contains("missing required block")),
             "got: {d:?}"
         );
     }
@@ -1322,7 +1390,8 @@ mod tests {
             "resource \"aws_thing\" \"x\" {\n  dynamic \"required_block\" {\n    for_each = var.xs\n    content {}\n  }\n}\n",
         );
         assert!(
-            d.iter().all(|d| !d.message.contains("missing required block")),
+            d.iter()
+                .all(|d| !d.message.contains("missing required block")),
             "got: {d:?}"
         );
     }
@@ -1338,7 +1407,11 @@ mod tests {
             .iter()
             .find(|d| d.message.contains("too many `bounded_block`"))
             .expect("too-many-blocks diagnostic");
-        assert!(too_many.message.contains("max 2"), "got: {}", too_many.message);
+        assert!(
+            too_many.message.contains("max 2"),
+            "got: {}",
+            too_many.message
+        );
     }
 
     #[test]
@@ -1467,48 +1540,58 @@ mod tests {
 
     #[test]
     fn meta_attr_count_not_flagged_in_resource() {
-        let d = diags(r#"resource "aws_instance" "x" {
+        let d = diags(
+            r#"resource "aws_instance" "x" {
           ami   = "ami-1"
           count = 2
-        }"#);
+        }"#,
+        );
         assert!(!has_unknown(&d, "count"), "got: {d:?}");
     }
 
     #[test]
     fn meta_attr_for_each_not_flagged_in_resource() {
-        let d = diags(r#"resource "aws_instance" "x" {
+        let d = diags(
+            r#"resource "aws_instance" "x" {
           ami      = "ami-1"
           for_each = toset(["a", "b"])
-        }"#);
+        }"#,
+        );
         assert!(!has_unknown(&d, "for_each"), "got: {d:?}");
     }
 
     #[test]
     fn meta_attr_provider_not_flagged_in_resource() {
-        let d = diags(r#"resource "aws_instance" "x" {
+        let d = diags(
+            r#"resource "aws_instance" "x" {
           ami      = "ami-1"
           provider = aws.east
-        }"#);
+        }"#,
+        );
         assert!(!has_unknown(&d, "provider"), "got: {d:?}");
     }
 
     #[test]
     fn meta_attr_depends_on_not_flagged_in_resource() {
-        let d = diags(r#"resource "aws_instance" "x" {
+        let d = diags(
+            r#"resource "aws_instance" "x" {
           ami        = "ami-1"
           depends_on = []
-        }"#);
+        }"#,
+        );
         assert!(!has_unknown(&d, "depends_on"), "got: {d:?}");
     }
 
     #[test]
     fn meta_attrs_not_flagged_in_data_block() {
-        let d = diags(r#"data "aws_ami" "x" {
+        let d = diags(
+            r#"data "aws_ami" "x" {
           count      = 1
           for_each   = toset(["a"])
           provider   = aws.east
           depends_on = []
-        }"#);
+        }"#,
+        );
         assert!(!has_unknown(&d, "count"), "got: {d:?}");
         assert!(!has_unknown(&d, "for_each"), "got: {d:?}");
         assert!(!has_unknown(&d, "provider"), "got: {d:?}");
@@ -1518,22 +1601,26 @@ mod tests {
     #[test]
     fn truly_unknown_attribute_is_still_flagged() {
         // Negative regression: the meta-argument fix must not over-match.
-        let d = diags(r#"resource "aws_instance" "x" {
+        let d = diags(
+            r#"resource "aws_instance" "x" {
           ami           = "ami-1"
           not_in_schema = true
-        }"#);
+        }"#,
+        );
         assert!(has_unknown(&d, "not_in_schema"), "got: {d:?}");
     }
 
     #[test]
     fn lifecycle_block_with_known_attrs_is_accepted_in_resource() {
-        let d = diags(r#"resource "aws_instance" "x" {
+        let d = diags(
+            r#"resource "aws_instance" "x" {
           ami = "ami-1"
           lifecycle {
             create_before_destroy = true
             prevent_destroy       = false
           }
-        }"#);
+        }"#,
+        );
         assert!(
             d.iter().all(|diag| !diag.message.contains("unknown")),
             "got: {d:?}"
@@ -1542,12 +1629,14 @@ mod tests {
 
     #[test]
     fn lifecycle_unknown_attr_is_flagged_in_resource() {
-        let d = diags(r#"resource "aws_instance" "x" {
+        let d = diags(
+            r#"resource "aws_instance" "x" {
           ami = "ami-1"
           lifecycle {
             typo = true
           }
-        }"#);
+        }"#,
+        );
         assert!(has_unknown(&d, "typo"), "got: {d:?}");
     }
 
@@ -1588,14 +1677,16 @@ mod tests {
 
     #[test]
     fn lifecycle_data_postcondition_is_accepted() {
-        let d = diags(r#"data "aws_ami" "x" {
+        let d = diags(
+            r#"data "aws_ami" "x" {
           lifecycle {
             postcondition {
               condition     = true
               error_message = "nope"
             }
           }
-        }"#);
+        }"#,
+        );
         assert!(
             d.iter().all(|diag| !diag.message.contains("unknown")),
             "got: {d:?}"
@@ -1605,24 +1696,28 @@ mod tests {
     #[test]
     fn lifecycle_data_attrs_not_allowed() {
         // `create_before_destroy` only valid on resources, not data sources.
-        let d = diags(r#"data "aws_ami" "x" {
+        let d = diags(
+            r#"data "aws_ami" "x" {
           lifecycle {
             create_before_destroy = true
           }
-        }"#);
+        }"#,
+        );
         assert!(has_unknown(&d, "create_before_destroy"), "got: {d:?}");
     }
 
     #[test]
     fn provisioner_block_body_not_validated() {
         // provisioner bodies vary per provisioner type; skip inner checks.
-        let d = diags(r#"resource "aws_instance" "x" {
+        let d = diags(
+            r#"resource "aws_instance" "x" {
           ami = "ami-1"
           provisioner "local-exec" {
             command = "echo hi"
             anything_goes = true
           }
-        }"#);
+        }"#,
+        );
         assert!(
             d.iter().all(|diag| !diag.message.contains("unknown")),
             "got: {d:?}"
@@ -1631,13 +1726,15 @@ mod tests {
 
     #[test]
     fn connection_block_body_not_validated() {
-        let d = diags(r#"resource "aws_instance" "x" {
+        let d = diags(
+            r#"resource "aws_instance" "x" {
           ami = "ami-1"
           connection {
             type = "ssh"
             host = "h"
           }
-        }"#);
+        }"#,
+        );
         assert!(
             d.iter().all(|diag| !diag.message.contains("unknown")),
             "got: {d:?}"

@@ -30,8 +30,8 @@ use std::time::Duration;
 use clap::Parser;
 use tfls_lsp::Backend;
 use tfls_state::DocumentState;
-use tower_lsp::LspService;
 use tower_lsp::lsp_types::Url;
+use tower_lsp::LspService;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -52,7 +52,9 @@ struct Cli {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    rustls::crypto::aws_lc_rs::default_provider().install_default().ok();
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .ok();
 
     let cli = Cli::parse();
     let dir = std::env::temp_dir().join(format!(
@@ -62,7 +64,10 @@ async fn main() {
     ));
     std::fs::create_dir_all(&dir).unwrap();
     println!("workspace: {}", dir.display());
-    println!("workspace canonical: {}", dir.canonicalize().unwrap().display());
+    println!(
+        "workspace canonical: {}",
+        dir.canonicalize().unwrap().display()
+    );
 
     // Seed: main.tf + initial lock matching `~> 4.71.0`.
     let main_tf = dir.join("main.tf");
@@ -86,11 +91,7 @@ async fn main() {
     let inner = service.inner();
     let state = inner.state.clone();
     let jobs = inner.jobs.clone();
-    let backend = Backend::with_shared_state(
-        inner.client.clone(),
-        state.clone(),
-        jobs.clone(),
-    );
+    let backend = Backend::with_shared_state(inner.client.clone(), state.clone(), jobs.clone());
 
     // Mirror `did_open`: insert the document into state.
     let main_uri = Url::from_file_path(&main_tf).unwrap();
@@ -127,9 +128,18 @@ async fn main() {
     };
 
     mutate("step 1: lock → 2.71.0 (drift; warning expected)", "2.71.0");
-    mutate("step 2: lock → 4.71.0 (back in band; warning should clear)", "4.71.0");
-    mutate("step 3: lock → 1.0.0 (drift again; warning expected)", "1.0.0");
-    mutate("step 4: lock → 4.71.0 (back; warning should clear)", "4.71.0");
+    mutate(
+        "step 2: lock → 4.71.0 (back in band; warning should clear)",
+        "4.71.0",
+    );
+    mutate(
+        "step 3: lock → 1.0.0 (drift again; warning expected)",
+        "1.0.0",
+    );
+    mutate(
+        "step 4: lock → 4.71.0 (back; warning should clear)",
+        "4.71.0",
+    );
 
     // Schema-aware version hopping. The real LSP populates
     // `state.schemas` from gRPC against the on-disk binary,
@@ -156,21 +166,13 @@ async fn main() {
         if install_new_schema {
             state.install_schemas(schemas_new.clone());
             state.record_installed_version(
-                tfls_core::ProviderAddress::new(
-                    "registry.terraform.io",
-                    "hashicorp",
-                    "azurerm",
-                ),
+                tfls_core::ProviderAddress::new("registry.terraform.io", "hashicorp", "azurerm"),
                 lock_version.to_string(),
             );
         } else {
             state.install_schemas(schemas_old.clone());
             state.record_installed_version(
-                tfls_core::ProviderAddress::new(
-                    "registry.terraform.io",
-                    "hashicorp",
-                    "azurerm",
-                ),
+                tfls_core::ProviderAddress::new("registry.terraform.io", "hashicorp", "azurerm"),
                 lock_version.to_string(),
             );
         }
@@ -178,7 +180,11 @@ async fn main() {
         report_full(&state, &main_uri_for_runbook, &dir, label, cli.verbose);
     };
 
-    hop("hop 1: lock 4.71.0 + new schema (with attr)", "4.71.0", true);
+    hop(
+        "hop 1: lock 4.71.0 + new schema (with attr)",
+        "4.71.0",
+        true,
+    );
     hop("hop 2: lock 2.71.0 + old schema (no attr)", "2.71.0", false);
     hop("hop 3: lock 4.71.0 + new schema", "4.71.0", true);
     hop("hop 4: lock 1.0.0 + old schema", "1.0.0", false);
@@ -195,9 +201,7 @@ async fn main() {
 /// "old vs new" provider versions.
 fn synthetic_schemas(with_runtime_env: bool) -> tfls_schema::ProviderSchemas {
     use std::collections::HashMap;
-    use tfls_schema::{
-        AttributeSchema, BlockSchema, ProviderSchema, ProviderSchemas, Schema,
-    };
+    use tfls_schema::{AttributeSchema, BlockSchema, ProviderSchema, ProviderSchemas, Schema};
     let mut block = BlockSchema::default();
     block.attributes.insert(
         "name".to_string(),
@@ -219,9 +223,7 @@ fn synthetic_schemas(with_runtime_env: bool) -> tfls_schema::ProviderSchemas {
         block.attributes.insert(
             "runtime_environment_name".to_string(),
             AttributeSchema {
-                description: Some(
-                    "(Optional) Runtime environment name".to_string(),
-                ),
+                description: Some("(Optional) Runtime environment name".to_string()),
                 optional: true,
                 ..Default::default()
             },
@@ -282,8 +284,7 @@ fn report_full(
     let schema = state.resource_schema("azurerm_automation_runbook");
     match schema {
         Some(s) => {
-            let has_runtime_env =
-                s.block.attributes.contains_key("runtime_environment_name");
+            let has_runtime_env = s.block.attributes.contains_key("runtime_environment_name");
             let attr_count = s.block.attributes.len();
             println!(
                 "schema: azurerm_automation_runbook present, {attr_count} attrs, \
@@ -293,11 +294,7 @@ fn report_full(
         None => println!("schema: azurerm_automation_runbook MISSING"),
     }
     // Installed version (used by upgrade-hint / etc).
-    let addr = tfls_core::ProviderAddress::new(
-        "registry.terraform.io",
-        "hashicorp",
-        "azurerm",
-    );
+    let addr = tfls_core::ProviderAddress::new("registry.terraform.io", "hashicorp", "azurerm");
     if let Some(v) = state.installed_version(&addr) {
         println!("installed_version(azurerm) = {v}");
     } else {
@@ -335,8 +332,7 @@ fn report(
         }
     }
 
-    let diags =
-        tfls_lsp::handlers::document::compute_diagnostics(state, uri);
+    let diags = tfls_lsp::handlers::document::compute_diagnostics(state, uri);
     let drift: Vec<_> = diags
         .iter()
         .filter(|d| d.message.contains("does not admit"))

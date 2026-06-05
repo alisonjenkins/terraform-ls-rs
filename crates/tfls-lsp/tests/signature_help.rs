@@ -6,11 +6,11 @@
 use tfls_lsp::Backend;
 use tfls_schema::functions_cache;
 use tfls_state::DocumentState;
-use tower_lsp::LspService;
 use tower_lsp::lsp_types::{
     Position, SignatureHelpContext, SignatureHelpParams, SignatureHelpTriggerKind,
     TextDocumentIdentifier, TextDocumentPositionParams, Url, WorkDoneProgressParams,
 };
+use tower_lsp::LspService;
 
 fn uri(s: &str) -> Url {
     Url::parse(s).expect("url")

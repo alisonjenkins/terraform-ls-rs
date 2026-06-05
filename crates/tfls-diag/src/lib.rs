@@ -2,13 +2,13 @@
 
 pub mod comment_syntax;
 pub mod cyclic_locals;
-pub mod deprecated_index;
-pub mod deprecated_interpolation;
-pub mod deprecated_lookup;
 pub mod deprecated_aws_renames;
 pub mod deprecated_azurerm_blocks;
 pub mod deprecated_google_blocks;
+pub mod deprecated_index;
+pub mod deprecated_interpolation;
 pub mod deprecated_kubernetes_renames;
+pub mod deprecated_lookup;
 pub mod deprecated_null_data_source;
 pub mod deprecated_null_resource;
 pub mod deprecated_template_dir;
@@ -16,8 +16,8 @@ pub mod deprecated_template_file;
 pub mod deprecated_vault_blocks;
 pub mod deprecation_rule;
 pub mod documented_outputs;
-pub mod duplicate_definition;
 pub mod documented_variables;
+pub mod duplicate_definition;
 pub mod empty_list_equality;
 pub mod error;
 pub mod expr_walk;
@@ -44,33 +44,29 @@ pub mod workspace_remote;
 
 pub use comment_syntax::comment_syntax_diagnostics;
 pub use cyclic_locals::cyclic_locals_diagnostics;
-pub use deprecated_index::deprecated_index_diagnostics;
-pub use deprecated_interpolation::deprecated_interpolation_diagnostics;
-pub use deprecated_lookup::deprecated_lookup_diagnostics;
 pub use deprecated_aws_renames::{
-    AWS_TYPE_RENAMES, aws_renames_diagnostics, aws_renames_diagnostics_for_module,
+    aws_renames_diagnostics, aws_renames_diagnostics_for_module, AWS_TYPE_RENAMES,
 };
 pub use deprecated_azurerm_blocks::{
-    AZURERM_BLOCK_DEPRECATIONS, azurerm_blocks_diagnostics, azurerm_blocks_diagnostics_for_module,
+    azurerm_blocks_diagnostics, azurerm_blocks_diagnostics_for_module, AZURERM_BLOCK_DEPRECATIONS,
 };
 pub use deprecated_google_blocks::{
-    GOOGLE_BLOCK_DEPRECATIONS, google_blocks_diagnostics, google_blocks_diagnostics_for_module,
+    google_blocks_diagnostics, google_blocks_diagnostics_for_module, GOOGLE_BLOCK_DEPRECATIONS,
 };
+pub use deprecated_index::deprecated_index_diagnostics;
+pub use deprecated_interpolation::deprecated_interpolation_diagnostics;
 pub use deprecated_kubernetes_renames::{
-    KUBERNETES_TYPE_RENAMES, kubernetes_renames_diagnostics,
-    kubernetes_renames_diagnostics_for_module,
+    kubernetes_renames_diagnostics, kubernetes_renames_diagnostics_for_module,
+    KUBERNETES_TYPE_RENAMES,
 };
+pub use deprecated_lookup::deprecated_lookup_diagnostics;
 pub use deprecated_null_data_source::{
-    deprecated_null_data_source_diagnostics,
-    deprecated_null_data_source_diagnostics_for_module, supports_locals_replacement,
+    deprecated_null_data_source_diagnostics, deprecated_null_data_source_diagnostics_for_module,
+    supports_locals_replacement,
 };
 pub use deprecated_null_resource::{
     deprecated_null_resource_diagnostics, deprecated_null_resource_diagnostics_for_module,
     extract_required_version, supports_terraform_data,
-};
-pub use deprecation_rule::{
-    extract_required_provider_source, extract_required_provider_version, is_hardcoded_deprecation,
-    supports_with_lock,
 };
 pub use deprecated_template_dir::{
     deprecated_template_dir_diagnostics, deprecated_template_dir_diagnostics_for_module,
@@ -80,7 +76,11 @@ pub use deprecated_template_file::{
     supports_templatefile,
 };
 pub use deprecated_vault_blocks::{
-    VAULT_BLOCK_DEPRECATIONS, vault_blocks_diagnostics, vault_blocks_diagnostics_for_module,
+    vault_blocks_diagnostics, vault_blocks_diagnostics_for_module, VAULT_BLOCK_DEPRECATIONS,
+};
+pub use deprecation_rule::{
+    extract_required_provider_source, extract_required_provider_version, is_hardcoded_deprecation,
+    supports_with_lock,
 };
 pub use documented_outputs::documented_outputs_diagnostics;
 pub use documented_variables::documented_variables_diagnostics;
@@ -94,7 +94,9 @@ pub use module_pinned_source::module_pinned_source_diagnostics;
 pub use module_shallow_clone::module_shallow_clone_diagnostics;
 pub use module_version_presence::module_version_presence_diagnostics;
 pub use naming_convention::naming_convention_diagnostics;
-pub use references::{undefined_reference_diagnostics, undefined_reference_diagnostics_for_document};
+pub use references::{
+    undefined_reference_diagnostics, undefined_reference_diagnostics_for_document,
+};
 pub use required_providers_version::required_providers_version_diagnostics;
 pub use required_version_presence::required_version_presence_diagnostics;
 pub use schema_validation::resource_diagnostics;
@@ -105,5 +107,5 @@ pub use typed_variables::typed_variables_diagnostics;
 pub use unused_declarations::unused_declarations_diagnostics;
 pub use unused_required_providers::unused_required_providers_diagnostics;
 pub use variable_default_type::variable_default_type_diagnostics;
-pub use version_constraint::{ConstraintSource, VersionCacheLookup, constraint_diagnostics};
+pub use version_constraint::{constraint_diagnostics, ConstraintSource, VersionCacheLookup};
 pub use workspace_remote::workspace_remote_diagnostics;

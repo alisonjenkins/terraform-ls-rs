@@ -58,12 +58,7 @@ pub async fn load_functions(binary: &Path) -> FunctionsSchema {
     }
 
     // 2. CLI.
-    match fetch_functions_from_cli(
-        binary,
-        std::time::Duration::from_secs(CLI_TIMEOUT_SECS),
-    )
-    .await
-    {
+    match fetch_functions_from_cli(binary, std::time::Duration::from_secs(CLI_TIMEOUT_SECS)).await {
         Ok(schema) => {
             // Cache write = `create_dir_all` + JSON encode +
             // `fs::write`; run on the blocking pool.
@@ -132,9 +127,7 @@ fn cache_key(binary: &Path) -> Option<String> {
 fn cache_dir() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache"))
-        })?;
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
     Some(base.join("terraform-ls-rs").join("functions"))
 }
 
@@ -149,9 +142,8 @@ fn read_disk_cache(key: &str) -> Option<FunctionsSchema> {
 }
 
 fn write_disk_cache(key: &str, schema: &FunctionsSchema) -> Result<(), SchemaError> {
-    let dir = cache_dir().ok_or_else(|| {
-        SchemaError::Cache(std::io::Error::other("no cache directory available"))
-    })?;
+    let dir = cache_dir()
+        .ok_or_else(|| SchemaError::Cache(std::io::Error::other("no cache directory available")))?;
     std::fs::create_dir_all(&dir).map_err(SchemaError::Cache)?;
     let path = dir.join(format!("{key}.json"));
     let json = sonic_rs::to_string(schema).map_err(SchemaError::JsonParse)?;

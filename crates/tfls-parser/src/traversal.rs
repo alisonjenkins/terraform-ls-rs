@@ -4,9 +4,9 @@
 //! `output`, `data`, `module`, `provider`, `locals`, `terraform`. This
 //! module maps those block shapes into our domain [`SymbolTable`].
 
-use hcl_edit::Ident;
 use hcl_edit::repr::{Decorated, Span};
 use hcl_edit::structure::{Block, BlockLabel, Body};
+use hcl_edit::Ident;
 use lsp_types::{Range, Url};
 use ropey::Rope;
 use tfls_core::{ResourceAddress, Symbol, SymbolKind, SymbolLocation, SymbolTable};
@@ -29,8 +29,7 @@ pub fn extract_symbols(body: &Body, uri: &Url, rope: &Rope) -> SymbolTable {
         let ident = block.ident.as_str();
         match ident {
             "variable" => {
-                let type_expr = find_attr_expr(block, "type")
-                    .map(tfls_core::parse_type_expr);
+                let type_expr = find_attr_expr(block, "type").map(tfls_core::parse_type_expr);
                 let default_shape = find_attr_expr(block, "default")
                     .map(tfls_core::parse_value_shape)
                     .filter(|s| !matches!(s, tfls_core::VariableType::Any));
@@ -210,7 +209,9 @@ fn extract_locals(block: &Block, uri: &Url, rope: &Rope, table: &mut SymbolTable
             None => continue,
         };
         let name = attr.key.as_str().to_string();
-        let Some(attr_span) = attr.span() else { continue };
+        let Some(attr_span) = attr.span() else {
+            continue;
+        };
         let Ok(location_range) = hcl_span_to_lsp_range(rope, attr_span) else {
             continue;
         };
@@ -327,15 +328,26 @@ mod tests {
         assert_eq!(sym.location.range().start.character, 0);
         // name_range points at the `"region"` literal — anywhere inside
         // the quoted span, so long as it is *not* the block keyword.
-        assert!(sym.name_range.start.character > 0,
-            "expected name_range to start past the keyword, got {}", sym.name_range.start.character);
+        assert!(
+            sym.name_range.start.character > 0,
+            "expected name_range to start past the keyword, got {}",
+            sym.name_range.start.character
+        );
         let (lo, hi) = column_span(src, "region");
         // The range must cover the `region` text (inclusive of or
         // excluding surrounding quotes — both are legitimate spans).
-        assert!(sym.name_range.start.character <= lo,
-            "name_range starts at {} but `region` begins at {}", sym.name_range.start.character, lo);
-        assert!(sym.name_range.end.character >= hi,
-            "name_range ends at {} but `region` ends at {}", sym.name_range.end.character, hi);
+        assert!(
+            sym.name_range.start.character <= lo,
+            "name_range starts at {} but `region` begins at {}",
+            sym.name_range.start.character,
+            lo
+        );
+        assert!(
+            sym.name_range.end.character >= hi,
+            "name_range ends at {} but `region` ends at {}",
+            sym.name_range.end.character,
+            hi
+        );
     }
 
     #[test]
@@ -350,8 +362,10 @@ mod tests {
         // Crucially, the range must not extend into or past the name
         // label — that was the bug where `"test"` got mis-coloured.
         let (name_lo, _) = column_span(src, "\"test\"");
-        assert!(sym.name_range.end.character <= name_lo,
-            "name_range leaks past the type label into the name label");
+        assert!(
+            sym.name_range.end.character <= name_lo,
+            "name_range leaks past the type label into the name label"
+        );
     }
 
     #[test]
@@ -415,16 +429,12 @@ resource "aws_instance" "api" { ami = "ami-123" }
 "#,
         );
         assert_eq!(table.resources.len(), 2);
-        assert!(
-            table
-                .resources
-                .contains_key(&ResourceAddress::new("aws_instance", "web"))
-        );
-        assert!(
-            table
-                .resources
-                .contains_key(&ResourceAddress::new("aws_instance", "api"))
-        );
+        assert!(table
+            .resources
+            .contains_key(&ResourceAddress::new("aws_instance", "web")));
+        assert!(table
+            .resources
+            .contains_key(&ResourceAddress::new("aws_instance", "api")));
     }
 
     #[test]
@@ -457,17 +467,12 @@ resource "aws_instance" "api" { ami = "ami-123" }
     #[test]
     fn extracts_variable_description() {
         let table = extract(r#"variable "region" { description = "AWS region" }"#);
-        assert_eq!(
-            table.variables["region"].doc.as_deref(),
-            Some("AWS region")
-        );
+        assert_eq!(table.variables["region"].doc.as_deref(), Some("AWS region"));
     }
 
     #[test]
     fn captures_for_each_shape_for_resource() {
-        let table = extract(
-            "resource \"aws_vpc\" \"eu\" {\n  for_each = toset([\"vpc\"])\n}\n",
-        );
+        let table = extract("resource \"aws_vpc\" \"eu\" {\n  for_each = toset([\"vpc\"])\n}\n");
         let addr = tfls_core::ResourceAddress::new("aws_vpc", "eu");
         match table.for_each_shapes.get(&addr) {
             Some(tfls_core::VariableType::Object(fields)) => {
@@ -479,9 +484,8 @@ resource "aws_instance" "api" { ami = "ami-123" }
 
     #[test]
     fn captures_for_each_shape_for_data_source() {
-        let table = extract(
-            "data \"aws_ami\" \"lookup\" {\n  for_each = toset([\"a\", \"b\"])\n}\n",
-        );
+        let table =
+            extract("data \"aws_ami\" \"lookup\" {\n  for_each = toset([\"a\", \"b\"])\n}\n");
         let addr = tfls_core::ResourceAddress::new("aws_ami", "lookup");
         match table.data_source_for_each_shapes.get(&addr) {
             Some(tfls_core::VariableType::Object(fields)) => {
@@ -494,9 +498,8 @@ resource "aws_instance" "api" { ami = "ami-123" }
 
     #[test]
     fn captures_for_each_shape_for_module() {
-        let table = extract(
-            "module \"web\" {\n  source = \"./mod\"\n  for_each = { a = 1, b = 2 }\n}\n",
-        );
+        let table =
+            extract("module \"web\" {\n  source = \"./mod\"\n  for_each = { a = 1, b = 2 }\n}\n");
         match table.module_for_each_shapes.get("web") {
             Some(tfls_core::VariableType::Object(fields)) => {
                 assert!(fields.contains_key("a"));
@@ -554,9 +557,8 @@ resource "aws_instance" "api" { ami = "ami-123" }
 
     #[test]
     fn extracts_output_description() {
-        let table = extract(
-            "output \"url\" {\n  description = \"Public URL\"\n  value = \"x\"\n}\n",
-        );
+        let table =
+            extract("output \"url\" {\n  description = \"Public URL\"\n  value = \"x\"\n}\n");
         assert_eq!(table.outputs["url"].doc.as_deref(), Some("Public URL"));
     }
 

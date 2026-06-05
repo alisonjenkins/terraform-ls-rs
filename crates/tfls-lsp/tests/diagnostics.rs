@@ -6,11 +6,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::fs;
-use tfls_lsp::Backend;
 use tfls_lsp::handlers::document::compute_diagnostics;
+use tfls_lsp::Backend;
 use tfls_state::DocumentState;
-use tower_lsp::LspService;
 use tower_lsp::lsp_types::Url;
+use tower_lsp::LspService;
 
 fn uri(path: &str) -> Url {
     Url::parse(path).expect("valid url")
@@ -73,8 +73,12 @@ fn variable_reference_resolves_across_files_in_same_directory() {
     let vars_uri = uri("file:///project/variables.tf");
     let use_uri = uri("file:///project/main.tf");
 
-    insert(&b, &vars_uri, r#"variable "region" {}
-"#);
+    insert(
+        &b,
+        &vars_uri,
+        r#"variable "region" {}
+"#,
+    );
     insert(
         &b,
         &use_uri,
@@ -202,16 +206,8 @@ fn scope_var_shadowing_across_unrelated_stacks_resolves_in_each() {
         (&b_vars, "variable \"region\" {}\n"),
         (&b_main, "output \"r\" { value = var.region }\n"),
     ];
-    expect_no_undefined_variable(
-        &multi_file_diags(files, &a_main),
-        "region",
-        "stackA ref",
-    );
-    expect_no_undefined_variable(
-        &multi_file_diags(files, &b_main),
-        "region",
-        "stackB ref",
-    );
+    expect_no_undefined_variable(&multi_file_diags(files, &a_main), "region", "stackA ref");
+    expect_no_undefined_variable(&multi_file_diags(files, &b_main), "region", "stackB ref");
 }
 
 #[test]
@@ -245,7 +241,11 @@ fn unused_data_source_cleared_when_reference_in_peer_file() {
     let data_file = uri("file:///stack/data.tf");
     let out_file = uri("file:///stack/outputs.tf");
 
-    insert(&b, &data_file, "data \"http\" \"test\" {\n  url = \"https://myip.dk\"\n}\n");
+    insert(
+        &b,
+        &data_file,
+        "data \"http\" \"test\" {\n  url = \"https://myip.dk\"\n}\n",
+    );
     insert(
         &b,
         &out_file,
@@ -288,7 +288,9 @@ fn malformed_version_diagnostic_clears_after_simulated_edit() {
     // Sanity: the malformed diag DOES fire on the initial state.
     let initial = messages(&b, &u);
     assert!(
-        initial.iter().any(|m| m.contains("malformed") && m.contains("`c`")),
+        initial
+            .iter()
+            .any(|m| m.contains("malformed") && m.contains("`c`")),
         "baseline: expected malformed `c` diag on initial state, got {initial:?}"
     );
 
@@ -380,8 +382,9 @@ fn undefined_variable_clears_when_declaration_added_to_peer_file() {
     // must clear.
     let after = messages(&b, &main_u);
     assert!(
-        after.iter().all(|m| !(m.contains("undefined variable")
-            && m.contains("rest_api_id"))),
+        after
+            .iter()
+            .all(|m| !(m.contains("undefined variable") && m.contains("rest_api_id"))),
         "stale undefined-var persisted after declaration added: {after:?}"
     );
 }
@@ -410,8 +413,8 @@ fn scope_var_decl_unused_check_survives_peer_parse_error() {
         &vars,
     );
     assert!(
-        msgs.iter().all(|m| !(m.contains("declared but not used")
-            && m.contains("admin_users"))),
+        msgs.iter()
+            .all(|m| !(m.contains("declared but not used") && m.contains("admin_users"))),
         "parse error in peer file must not hide references: {msgs:?}"
     );
 }
@@ -437,8 +440,8 @@ fn scope_var_decl_is_not_unused_when_ref_lives_in_peer_file() {
         &vars,
     );
     assert!(
-        msgs.iter().all(|m| !(m.contains("declared but not used")
-            && m.contains("admin_users"))),
+        msgs.iter()
+            .all(|m| !(m.contains("declared but not used") && m.contains("admin_users"))),
         "in-use var flagged as unused: {msgs:?}"
     );
 }
@@ -486,8 +489,9 @@ fn module_reference_is_false_positive_until_sibling_is_indexed() {
     );
     let before = messages(&b, &ref_uri);
     assert!(
-        before.iter().any(|m| m.contains("undefined module")
-            && m.contains("k3s_cluster")),
+        before
+            .iter()
+            .any(|m| m.contains("undefined module") && m.contains("k3s_cluster")),
         "expected false-positive diagnostic pre-indexing: {before:?}"
     );
 
@@ -504,8 +508,9 @@ fn module_reference_is_false_positive_until_sibling_is_indexed() {
     );
     let after = messages(&b, &ref_uri);
     assert!(
-        after.iter().all(|m| !(m.contains("undefined module")
-            && m.contains("k3s_cluster"))),
+        after
+            .iter()
+            .all(|m| !(m.contains("undefined module") && m.contains("k3s_cluster"))),
         "diagnostic should clear once peer indexed: {after:?}"
     );
 }
@@ -518,8 +523,12 @@ fn submodule_definitions_do_not_satisfy_parent_references() {
     let submodule_vars = uri("file:///project/modules/k/variables.tf");
     let root_use = uri("file:///project/main.tf");
 
-    insert(&b, &submodule_vars, r#"variable "inner" {}
-"#);
+    insert(
+        &b,
+        &submodule_vars,
+        r#"variable "inner" {}
+"#,
+    );
     insert(
         &b,
         &root_use,
@@ -529,7 +538,8 @@ fn submodule_definitions_do_not_satisfy_parent_references() {
 
     let msgs = messages(&b, &root_use);
     assert!(
-        msgs.iter().any(|m| m.contains("undefined variable `inner`")),
+        msgs.iter()
+            .any(|m| m.contains("undefined variable `inner`")),
         "expected submodule variable to still warn at root scope: {msgs:?}"
     );
 }
@@ -560,8 +570,12 @@ fn definitions_in_unrelated_workspace_dir_do_not_satisfy_references() {
     let a_vars = uri("file:///projectA/variables.tf");
     let b_ref = uri("file:///projectB/main.tf");
 
-    insert(&b, &a_vars, r#"variable "shared" {}
-"#);
+    insert(
+        &b,
+        &a_vars,
+        r#"variable "shared" {}
+"#,
+    );
     insert(
         &b,
         &b_ref,
@@ -571,7 +585,8 @@ fn definitions_in_unrelated_workspace_dir_do_not_satisfy_references() {
 
     let msgs = messages(&b, &b_ref);
     assert!(
-        msgs.iter().any(|m| m.contains("undefined variable `shared`")),
+        msgs.iter()
+            .any(|m| m.contains("undefined variable `shared`")),
         "cross-workspace reference should still warn: {msgs:?}"
     );
 }
@@ -607,7 +622,8 @@ fn parses_tf_json_file_via_document_lifecycle() {
     );
     let msgs = messages(&b, &vars);
     assert!(
-        msgs.iter().any(|m| m.contains("`region`") && m.contains("no type")),
+        msgs.iter()
+            .any(|m| m.contains("`region`") && m.contains("no type")),
         "expected `region` missing-type warning via tf.json; got {msgs:?}"
     );
 }
@@ -619,7 +635,8 @@ fn flags_malformed_tf_json() {
     insert(&b, &u, "{not valid json}");
     let msgs = messages(&b, &u);
     assert!(
-        msgs.iter().any(|m| m.contains("JSON") || m.contains("json")),
+        msgs.iter()
+            .any(|m| m.contains("JSON") || m.contains("json")),
         "expected JSON parse error: {msgs:?}"
     );
 }
@@ -631,7 +648,8 @@ fn flags_unknown_top_level_key_in_tf_json() {
     insert(&b, &u, r#"{ "unknown_root": {} }"#);
     let msgs = messages(&b, &u);
     assert!(
-        msgs.iter().any(|m| m.contains("unknown") && m.contains("unknown_root")),
+        msgs.iter()
+            .any(|m| m.contains("unknown") && m.contains("unknown_root")),
         "expected unknown-top-level-key error: {msgs:?}"
     );
 }
@@ -708,7 +726,8 @@ fn known_provider_function_emits_no_diagnostic() {
     );
     let msgs = messages(&b, &u);
     assert!(
-        !msgs.iter()
+        !msgs
+            .iter()
             .any(|m| m.contains("provider") && m.contains("aws") && m.contains("trim_prefix")),
         "false positive on known fn: {msgs:?}"
     );
@@ -808,7 +827,8 @@ fn renamed_local_resolves_via_required_providers() {
     );
     let msgs = messages(&b, &u);
     assert!(
-        !msgs.iter()
+        !msgs
+            .iter()
             .any(|m| m.contains("trim_prefix") || m.contains("aws_v6")),
         "alias should resolve cleanly: {msgs:?}"
     );
@@ -857,8 +877,16 @@ fn aws_lock_pin_unblocks_rule_that_constraint_floor_would_suppress() {
     let b = backend();
     let tf_uri = Url::from_file_path(dir.join("terraform.tf")).unwrap();
     let main_uri = Url::from_file_path(dir.join("main.tf")).unwrap();
-    insert(&b, &tf_uri, &fs::read_to_string(dir.join("terraform.tf")).unwrap());
-    insert(&b, &main_uri, &fs::read_to_string(dir.join("main.tf")).unwrap());
+    insert(
+        &b,
+        &tf_uri,
+        &fs::read_to_string(dir.join("terraform.tf")).unwrap(),
+    );
+    insert(
+        &b,
+        &main_uri,
+        &fs::read_to_string(dir.join("main.tf")).unwrap(),
+    );
 
     let msgs = messages(&b, &main_uri);
     assert!(
@@ -888,8 +916,16 @@ fn aws_constraint_alone_suppresses_rule_when_lock_absent() {
     let b = backend();
     let tf_uri = Url::from_file_path(dir.join("terraform.tf")).unwrap();
     let main_uri = Url::from_file_path(dir.join("main.tf")).unwrap();
-    insert(&b, &tf_uri, &fs::read_to_string(dir.join("terraform.tf")).unwrap());
-    insert(&b, &main_uri, &fs::read_to_string(dir.join("main.tf")).unwrap());
+    insert(
+        &b,
+        &tf_uri,
+        &fs::read_to_string(dir.join("terraform.tf")).unwrap(),
+    );
+    insert(
+        &b,
+        &main_uri,
+        &fs::read_to_string(dir.join("main.tf")).unwrap(),
+    );
 
     let msgs = messages(&b, &main_uri);
     assert!(
@@ -923,8 +959,16 @@ fn aws_lock_short_form_provider_resolves_via_implicit_hashicorp_namespace() {
     let b = backend();
     let tf_uri = Url::from_file_path(dir.join("terraform.tf")).unwrap();
     let main_uri = Url::from_file_path(dir.join("main.tf")).unwrap();
-    insert(&b, &tf_uri, &fs::read_to_string(dir.join("terraform.tf")).unwrap());
-    insert(&b, &main_uri, &fs::read_to_string(dir.join("main.tf")).unwrap());
+    insert(
+        &b,
+        &tf_uri,
+        &fs::read_to_string(dir.join("terraform.tf")).unwrap(),
+    );
+    insert(
+        &b,
+        &main_uri,
+        &fs::read_to_string(dir.join("main.tf")).unwrap(),
+    );
 
     let msgs = messages(&b, &main_uri);
     assert!(
@@ -959,8 +1003,16 @@ fn aws_lock_invalidate_drops_diagnostic() {
     let b = backend();
     let tf_uri = Url::from_file_path(dir.join("terraform.tf")).unwrap();
     let main_uri = Url::from_file_path(dir.join("main.tf")).unwrap();
-    insert(&b, &tf_uri, &fs::read_to_string(dir.join("terraform.tf")).unwrap());
-    insert(&b, &main_uri, &fs::read_to_string(dir.join("main.tf")).unwrap());
+    insert(
+        &b,
+        &tf_uri,
+        &fs::read_to_string(dir.join("terraform.tf")).unwrap(),
+    );
+    insert(
+        &b,
+        &main_uri,
+        &fs::read_to_string(dir.join("main.tf")).unwrap(),
+    );
 
     // Sanity: with lock present, the rule fires.
     let with_lock = messages(&b, &main_uri);
@@ -988,10 +1040,9 @@ fn lock_file_change_drops_cached_schema_fetch_mtime() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let b = backend();
-    b.state.fetched_schema_dirs.insert(
-        dir.to_path_buf(),
-        std::time::SystemTime::UNIX_EPOCH,
-    );
+    b.state
+        .fetched_schema_dirs
+        .insert(dir.to_path_buf(), std::time::SystemTime::UNIX_EPOCH);
     assert!(b.state.fetched_schema_dirs.contains_key(dir));
 
     // Same mutation the LockFileChanged arm performs. The arm also
@@ -1057,7 +1108,11 @@ fn lock_constraint_drift_clears_after_invalidate() {
 
     let b = backend();
     let main_uri = Url::from_file_path(dir.join("main.tf")).unwrap();
-    insert(&b, &main_uri, &fs::read_to_string(dir.join("main.tf")).unwrap());
+    insert(
+        &b,
+        &main_uri,
+        &fs::read_to_string(dir.join("main.tf")).unwrap(),
+    );
 
     // Step 1: lock matches → no drift warning.
     let initial = messages(&b, &main_uri);
@@ -1075,7 +1130,9 @@ fn lock_constraint_drift_clears_after_invalidate() {
 
     let after_downgrade = messages(&b, &main_uri);
     assert!(
-        after_downgrade.iter().any(|m| m.contains("does not admit") && m.contains("2.71.0")),
+        after_downgrade
+            .iter()
+            .any(|m| m.contains("does not admit") && m.contains("2.71.0")),
         "downgrade should produce drift warning citing 2.71.0; got: {after_downgrade:?}"
     );
 
@@ -1086,7 +1143,9 @@ fn lock_constraint_drift_clears_after_invalidate() {
 
     let after_re_upgrade = messages(&b, &main_uri);
     assert!(
-        !after_re_upgrade.iter().any(|m| m.contains("does not admit")),
+        !after_re_upgrade
+            .iter()
+            .any(|m| m.contains("does not admit")),
         "re-upgrade should clear drift warning; got: {after_re_upgrade:?}"
     );
 }
@@ -1106,9 +1165,7 @@ fn lock_invalidate_with_canonical_path_clears_cache_keyed_under_non_canonical() 
     if non_canonical == canonical {
         // Linux / no symlinks — skip; the bug's specific to
         // macOS-style symlinked /tmp.
-        eprintln!(
-            "skip: non_canonical and canonical paths match, no symlink to test against",
-        );
+        eprintln!("skip: non_canonical and canonical paths match, no symlink to test against",);
         return;
     }
     fs::write(
@@ -1128,7 +1185,11 @@ fn lock_invalidate_with_canonical_path_clears_cache_keyed_under_non_canonical() 
 
     let b = backend();
     let main_uri = Url::from_file_path(non_canonical.join("main.tf")).unwrap();
-    insert(&b, &main_uri, &fs::read_to_string(non_canonical.join("main.tf")).unwrap());
+    insert(
+        &b,
+        &main_uri,
+        &fs::read_to_string(non_canonical.join("main.tf")).unwrap(),
+    );
 
     // Prime the lock cache via the non-canonical URI parent.
     let _ = messages(&b, &main_uri);
@@ -1143,7 +1204,9 @@ fn lock_invalidate_with_canonical_path_clears_cache_keyed_under_non_canonical() 
     // both path forms to the same cache key.
     let after = messages(&b, &main_uri);
     assert!(
-        after.iter().any(|m| m.contains("does not admit") && m.contains("2.71.0")),
+        after
+            .iter()
+            .any(|m| m.contains("does not admit") && m.contains("2.71.0")),
         "invalidate via canonical path must clear cache keyed under non-canonical; got: {after:?}"
     );
 }

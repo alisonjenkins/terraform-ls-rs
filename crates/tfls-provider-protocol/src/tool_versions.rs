@@ -14,8 +14,8 @@ use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
 
+use crate::registry_versions::{merge_with_provenance, VersionInfo};
 use crate::ProtocolError;
-use crate::registry_versions::{VersionInfo, merge_with_provenance};
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 const CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -135,13 +135,17 @@ async fn try_github_fetch(
         .text()
         .await
         .map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
-    let releases: Vec<GitHubRelease> = serde_json::from_str(&body)
-        .map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
+    let releases: Vec<GitHubRelease> =
+        serde_json::from_str(&body).map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
     Ok(releases
         .into_iter()
         .filter(|r| !r.draft && !r.prerelease)
         .map(|r| CachedRelease {
-            version: r.tag_name.strip_prefix('v').unwrap_or(&r.tag_name).to_string(),
+            version: r
+                .tag_name
+                .strip_prefix('v')
+                .unwrap_or(&r.tag_name)
+                .to_string(),
             published_at: r.published_at,
         })
         .collect())
@@ -149,7 +153,9 @@ async fn try_github_fetch(
 
 fn cache_root() -> PathBuf {
     if let Some(dir) = std::env::var_os("XDG_CACHE_HOME") {
-        return PathBuf::from(dir).join("terraform-ls-rs").join("tool-versions");
+        return PathBuf::from(dir)
+            .join("terraform-ls-rs")
+            .join("tool-versions");
     }
     if let Some(home) = std::env::var_os("HOME") {
         return PathBuf::from(home)

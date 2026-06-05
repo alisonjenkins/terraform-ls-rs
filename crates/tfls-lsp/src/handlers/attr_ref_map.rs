@@ -385,7 +385,11 @@ mod tests {
     fn azurerm_storage_account_id_resolves() {
         let types = azurerm_types();
         assert_eq!(
-            referenced_resource_type("azurerm_monitor_diagnostic_setting", "storage_account_id", &types),
+            referenced_resource_type(
+                "azurerm_monitor_diagnostic_setting",
+                "storage_account_id",
+                &types
+            ),
             Some("azurerm_storage_account".into())
         );
     }
@@ -412,7 +416,11 @@ mod tests {
     fn azurerm_log_analytics_workspace_id_resolves() {
         let types = azurerm_types();
         assert_eq!(
-            referenced_resource_type("azurerm_monitor_diagnostic_setting", "log_analytics_workspace_id", &types),
+            referenced_resource_type(
+                "azurerm_monitor_diagnostic_setting",
+                "log_analytics_workspace_id",
+                &types
+            ),
             Some("azurerm_log_analytics_workspace".into())
         );
     }

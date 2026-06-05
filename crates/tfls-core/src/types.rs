@@ -331,9 +331,7 @@ mod resource_address_map {
         entries.serialize(serializer)
     }
 
-    pub fn deserialize<'de, D, V>(
-        deserializer: D,
-    ) -> Result<HashMap<ResourceAddress, V>, D::Error>
+    pub fn deserialize<'de, D, V>(deserializer: D) -> Result<HashMap<ResourceAddress, V>, D::Error>
     where
         D: Deserializer<'de>,
         V: Deserialize<'de>,

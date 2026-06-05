@@ -221,7 +221,10 @@ pub async fn spawn_and_handshake(
 pub fn parse_handshake_line(line: &str) -> Result<HandshakeInfo, String> {
     let parts: Vec<&str> = line.split('|').collect();
     if !(5..=6).contains(&parts.len()) {
-        return Err(format!("expected 5 or 6 '|'-separated fields, got {}", parts.len()));
+        return Err(format!(
+            "expected 5 or 6 '|'-separated fields, got {}",
+            parts.len()
+        ));
     }
 
     let core_protocol_version = parts[0]
@@ -240,7 +243,10 @@ pub fn parse_handshake_line(line: &str) -> Result<HandshakeInfo, String> {
         "grpc" => Protocol::Grpc,
         other => return Err(format!("unsupported wire protocol {other:?} (only `grpc`)")),
     };
-    let server_cert_b64 = parts.get(5).map(|s| s.to_string()).filter(|s| !s.is_empty());
+    let server_cert_b64 = parts
+        .get(5)
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
 
     Ok(HandshakeInfo {
         core_protocol_version,
@@ -259,8 +265,7 @@ mod tests {
 
     #[test]
     fn parses_minimal_handshake() {
-        let info =
-            parse_handshake_line("1|6|unix|/tmp/plugin.sock|grpc").expect("parse");
+        let info = parse_handshake_line("1|6|unix|/tmp/plugin.sock|grpc").expect("parse");
         assert_eq!(info.core_protocol_version, 1);
         assert_eq!(info.app_protocol_version, 6);
         assert_eq!(info.network, Network::Unix);
@@ -271,10 +276,8 @@ mod tests {
 
     #[test]
     fn parses_handshake_with_server_cert() {
-        let info = parse_handshake_line(
-            "1|6|unix|/tmp/plugin.sock|grpc|MIIC123...",
-        )
-        .expect("parse");
+        let info =
+            parse_handshake_line("1|6|unix|/tmp/plugin.sock|grpc|MIIC123...").expect("parse");
         assert_eq!(info.server_cert_b64.as_deref(), Some("MIIC123..."));
     }
 

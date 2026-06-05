@@ -14,10 +14,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tfls_lsp::{Backend, indexer};
+use tfls_lsp::{indexer, Backend};
 use tfls_state::{JobQueue, StateStore};
-use tower_lsp::LspService;
 use tower_lsp::lsp_types::{DidOpenTextDocumentParams, TextDocumentItem, Url};
+use tower_lsp::LspService;
 
 fn tmp_dir(label: &str) -> PathBuf {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -215,14 +215,12 @@ async fn did_open_synchronously_indexes_peers_so_first_diagnostic_pull_is_correc
     // The first synchronous diagnostic pull on the opened
     // buffer must NOT flag the reference as undefined — the
     // peer's module declaration is in the store.
-    let diags = tfls_lsp::handlers::document::compute_diagnostics(
-        &inner.state,
-        &main_uri,
-    );
+    let diags = tfls_lsp::handlers::document::compute_diagnostics(&inner.state, &main_uri);
     let messages: Vec<String> = diags.iter().map(|d| d.message.clone()).collect();
     assert!(
-        messages.iter().all(|m| !(m.contains("undefined module")
-            && m.contains("k3s_cluster"))),
+        messages
+            .iter()
+            .all(|m| !(m.contains("undefined module") && m.contains("k3s_cluster"))),
         "peer-declared module must resolve on first pull: {messages:?}"
     );
 

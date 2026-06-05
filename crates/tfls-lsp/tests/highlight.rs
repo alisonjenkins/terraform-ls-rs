@@ -4,11 +4,11 @@
 
 use tfls_lsp::Backend;
 use tfls_state::DocumentState;
-use tower_lsp::LspService;
 use tower_lsp::lsp_types::{
     DocumentHighlightKind, DocumentHighlightParams, PartialResultParams, Position,
     TextDocumentIdentifier, TextDocumentPositionParams, Url, WorkDoneProgressParams,
 };
+use tower_lsp::LspService;
 
 #[tokio::test]
 async fn highlights_definition_as_write_and_refs_as_read() {

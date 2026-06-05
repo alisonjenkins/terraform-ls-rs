@@ -8,16 +8,16 @@
 
 use std::sync::Arc;
 
-use tonic::Request;
 use tonic::transport::{Channel, Endpoint, Uri};
+use tonic::Request;
 
 use crate::discovery::ProviderBinary;
-use crate::handshake::{Network, PluginInstance, spawn_and_handshake};
-use crate::proto::provider_client::ProviderClient as ProviderClientV6;
+use crate::handshake::{spawn_and_handshake, Network, PluginInstance};
 use crate::proto::get_provider_schema;
+use crate::proto::provider_client::ProviderClient as ProviderClientV6;
 use crate::proto_v5::provider_client::ProviderClient as ProviderClientV5;
-use crate::tls::{ClientIdentity, build_client_config};
-use crate::{ProtocolError, proto_v5, translate, translate_v5};
+use crate::tls::{build_client_config, ClientIdentity};
+use crate::{proto_v5, translate, translate_v5, ProtocolError};
 
 /// One-shot: launch the binary in `bin`, do the handshake, call the
 /// schema RPC (v5 `GetSchema` or v6 `GetProviderSchema` depending on
@@ -60,8 +60,7 @@ async fn fetch_schema_v6(
     // AWS and other large providers return schemas over 100 MB (aws v6 is
     // ~5-6 MB just for the protobuf response; newer versions push higher).
     // Raise the decode cap so those don't trip the default 4 MB limit.
-    let mut client = ProviderClientV6::new(channel)
-        .max_decoding_message_size(256 * 1024 * 1024);
+    let mut client = ProviderClientV6::new(channel).max_decoding_message_size(256 * 1024 * 1024);
     let resp = client
         .get_provider_schema(Request::new(get_provider_schema::Request::default()))
         .await
@@ -98,8 +97,7 @@ async fn fetch_schema_v5(
     bin: &ProviderBinary,
     channel: Channel,
 ) -> Result<tfls_schema::ProviderSchema, ProtocolError> {
-    let mut client = ProviderClientV5::new(channel)
-        .max_decoding_message_size(256 * 1024 * 1024);
+    let mut client = ProviderClientV5::new(channel).max_decoding_message_size(256 * 1024 * 1024);
     let resp = client
         .get_schema(Request::new(
             proto_v5::get_provider_schema::Request::default(),
@@ -187,14 +185,15 @@ async fn connect_channel(
     instance: &PluginInstance,
     identity: &ClientIdentity,
 ) -> Result<Channel, ProtocolError> {
-    let server_cert_b64 = instance
-        .info
-        .server_cert_b64
-        .as_deref()
-        .ok_or_else(|| ProtocolError::BadHandshake {
-            path: instance.path().display().to_string(),
-            reason: "AutoMTLS required but no server cert in handshake".into(),
-        })?;
+    let server_cert_b64 =
+        instance
+            .info
+            .server_cert_b64
+            .as_deref()
+            .ok_or_else(|| ProtocolError::BadHandshake {
+                path: instance.path().display().to_string(),
+                reason: "AutoMTLS required but no server cert in handshake".into(),
+            })?;
     let tls_config = build_client_config(identity, server_cert_b64)?;
 
     let channel = match instance.info.network {
@@ -223,10 +222,11 @@ async fn connect_tcp(
     use tower::service_fn;
 
     let addr = addr.to_string();
-    let endpoint = Endpoint::try_from("http://[::]").map_err(|source| ProtocolError::Transport {
-        path: instance.path().display().to_string(),
-        source,
-    })?;
+    let endpoint =
+        Endpoint::try_from("http://[::]").map_err(|source| ProtocolError::Transport {
+            path: instance.path().display().to_string(),
+            source,
+        })?;
 
     let channel = endpoint
         .connect_with_connector(service_fn(move |_: Uri| {
@@ -267,8 +267,8 @@ async fn connect_unix(
 
     // Tonic needs an Endpoint even though we're not using its own
     // connector. The URI is only used to thread through the gRPC router.
-    let endpoint = Endpoint::try_from("http://[::]")
-        .map_err(|source| ProtocolError::Transport {
+    let endpoint =
+        Endpoint::try_from("http://[::]").map_err(|source| ProtocolError::Transport {
             path: instance.path().display().to_string(),
             source,
         })?;

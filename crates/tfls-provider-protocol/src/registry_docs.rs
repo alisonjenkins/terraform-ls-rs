@@ -235,7 +235,13 @@ async fn write_parsed_cache(path: &Path, entry: &ParsedDocsCache) {
 fn sanitise(component: &str) -> String {
     component
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '.' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '.' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -447,7 +453,11 @@ fn parse_attribute_descriptions_raw(markdown: &str) -> HashMap<String, String> {
 
         if let Some(caps) = bullet.captures(line) {
             flush(&mut current, &mut out);
-            let name = caps.get(1).map(|m| m.as_str()).unwrap_or_default().to_string();
+            let name = caps
+                .get(1)
+                .map(|m| m.as_str())
+                .unwrap_or_default()
+                .to_string();
             let qualifiers = caps.get(2).map(|m| m.as_str()).unwrap_or_default();
             let rest = caps.get(3).map(|m| m.as_str().trim()).unwrap_or_default();
 
@@ -836,8 +846,7 @@ pub async fn fetch_latest_parsed_docs(
     namespace: &str,
     name: &str,
 ) -> Result<Option<LatestParsedDocs>, ProtocolError> {
-    let Some(latest) = crate::registry_versions::cached_latest_version(namespace, name)
-    else {
+    let Some(latest) = crate::registry_versions::cached_latest_version(namespace, name) else {
         return Ok(None);
     };
     let cache_path = latest_parsed_cache_path(namespace, name);
@@ -1036,7 +1045,12 @@ fn merge_descriptions_into_block(
             continue;
         };
         let mut touched = false;
-        if attr.description.as_deref().map(str::is_empty).unwrap_or(true) {
+        if attr
+            .description
+            .as_deref()
+            .map(str::is_empty)
+            .unwrap_or(true)
+        {
             attr.description = Some(parsed.description.clone());
             touched = true;
         }
@@ -1169,7 +1183,10 @@ In addition to the Arguments listed above - the following Attributes are exporte
 
     #[test]
     fn strips_provider_prefix_works() {
-        assert_eq!(strip_provider_prefix("aws", "aws_instance"), Some("instance"));
+        assert_eq!(
+            strip_provider_prefix("aws", "aws_instance"),
+            Some("instance")
+        );
         assert_eq!(strip_provider_prefix("aws", "other_thing"), None);
     }
 

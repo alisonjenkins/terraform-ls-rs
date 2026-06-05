@@ -62,10 +62,12 @@ fn assert_allowed_values(
     let parsed = descs
         .get(attr)
         .unwrap_or_else(|| panic!("missing description for `{attr}`"));
-    let got = parsed
-        .allowed_values
-        .as_deref()
-        .unwrap_or_else(|| panic!("`{attr}` has no allowed_values mined; description: {}", parsed.description));
+    let got = parsed.allowed_values.as_deref().unwrap_or_else(|| {
+        panic!(
+            "`{attr}` has no allowed_values mined; description: {}",
+            parsed.description
+        )
+    });
     let got: Vec<&str> = got.iter().map(String::as_str).collect();
     assert_eq!(
         got, expected,

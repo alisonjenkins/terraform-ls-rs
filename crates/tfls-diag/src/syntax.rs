@@ -34,7 +34,10 @@ fn error_range(err: &ParseError) -> Range {
             // A precise end position isn't known — extend by one so
             // the caret is visible instead of a zero-width range.
             Range {
-                start: Position { line, character: col },
+                start: Position {
+                    line,
+                    character: col,
+                },
                 end: Position {
                     line,
                     character: col + 1,

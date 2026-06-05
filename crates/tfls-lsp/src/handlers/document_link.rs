@@ -33,7 +33,10 @@ pub async fn document_link(
                 out.push(DocumentLink {
                     range: sym.location.range(),
                     target: Some(link),
-                    tooltip: Some(format!("Open `{}` docs on registry.terraform.io", addr.resource_type)),
+                    tooltip: Some(format!(
+                        "Open `{}` docs on registry.terraform.io",
+                        addr.resource_type
+                    )),
                     data: None,
                 });
             }
@@ -49,14 +52,21 @@ pub async fn document_link(
                 out.push(DocumentLink {
                     range: sym.location.range(),
                     target: Some(link),
-                    tooltip: Some(format!("Open `{}` docs on registry.terraform.io", addr.resource_type)),
+                    tooltip: Some(format!(
+                        "Open `{}` docs on registry.terraform.io",
+                        addr.resource_type
+                    )),
                     data: None,
                 });
             }
         }
     }
 
-    if out.is_empty() { Ok(None) } else { Ok(Some(out)) }
+    if out.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(out))
+    }
 }
 
 /// Find the [`ProviderAddress`] whose schema `Arc` equals the one we

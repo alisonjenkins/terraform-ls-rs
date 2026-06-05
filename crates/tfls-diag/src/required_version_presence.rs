@@ -137,10 +137,7 @@ mod tests {
         // body. Uses the idiomatic multi-line layout; the
         // single-line variant is rejected by hcl-edit so we
         // don't test that path.
-        let d = diags(
-            "terraform {\n  backend \"s3\" {}\n}\n",
-            false,
-        );
+        let d = diags("terraform {\n  backend \"s3\" {}\n}\n", false);
         assert_eq!(d.len(), 1, "nested backend must not double-fire: {d:?}");
     }
 

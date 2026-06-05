@@ -17,8 +17,8 @@ use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
-use crate::ProtocolError;
 use crate::registry_versions::Registry;
+use crate::ProtocolError;
 
 const TERRAFORM_HOST: &str = "https://registry.terraform.io";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -58,9 +58,7 @@ impl CatalogEntry {
 /// Fetch the public provider catalog (official + partner tiers) from
 /// the Terraform registry. Transparently serves from disk cache
 /// (fresh or, during an outage, stale).
-pub async fn fetch_catalog(
-    client: &reqwest::Client,
-) -> Result<Vec<CatalogEntry>, ProtocolError> {
+pub async fn fetch_catalog(client: &reqwest::Client) -> Result<Vec<CatalogEntry>, ProtocolError> {
     let cache_path = catalog_cache_path();
     if let Some(fresh) = read_fresh_cache(&cache_path).await {
         return Ok(fresh);
@@ -91,9 +89,7 @@ pub fn build_http_client() -> Result<reqwest::Client, ProtocolError> {
         .map_err(|e| ProtocolError::RegistryHttp(e.to_string()))
 }
 
-async fn try_live_fetch(
-    client: &reqwest::Client,
-) -> Result<Vec<CatalogEntry>, ProtocolError> {
+async fn try_live_fetch(client: &reqwest::Client) -> Result<Vec<CatalogEntry>, ProtocolError> {
     // Fetch official and partner tiers in parallel — they're independent.
     let (official_res, partner_res) = tokio::join!(
         fetch_tier(client, "official"),
@@ -142,8 +138,8 @@ async fn fetch_tier(
             .text()
             .await
             .map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
-        let parsed: CatalogResponse = serde_json::from_str(&body)
-            .map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
+        let parsed: CatalogResponse =
+            serde_json::from_str(&body).map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
         let page_len = parsed.data.len();
         for item in parsed.data {
             let attrs = item.attributes;

@@ -148,8 +148,7 @@ impl ConfigCell {
         };
 
         // Accept both `{"terraform-ls-rs": {...}}` and flat objects.
-        let obj: &sonic_rs::Value =
-            value.get("terraform-ls-rs").unwrap_or(value);
+        let obj: &sonic_rs::Value = value.get("terraform-ls-rs").unwrap_or(value);
 
         if let Some(v) = obj.get("cliEnabled").and_then(|v| v.as_bool()) {
             guard.cli_enabled = v;
@@ -245,7 +244,8 @@ mod tests {
             Some(&RuleSeverity::Off)
         );
         assert_eq!(
-            snap.rule_overrides.get("terraform_deprecated_interpolation"),
+            snap.rule_overrides
+                .get("terraform_deprecated_interpolation"),
             Some(&RuleSeverity::Error)
         );
         // Invalid severity value is ignored, not stored.
@@ -255,8 +255,7 @@ mod tests {
     #[test]
     fn update_accepts_flat_object_without_prefix() {
         let cell = ConfigCell::default();
-        let value: sonic_rs::Value =
-            sonic_rs::from_str(r#"{"cliTimeoutSecs": 5}"#).expect("parse");
+        let value: sonic_rs::Value = sonic_rs::from_str(r#"{"cliTimeoutSecs": 5}"#).expect("parse");
         cell.update_from_json(&value);
         assert_eq!(cell.snapshot().cli_timeout, Duration::from_secs(5));
     }
@@ -264,8 +263,7 @@ mod tests {
     #[test]
     fn update_ignores_unknown_keys() {
         let cell = ConfigCell::default();
-        let value: sonic_rs::Value =
-            sonic_rs::from_str(r#"{"madeUpSetting": 42}"#).expect("parse");
+        let value: sonic_rs::Value = sonic_rs::from_str(r#"{"madeUpSetting": 42}"#).expect("parse");
         cell.update_from_json(&value);
         assert_eq!(cell.snapshot(), Config::default());
     }
@@ -280,8 +278,7 @@ mod tests {
         cell.update_from_json(&v);
         assert_eq!(cell.snapshot().format_style, FormatStyle::Opinionated);
 
-        let v: sonic_rs::Value =
-            sonic_rs::from_str(r#"{"formatStyle":"minimal"}"#).expect("parse");
+        let v: sonic_rs::Value = sonic_rs::from_str(r#"{"formatStyle":"minimal"}"#).expect("parse");
         cell.update_from_json(&v);
         assert_eq!(cell.snapshot().format_style, FormatStyle::Minimal);
     }
@@ -292,10 +289,8 @@ mod tests {
         let v: sonic_rs::Value =
             sonic_rs::from_str(r#"{"formatStyle":"opinionated"}"#).expect("parse");
         cell.update_from_json(&v);
-        let v: sonic_rs::Value =
-            sonic_rs::from_str(r#"{"formatStyle":"banana"}"#).expect("parse");
+        let v: sonic_rs::Value = sonic_rs::from_str(r#"{"formatStyle":"banana"}"#).expect("parse");
         cell.update_from_json(&v);
         assert_eq!(cell.snapshot().format_style, FormatStyle::Opinionated);
     }
 }
-

@@ -5,7 +5,11 @@ use tfls_lsp::Backend;
 use tower_lsp::{LspService, Server};
 
 #[derive(Debug, Parser)]
-#[command(name = "tfls", version, about = "High-performance Terraform language server")]
+#[command(
+    name = "tfls",
+    version,
+    about = "High-performance Terraform language server"
+)]
 struct Cli {
     /// Increase logging verbosity.
     #[arg(short, long, action = clap::ArgAction::Count)]
@@ -46,7 +50,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn init_tracing(verbosity: u8) {
-    use tracing_subscriber::{EnvFilter, fmt};
+    use tracing_subscriber::{fmt, EnvFilter};
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         let level = match verbosity {

@@ -11,13 +11,13 @@ use hcl_edit::repr::Span;
 use hcl_edit::structure::{Block, Body};
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionItemTag, CompletionParams, CompletionResponse,
-    CompletionTextEdit, Documentation, InsertTextFormat, MarkupContent, MarkupKind, Position, Range,
-    TextEdit, Url,
+    CompletionTextEdit, Documentation, InsertTextFormat, MarkupContent, MarkupKind, Position,
+    Range, TextEdit, Url,
 };
 use tfls_core::{
-    BlockKind, CompletionContext, IndexRootRef, META_ATTRS, PathStep, ResourceAddress,
-    VariableType, builtin_blocks, classify_context, is_singleton_meta_block, merge_shapes,
-    meta_blocks,
+    builtin_blocks, classify_context, is_singleton_meta_block, merge_shapes, meta_blocks,
+    BlockKind, CompletionContext, IndexRootRef, PathStep, ResourceAddress, VariableType,
+    META_ATTRS,
 };
 use tfls_parser::lsp_position_to_byte_offset;
 use tfls_schema::NestingMode;
@@ -140,8 +140,7 @@ pub async fn completion(
     if is_tfvars_uri(&uri) {
         let cur_line_start = doc.rope.line_to_byte(line_idx);
         let line_prefix = doc.rope.byte_slice(cur_line_start..offset).to_string();
-        let items =
-            tfvars_completion_items(backend, &uri, doc.parsed.body.as_ref(), &line_prefix);
+        let items = tfvars_completion_items(backend, &uri, doc.parsed.body.as_ref(), &line_prefix);
         return Ok(Some(CompletionResponse::Array(items)));
     }
 
@@ -181,7 +180,13 @@ pub async fn completion(
                 let nested_path = body
                     .map(|b| nested_block_path(b, offset))
                     .unwrap_or_default();
-                resource_body_items(backend, &resource_type, /*data=*/ false, &filter, &nested_path)
+                resource_body_items(
+                    backend,
+                    &resource_type,
+                    /*data=*/ false,
+                    &filter,
+                    &nested_path,
+                )
             }
         }
         CompletionContext::DataSourceBody { resource_type } => {
@@ -193,18 +198,33 @@ pub async fn completion(
                 let nested_path = body
                     .map(|b| nested_block_path(b, offset))
                     .unwrap_or_default();
-                resource_body_items(backend, &resource_type, /*data=*/ true, &filter, &nested_path)
+                resource_body_items(
+                    backend,
+                    &resource_type,
+                    /*data=*/ true,
+                    &filter,
+                    &nested_path,
+                )
             }
         }
-        CompletionContext::VariableRef => {
-            module_symbol_items(backend, &uri, SymbolField::Variables, CompletionItemKind::VARIABLE)
-        }
-        CompletionContext::LocalRef => {
-            module_symbol_items(backend, &uri, SymbolField::Locals, CompletionItemKind::VARIABLE)
-        }
-        CompletionContext::ModuleRef => {
-            module_symbol_items(backend, &uri, SymbolField::Modules, CompletionItemKind::MODULE)
-        }
+        CompletionContext::VariableRef => module_symbol_items(
+            backend,
+            &uri,
+            SymbolField::Variables,
+            CompletionItemKind::VARIABLE,
+        ),
+        CompletionContext::LocalRef => module_symbol_items(
+            backend,
+            &uri,
+            SymbolField::Locals,
+            CompletionItemKind::VARIABLE,
+        ),
+        CompletionContext::ModuleRef => module_symbol_items(
+            backend,
+            &uri,
+            SymbolField::Modules,
+            CompletionItemKind::MODULE,
+        ),
         CompletionContext::EachRef => each_namespace_items(),
         CompletionContext::CountRef => count_namespace_items(),
         CompletionContext::PathRef => path_namespace_items(),
@@ -318,7 +338,10 @@ pub async fn completion(
         CompletionContext::RequiredProviderSourceValue => {
             required_provider_source_value_items().await
         }
-        CompletionContext::RequiredProviderVersionValue { source, cursor_partial } => {
+        CompletionContext::RequiredProviderVersionValue {
+            source,
+            cursor_partial,
+        } => {
             let items = required_provider_version_value_items(
                 &backend.http_client,
                 source.as_deref(),
@@ -332,7 +355,10 @@ pub async fn completion(
             stamp_version_replace(items, pos, &cursor_partial)
         }
         CompletionContext::VariableTypeValue => variable_type_value_items(),
-        CompletionContext::ModuleVersionValue { source, cursor_partial } => {
+        CompletionContext::ModuleVersionValue {
+            source,
+            cursor_partial,
+        } => {
             let items = module_version_value_items(
                 &backend.http_client,
                 source.as_deref(),
@@ -579,7 +605,10 @@ fn variable_type_value_items() -> Vec<CompletionItem> {
         ("string", "A Unicode string value"),
         ("number", "A numeric value (integer or float)"),
         ("bool", "A boolean: `true` or `false`"),
-        ("any", "Accept any type. Typically used for pass-through variables"),
+        (
+            "any",
+            "Accept any type. Typically used for pass-through variables",
+        ),
         ("null", "The null value"),
     ];
     const CONSTRUCTORS: &[(&str, &str, &str)] = &[
@@ -825,20 +854,21 @@ fn required_providers_entry_items(filter: &BodyFilter) -> Vec<CompletionItem> {
             Some(parts) => parts,
             None => continue,
         };
-        let version_tabstop = match tfls_provider_protocol::registry_versions::cached_latest_version(ns, name)
-            .as_deref()
-            .and_then(tfls_provider_protocol::registry_versions::major_minor_of)
-        {
-            // Cached MM available → bake `~> 4.71` (or whatever) into
-            // the placeholder so a tab-and-accept lands on a sensible
-            // default tracking the current major.
-            Some(mm) => format!("${{1:~> {mm}}}"),
-            // Cold cache → empty tabstop. The version-value
-            // completion path (`required_provider_version_value_items`)
-            // fires the moment the user triggers completion inside
-            // the empty quotes; preselects latest.
-            None => "${1}".to_string(),
-        };
+        let version_tabstop =
+            match tfls_provider_protocol::registry_versions::cached_latest_version(ns, name)
+                .as_deref()
+                .and_then(tfls_provider_protocol::registry_versions::major_minor_of)
+            {
+                // Cached MM available → bake `~> 4.71` (or whatever) into
+                // the placeholder so a tab-and-accept lands on a sensible
+                // default tracking the current major.
+                Some(mm) => format!("${{1:~> {mm}}}"),
+                // Cold cache → empty tabstop. The version-value
+                // completion path (`required_provider_version_value_items`)
+                // fires the moment the user triggers completion inside
+                // the empty quotes; preselects latest.
+                None => "${1}".to_string(),
+            };
         items.push(CompletionItem {
             label: local_name.to_string(),
             kind: Some(CompletionItemKind::MODULE),
@@ -961,7 +991,7 @@ async fn required_provider_source_value_items() -> Vec<CompletionItem> {
 /// from `tfls_core::version_constraint`. Rendered inline (`detail`)
 /// and on hover (`documentation`).
 fn constraint_operator_items() -> Vec<CompletionItem> {
-    use tfls_core::version_constraint::{ALL_OPERATORS, ConstraintOp};
+    use tfls_core::version_constraint::{ConstraintOp, ALL_OPERATORS};
     ALL_OPERATORS
         .iter()
         .map(|op| {
@@ -1003,7 +1033,7 @@ async fn required_provider_version_value_items(
     source: Option<&str>,
     cursor_partial: &str,
 ) -> Vec<CompletionItem> {
-    use tfls_core::version_constraint::{CursorSlot, cursor_slot};
+    use tfls_core::version_constraint::{cursor_slot, CursorSlot};
     let slot = cursor_slot(cursor_partial, cursor_partial.len());
     match slot {
         CursorSlot::AtOperator | CursorSlot::Trailing => {
@@ -1042,17 +1072,14 @@ async fn prefilled_provider_version_items(
         // No source → can't fetch — fall back to operator-only.
         return constraint_operator_items();
     };
-    let versions = match tfls_provider_protocol::registry_versions::fetch_versions(
-        client, &ns, &name,
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::debug!(error = %e, "registry version fetch failed");
-            return constraint_operator_items();
-        }
-    };
+    let versions =
+        match tfls_provider_protocol::registry_versions::fetch_versions(client, &ns, &name).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!(error = %e, "registry version fetch failed");
+                return constraint_operator_items();
+            }
+        };
     // Preselect the latest STABLE release as the default — `versions` is
     // major-dominant descending, so `first()` would pin a higher-major
     // pre-release (e.g. `6.0.0-beta1` over stable `5.99.0`). Fall back to
@@ -1157,17 +1184,14 @@ async fn provider_version_items_from_registry(
     let Some((ns, name)) = source.and_then(parse_source) else {
         return Vec::new();
     };
-    let versions = match tfls_provider_protocol::registry_versions::fetch_versions(
-        client, &ns, &name,
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::debug!(error = %e, "registry version fetch failed");
-            return Vec::new();
-        }
-    };
+    let versions =
+        match tfls_provider_protocol::registry_versions::fetch_versions(client, &ns, &name).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!(error = %e, "registry version fetch failed");
+                return Vec::new();
+            }
+        };
     // Pre-filter to versions matching the typed prefix so clients without
     // label-prefix matching don't show the full 1000+ list each keystroke.
     // Fall back to the full list when nothing matches (typo / new digit).
@@ -1203,7 +1227,7 @@ async fn provider_version_items_from_registry(
 /// usable value immediately. After an operator we fall through to
 /// the existing exact-version list.
 async fn required_version_value_items(cursor_partial: &str) -> Vec<CompletionItem> {
-    use tfls_core::version_constraint::{CursorSlot, cursor_slot};
+    use tfls_core::version_constraint::{cursor_slot, CursorSlot};
     let slot = cursor_slot(cursor_partial, cursor_partial.len());
     match slot {
         CursorSlot::AtOperator | CursorSlot::Trailing => {
@@ -1233,14 +1257,13 @@ async fn prefilled_tool_version_items() -> Vec<CompletionItem> {
     let Ok(client) = tfls_provider_protocol::tool_versions::build_http_client() else {
         return constraint_operator_items();
     };
-    let versions =
-        match tfls_provider_protocol::tool_versions::fetch_tool_versions(&client).await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::debug!(error = %e, "github release fetch failed");
-                return constraint_operator_items();
-            }
-        };
+    let versions = match tfls_provider_protocol::tool_versions::fetch_tool_versions(&client).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!(error = %e, "github release fetch failed");
+            return constraint_operator_items();
+        }
+    };
     // Latest STABLE release as the preselected default (skip pre-releases
     // unless that's all that exists) — see prefilled_provider_version_items.
     let Some(latest) = versions
@@ -1310,14 +1333,13 @@ async fn tool_version_items_from_github(version_partial: &str) -> Vec<Completion
     let Ok(client) = tfls_provider_protocol::tool_versions::build_http_client() else {
         return Vec::new();
     };
-    let versions =
-        match tfls_provider_protocol::tool_versions::fetch_tool_versions(&client).await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::debug!(error = %e, "github release fetch failed");
-                return Vec::new();
-            }
-        };
+    let versions = match tfls_provider_protocol::tool_versions::fetch_tool_versions(&client).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!(error = %e, "github release fetch failed");
+            return Vec::new();
+        }
+    };
     let mut matches: Vec<&_> = versions
         .iter()
         .filter(|vi| vi.version.starts_with(version_partial))
@@ -1349,14 +1371,13 @@ async fn module_version_value_items(
     source: Option<&str>,
     cursor_partial: &str,
 ) -> Vec<CompletionItem> {
-    use tfls_core::version_constraint::{CursorSlot, cursor_slot};
+    use tfls_core::version_constraint::{cursor_slot, CursorSlot};
     let slot = cursor_slot(cursor_partial, cursor_partial.len());
     match slot {
         CursorSlot::AtOperator | CursorSlot::Trailing => constraint_operator_items(),
         CursorSlot::AfterOperator(_) | CursorSlot::InsideVersion { .. } => {
             let mut items =
-                module_version_items_from_registry(client, source, version_partial_of(&slot))
-                    .await;
+                module_version_items_from_registry(client, source, version_partial_of(&slot)).await;
             if items.is_empty() {
                 items = constraint_operator_items();
             }
@@ -1516,8 +1537,7 @@ fn resource_body_items(
             // the user can still set those, the provider just has a
             // fallback. `required` implies writable regardless of
             // `computed`.
-            !filter.present_attrs.contains(name.as_str())
-                && (attr.required || attr.optional)
+            !filter.present_attrs.contains(name.as_str()) && (attr.required || attr.optional)
         })
         .map(|(name, attr)| CompletionItem {
             label: name.clone(),
@@ -1582,7 +1602,10 @@ fn resource_body_items(
                 }),
                 // Nested blocks sort after attributes (bucket 2);
                 // deprecated ones sink to bucket 9.
-                sort_text: Some(format!("{}_{name}", if nb.block.deprecated { 9 } else { 2 })),
+                sort_text: Some(format!(
+                    "{}_{name}",
+                    if nb.block.deprecated { 9 } else { 2 }
+                )),
                 tags: deprecated_tags(nb.block.deprecated),
                 insert_text: Some(nested_block_scaffold_snippet(name, &nb.block)),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
@@ -1594,7 +1617,11 @@ fn resource_body_items(
     // only at the top level of a resource or data body — not inside
     // nested schema blocks like `root_block_device` or `lifecycle`.
     if nested_path.is_empty() {
-        let kind = if data { BlockKind::Data } else { BlockKind::Resource };
+        let kind = if data {
+            BlockKind::Data
+        } else {
+            BlockKind::Resource
+        };
         items.extend(
             meta_argument_items(kind)
                 .into_iter()
@@ -1841,7 +1868,11 @@ fn meta_argument_items(_kind: BlockKind) -> Vec<CompletionItem> {
 fn dynamic_body_items(filter: &BodyFilter) -> Vec<CompletionItem> {
     let meta = [
         ("for_each", "meta-argument — required", "for_each = ${1}"),
-        ("iterator", "meta-argument — rename `each`", "iterator = \"${1}\""),
+        (
+            "iterator",
+            "meta-argument — rename `each`",
+            "iterator = \"${1}\"",
+        ),
         ("labels", "meta-argument — labels list", "labels = [${1}]"),
     ];
     let mut items: Vec<CompletionItem> = meta
@@ -2005,9 +2036,9 @@ fn variable_insert_text(name: &str, ty: Option<&VariableType>) -> String {
         Some(VariableType::Primitive(tfls_core::Primitive::String)) => {
             format!("{name} = \"${{1}}\"")
         }
-        Some(VariableType::List(_))
-        | Some(VariableType::Set(_))
-        | Some(VariableType::Tuple(_)) => format!("{name} = [${{1}}]"),
+        Some(VariableType::List(_)) | Some(VariableType::Set(_)) | Some(VariableType::Tuple(_)) => {
+            format!("{name} = [${{1}}]")
+        }
         Some(VariableType::Map(_)) | Some(VariableType::Object(_)) => {
             format!("{name} = {{\n  ${{1}}\n}}")
         }
@@ -2086,10 +2117,7 @@ fn expression_scaffold_items() -> Vec<CompletionItem> {
 /// `module`) whose span contains `offset`, as `(kind, type, name)`.
 /// `kind` is the block ident; for `module` the type slot holds the
 /// module name and `name` is empty.
-fn enclosing_addressable_block(
-    body: &Body,
-    offset: usize,
-) -> Option<(String, String, String)> {
+fn enclosing_addressable_block(body: &Body, offset: usize) -> Option<(String, String, String)> {
     for structure in body.iter() {
         let Some(block) = structure.as_block() else {
             continue;
@@ -2129,8 +2157,14 @@ fn each_attr_items(
     };
     // The for_each *collection* shape, keyed by the block's address.
     let root = match kind.as_str() {
-        "resource" => IndexRootRef::Resource { resource_type: ty, name },
-        "data" => IndexRootRef::DataSource { resource_type: ty, name },
+        "resource" => IndexRootRef::Resource {
+            resource_type: ty,
+            name,
+        },
+        "data" => IndexRootRef::DataSource {
+            resource_type: ty,
+            name,
+        },
         "module" => IndexRootRef::Module { module_name: ty },
         _ => return Vec::new(),
     };
@@ -2189,9 +2223,9 @@ fn for_each_element_shape(collection: &VariableType) -> Option<VariableType> {
             }
             acc
         }
-        VariableType::Map(value)
-        | VariableType::List(value)
-        | VariableType::Set(value) => Some((**value).clone()),
+        VariableType::Map(value) | VariableType::List(value) | VariableType::Set(value) => {
+            Some((**value).clone())
+        }
         _ => None,
     }
 }
@@ -2271,13 +2305,28 @@ fn expression_root_items(backend: &Backend, uri: &Url) -> Vec<CompletionItem> {
     };
 
     for name in backend.state.all_variable_names() {
-        push_ref(format!("var.{name}"), "variable", CompletionItemKind::VARIABLE, &mut sort_index);
+        push_ref(
+            format!("var.{name}"),
+            "variable",
+            CompletionItemKind::VARIABLE,
+            &mut sort_index,
+        );
     }
     for name in backend.state.all_local_names() {
-        push_ref(format!("local.{name}"), "local", CompletionItemKind::VARIABLE, &mut sort_index);
+        push_ref(
+            format!("local.{name}"),
+            "local",
+            CompletionItemKind::VARIABLE,
+            &mut sort_index,
+        );
     }
     for name in module_names_in_scope(backend, uri) {
-        push_ref(format!("module.{name}"), "module", CompletionItemKind::MODULE, &mut sort_index);
+        push_ref(
+            format!("module.{name}"),
+            "module",
+            CompletionItemKind::MODULE,
+            &mut sort_index,
+        );
     }
 
     // Namespace root keywords — insert the root with a trailing dot so the
@@ -2471,10 +2520,7 @@ fn local_to_provider_name(backend: &Backend, uri: &Url, local: &str) -> String {
 /// `required_providers` (and peer `.tf` files in the same dir, since
 /// `required_providers` typically lives in `versions.tf`). Entries
 /// without an explicit `source` map `LOCAL → LOCAL`.
-fn name_to_local_map(
-    backend: &Backend,
-    uri: &Url,
-) -> std::collections::HashMap<String, String> {
+fn name_to_local_map(backend: &Backend, uri: &Url) -> std::collections::HashMap<String, String> {
     use std::collections::HashMap;
     let mut out: HashMap<String, String> = HashMap::new();
     if let Some(doc) = backend.state.documents.get(uri) {
@@ -2528,17 +2574,23 @@ fn required_providers_local_to_name(
 ) -> Option<String> {
     use hcl_edit::expr::Expression;
     for structure in body.iter() {
-        let Some(block) = structure.as_block() else { continue };
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
         if block.ident.as_str() != "terraform" {
             continue;
         }
         for inner in block.body.iter() {
-            let Some(rp_block) = inner.as_block() else { continue };
+            let Some(rp_block) = inner.as_block() else {
+                continue;
+            };
             if rp_block.ident.as_str() != "required_providers" {
                 continue;
             }
             for entry in rp_block.body.iter() {
-                let Some(attr) = entry.as_attribute() else { continue };
+                let Some(attr) = entry.as_attribute() else {
+                    continue;
+                };
                 if attr.key.as_str() != local {
                     continue;
                 }
@@ -2573,17 +2625,23 @@ fn required_providers_name_to_local(
     use std::collections::HashMap;
     let mut out = HashMap::new();
     for structure in body.iter() {
-        let Some(block) = structure.as_block() else { continue };
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
         if block.ident.as_str() != "terraform" {
             continue;
         }
         for inner in block.body.iter() {
-            let Some(rp_block) = inner.as_block() else { continue };
+            let Some(rp_block) = inner.as_block() else {
+                continue;
+            };
             if rp_block.ident.as_str() != "required_providers" {
                 continue;
             }
             for entry in rp_block.body.iter() {
-                let Some(attr) = entry.as_attribute() else { continue };
+                let Some(attr) = entry.as_attribute() else {
+                    continue;
+                };
                 let local = attr.key.as_str().to_string();
                 let mut name: Option<String> = None;
                 if let Expression::Object(obj) = &attr.value {
@@ -2622,9 +2680,7 @@ fn expr_literal_string(expr: &hcl_edit::expr::Expression) -> Option<String> {
             let mut collected = String::new();
             for element in t.iter() {
                 match element {
-                    hcl_edit::template::Element::Literal(lit) => {
-                        collected.push_str(lit.as_str())
-                    }
+                    hcl_edit::template::Element::Literal(lit) => collected.push_str(lit.as_str()),
                     _ => return None,
                 }
             }
@@ -2695,7 +2751,9 @@ fn allowed_value_items(
         .state
         .resource_schema(resource_type)
         .or_else(|| backend.state.data_source_schema(resource_type));
-    let Some(schema) = schema else { return Vec::new() };
+    let Some(schema) = schema else {
+        return Vec::new();
+    };
     let Some(attr) = schema.block.attributes.get(attr_name) else {
         return Vec::new();
     };
@@ -2752,8 +2810,8 @@ fn attribute_value_items(
     resource_type: &str,
     attr_name: &str,
 ) -> Vec<CompletionItem> {
-    use std::collections::HashSet;
     use super::attr_ref_map;
+    use std::collections::HashSet;
 
     let mut items = Vec::new();
     let mut sort_index = 0u32;
@@ -2764,7 +2822,12 @@ fn attribute_value_items(
     // server can make, and Plugin Framework providers don't expose
     // validators over the wire so the schema's bare `string` type
     // is otherwise the only signal.
-    items.extend(allowed_value_items(backend, resource_type, attr_name, &mut sort_index));
+    items.extend(allowed_value_items(
+        backend,
+        resource_type,
+        attr_name,
+        &mut sort_index,
+    ));
 
     let known_types: HashSet<String> = backend.state.all_resource_types().into_iter().collect();
 
@@ -3245,11 +3308,7 @@ fn module_input_items(
 }
 
 /// Output completions for `module.NAME.|`.
-fn module_output_items(
-    backend: &Backend,
-    uri: &Url,
-    module_name: &str,
-) -> Vec<CompletionItem> {
+fn module_output_items(backend: &Backend, uri: &Url, module_name: &str) -> Vec<CompletionItem> {
     let Some(child_dir) = resolve_child_module_dir(backend, uri, module_name) else {
         return Vec::new();
     };
@@ -3286,11 +3345,7 @@ fn module_output_items(
 
 /// Resolve the statically-known shape of the reference rooted at
 /// `root`, merged across peer documents in the active module.
-fn shape_for_root(
-    backend: &Backend,
-    uri: &Url,
-    root: &IndexRootRef,
-) -> Option<VariableType> {
+fn shape_for_root(backend: &Backend, uri: &Url, root: &IndexRootRef) -> Option<VariableType> {
     let dir = parent_dir(uri);
     let mut acc: Option<VariableType> = None;
     for entry in backend.state.documents.iter() {
@@ -3344,9 +3399,7 @@ fn walk_shape(shape: &VariableType, path: &[PathStep]) -> Option<VariableType> {
     for step in path {
         current = match (current, step) {
             (VariableType::Object(fields), PathStep::Bracket(k))
-            | (VariableType::Object(fields), PathStep::Attr(k)) => {
-                fields.get(k).cloned()?
-            }
+            | (VariableType::Object(fields), PathStep::Attr(k)) => fields.get(k).cloned()?,
             (VariableType::Map(value), PathStep::Bracket(_)) => *value,
             (VariableType::Tuple(items), PathStep::Bracket(k)) => {
                 let idx: usize = k.parse().ok()?;
@@ -3419,7 +3472,7 @@ fn stamp_version_replace(
     pos: Position,
     cursor_partial: &str,
 ) -> Vec<CompletionItem> {
-    use tfls_core::version_constraint::{CursorSlot, cursor_slot};
+    use tfls_core::version_constraint::{cursor_slot, CursorSlot};
     let partial_len = match cursor_slot(cursor_partial, cursor_partial.len()) {
         // Version tokens are ASCII, so char count == UTF-16 CU count.
         CursorSlot::InsideVersion { partial, .. } => partial.chars().count() as u32,
@@ -3528,7 +3581,10 @@ mod stamp_version_replace_tests {
         };
         assert_eq!((te.range.start.character, te.range.end.character), (11, 14));
         assert_eq!(te.new_text, "5.94.0");
-        assert!(out[0].insert_text.is_none(), "insert_text cleared in favour of text_edit");
+        assert!(
+            out[0].insert_text.is_none(),
+            "insert_text cleared in favour of text_edit"
+        );
     }
 
     #[test]
@@ -3614,7 +3670,6 @@ mod compute_index_replace_range_tests {
     }
 }
 
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod required_providers_resolver_tests {
@@ -3687,10 +3742,7 @@ mod type_aware_insert_tests {
     #[test]
     fn string_wraps_in_quotes() {
         let attr = schema_with_type(r#""string""#);
-        assert_eq!(
-            schema_attribute_insert_text("ami", &attr),
-            "ami = \"${1}\""
-        );
+        assert_eq!(schema_attribute_insert_text("ami", &attr), "ami = \"${1}\"");
     }
 
     #[test]
@@ -3711,10 +3763,7 @@ mod type_aware_insert_tests {
     #[test]
     fn list_of_string_gets_square_brackets() {
         let attr = schema_with_type(r#"["list", "string"]"#);
-        assert_eq!(
-            schema_attribute_insert_text("tags", &attr),
-            "tags = [${1}]"
-        );
+        assert_eq!(schema_attribute_insert_text("tags", &attr), "tags = [${1}]");
     }
 
     #[test]
@@ -3729,10 +3778,7 @@ mod type_aware_insert_tests {
     #[test]
     fn tuple_gets_square_brackets() {
         let attr = schema_with_type(r#"["tuple", ["string", "number"]]"#);
-        assert_eq!(
-            schema_attribute_insert_text("pair", &attr),
-            "pair = [${1}]"
-        );
+        assert_eq!(schema_attribute_insert_text("pair", &attr), "pair = [${1}]");
     }
 
     #[test]

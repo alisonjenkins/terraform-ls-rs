@@ -20,7 +20,12 @@
 //!     --tfls-path target/debug/tfls \
 //!     --lspmux-path "$(which lspmux)"
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::print_stdout)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::print_stdout
+)]
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -29,7 +34,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -91,16 +96,18 @@ async fn run(cli: Cli) -> Result<(), String> {
     // tfls path (`./target/debug/tfls`) breaks. Same for lspmux
     // itself — relative path would resolve against whichever
     // dir was passed in `Command::current_dir`.
-    let tfls = cli.tfls_path.canonicalize().map_err(|e| {
-        format!("canonicalize tfls path {:?}: {e}", cli.tfls_path)
-    })?;
+    let tfls = cli
+        .tfls_path
+        .canonicalize()
+        .map_err(|e| format!("canonicalize tfls path {:?}: {e}", cli.tfls_path))?;
     eprintln!("tfls:   {tfls:?}");
     let lspmux = if cli.direct {
         PathBuf::new()
     } else {
-        let p = cli.lspmux_path.canonicalize().map_err(|e| {
-            format!("canonicalize lspmux path {:?}: {e}", cli.lspmux_path)
-        })?;
+        let p = cli
+            .lspmux_path
+            .canonicalize()
+            .map_err(|e| format!("canonicalize lspmux path {:?}: {e}", cli.lspmux_path))?;
         eprintln!("lspmux: {p:?}");
         p
     };
@@ -109,8 +116,7 @@ async fn run(cli: Cli) -> Result<(), String> {
     }
 
     // Workspace setup: main.tf + initial .terraform.lock.hcl.
-    let workspace = tempfile_dir("tfls-mux-lock-probe-ws")
-        .map_err(|e| format!("tempdir: {e}"))?;
+    let workspace = tempfile_dir("tfls-mux-lock-probe-ws").map_err(|e| format!("tempdir: {e}"))?;
     let main_tf = workspace.join("main.tf");
     std::fs::write(
         &main_tf,
@@ -161,15 +167,13 @@ async fn run(cli: Cli) -> Result<(), String> {
         (child, None, stderr_log)
     } else {
         // Isolated lspmux daemon on a free port + temp HOME.
-        let home = tempfile_dir("tfls-mux-lock-probe-home")
-            .map_err(|e| format!("tempdir: {e}"))?;
+        let home = tempfile_dir("tfls-mux-lock-probe-home").map_err(|e| format!("tempdir: {e}"))?;
         std::fs::create_dir_all(home.join(".config/lspmux"))
             .map_err(|e| format!("config dir: {e}"))?;
         let port = pick_free_port().ok_or("no free port")?;
         write_lspmux_config(&home, port).map_err(|e| format!("write config: {e}"))?;
 
-        let mut daemon =
-            spawn_daemon(&lspmux, &home).map_err(|e| format!("spawn daemon: {e}"))?;
+        let mut daemon = spawn_daemon(&lspmux, &home).map_err(|e| format!("spawn daemon: {e}"))?;
         let daemon_log = home.join("lspmux.stderr.log");
         pipe_stderr(&mut daemon, &daemon_log);
         eprintln!("daemon log: {daemon_log:?}");
@@ -412,8 +416,7 @@ async fn recv<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<String, String> {
             break;
         }
     }
-    let header_str =
-        std::str::from_utf8(&header).map_err(|e| format!("header utf-8: {e}"))?;
+    let header_str = std::str::from_utf8(&header).map_err(|e| format!("header utf-8: {e}"))?;
     let len: usize = header_str
         .lines()
         .find_map(|l| l.strip_prefix("Content-Length: "))

@@ -50,5 +50,9 @@ pub async fn document_highlight(
         }
     }
 
-    if out.is_empty() { Ok(None) } else { Ok(Some(out)) }
+    if out.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(out))
+    }
 }

@@ -25,12 +25,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tfls_lsp::Backend;
 use tokio::sync::Mutex;
 use tower::Service;
-use tower_lsp::LspService;
 use tower_lsp::jsonrpc::Request;
+use tower_lsp::LspService;
 
 pub type Captured = Arc<Mutex<Vec<Value>>>;
 

@@ -57,9 +57,7 @@ pub fn variable_default_type_diagnostics(body: &Body, rope: &Rope) -> Vec<Diagno
         let range = hcl_span_to_lsp_range(rope, span).unwrap_or_default();
         let detail = explain_mismatch(&declared, &actual);
         let message = if detail.is_empty() {
-            format!(
-                "default value of type `{actual}` does not match declared type `{declared}`"
-            )
+            format!("default value of type `{actual}` does not match declared type `{declared}`")
         } else {
             format!("default does not match declared type `{declared}`: {detail}")
         };
@@ -89,10 +87,12 @@ mod tests {
 
     #[test]
     fn flags_string_type_with_object_default() {
-        let d = diags(r#"variable "x" {
+        let d = diags(
+            r#"variable "x" {
           type    = string
           default = {}
-        }"#);
+        }"#,
+        );
         assert_eq!(d.len(), 1, "got: {d:?}");
         assert_eq!(d[0].severity, Some(DiagnosticSeverity::ERROR));
         assert!(d[0].message.contains("string"), "got: {}", d[0].message);
@@ -104,28 +104,34 @@ mod tests {
         // for `type = number` is valid and accepted by `terraform plan`.
         // We only know the static type, so we accept conservatively
         // (worst case: a missed error like `"hi"`, never a false positive).
-        let d = diags(r#"variable "x" {
+        let d = diags(
+            r#"variable "x" {
           type    = number
           default = "5"
-        }"#);
+        }"#,
+        );
         assert!(d.is_empty(), "got: {d:?}");
     }
 
     #[test]
     fn accepts_number_default_for_string_type() {
-        let d = diags(r#"variable "x" {
+        let d = diags(
+            r#"variable "x" {
           type    = string
           default = 5
-        }"#);
+        }"#,
+        );
         assert!(d.is_empty(), "got: {d:?}");
     }
 
     #[test]
     fn accepts_string_default_for_bool_type() {
-        let d = diags(r#"variable "x" {
+        let d = diags(
+            r#"variable "x" {
           type    = bool
           default = "true"
-        }"#);
+        }"#,
+        );
         assert!(d.is_empty(), "got: {d:?}");
     }
 
@@ -133,10 +139,12 @@ mod tests {
     fn flags_number_type_with_collection_default() {
         // string<->number coercion does NOT extend to a collection: a
         // list default for a number type is still a clear mistake.
-        let d = diags(r#"variable "x" {
+        let d = diags(
+            r#"variable "x" {
           type    = number
           default = [1, 2]
-        }"#);
+        }"#,
+        );
         assert_eq!(d.len(), 1, "got: {d:?}");
     }
 
@@ -144,99 +152,121 @@ mod tests {
     fn flags_list_string_with_incompatible_array() {
         // `[1, 2]` coerces to strings (valid Terraform); an object
         // element is the genuinely-incompatible case still flagged.
-        let d = diags(r#"variable "x" {
+        let d = diags(
+            r#"variable "x" {
           type    = list(string)
           default = [{}, {}]
-        }"#);
+        }"#,
+        );
         assert_eq!(d.len(), 1, "got: {d:?}");
     }
 
     #[test]
     fn accepts_list_string_with_numeric_array() {
-        let d = diags(r#"variable "x" {
+        let d = diags(
+            r#"variable "x" {
           type    = list(string)
           default = [1, 2]
-        }"#);
+        }"#,
+        );
         assert!(d.is_empty(), "got: {d:?}");
     }
 
     #[test]
     fn accepts_matching_primitive() {
-        let d = diags(r#"variable "x" {
+        let d = diags(
+            r#"variable "x" {
           type    = string
           default = "hi"
-        }"#);
+        }"#,
+        );
         assert!(d.is_empty(), "got: {d:?}");
     }
 
     #[test]
     fn accepts_matching_list() {
-        let d = diags(r#"variable "x" {
+        let d = diags(
+            r#"variable "x" {
           type    = list(string)
           default = ["a", "b"]
-        }"#);
+        }"#,
+        );
         assert!(d.is_empty(), "got: {d:?}");
     }
 
     #[test]
     fn accepts_any_type() {
-        let d = diags(r#"variable "x" {
+        let d = diags(
+            r#"variable "x" {
           type    = any
           default = {}
-        }"#);
+        }"#,
+        );
         assert!(d.is_empty(), "got: {d:?}");
     }
 
     #[test]
     fn no_diagnostic_when_default_is_unknowable() {
         // `var.y` collapses to Any in shape inference; satisfies() passes.
-        let d = diags(r#"variable "x" {
+        let d = diags(
+            r#"variable "x" {
           type    = string
           default = var.y
-        }"#);
+        }"#,
+        );
         assert!(d.is_empty(), "got: {d:?}");
     }
 
     #[test]
     fn no_diagnostic_when_no_default() {
-        let d = diags(r#"variable "x" {
+        let d = diags(
+            r#"variable "x" {
           type = string
-        }"#);
+        }"#,
+        );
         assert!(d.is_empty(), "got: {d:?}");
     }
 
     #[test]
     fn no_diagnostic_when_no_type() {
         // Without `type`, terraform infers from default — no mismatch possible.
-        let d = diags(r#"variable "x" {
+        let d = diags(
+            r#"variable "x" {
           default = "hi"
-        }"#);
+        }"#,
+        );
         assert!(d.is_empty(), "got: {d:?}");
     }
 
     #[test]
     fn ignores_non_variable_blocks() {
-        let d = diags(r#"resource "aws_instance" "x" {
+        let d = diags(
+            r#"resource "aws_instance" "x" {
           type    = "t3.micro"
-        }"#);
+        }"#,
+        );
         assert!(d.is_empty(), "got: {d:?}");
     }
 
     #[test]
     fn accepts_object_with_optional_missing_fields() {
-        let d = diags(r#"variable "x" {
+        let d = diags(
+            r#"variable "x" {
           type    = object({ a = string, b = optional(number) })
           default = { a = "y" }
-        }"#);
+        }"#,
+        );
         assert!(d.is_empty(), "got: {d:?}");
     }
 
     #[test]
     fn flags_object_missing_required_field() {
-        let d = diags(r#"variable "x" {
+        let d = diags(
+            r#"variable "x" {
           type    = object({ a = string, b = number })
           default = { a = "y" }
-        }"#);
+        }"#,
+        );
         assert_eq!(d.len(), 1, "got: {d:?}");
         assert!(
             d[0].message.contains("missing field") && d[0].message.contains("`b`"),
@@ -249,10 +279,12 @@ mod tests {
     fn flags_object_extra_field() {
         // The exact case from the user report: declared schema names
         // `name`, default supplies an unrelated `a`.
-        let d = diags(r#"variable "test" {
+        let d = diags(
+            r#"variable "test" {
           default = { a = "b" }
           type    = object({ name = string })
-        }"#);
+        }"#,
+        );
         assert_eq!(d.len(), 1, "got: {d:?}");
         assert!(
             d[0].message.contains("unknown field") && d[0].message.contains("`a`"),
@@ -268,13 +300,15 @@ mod tests {
 
     #[test]
     fn flags_nested_object_field_type_mismatch_plain_literal() {
-        let d = diags(r#"variable "test" {
+        let d = diags(
+            r#"variable "test" {
           type    = object({ name = string, age = number })
           default = {
             name = "Alison"
             age  = { years = 38 }
           }
-        }"#);
+        }"#,
+        );
         assert_eq!(d.len(), 1, "got: {d:?}");
         assert!(
             d[0].message.contains("`age`"),
@@ -287,14 +321,16 @@ mod tests {
     fn flags_nested_object_field_type_mismatch_object_call() {
         // User's specific report: `age = number` declared, but the
         // default uses `age = object({ years = 38, months = true })`.
-        let d = diags(r#"variable "test" {
+        let d = diags(
+            r#"variable "test" {
           type    = object({ name = string, sex = string, age = number })
           default = {
             name = "Alison"
             sex  = "female"
             age  = object({ years = 38, months = true })
           }
-        }"#);
+        }"#,
+        );
         assert_eq!(d.len(), 1, "got: {d:?}");
         assert!(
             d[0].message.contains("`age`"),
@@ -306,10 +342,12 @@ mod tests {
     #[test]
     fn flags_object_field_type_mismatch() {
         // `a = 1` would coerce to string; a collection value does not.
-        let d = diags(r#"variable "x" {
+        let d = diags(
+            r#"variable "x" {
           type    = object({ a = string })
           default = { a = [1, 2] }
-        }"#);
+        }"#,
+        );
         assert_eq!(d.len(), 1, "got: {d:?}");
         assert!(
             d[0].message.contains("`a`") && d[0].message.contains("expected"),

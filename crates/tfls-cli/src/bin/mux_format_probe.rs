@@ -39,7 +39,12 @@
 //!   cargo run --bin tfls-mux-format-probe -- \
 //!     --tfls-path target/debug/tfls --lspmux-path "$(which lspmux)"
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::print_stdout)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::print_stdout
+)]
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -48,7 +53,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -178,9 +183,10 @@ async fn run(cli: Cli) -> Result<(), String> {
     let lspmux = if cli.direct {
         PathBuf::new()
     } else {
-        let p = cli.lspmux_path.canonicalize().map_err(|e| {
-            format!("canonicalize lspmux path {:?}: {e}", cli.lspmux_path)
-        })?;
+        let p = cli
+            .lspmux_path
+            .canonicalize()
+            .map_err(|e| format!("canonicalize lspmux path {:?}: {e}", cli.lspmux_path))?;
         eprintln!("lspmux: {p:?}");
         p
     };
@@ -188,11 +194,10 @@ async fn run(cli: Cli) -> Result<(), String> {
         eprintln!("mode:   --direct (no lspmux)");
     }
 
-    let workspace = tempfile_dir("tfls-mux-format-probe-ws")
-        .map_err(|e| format!("tempdir: {e}"))?;
+    let workspace =
+        tempfile_dir("tfls-mux-format-probe-ws").map_err(|e| format!("tempdir: {e}"))?;
     let main_tf = workspace.join("main.tf");
-    std::fs::write(&main_tf, FILE_CONTENTS)
-        .map_err(|e| format!("write main.tf: {e}"))?;
+    std::fs::write(&main_tf, FILE_CONTENTS).map_err(|e| format!("write main.tf: {e}"))?;
     let workspace = workspace
         .canonicalize()
         .map_err(|e| format!("canonicalize: {e}"))?;
@@ -215,12 +220,11 @@ async fn run(cli: Cli) -> Result<(), String> {
         pipe_stderr(&mut c, &log_path.with_extension("crash.log"));
         (c, None, log_path)
     } else {
-        let home = tempfile_dir("tfls-mux-format-probe-home")
-            .map_err(|e| format!("tempdir: {e}"))?;
+        let home =
+            tempfile_dir("tfls-mux-format-probe-home").map_err(|e| format!("tempdir: {e}"))?;
         let port = pick_free_port().ok_or("no free port")?;
         write_lspmux_config(&home, port).map_err(|e| format!("write config: {e}"))?;
-        let mut daemon =
-            spawn_daemon(&lspmux, &home).map_err(|e| format!("spawn daemon: {e}"))?;
+        let mut daemon = spawn_daemon(&lspmux, &home).map_err(|e| format!("spawn daemon: {e}"))?;
         let daemon_log = home.join("lspmux.stderr.log");
         pipe_stderr(&mut daemon, &daemon_log);
         eprintln!("daemon log: {daemon_log:?}");
@@ -419,19 +423,15 @@ fn apply_text_edits(src: &str, edits: &[lsp_types::TextEdit]) -> Result<String, 
     use ropey::Rope;
     let mut rope = Rope::from_str(src);
     let mut sorted: Vec<&lsp_types::TextEdit> = edits.iter().collect();
-    sorted.sort_by_key(|e| {
-        std::cmp::Reverse((e.range.start.line, e.range.start.character))
-    });
+    sorted.sort_by_key(|e| std::cmp::Reverse((e.range.start.line, e.range.start.character)));
     for edit in sorted {
         let start_line = edit.range.start.line as usize;
         let end_line = edit.range.end.line as usize;
         if start_line >= rope.len_lines() || end_line >= rope.len_lines() {
             return Err(format!("edit range out of bounds: {:?}", edit.range));
         }
-        let start_byte = rope.line_to_byte(start_line)
-            + edit.range.start.character as usize;
-        let end_byte = rope.line_to_byte(end_line)
-            + edit.range.end.character as usize;
+        let start_byte = rope.line_to_byte(start_line) + edit.range.start.character as usize;
+        let end_byte = rope.line_to_byte(end_line) + edit.range.end.character as usize;
         let start_char = rope.byte_to_char(start_byte);
         let end_char = rope.byte_to_char(end_byte);
         rope.remove(start_char..end_char);
@@ -482,8 +482,7 @@ async fn drain_diagnostics<R: AsyncReadExt + Unpin>(
             continue;
         }
         let diags_v = params.get("diagnostics").cloned().unwrap_or(Value::Null);
-        let diags: Vec<lsp_types::Diagnostic> =
-            serde_json::from_value(diags_v).unwrap_or_default();
+        let diags: Vec<lsp_types::Diagnostic> = serde_json::from_value(diags_v).unwrap_or_default();
         latest = diags;
         saw_any = true;
     }
@@ -565,8 +564,7 @@ async fn recv<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<String, String> {
             break;
         }
     }
-    let header_str =
-        std::str::from_utf8(&header).map_err(|e| format!("header utf-8: {e}"))?;
+    let header_str = std::str::from_utf8(&header).map_err(|e| format!("header utf-8: {e}"))?;
     let len: usize = header_str
         .lines()
         .find_map(|l| l.strip_prefix("Content-Length: "))

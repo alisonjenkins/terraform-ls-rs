@@ -105,8 +105,8 @@ mod tests {
     #[test]
     fn position_at_start_of_empty_doc_is_zero() {
         let r = rope("");
-        let offset = lsp_position_to_byte_offset(&r, Position::new(0, 0))
-            .expect("start of empty doc");
+        let offset =
+            lsp_position_to_byte_offset(&r, Position::new(0, 0)).expect("start of empty doc");
         assert_eq!(offset, 0);
     }
 
@@ -204,8 +204,8 @@ mod tests {
     #[test]
     fn position_clamps_past_eol_with_crlf() {
         let r = rope("one\r\ntwo\r\n");
-        let offset = lsp_position_to_byte_offset(&r, Position::new(0, 50))
-            .expect("CRLF visible length");
+        let offset =
+            lsp_position_to_byte_offset(&r, Position::new(0, 50)).expect("CRLF visible length");
         assert_eq!(offset, r.line_to_byte(0) + 3);
     }
 

@@ -16,7 +16,7 @@
 
 use lsp_types::Position;
 use tfls_core::{SymbolKind, SymbolLocation};
-use tfls_state::{DocumentState, SymbolKey, reference_at_position, reference_key};
+use tfls_state::{reference_at_position, reference_key, DocumentState, SymbolKey};
 
 /// Whether the target under the cursor is a symbol definition (block label)
 /// or a reference (`var.x`, `local.y`, …).

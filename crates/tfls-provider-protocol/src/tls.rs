@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::crypto::{CryptoProvider, aws_lc_rs};
+use rustls::crypto::{aws_lc_rs, CryptoProvider};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 
@@ -37,10 +37,8 @@ impl ClientIdentity {
         // circumstances that we haven't fully diagnosed; RSA 2048 works
         // reliably (confirmed against all v5/v6 providers in the cache).
         let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_RSA_SHA256)?;
-        let mut params = rcgen::CertificateParams::new(vec![
-            "localhost".to_string(),
-            "127.0.0.1".to_string(),
-        ])?;
+        let mut params =
+            rcgen::CertificateParams::new(vec!["localhost".to_string(), "127.0.0.1".to_string()])?;
         // The server uses our cert as both trust anchor AND leaf. Go's
         // x509 chain verifier insists the anchor has CA:TRUE in its basic
         // constraints; `SelfSignedOnly` sets that without implying the
@@ -84,9 +82,7 @@ pub fn build_client_config(
         .or_else(|_| base64::engine::general_purpose::STANDARD.decode(server_cert_b64))
         .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(server_cert_b64))
         .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(server_cert_b64))
-        .map_err(|e| {
-            ProtocolError::Tls(rustls::Error::General(format!("server cert b64: {e}")))
-        })?;
+        .map_err(|e| ProtocolError::Tls(rustls::Error::General(format!("server cert b64: {e}"))))?;
     let server_cert_der = CertificateDer::from(cert_bytes);
 
     // rustls 0.23 requires an explicit crypto provider. We use aws_lc_rs
@@ -212,8 +208,7 @@ mod tests {
     fn build_config_accepts_standard_no_pad_b64() {
         install_crypto();
         let id = ClientIdentity::generate().unwrap();
-        let b64 = base64::engine::general_purpose::STANDARD_NO_PAD
-            .encode(id.cert_der.as_ref());
+        let b64 = base64::engine::general_purpose::STANDARD_NO_PAD.encode(id.cert_der.as_ref());
         let cfg = build_client_config(&id, &b64).unwrap();
         assert_eq!(cfg.alpn_protocols, vec![b"h2".to_vec()]);
     }
@@ -222,8 +217,7 @@ mod tests {
     fn build_config_accepts_standard_b64() {
         install_crypto();
         let id = ClientIdentity::generate().unwrap();
-        let b64 = base64::engine::general_purpose::STANDARD
-            .encode(id.cert_der.as_ref());
+        let b64 = base64::engine::general_purpose::STANDARD.encode(id.cert_der.as_ref());
         build_client_config(&id, &b64).unwrap();
     }
 
@@ -231,8 +225,7 @@ mod tests {
     fn build_config_accepts_url_safe_no_pad_b64() {
         install_crypto();
         let id = ClientIdentity::generate().unwrap();
-        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(id.cert_der.as_ref());
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(id.cert_der.as_ref());
         build_client_config(&id, &b64).unwrap();
     }
 
@@ -240,8 +233,7 @@ mod tests {
     fn build_config_accepts_url_safe_b64() {
         install_crypto();
         let id = ClientIdentity::generate().unwrap();
-        let b64 = base64::engine::general_purpose::URL_SAFE
-            .encode(id.cert_der.as_ref());
+        let b64 = base64::engine::general_purpose::URL_SAFE.encode(id.cert_der.as_ref());
         build_client_config(&id, &b64).unwrap();
     }
 
@@ -294,8 +286,7 @@ mod tests {
     fn config_sets_h2_alpn() {
         install_crypto();
         let id = ClientIdentity::generate().unwrap();
-        let b64 = base64::engine::general_purpose::STANDARD_NO_PAD
-            .encode(id.cert_der.as_ref());
+        let b64 = base64::engine::general_purpose::STANDARD_NO_PAD.encode(id.cert_der.as_ref());
         let cfg = build_client_config(&id, &b64).unwrap();
         assert_eq!(cfg.alpn_protocols, vec![b"h2".to_vec()]);
     }

@@ -224,9 +224,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Format::Markdown => emit_markdown(&blocks, &attributes, show_blocks, show_attrs),
         Format::Json => emit_json(&blocks, &attributes, show_blocks, show_attrs),
         Format::Scaffold => {
-            return Err(
-                "use --scaffold <type_name> to choose a single rule".into(),
-            );
+            return Err("use --scaffold <type_name> to choose a single rule".into());
         }
     }
 
@@ -259,10 +257,7 @@ fn collect_deprecations(
                     kind: BlockKind::Resource,
                     type_name: type_name.clone(),
                     description: nonempty(&res.block.description),
-                    already_covered: tfls_diag::is_hardcoded_deprecation(
-                        "resource",
-                        type_name,
-                    ),
+                    already_covered: tfls_diag::is_hardcoded_deprecation("resource", type_name),
                 });
             }
             for (attr_name, attr) in &res.block.attributes {
@@ -334,10 +329,18 @@ fn provider_namespace(addr: &str) -> &str {
 }
 
 fn nonempty(s: &Option<String>) -> Option<String> {
-    s.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()).map(String::from)
+    s.as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
 }
 
-fn registry_url(namespace: &str, provider_addr_local: &str, kind: BlockKind, type_name: &str) -> String {
+fn registry_url(
+    namespace: &str,
+    provider_addr_local: &str,
+    kind: BlockKind,
+    type_name: &str,
+) -> String {
     let slug = type_name
         .strip_prefix(&format!("{provider_addr_local}_"))
         .unwrap_or(type_name);
@@ -380,7 +383,12 @@ fn emit_markdown(
         if !covered.is_empty() {
             println!("\n# Deprecated blocks already covered by tier-1\n");
             for b in &covered {
-                println!("- `{}.{}` (provider `{}`)", b.kind.block_kind_str(), b.type_name, b.provider);
+                println!(
+                    "- `{}.{}` (provider `{}`)",
+                    b.kind.block_kind_str(),
+                    b.type_name,
+                    b.provider
+                );
             }
             println!();
         }
@@ -396,11 +404,7 @@ fn emit_markdown(
             let key = (a.provider.as_str(), a.type_name.as_str());
             if key != current {
                 current = key;
-                println!(
-                    "\n## `{}.{}`",
-                    a.kind.block_kind_str(),
-                    a.type_name
-                );
+                println!("\n## `{}.{}`", a.kind.block_kind_str(), a.type_name);
             }
             print!("- `{}`", a.attr_name);
             if let Some(desc) = &a.description {
@@ -456,7 +460,10 @@ fn emit_json(
         "blocks": blocks_json,
         "attributes": attrs_json,
     });
-    println!("{}", sonic_rs::to_string_pretty(&combined).unwrap_or_default());
+    println!(
+        "{}",
+        sonic_rs::to_string_pretty(&combined).unwrap_or_default()
+    );
 }
 
 /// Emit a Rust scaffolding for a tier-1 rule covering this
@@ -472,13 +479,23 @@ fn emit_scaffold(b: &DepBlock) {
     println!("// File: crates/tfls-diag/src/{mod_name}.rs");
     println!("// Add to crates/tfls-diag/src/lib.rs:");
     println!("//   pub mod {mod_name};");
-    println!("//   pub use {mod_name}::deprecated_{}_diagnostics{{,_for_module}};",
-             b.type_name);
+    println!(
+        "//   pub use {mod_name}::deprecated_{}_diagnostics{{,_for_module}};",
+        b.type_name
+    );
     println!("// Add to deprecation_rule.rs::HARDCODED_DEPRECATION_LABELS:");
-    println!("//   (\"{}\", \"{}\"),", b.kind.block_kind_str(), b.type_name);
+    println!(
+        "//   (\"{}\", \"{}\"),",
+        b.kind.block_kind_str(),
+        b.type_name
+    );
     println!();
     println!("//! `terraform_deprecated_{}` — flag uses of", b.type_name);
-    println!("//! `{} \"{}\"`. Provider-version-gated.", b.kind.block_kind_str(), b.type_name);
+    println!(
+        "//! `{} \"{}\"`. Provider-version-gated.",
+        b.kind.block_kind_str(),
+        b.type_name
+    );
     println!("//!");
     if let Some(desc) = &b.description {
         for line in first_paragraph(desc, 600).lines() {
@@ -503,12 +520,16 @@ fn emit_scaffold(b: &DepBlock) {
     println!("        provider: \"{}\",", b.provider);
     println!("        threshold: \"X.Y.Z\", // TODO: version that introduced the replacement");
     println!("    }},");
-    println!("    message: \"{} `{}` is deprecated — see {url}\",",
-             kind_word, b.type_name);
+    println!(
+        "    message: \"{} `{}` is deprecated — see {url}\",",
+        kind_word, b.type_name
+    );
     println!("}};");
     println!();
-    println!("pub fn deprecated_{}_diagnostics(body: &Body, rope: &Rope) -> Vec<Diagnostic> {{",
-             b.type_name);
+    println!(
+        "pub fn deprecated_{}_diagnostics(body: &Body, rope: &Rope) -> Vec<Diagnostic> {{",
+        b.type_name
+    );
     println!("    deprecation_rule::diagnostics(&RULE, body, rope)");
     println!("}}");
     println!();
@@ -550,7 +571,7 @@ fn find_terraform_init_root(start: &Path) -> Option<PathBuf> {
 }
 
 fn init_tracing(verbose: u8) {
-    use tracing_subscriber::{EnvFilter, fmt};
+    use tracing_subscriber::{fmt, EnvFilter};
     let level = match verbose {
         0 => "warn",
         1 => "info",

@@ -121,8 +121,7 @@ mod tests {
     #[test]
     fn refuses_to_format_broken_source() {
         let src = "resource \"x\" {\n";
-        let err =
-            format_source(src, FormatStyle::Minimal).expect_err("must reject broken source");
+        let err = format_source(src, FormatStyle::Minimal).expect_err("must reject broken source");
         let _ = err;
     }
 }

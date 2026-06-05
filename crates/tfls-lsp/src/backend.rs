@@ -8,26 +8,26 @@ use tfls_state::{JobQueue, StateStore};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tower_lsp::lsp_types::{
+    request::{GotoDeclarationParams, GotoDeclarationResponse},
     CodeActionParams, CodeActionResponse, CodeLens, CodeLensParams, CompletionParams,
-    CompletionResponse, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidChangeConfigurationParams, DidChangeWatchedFilesParams, DidOpenTextDocumentParams,
+    CompletionResponse, DidChangeConfigurationParams, DidChangeTextDocumentParams,
+    DidChangeWatchedFilesParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
     DidSaveTextDocumentParams, DocumentDiagnosticParams, DocumentDiagnosticReport,
-    DocumentDiagnosticReportResult, DocumentFormattingParams, ExecuteCommandParams,
-    DocumentHighlight, DocumentHighlightParams, DocumentLink, DocumentLinkParams,
-    DocumentOnTypeFormattingParams, DocumentRangeFormattingParams, FullDocumentDiagnosticReport,
-    InlayHint, InlayHintParams, DocumentSymbolParams, DocumentSymbolResponse, FoldingRange,
-    FoldingRangeParams, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams,
-    InitializeParams, InitializeResult, InitializedParams, Location, MessageType,
-    ReferenceParams, RelatedFullDocumentDiagnosticReport, SemanticTokensParams,
-    PrepareRenameResponse, RenameParams, SelectionRange, SelectionRangeParams,
-    SemanticTokensRangeParams, SemanticTokensRangeResult, SemanticTokensResult, ServerInfo,
-    SignatureHelp, SignatureHelpParams, SymbolInformation, TextDocumentPositionParams, TextEdit,
+    DocumentDiagnosticReportResult, DocumentFormattingParams, DocumentHighlight,
+    DocumentHighlightParams, DocumentLink, DocumentLinkParams, DocumentOnTypeFormattingParams,
+    DocumentRangeFormattingParams, DocumentSymbolParams, DocumentSymbolResponse,
+    ExecuteCommandParams, FoldingRange, FoldingRangeParams, FullDocumentDiagnosticReport,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, InitializeParams,
+    InitializeResult, InitializedParams, InlayHint, InlayHintParams, Location, MessageType,
+    PrepareRenameResponse, ReferenceParams, RelatedFullDocumentDiagnosticReport, RenameParams,
+    SelectionRange, SelectionRangeParams, SemanticTokensParams, SemanticTokensRangeParams,
+    SemanticTokensRangeResult, SemanticTokensResult, ServerInfo, SignatureHelp,
+    SignatureHelpParams, SymbolInformation, TextDocumentPositionParams, TextEdit,
     WorkspaceDiagnosticParams, WorkspaceDiagnosticReport, WorkspaceDiagnosticReportResult,
     WorkspaceDocumentDiagnosticReport, WorkspaceEdit, WorkspaceFullDocumentDiagnosticReport,
     WorkspaceSymbolParams,
-    request::{GotoDeclarationParams, GotoDeclarationResponse},
 };
-use tower_lsp::{Client, LanguageServer, jsonrpc};
+use tower_lsp::{jsonrpc, Client, LanguageServer};
 
 use crate::capabilities::server_capabilities;
 use crate::handlers;
@@ -198,9 +198,7 @@ impl LanguageServer for Backend {
                 if let Ok(sonic) = sonic_rs::from_str::<sonic_rs::Value>(&serialised) {
                     self.state.config.update_from_json(&sonic);
                 } else {
-                    tracing::warn!(
-                        "initializationOptions: failed to reparse as sonic-rs value"
-                    );
+                    tracing::warn!("initializationOptions: failed to reparse as sonic-rs value");
                 }
             }
         }
@@ -352,10 +350,7 @@ impl LanguageServer for Backend {
         handlers::navigation::goto_definition(self, params).await
     }
 
-    async fn references(
-        &self,
-        params: ReferenceParams,
-    ) -> jsonrpc::Result<Option<Vec<Location>>> {
+    async fn references(&self, params: ReferenceParams) -> jsonrpc::Result<Option<Vec<Location>>> {
         handlers::navigation::references(self, params).await
     }
 
@@ -440,10 +435,7 @@ impl LanguageServer for Backend {
         handlers::navigation::goto_declaration(self, params).await
     }
 
-    async fn code_lens(
-        &self,
-        params: CodeLensParams,
-    ) -> jsonrpc::Result<Option<Vec<CodeLens>>> {
+    async fn code_lens(&self, params: CodeLensParams) -> jsonrpc::Result<Option<Vec<CodeLens>>> {
         handlers::code_lens::code_lens(self, params).await
     }
 
@@ -468,10 +460,7 @@ impl LanguageServer for Backend {
         handlers::folding::selection_range(self, params).await
     }
 
-    async fn inlay_hint(
-        &self,
-        params: InlayHintParams,
-    ) -> jsonrpc::Result<Option<Vec<InlayHint>>> {
+    async fn inlay_hint(&self, params: InlayHintParams) -> jsonrpc::Result<Option<Vec<InlayHint>>> {
         handlers::inlay_hints::inlay_hint(self, params).await
     }
 
@@ -489,10 +478,7 @@ impl LanguageServer for Backend {
         handlers::rename::prepare_rename(self, params).await
     }
 
-    async fn rename(
-        &self,
-        params: RenameParams,
-    ) -> jsonrpc::Result<Option<WorkspaceEdit>> {
+    async fn rename(&self, params: RenameParams) -> jsonrpc::Result<Option<WorkspaceEdit>> {
         handlers::rename::rename(self, params).await
     }
 

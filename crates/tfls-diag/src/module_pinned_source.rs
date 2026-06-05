@@ -85,9 +85,7 @@ fn has_pinned_ref(src: &str, kind: SourceKind) -> bool {
             // `?ref=...` is the canonical pin for git; `?rev=...` for hg.
             // Also accept `#<sha>` URL fragments (less common but used
             // for GitHub) — tflint accepts them.
-            src.contains("?ref=")
-                || src.contains("&ref=")
-                || src.contains("#")
+            src.contains("?ref=") || src.contains("&ref=") || src.contains("#")
         }
         SourceKind::Hg => src.contains("?rev=") || src.contains("&rev="),
         SourceKind::Other => true,
@@ -108,9 +106,7 @@ mod tests {
 
     #[test]
     fn flags_unpinned_git_source() {
-        let d = diags(
-            r#"module "x" { source = "git::https://example.com/foo.git" }"#,
-        );
+        let d = diags(r#"module "x" { source = "git::https://example.com/foo.git" }"#);
         assert_eq!(d.len(), 1);
         assert!(d[0].message.contains("git"), "got: {}", d[0].message);
         assert!(d[0].message.contains("ref="), "got: {}", d[0].message);
@@ -118,25 +114,19 @@ mod tests {
 
     #[test]
     fn silent_when_git_source_pinned_with_ref() {
-        let d = diags(
-            r#"module "x" { source = "git::https://example.com/foo.git?ref=v1.0.0" }"#,
-        );
+        let d = diags(r#"module "x" { source = "git::https://example.com/foo.git?ref=v1.0.0" }"#);
         assert!(d.is_empty(), "got: {d:?}");
     }
 
     #[test]
     fn silent_when_git_source_pinned_with_fragment() {
-        let d = diags(
-            r#"module "x" { source = "git::https://example.com/foo.git#abc123" }"#,
-        );
+        let d = diags(r#"module "x" { source = "git::https://example.com/foo.git#abc123" }"#);
         assert!(d.is_empty(), "got: {d:?}");
     }
 
     #[test]
     fn flags_unpinned_github_shorthand() {
-        let d = diags(
-            r#"module "x" { source = "github.com/example/foo" }"#,
-        );
+        let d = diags(r#"module "x" { source = "github.com/example/foo" }"#);
         assert_eq!(d.len(), 1);
     }
 

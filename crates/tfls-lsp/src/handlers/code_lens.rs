@@ -19,7 +19,11 @@ pub async fn code_lens(
 
     let mut out = Vec::new();
     collect(&doc, &backend.state, &mut out);
-    if out.is_empty() { Ok(None) } else { Ok(Some(out)) }
+    if out.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(out))
+    }
 }
 
 fn collect(doc: &DocumentState, state: &StateStore, out: &mut Vec<CodeLens>) {
@@ -37,10 +41,9 @@ impl<'a> SymbolVisitor for LensCollector<'a> {
         // Providers have no reference-count lens today — skip
         // them rather than emitting "0 references" clutter.
         let key = match sym.kind {
-            SymbolKind::Variable
-            | SymbolKind::Local
-            | SymbolKind::Output
-            | SymbolKind::Module => SymbolKey::new(sym.kind, &sym.name),
+            SymbolKind::Variable | SymbolKind::Local | SymbolKind::Output | SymbolKind::Module => {
+                SymbolKey::new(sym.kind, &sym.name)
+            }
             _ => return,
         };
         push_lens(sym, key, self.state, self.out);
@@ -92,10 +95,7 @@ mod tests {
         let mut out = Vec::new();
         collect(&doc, &state, &mut out);
         assert_eq!(out.len(), 1);
-        assert_eq!(
-            out[0].command.as_ref().expect("cmd").title,
-            "0 references"
-        );
+        assert_eq!(out[0].command.as_ref().expect("cmd").title, "0 references");
     }
 
     #[test]

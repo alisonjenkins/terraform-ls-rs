@@ -1,7 +1,7 @@
 //! HCL parsing wrapper around `hcl-edit`.
 
 use crate::error::ParseError;
-use crate::safe::{BodyParseError, parse_body};
+use crate::safe::{parse_body, BodyParseError};
 
 /// Result of parsing a single `.tf` file.
 #[derive(Debug)]
@@ -36,10 +36,7 @@ pub fn parse_source(source: &str) -> ParsedFile {
             let message = e.to_string();
             ParsedFile {
                 body: None,
-                errors: vec![ParseError::Syntax {
-                    message,
-                    source: e,
-                }],
+                errors: vec![ParseError::Syntax { message, source: e }],
             }
         }
         Err(BodyParseError::Panicked(p)) => ParsedFile {
@@ -72,7 +69,10 @@ mod tests {
     #[test]
     fn parses_empty_source() {
         let parsed = parse_source("");
-        assert!(parsed.body.is_some(), "empty source should parse to empty body");
+        assert!(
+            parsed.body.is_some(),
+            "empty source should parse to empty body"
+        );
         assert!(!parsed.has_errors());
     }
 

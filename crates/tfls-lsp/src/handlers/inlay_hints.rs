@@ -23,7 +23,7 @@ use lsp_types::{
 };
 use ropey::Rope;
 use std::collections::HashMap;
-use tfls_parser::{ReferenceKind, hcl_span_to_lsp_range};
+use tfls_parser::{hcl_span_to_lsp_range, ReferenceKind};
 use tower_lsp::jsonrpc;
 
 use crate::backend::Backend;
@@ -86,7 +86,11 @@ pub async fn inlay_hint(
         &uri,
     ));
 
-    if hints.is_empty() { Ok(None) } else { Ok(Some(hints)) }
+    if hints.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(hints))
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -103,28 +107,29 @@ fn is_opentofu_file(uri: &Url) -> bool {
     path.ends_with(".tofu") || path.ends_with(".tofu.json")
 }
 
-fn lifecycle_enabled_hints(
-    body: &Body,
-    rope: &Rope,
-    visible: &Range,
-    uri: &Url,
-) -> Vec<InlayHint> {
+fn lifecycle_enabled_hints(body: &Body, rope: &Rope, visible: &Range, uri: &Url) -> Vec<InlayHint> {
     let mut out = Vec::new();
     if is_opentofu_file(uri) {
         return out;
     }
     for structure in body.iter() {
-        let Some(block) = structure.as_block() else { continue };
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
         if !matches!(block.ident.as_str(), "resource" | "data") {
             continue;
         }
         for inner in block.body.iter() {
-            let Some(lifecycle) = inner.as_block() else { continue };
+            let Some(lifecycle) = inner.as_block() else {
+                continue;
+            };
             if lifecycle.ident.as_str() != "lifecycle" {
                 continue;
             }
             for entry in lifecycle.body.iter() {
-                let Some(attr) = entry.as_attribute() else { continue };
+                let Some(attr) = entry.as_attribute() else {
+                    continue;
+                };
                 if attr.key.as_str() != "enabled" {
                     continue;
                 }
@@ -137,7 +142,9 @@ fn lifecycle_enabled_hints(
                 // `enabled = expr` form, so its end reliably sits
                 // after the entire value regardless of shape.
                 let Some(span) = attr.span() else { continue };
-                let Ok(range) = hcl_span_to_lsp_range(rope, span) else { continue };
+                let Ok(range) = hcl_span_to_lsp_range(rope, span) else {
+                    continue;
+                };
                 if !within(visible, range) {
                     continue;
                 }
@@ -169,7 +176,10 @@ fn lifecycle_enabled_hints(
 #[derive(Debug, Clone)]
 enum VersionSource {
     TerraformCli,
-    Provider { namespace: String, name: String },
+    Provider {
+        namespace: String,
+        name: String,
+    },
     Module {
         namespace: String,
         name: String,
@@ -187,17 +197,13 @@ fn version_hints(
 ) -> Vec<InlayHint> {
     let mut out = Vec::new();
     for structure in body.iter() {
-        let Some(block) = structure.as_block() else { continue };
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
         match block.ident.as_str() {
-            "terraform" => walk_terraform(
-                &block.body,
-                rope,
-                visible,
-                stale_days,
-                state,
-                uri,
-                &mut out,
-            ),
+            "terraform" => {
+                walk_terraform(&block.body, rope, visible, stale_days, state, uri, &mut out)
+            }
             "module" => walk_module(&block.body, rope, visible, stale_days, &mut out),
             _ => {}
         }
@@ -229,15 +235,7 @@ fn walk_terraform(
             }
         } else if let Some(nested) = structure.as_block() {
             if nested.ident.as_str() == "required_providers" {
-                walk_required_providers(
-                    &nested.body,
-                    rope,
-                    visible,
-                    stale_days,
-                    state,
-                    uri,
-                    out,
-                );
+                walk_required_providers(&nested.body, rope, visible, stale_days, state, uri, out);
             }
         }
     }
@@ -253,14 +251,18 @@ fn walk_required_providers(
     out: &mut Vec<InlayHint>,
 ) {
     for structure in body.iter() {
-        let Some(attr) = structure.as_attribute() else { continue };
+        let Some(attr) = structure.as_attribute() else {
+            continue;
+        };
         // The map key in `required_providers` is the local name
         // the user picked (`aws`, `awsv5`, …). Used for the
         // lock-file lookup below — `module_locked_provider_version`
         // matches it back to the declared `source` (or the
         // implicit `hashicorp/<name>` default).
         let provider_local_name = attr.key.as_str().to_string();
-        let Expression::Object(obj) = &attr.value else { continue };
+        let Expression::Object(obj) = &attr.value else {
+            continue;
+        };
         let mut source_str: Option<String> = None;
         let mut version_expr: Option<&Expression> = None;
         for (key, value) in obj.iter() {
@@ -272,13 +274,12 @@ fn walk_required_providers(
                 _ => {}
             }
         }
-        let Some(source) = source_str.and_then(|s| parse_provider_source(&s)) else { continue };
+        let Some(source) = source_str.and_then(|s| parse_provider_source(&s)) else {
+            continue;
+        };
         let Some(expr) = version_expr else { continue };
-        let locked = crate::handlers::util::module_locked_provider_version(
-            state,
-            uri,
-            &provider_local_name,
-        );
+        let locked =
+            crate::handlers::util::module_locked_provider_version(state, uri, &provider_local_name);
         emit_for_attr(
             expr,
             rope,
@@ -304,7 +305,9 @@ fn walk_module(
     let mut source_str: Option<String> = None;
     let mut version_expr: Option<&Expression> = None;
     for structure in body.iter() {
-        let Some(attr) = structure.as_attribute() else { continue };
+        let Some(attr) = structure.as_attribute() else {
+            continue;
+        };
         match attr.key.as_str() {
             "source" => source_str = literal_string(&attr.value),
             "version" => version_expr = Some(&attr.value),
@@ -340,7 +343,9 @@ fn emit_for_attr(
     out: &mut Vec<InlayHint>,
 ) {
     let Some(span) = expr.span() else { return };
-    let Ok(range) = hcl_span_to_lsp_range(rope, span) else { return };
+    let Ok(range) = hcl_span_to_lsp_range(rope, span) else {
+        return;
+    };
     if !within(visible, range) {
         return;
     }
@@ -358,14 +363,20 @@ fn emit_for_attr(
     } else {
         range.end
     };
-    let Some(raw) = literal_string(expr) else { return };
+    let Some(raw) = literal_string(expr) else {
+        return;
+    };
     let parsed = tfls_core::version_constraint::parse(&raw);
     if !parsed.errors.is_empty() || parsed.constraints.is_empty() {
         return;
     }
-    let Some(entries) = read_versions_with_dates(source) else { return };
+    let Some(entries) = read_versions_with_dates(source) else {
+        return;
+    };
     let composed = compose_label(&parsed.constraints, &entries, stale_days, locked);
-    let Some((label, has_lock)) = composed else { return };
+    let Some((label, has_lock)) = composed else {
+        return;
+    };
     let tooltip = if has_lock {
         Some(InlayHintTooltip::MarkupContent(MarkupContent {
             kind: MarkupKind::Markdown,
@@ -406,9 +417,7 @@ fn compose_label(
     // upstream; see `merge_with_provenance`). Fallback: scan manually.
     let latest_overall = entries.first().map(|(v, _)| v.clone())?;
     // Latest matching = first entry that satisfies the constraint.
-    let latest_matching = entries
-        .iter()
-        .find(|(v, _)| satisfies_all(constraints, v));
+    let latest_matching = entries.iter().find(|(v, _)| satisfies_all(constraints, v));
 
     let locked_str = locked.map(|v| v.to_string());
 
@@ -519,14 +528,10 @@ fn humanise_age(days: i64) -> String {
 //  by the completion path; no network)
 // -------------------------------------------------------------------------
 
-fn read_versions_with_dates(
-    source: &VersionSource,
-) -> Option<Vec<(String, Option<String>)>> {
+fn read_versions_with_dates(source: &VersionSource) -> Option<Vec<(String, Option<String>)>> {
     match source {
         VersionSource::TerraformCli => read_tool_cache(),
-        VersionSource::Provider { namespace, name } => {
-            read_provider_cache(namespace, name)
-        }
+        VersionSource::Provider { namespace, name } => read_provider_cache(namespace, name),
         VersionSource::Module {
             namespace,
             name,
@@ -548,7 +553,9 @@ fn read_tool_cache() -> Option<Vec<(String, Option<String>)>> {
         let Some(path) = cache_path(&["tool-versions", &format!("{slug}.json")]) else {
             continue;
         };
-        let Ok(body) = std::fs::read_to_string(&path) else { continue };
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            continue;
+        };
         // New richer shape is a list of objects; old shape was a list of
         // bare version strings — accept both.
         if let Ok(rich) = serde_json::from_str::<Vec<Entry>>(&body) {
@@ -568,7 +575,11 @@ fn read_tool_cache() -> Option<Vec<(String, Option<String>)>> {
         }
     }
     sort_versions_desc(&mut out);
-    if out.is_empty() { None } else { Some(out) }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 fn read_provider_cache(namespace: &str, name: &str) -> Option<Vec<(String, Option<String>)>> {
@@ -584,7 +595,9 @@ fn read_provider_cache(namespace: &str, name: &str) -> Option<Vec<(String, Optio
         "dates.json",
     ]) {
         if let Ok(body) = std::fs::read_to_string(&path) {
-            if let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, String>>(&body) {
+            if let Ok(map) =
+                serde_json::from_str::<std::collections::HashMap<String, String>>(&body)
+            {
                 dates.extend(map);
             }
         }
@@ -597,7 +610,9 @@ fn read_provider_cache(namespace: &str, name: &str) -> Option<Vec<(String, Optio
         "dates.json",
     ]) {
         if let Ok(body) = std::fs::read_to_string(&path) {
-            if let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, String>>(&body) {
+            if let Ok(map) =
+                serde_json::from_str::<std::collections::HashMap<String, String>>(&body)
+            {
                 for (v, d) in map {
                     dates.entry(v).or_insert(d);
                 }
@@ -616,8 +631,12 @@ fn read_provider_cache(namespace: &str, name: &str) -> Option<Vec<(String, Optio
         ]) else {
             continue;
         };
-        let Ok(body) = std::fs::read_to_string(&path) else { continue };
-        let Ok(vs) = serde_json::from_str::<Vec<String>>(&body) else { continue };
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(vs) = serde_json::from_str::<Vec<String>>(&body) else {
+            continue;
+        };
         for v in vs {
             if seen.insert(v.clone()) {
                 let d = dates.get(&v).cloned();
@@ -626,7 +645,11 @@ fn read_provider_cache(namespace: &str, name: &str) -> Option<Vec<(String, Optio
         }
     }
     sort_versions_desc(&mut out);
-    if out.is_empty() { None } else { Some(out) }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 fn read_module_cache(
@@ -648,8 +671,12 @@ fn read_module_cache(
         ]) else {
             continue;
         };
-        let Ok(body) = std::fs::read_to_string(&path) else { continue };
-        let Ok(vs) = serde_json::from_str::<Vec<String>>(&body) else { continue };
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(vs) = serde_json::from_str::<Vec<String>>(&body) else {
+            continue;
+        };
         for v in vs {
             if seen.insert(v.clone()) {
                 out.push((v, None));
@@ -657,7 +684,11 @@ fn read_module_cache(
         }
     }
     sort_versions_desc(&mut out);
-    if out.is_empty() { None } else { Some(out) }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 fn sort_versions_desc(entries: &mut [(String, Option<String>)]) {
@@ -735,9 +766,7 @@ fn literal_string(expr: &Expression) -> Option<String> {
             let mut collected = String::new();
             for element in t.iter() {
                 match element {
-                    hcl_edit::template::Element::Literal(lit) => {
-                        collected.push_str(lit.as_str())
-                    }
+                    hcl_edit::template::Element::Literal(lit) => collected.push_str(lit.as_str()),
                     _ => return None,
                 }
             }
@@ -820,8 +849,7 @@ fn literal_scalar(expr: &Expression) -> Option<String> {
 }
 
 fn within(outer: &Range, inner: Range) -> bool {
-    (inner.start.line, inner.start.character)
-        >= (outer.start.line, outer.start.character)
+    (inner.start.line, inner.start.character) >= (outer.start.line, outer.start.character)
         && (inner.end.line, inner.end.character) <= (outer.end.line, outer.end.character)
 }
 
@@ -934,7 +962,10 @@ mod tests {
         match &h.tooltip {
             Some(InlayHintTooltip::MarkupContent(mc)) => {
                 assert!(mc.value.contains("OpenTofu"), "tooltip missing 'OpenTofu'");
-                assert!(mc.value.contains("count"), "tooltip missing 'count' fallback");
+                assert!(
+                    mc.value.contains("count"),
+                    "tooltip missing 'count' fallback"
+                );
             }
             other => panic!("expected markdown tooltip, got {other:?}"),
         }
@@ -1131,8 +1162,7 @@ mod tests {
             entry("5.50.0", 200),
         ];
         let lock = semver::Version::new(5, 50, 0);
-        let (label, _) =
-            compose_label(&constraints, &entries, 30, Some(&lock)).expect("label");
+        let (label, _) = compose_label(&constraints, &entries, 30, Some(&lock)).expect("label");
         // Constraint best-match (5.94.0) is the latest_overall —
         // ✓ arm. Drift segment shows the lock pin.
         assert_eq!(label, "✓ 5.94.0  (locked: 5.50.0)", "got: {label}");

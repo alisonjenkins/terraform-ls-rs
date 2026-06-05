@@ -99,14 +99,30 @@ mod tests {
         fn variable_is_referenced(&self, name: &str) -> bool {
             self.referenced.contains(name)
         }
-        fn local_is_referenced(&self, _: &str) -> bool { true }
-        fn data_source_is_referenced(&self, _: &str, _: &str) -> bool { true }
-        fn used_provider_locals(&self) -> HashSet<String> { HashSet::new() }
-        fn present_files(&self) -> HashSet<String> { HashSet::new() }
-        fn is_root_module(&self) -> bool { self.is_root }
-        fn module_has_required_version(&self) -> bool { true }
-        fn is_primary_terraform_doc(&self) -> bool { true }
-        fn providers_with_version_set(&self) -> HashSet<String> { HashSet::new() }
+        fn local_is_referenced(&self, _: &str) -> bool {
+            true
+        }
+        fn data_source_is_referenced(&self, _: &str, _: &str) -> bool {
+            true
+        }
+        fn used_provider_locals(&self) -> HashSet<String> {
+            HashSet::new()
+        }
+        fn present_files(&self) -> HashSet<String> {
+            HashSet::new()
+        }
+        fn is_root_module(&self) -> bool {
+            self.is_root
+        }
+        fn module_has_required_version(&self) -> bool {
+            true
+        }
+        fn is_primary_terraform_doc(&self) -> bool {
+            true
+        }
+        fn providers_with_version_set(&self) -> HashSet<String> {
+            HashSet::new()
+        }
     }
 
     fn diags_with_lookup(src: &str, lookup: &dyn ModuleGraphLookup) -> Vec<Diagnostic> {
@@ -120,7 +136,11 @@ mod tests {
         let d = diags(r#"variable "region" {}"#);
         assert_eq!(d.len(), 1);
         assert!(d[0].message.contains("`region`"), "got: {}", d[0].message);
-        assert!(d[0].message.contains("has no type"), "got: {}", d[0].message);
+        assert!(
+            d[0].message.contains("has no type"),
+            "got: {}",
+            d[0].message
+        );
         assert_eq!(d[0].severity, Some(DiagnosticSeverity::WARNING));
     }
 

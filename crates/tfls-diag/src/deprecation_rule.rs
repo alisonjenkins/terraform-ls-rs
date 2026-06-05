@@ -17,7 +17,7 @@
 
 use hcl_edit::expr::Expression;
 use hcl_edit::repr::Span;
-use hcl_edit::structure::{Body, BlockLabel};
+use hcl_edit::structure::{BlockLabel, Body};
 use lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag};
 use ropey::Rope;
 use tfls_parser::hcl_span_to_lsp_range;
@@ -116,9 +116,7 @@ pub enum Gate {
     /// replacement (e.g. `"1.4.0"` for `terraform_data`).
     /// Constraints whose minimum admitted version is below the
     /// threshold suppress the rule.
-    TerraformVersion {
-        threshold: &'static str,
-    },
+    TerraformVersion { threshold: &'static str },
     /// `terraform { required_providers { <name> = ... } }` —
     /// either short form `"~> 4.0"` or long form
     /// `{ source = "...", version = "~> 4.0" }`. Used for
@@ -269,9 +267,7 @@ pub fn diagnostics_from_table(
 pub fn body_supports_rule(rule: &DeprecationRule, body: &Body) -> bool {
     let constraint = match &rule.gate {
         Gate::TerraformVersion { .. } => extract_required_version(body),
-        Gate::ProviderVersion { provider, .. } => {
-            extract_required_provider_version(body, provider)
-        }
+        Gate::ProviderVersion { provider, .. } => extract_required_provider_version(body, provider),
     };
     let Some(c) = constraint else { return true };
     supports(rule, &c)
@@ -287,8 +283,7 @@ pub fn supports(rule: &DeprecationRule, constraint: &str) -> bool {
     if parsed.constraints.is_empty() {
         return true;
     }
-    let Some(min) = tfls_core::version_constraint::min_admitted_version(&parsed.constraints)
-    else {
+    let Some(min) = tfls_core::version_constraint::min_admitted_version(&parsed.constraints) else {
         return false;
     };
     tfls_core::version_constraint::version_at_least(min, rule.threshold())
@@ -371,9 +366,7 @@ pub fn extract_required_version(body: &Body) -> Option<String> {
 fn body_supports(rule: &DeprecationRule, body: &Body) -> bool {
     let constraint = match &rule.gate {
         Gate::TerraformVersion { .. } => extract_required_version(body),
-        Gate::ProviderVersion { provider, .. } => {
-            extract_required_provider_version(body, provider)
-        }
+        Gate::ProviderVersion { provider, .. } => extract_required_provider_version(body, provider),
     };
     let Some(c) = constraint else { return true };
     supports(rule, &c)
@@ -396,10 +389,7 @@ fn body_supports(rule: &DeprecationRule, body: &Body) -> bool {
 /// Returns `None` when the provider isn't listed, when the
 /// long form omits `version`, or when the constraint is a
 /// non-string expression.
-pub fn extract_required_provider_version(
-    body: &Body,
-    provider_name: &str,
-) -> Option<String> {
+pub fn extract_required_provider_version(body: &Body, provider_name: &str) -> Option<String> {
     let canonical = provider_ns_name(provider_name);
     for structure in body.iter() {
         let Some(tf_block) = structure.as_block() else {
@@ -495,10 +485,7 @@ fn entry_matches_provider(local_key: &str, explicit_source: Option<&str>, canoni
 /// entries (`aws = "~> 4.0"`) implicitly resolve to
 /// `hashicorp/<name>` per Terraform's own rule, so callers should
 /// fall back to that default on `None`.
-pub fn extract_required_provider_source(
-    body: &Body,
-    provider_name: &str,
-) -> Option<String> {
+pub fn extract_required_provider_source(body: &Body, provider_name: &str) -> Option<String> {
     for structure in body.iter() {
         let Some(tf_block) = structure.as_block() else {
             continue;
@@ -524,12 +511,12 @@ pub fn extract_required_provider_source(
                     for (k, v) in obj.iter() {
                         let key_matches = match k {
                             hcl_edit::expr::ObjectKey::Ident(id) => id.as_str() == "source",
-                            hcl_edit::expr::ObjectKey::Expression(
-                                Expression::Variable(var),
-                            ) => var.value().as_str() == "source",
-                            hcl_edit::expr::ObjectKey::Expression(
-                                Expression::String(s),
-                            ) => s.value().as_str() == "source",
+                            hcl_edit::expr::ObjectKey::Expression(Expression::Variable(var)) => {
+                                var.value().as_str() == "source"
+                            }
+                            hcl_edit::expr::ObjectKey::Expression(Expression::String(s)) => {
+                                s.value().as_str() == "source"
+                            }
                             _ => false,
                         };
                         if key_matches {
@@ -644,7 +631,9 @@ mod tests {
 
     #[test]
     fn extract_required_version_returns_none_when_absent() {
-        let body = parse_source("resource \"x\" \"y\" {}\n").body.expect("parses");
+        let body = parse_source("resource \"x\" \"y\" {}\n")
+            .body
+            .expect("parses");
         assert!(extract_required_version(&body).is_none());
     }
 
@@ -711,11 +700,10 @@ mod tests {
 
     #[test]
     fn extract_required_provider_version_short_form() {
-        let body = parse_source(
-            "terraform {\n  required_providers {\n    aws = \"~> 4.0\"\n  }\n}\n",
-        )
-        .body
-        .expect("parses");
+        let body =
+            parse_source("terraform {\n  required_providers {\n    aws = \"~> 4.0\"\n  }\n}\n")
+                .body
+                .expect("parses");
         assert_eq!(
             extract_required_provider_version(&body, "aws"),
             Some("~> 4.0".into())
@@ -800,11 +788,10 @@ mod tests {
 
     #[test]
     fn extract_required_provider_source_returns_none_for_short_form() {
-        let body = parse_source(
-            "terraform {\n  required_providers {\n    aws = \"~> 4.0\"\n  }\n}\n",
-        )
-        .body
-        .expect("parses");
+        let body =
+            parse_source("terraform {\n  required_providers {\n    aws = \"~> 4.0\"\n  }\n}\n")
+                .body
+                .expect("parses");
         assert!(extract_required_provider_source(&body, "aws").is_none());
     }
 

@@ -134,9 +134,8 @@ mod tests {
 
     #[test]
     fn flags_kubernetes_pod_when_unconstrained() {
-        let d = diags(
-            "resource \"kubernetes_pod\" \"x\" {\n  metadata {\n    name = \"x\"\n  }\n}\n",
-        );
+        let d =
+            diags("resource \"kubernetes_pod\" \"x\" {\n  metadata {\n    name = \"x\"\n  }\n}\n");
         assert_eq!(d.len(), 1);
         assert!(d[0].message.contains("_v1"));
     }
@@ -218,8 +217,7 @@ mod tests {
 
     #[test]
     fn module_aware_helper_fires_when_supports_overridden() {
-        let src =
-            "resource \"kubernetes_pod\" \"x\" {\n  metadata {\n    name = \"x\"\n  }\n}\n";
+        let src = "resource \"kubernetes_pod\" \"x\" {\n  metadata {\n    name = \"x\"\n  }\n}\n";
         let rope = Rope::from_str(src);
         let body = parse_source(src).body.expect("parses");
         let d = kubernetes_renames_diagnostics_for_module(&body, &rope, &|_rule| true);
@@ -228,8 +226,7 @@ mod tests {
 
     #[test]
     fn module_aware_helper_suppresses_when_no_rule_supported() {
-        let src =
-            "resource \"kubernetes_pod\" \"x\" {\n  metadata {\n    name = \"x\"\n  }\n}\n";
+        let src = "resource \"kubernetes_pod\" \"x\" {\n  metadata {\n    name = \"x\"\n  }\n}\n";
         let rope = Rope::from_str(src);
         let body = parse_source(src).body.expect("parses");
         let d = kubernetes_renames_diagnostics_for_module(&body, &rope, &|_rule| false);

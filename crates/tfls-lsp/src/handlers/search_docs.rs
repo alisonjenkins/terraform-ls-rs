@@ -197,10 +197,7 @@ pub async fn search_docs(
     })
 }
 
-pub async fn get_doc(
-    backend: &Backend,
-    params: GetDocParams,
-) -> jsonrpc::Result<GetDocResult> {
+pub async fn get_doc(backend: &Backend, params: GetDocParams) -> jsonrpc::Result<GetDocResult> {
     let name = params.name;
     let kind = params.kind;
 
@@ -394,7 +391,10 @@ fn score_item(
     let max_possible = (W_NAME * terms.len() as f32) + 1.0;
     let normalised = (total / max_possible).min(1.0);
 
-    Some((normalised, build_item(name, kind, addr, summary, normalised, matched)))
+    Some((
+        normalised,
+        build_item(name, kind, addr, summary, normalised, matched),
+    ))
 }
 
 fn build_item(
@@ -427,7 +427,10 @@ fn shortness_bonus(name_lc: &str) -> f32 {
 }
 
 fn first_line(s: &str) -> &str {
-    s.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim()
+    s.lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim()
 }
 
 fn find_entry(
@@ -537,8 +540,7 @@ fn render_full_doc(name: &str, kind: Kind, _provider: &str, block: &BlockSchema)
 
     if !block.block_types.is_empty() {
         out.push_str("## Nested Blocks\n\n");
-        let mut entries: Vec<(&String, &NestedBlockSchema)> =
-            block.block_types.iter().collect();
+        let mut entries: Vec<(&String, &NestedBlockSchema)> = block.block_types.iter().collect();
         entries.sort_by(|a, b| a.0.cmp(b.0));
         for (nested_name, nb) in entries {
             render_nested_block_summary(&mut out, nested_name, nb);
@@ -591,31 +593,40 @@ fn render_full_builtin_doc(
         None
     };
 
-    let parent_detail =
-        parent_block.and_then(|b| (!b.detail.is_empty()).then_some(b.detail));
+    let parent_detail = parent_block.and_then(|b| (!b.detail.is_empty()).then_some(b.detail));
     if let Some(detail) = parent_detail {
         out.push_str(detail);
         out.push_str("\n\n");
     } else if steps.len() == 1 {
         let desc = match steps[0].keyword.as_str() {
-            "terraform" => "Top-level configuration block. \
+            "terraform" => {
+                "Top-level configuration block. \
                 Holds the required_version pin, required_providers map, \
                 optional backend / cloud / provider_meta sub-blocks, and \
-                language experiments.",
-            "variable" => "Declare a module input variable. \
+                language experiments."
+            }
+            "variable" => {
+                "Declare a module input variable. \
                 Supports `type`, `default`, `description`, `sensitive`, \
-                `nullable`, and a `validation { }` sub-block.",
-            "output" => "Declare a module output. \
+                `nullable`, and a `validation { }` sub-block."
+            }
+            "output" => {
+                "Declare a module output. \
                 `value` is required; `description`, `sensitive`, \
-                `depends_on`, and `precondition {}` are optional.",
-            "module" => "Invoke a child module. \
+                `depends_on`, and `precondition {}` are optional."
+            }
+            "module" => {
+                "Invoke a child module. \
                 `source` is required; `version` applies to registry modules \
                 only; `providers` maps child-module provider keys to the \
-                parent's.",
-            "lifecycle" => "Customise how Terraform manages resource lifecycle \
+                parent's."
+            }
+            "lifecycle" => {
+                "Customise how Terraform manages resource lifecycle \
                 (create_before_destroy, prevent_destroy, ignore_changes, \
                 replace_triggered_by), plus precondition / postcondition \
-                assertions.",
+                assertions."
+            }
             _ => "",
         };
         if !desc.is_empty() {
@@ -731,11 +742,9 @@ fn render_builtin_nested_block_summary(
             }
         }
         if !sch.blocks.is_empty() {
-            let mut names: Vec<&'static str> =
-                sch.blocks.iter().map(|b| b.name).collect();
+            let mut names: Vec<&'static str> = sch.blocks.iter().map(|b| b.name).collect();
             names.sort();
-            let joined: Vec<String> =
-                names.iter().map(|n| format!("`{n}`")).collect();
+            let joined: Vec<String> = names.iter().map(|n| format!("`{n}`")).collect();
             out.push_str(&format!("- **Sub-blocks:** {}\n", joined.join(", ")));
         }
     }
@@ -856,9 +865,7 @@ fn write_nested_attr_section(
 
 type AttrList<'a> = Vec<(&'a str, &'a tfls_schema::AttributeSchema)>;
 
-fn partition_attributes(
-    block: &BlockSchema,
-) -> (AttrList<'_>, AttrList<'_>, AttrList<'_>) {
+fn partition_attributes(block: &BlockSchema) -> (AttrList<'_>, AttrList<'_>, AttrList<'_>) {
     let mut required: Vec<(&str, &tfls_schema::AttributeSchema)> = Vec::new();
     let mut optional: Vec<(&str, &tfls_schema::AttributeSchema)> = Vec::new();
     let mut computed: Vec<(&str, &tfls_schema::AttributeSchema)> = Vec::new();
@@ -975,7 +982,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(result.items.iter().any(|i| i.name == "azurerm_kubernetes_cluster"));
+        assert!(result
+            .items
+            .iter()
+            .any(|i| i.name == "azurerm_kubernetes_cluster"));
     }
 
     #[tokio::test]
@@ -995,8 +1005,10 @@ mod tests {
         .unwrap();
         let first = result.items.first().expect("at least one match");
         assert_eq!(first.name, "azurerm_kubernetes_cluster");
-        assert!(first.matched_fields.contains(&MatchedField::Description)
-            || first.matched_fields.contains(&MatchedField::Summary));
+        assert!(
+            first.matched_fields.contains(&MatchedField::Description)
+                || first.matched_fields.contains(&MatchedField::Summary)
+        );
     }
 
     #[tokio::test]
@@ -1117,7 +1129,10 @@ mod tests {
         };
         resource_block.attributes.insert(
             "ami".to_string(),
-            AttributeSchema { required: true, ..Default::default() },
+            AttributeSchema {
+                required: true,
+                ..Default::default()
+            },
         );
         resource_block.block_types.insert(
             "root_block_device".to_string(),
@@ -1130,7 +1145,10 @@ mod tests {
         );
         ps.resource_schemas.insert(
             "aws_instance".to_string(),
-            Schema { version: 1, block: resource_block },
+            Schema {
+                version: 1,
+                block: resource_block,
+            },
         );
         let addr = ProviderAddress::hashicorp("aws");
         state.schemas.insert(addr, Arc::new(ps));
@@ -1190,7 +1208,10 @@ mod tests {
         let mut outer = BlockSchema::default();
         outer.attributes.insert(
             "name".to_string(),
-            AttributeSchema { required: true, ..Default::default() },
+            AttributeSchema {
+                required: true,
+                ..Default::default()
+            },
         );
         outer.block_types.insert(
             "vestigial".to_string(),
@@ -1203,7 +1224,10 @@ mod tests {
         );
         ps.resource_schemas.insert(
             "some_resource".to_string(),
-            Schema { version: 1, block: outer },
+            Schema {
+                version: 1,
+                block: outer,
+            },
         );
         state
             .schemas
@@ -1249,7 +1273,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(result.markdown.contains("# `terraform`"), "{}", result.markdown);
+        assert!(
+            result.markdown.contains("# `terraform`"),
+            "{}",
+            result.markdown
+        );
         assert!(
             result.markdown.contains("_Built-in block_"),
             "{}",
@@ -1288,14 +1316,21 @@ mod tests {
             "{}",
             result.markdown
         );
-        assert!(result.markdown.contains("## Required"), "{}", result.markdown);
+        assert!(
+            result.markdown.contains("## Required"),
+            "{}",
+            result.markdown
+        );
         assert!(result.markdown.contains("`bucket`"), "{}", result.markdown);
         assert!(result.markdown.contains("`key`"), "{}", result.markdown);
-        assert!(result.markdown.contains("## Optional"), "{}", result.markdown);
+        assert!(
+            result.markdown.contains("## Optional"),
+            "{}",
+            result.markdown
+        );
         // s3 has `region`, `profile`, `encrypt`, etc. as optionals.
         assert!(
-            result.markdown.contains("`region`")
-                || result.markdown.contains("`encrypt`"),
+            result.markdown.contains("`region`") || result.markdown.contains("`encrypt`"),
             "{}",
             result.markdown
         );
@@ -1316,7 +1351,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(result.markdown.contains("# `variable`"), "{}", result.markdown);
+        assert!(
+            result.markdown.contains("# `variable`"),
+            "{}",
+            result.markdown
+        );
         // variable has a `validation` nested block.
         assert!(
             result.markdown.contains("## Nested Blocks"),
@@ -1375,7 +1414,9 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(result.snippet.starts_with("resource \"azurerm_kubernetes_cluster\""));
+        assert!(result
+            .snippet
+            .starts_with("resource \"azurerm_kubernetes_cluster\""));
         assert!(result.snippet.contains("${1:name}"));
         // Required attrs `name` and `location` are alphabetised, so they
         // take tabstops ${2} and ${3} respectively.
@@ -1401,7 +1442,9 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(result.snippet.starts_with("data \"azurerm_storage_account\""));
+        assert!(result
+            .snippet
+            .starts_with("data \"azurerm_storage_account\""));
         assert!(result.snippet.contains("${1:name}"));
         assert_eq!(result.kind, Kind::Data);
     }
@@ -1410,18 +1453,22 @@ mod tests {
     async fn get_snippet_no_required_attrs_exits_with_dollar_zero() {
         let state = StateStore::new();
         let mut ps = ProviderSchema {
-            provider: Schema { version: 1, block: BlockSchema::default() },
+            provider: Schema {
+                version: 1,
+                block: BlockSchema::default(),
+            },
             resource_schemas: Default::default(),
             data_source_schemas: Default::default(),
         };
         // Resource with only optional attrs — no required fields.
         let mut block = BlockSchema::default();
-        let opt = AttributeSchema { optional: true, ..Default::default() };
+        let opt = AttributeSchema {
+            optional: true,
+            ..Default::default()
+        };
         block.attributes.insert("length".to_string(), opt);
-        ps.resource_schemas.insert(
-            "random_pet".to_string(),
-            Schema { version: 1, block },
-        );
+        ps.resource_schemas
+            .insert("random_pet".to_string(), Schema { version: 1, block });
         let addr = ProviderAddress::hashicorp("random");
         state.schemas.insert(addr, Arc::new(ps));
         let backend = make_backend(state);

@@ -33,10 +33,9 @@ pub async fn execute_command(
         }
         CMD_FETCH_SCHEMAS => {
             let dir = dir.ok_or_else(|| missing_arg("working directory"))?;
-            backend.jobs.enqueue(
-                Job::FetchSchemas { working_dir: dir },
-                Priority::Immediate,
-            );
+            backend
+                .jobs
+                .enqueue(Job::FetchSchemas { working_dir: dir }, Priority::Immediate);
             Ok(Some(serde_json::json!({"enqueued": true})))
         }
         CMD_VALIDATE => {

@@ -97,8 +97,7 @@ pub fn parse_type_expr(expr: &Expression) -> VariableType {
                 ("set", [inner]) => VariableType::Set(Box::new(parse_type_expr(inner))),
                 ("map", [inner]) => VariableType::Map(Box::new(parse_type_expr(inner))),
                 ("tuple", [Expression::Array(arr)]) => {
-                    let items: Vec<VariableType> =
-                        arr.iter().map(parse_type_expr).collect();
+                    let items: Vec<VariableType> = arr.iter().map(parse_type_expr).collect();
                     VariableType::Tuple(items)
                 }
                 ("object", [Expression::Object(obj)]) => {
@@ -131,9 +130,7 @@ pub(crate) fn object_key_as_ident(key: &hcl_edit::expr::ObjectKey) -> Option<Str
         hcl_edit::expr::ObjectKey::Expression(Expression::Variable(v)) => {
             Some(v.value().as_str().to_string())
         }
-        hcl_edit::expr::ObjectKey::Expression(Expression::String(s)) => {
-            Some(s.value().to_string())
-        }
+        hcl_edit::expr::ObjectKey::Expression(Expression::String(s)) => Some(s.value().to_string()),
         _ => None,
     }
 }
@@ -199,10 +196,7 @@ impl SchemaLookup for NoSchemaLookup {
 /// source attribute resolves to its provider-schema type, and a
 /// for-expression iterating a known resource/data source resolves
 /// its body's attribute access through the same lookup.
-pub fn parse_value_shape_with_schema(
-    expr: &Expression,
-    schema: &dyn SchemaLookup,
-) -> VariableType {
+pub fn parse_value_shape_with_schema(expr: &Expression, schema: &dyn SchemaLookup) -> VariableType {
     match expr {
         Expression::Object(obj) => {
             let mut fields = BTreeMap::new();
@@ -307,20 +301,16 @@ pub fn parse_value_shape_with_schema(
                 }
                 // Common string-returning functions.
                 "format" | "join" | "trim" | "trimspace" | "trimprefix" | "trimsuffix"
-                | "upper" | "lower" | "title" | "replace" | "regex" | "abspath"
-                | "dirname" | "basename" | "pathexpand" | "uuid" | "uuidv5"
-                | "base64encode" | "base64decode" | "filebase64" | "filemd5"
-                | "filesha1" | "filesha256" | "filesha512" | "md5" | "sha1"
-                | "sha256" | "sha512" | "bcrypt" | "templatefile" | "file"
-                | "yamlencode" | "jsonencode" | "timestamp" | "formatdate" => {
-                    VariableType::Primitive(Primitive::String)
-                }
-                "length" | "ceil" | "floor" | "abs" | "log" | "max" | "min"
-                | "pow" | "signum" | "parseint" => VariableType::Primitive(Primitive::Number),
-                "alltrue" | "anytrue" | "can" | "contains" | "startswith"
-                | "endswith" | "fileexists" | "issensitive" => {
-                    VariableType::Primitive(Primitive::Bool)
-                }
+                | "upper" | "lower" | "title" | "replace" | "regex" | "abspath" | "dirname"
+                | "basename" | "pathexpand" | "uuid" | "uuidv5" | "base64encode"
+                | "base64decode" | "filebase64" | "filemd5" | "filesha1" | "filesha256"
+                | "filesha512" | "md5" | "sha1" | "sha256" | "sha512" | "bcrypt"
+                | "templatefile" | "file" | "yamlencode" | "jsonencode" | "timestamp"
+                | "formatdate" => VariableType::Primitive(Primitive::String),
+                "length" | "ceil" | "floor" | "abs" | "log" | "max" | "min" | "pow" | "signum"
+                | "parseint" => VariableType::Primitive(Primitive::Number),
+                "alltrue" | "anytrue" | "can" | "contains" | "startswith" | "endswith"
+                | "fileexists" | "issensitive" => VariableType::Primitive(Primitive::Bool),
                 "split" => VariableType::List(Box::new(VariableType::Primitive(Primitive::String))),
                 "keys" => VariableType::List(Box::new(VariableType::Primitive(Primitive::String))),
                 "values" => {
@@ -452,10 +442,8 @@ pub fn parse_value_shape_with_schema(
                             let Some(name) = object_key_as_ident(key) else {
                                 continue;
                             };
-                            fields.insert(
-                                name,
-                                parse_value_shape_with_schema(value.expr(), schema),
-                            );
+                            fields
+                                .insert(name, parse_value_shape_with_schema(value.expr(), schema));
                         }
                         return VariableType::Object(fields);
                     }
@@ -485,12 +473,8 @@ pub fn parse_value_shape_with_schema(
             // behaviour and fall back to `list(any)` / `map(any)`,
             // which still renders as valid HCL the user can refine.
             let iter_var = f.intro.value_var.as_str();
-            let elem_via_schema = for_expr_body_via_schema(
-                &f.intro.collection_expr,
-                iter_var,
-                &f.value_expr,
-                schema,
-            );
+            let elem_via_schema =
+                for_expr_body_via_schema(&f.intro.collection_expr, iter_var, &f.value_expr, schema);
             let elem = elem_via_schema
                 .unwrap_or_else(|| parse_value_shape_with_schema(&f.value_expr, schema));
             if f.key_expr.is_some() {
@@ -585,9 +569,9 @@ fn traversal_attr_type(tv: &Traversal, schema: &dyn SchemaLookup) -> Option<Vari
                     VariableType::Object(fields) => {
                         fields.get(i.as_str()).cloned().unwrap_or(VariableType::Any)
                     }
-                    VariableType::Map(inner) | VariableType::List(inner) | VariableType::Set(inner) => {
-                        *inner
-                    }
+                    VariableType::Map(inner)
+                    | VariableType::List(inner)
+                    | VariableType::Set(inner) => *inner,
                     _ => VariableType::Any,
                 };
             }
@@ -638,13 +622,10 @@ fn for_expr_body_via_schema(
     if body_base != iter_var {
         return None;
     }
-    let body_attr = body_tv
-        .operators
-        .first()
-        .and_then(|op| match op.value() {
-            TraversalOperator::GetAttr(i) => Some(i.as_str()),
-            _ => None,
-        })?;
+    let body_attr = body_tv.operators.first().and_then(|op| match op.value() {
+        TraversalOperator::GetAttr(i) => Some(i.as_str()),
+        _ => None,
+    })?;
 
     let coll_tv = match collection_expr {
         Expression::Traversal(tv) => tv,
@@ -720,9 +701,7 @@ pub fn merge_types(a: &VariableType, b: &VariableType) -> VariableType {
         }
         (VariableType::Tuple(xs), VariableType::Tuple(ys)) => {
             if xs.len() == ys.len() {
-                VariableType::Tuple(
-                    xs.iter().zip(ys).map(|(x, y)| merge_types(x, y)).collect(),
-                )
+                VariableType::Tuple(xs.iter().zip(ys).map(|(x, y)| merge_types(x, y)).collect())
             } else {
                 let all: Vec<&VariableType> = xs.iter().chain(ys.iter()).collect();
                 let mut acc = all[0].clone();
@@ -744,7 +723,11 @@ pub fn merge_types(a: &VariableType, b: &VariableType) -> VariableType {
         }
         (VariableType::Object(xs), VariableType::Object(ys)) => {
             let mut merged: BTreeMap<String, VariableType> = BTreeMap::new();
-            for k in xs.keys().chain(ys.keys()).collect::<std::collections::BTreeSet<_>>() {
+            for k in xs
+                .keys()
+                .chain(ys.keys())
+                .collect::<std::collections::BTreeSet<_>>()
+            {
                 let merged_val = match (xs.get(k), ys.get(k)) {
                     (Some(vx), Some(vy)) => merge_types(vx, vy),
                     (Some(vx), None) | (None, Some(vx)) => merge_types(vx, &VariableType::Any),
@@ -767,7 +750,6 @@ pub fn merge_observations(obs: &[VariableType]) -> Option<VariableType> {
     let first = iter.next()?.clone();
     Some(iter.fold(first, |acc, t| merge_types(&acc, t)))
 }
-
 
 /// Check whether a value whose inferred shape is `actual` satisfies
 /// the declared `type` constraint. `Any` on either side is a free
@@ -877,9 +859,8 @@ pub fn explain_mismatch(declared: &VariableType, actual: &VariableType) -> Strin
                 .iter()
                 .filter_map(|(k, d_ty)| {
                     act.get(k).and_then(|a_ty| {
-                        (!satisfies(d_ty, a_ty)).then(|| {
-                            format!("`{k}` expected `{d_ty}`, got `{a_ty}`")
-                        })
+                        (!satisfies(d_ty, a_ty))
+                            .then(|| format!("`{k}` expected `{d_ty}`, got `{a_ty}`"))
                     })
                 })
                 .collect();
@@ -1118,9 +1099,7 @@ mod tests {
 
     #[test]
     fn value_shape_nested_object_preserves_tree() {
-        let ty = shape_from_src(
-            r#"value = { "outer" = { "inner" = { "leaf" = true } } }"#,
-        );
+        let ty = shape_from_src(r#"value = { "outer" = { "inner" = { "leaf" = true } } }"#);
         match ty {
             VariableType::Object(top) => match top.get("outer") {
                 Some(VariableType::Object(mid)) => match mid.get("inner") {
@@ -1143,12 +1122,11 @@ mod tests {
 
     #[test]
     fn merge_shapes_unions_object_fields() {
-        let a = VariableType::Object(BTreeMap::from([
-            ("a".to_string(), VariableType::Any),
-        ]));
-        let b = VariableType::Object(BTreeMap::from([
-            ("b".to_string(), VariableType::Primitive(Primitive::String)),
-        ]));
+        let a = VariableType::Object(BTreeMap::from([("a".to_string(), VariableType::Any)]));
+        let b = VariableType::Object(BTreeMap::from([(
+            "b".to_string(),
+            VariableType::Primitive(Primitive::String),
+        )]));
         match merge_shapes(a, b) {
             VariableType::Object(fields) => {
                 assert!(fields.contains_key("a"));
@@ -1235,7 +1213,10 @@ mod tests {
             &shape(r#"{ a = "x", b = "y" }"#)
         ));
         // `b = 1` coerces to string; a nested object value does not.
-        assert!(satisfies(&decl("map(string)"), &shape(r#"{ a = "x", b = 1 }"#)));
+        assert!(satisfies(
+            &decl("map(string)"),
+            &shape(r#"{ a = "x", b = 1 }"#)
+        ));
         assert!(!satisfies(
             &decl("map(string)"),
             &shape(r#"{ a = "x", b = {} }"#)
@@ -1250,7 +1231,10 @@ mod tests {
         ));
         // `a = 1` coerces to string; a collection value for a string
         // field does not.
-        assert!(satisfies(&decl("object({ a = string })"), &shape(r#"{ a = 1 }"#)));
+        assert!(satisfies(
+            &decl("object({ a = string })"),
+            &shape(r#"{ a = 1 }"#)
+        ));
         assert!(!satisfies(
             &decl("object({ a = string })"),
             &shape(r#"{ a = [1] }"#)
@@ -1323,7 +1307,10 @@ mod tests {
         let ty = type_from_src("type = object({ name = string, inner = object({ x = bool }) })");
         let rendered = format!("{ty}");
         // BTreeMap sorts keys alphabetically: "inner" < "name".
-        assert_eq!(rendered, "object({ inner = object({ x = bool }), name = string })");
+        assert_eq!(
+            rendered,
+            "object({ inner = object({ x = bool }), name = string })"
+        );
     }
 
     // --- For-expression inference ---------------------------------
@@ -1417,10 +1404,7 @@ mod tests {
     fn schema_aware_for_expr_over_resource_yields_list_of_attribute_type() {
         // `[for s in aws_subnet.foo : s.id]` → `list(string)` once
         // the schema knows `aws_subnet.id` is `string`.
-        let ty = shape_with_schema(
-            "value = [for s in aws_subnet.foo : s.id]",
-            &FakeSchema,
-        );
+        let ty = shape_with_schema("value = [for s in aws_subnet.foo : s.id]", &FakeSchema);
         assert_eq!(
             ty,
             VariableType::List(Box::new(VariableType::Primitive(Primitive::String)))
@@ -1431,10 +1415,7 @@ mod tests {
     fn schema_aware_for_expr_falls_back_to_any_for_unknown_resource() {
         // No schema entry for `unknown_thing` — element type stays
         // `any`, but we still produce `list(any)` rather than `any`.
-        let ty = shape_with_schema(
-            "value = [for s in unknown_thing.foo : s.id]",
-            &FakeSchema,
-        );
+        let ty = shape_with_schema("value = [for s in unknown_thing.foo : s.id]", &FakeSchema);
         assert_eq!(ty, VariableType::List(Box::new(VariableType::Any)));
     }
 

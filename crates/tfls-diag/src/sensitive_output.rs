@@ -78,7 +78,9 @@ pub fn sensitive_output_diagnostics(
         let Some(name_label) = block.labels.first() else {
             continue;
         };
-        let Some(span) = name_label.span() else { continue };
+        let Some(span) = name_label.span() else {
+            continue;
+        };
         let Ok(range) = hcl_span_to_lsp_range(rope, span) else {
             continue;
         };
@@ -206,9 +208,7 @@ mod tests {
 
     #[test]
     fn flags_sensitive_var_in_plain_output() {
-        let d = diags(
-            "variable \"pw\" { sensitive = true }\noutput \"p\" { value = var.pw }\n",
-        );
+        let d = diags("variable \"pw\" { sensitive = true }\noutput \"p\" { value = var.pw }\n");
         assert_eq!(d.len(), 1, "got: {d:?}");
         assert_eq!(d[0].severity, Some(DiagnosticSeverity::ERROR));
         assert!(d[0].message.contains("output `p`"), "got: {}", d[0].message);
@@ -257,7 +257,9 @@ mod tests {
     fn uses_external_sensitive_set() {
         // `pw` declared in a sibling file (passed via extra_sensitive).
         let rope = Rope::from_str("output \"p\" { value = var.pw }\n");
-        let body = parse_source("output \"p\" { value = var.pw }\n").body.expect("parses");
+        let body = parse_source("output \"p\" { value = var.pw }\n")
+            .body
+            .expect("parses");
         let mut extra = HashSet::new();
         extra.insert("pw".to_string());
         let d = sensitive_output_diagnostics(&body, &rope, &extra);
@@ -272,6 +274,9 @@ mod tests {
         .body
         .expect("parses");
         let names = sensitive_variable_names(&body);
-        assert!(names.contains("a") && names.contains("c") && !names.contains("b"), "got: {names:?}");
+        assert!(
+            names.contains("a") && names.contains("c") && !names.contains("b"),
+            "got: {names:?}"
+        );
     }
 }

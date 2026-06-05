@@ -14,20 +14,18 @@ use ropey::Rope;
 
 use crate::deprecation_rule::{self, DeprecationRule, Gate};
 
-pub const VAULT_BLOCK_DEPRECATIONS: &[DeprecationRule] = &[
-    DeprecationRule {
-        block_kind: "resource",
-        label: "vault_generic_secret",
-        gate: Gate::ProviderVersion {
-            provider: "vault",
-            threshold: "3.0.0",
-        },
-        message: "`vault_generic_secret` is superseded by `vault_kv_secret_v1` / \
+pub const VAULT_BLOCK_DEPRECATIONS: &[DeprecationRule] = &[DeprecationRule {
+    block_kind: "resource",
+    label: "vault_generic_secret",
+    gate: Gate::ProviderVersion {
+        provider: "vault",
+        threshold: "3.0.0",
+    },
+    message: "`vault_generic_secret` is superseded by `vault_kv_secret_v1` / \
                   `vault_kv_secret_v2` (vault provider 3.0+) — pick the resource \
                   matching the mount's KV backend version. The new resources expose \
                   metadata + lease semantics the generic resource doesn't.",
-    },
-];
+}];
 
 pub fn vault_blocks_diagnostics(body: &Body, rope: &Rope) -> Vec<Diagnostic> {
     deprecation_rule::diagnostics_from_table(body, rope, VAULT_BLOCK_DEPRECATIONS, &|rule| {

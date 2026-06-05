@@ -10,19 +10,19 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use hcl_edit::repr::Span;
 use hcl_edit::structure::{Block, BlockLabel, Body};
-use sonic_rs::JsonValueTrait;
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams, CodeActionResponse,
     Diagnostic, DiagnosticSeverity, Position, Range, TextEdit, Url, WorkspaceEdit,
 };
 use ropey::Rope;
+use sonic_rs::JsonValueTrait;
 use tfls_parser::hcl_span_to_lsp_range;
 use tfls_state::{DocumentState, StateStore};
 use tower_lsp::jsonrpc;
 
 use crate::backend::Backend;
 use crate::handlers::code_action_scope::{
-    Scope, build_scoped_action, for_each_doc_in_scope, range_intersects, range_is_empty,
+    build_scoped_action, for_each_doc_in_scope, range_intersects, range_is_empty, Scope,
 };
 use crate::handlers::util::module_supports_terraform_data;
 
@@ -44,7 +44,11 @@ pub async fn code_action(
         let Some(doc) = backend.state.documents.get(&uri) else {
             return Ok(None);
         };
-        (doc.parsed.body.clone(), doc.rope.clone(), doc.symbols.clone())
+        (
+            doc.parsed.body.clone(),
+            doc.rope.clone(),
+            doc.symbols.clone(),
+        )
     };
 
     let mut actions: Vec<CodeActionOrCommand> = Vec::new();
@@ -67,8 +71,7 @@ pub async fn code_action(
     if let Some(body) = body.as_ref() {
         for diag in &params.context.diagnostics {
             if is_missing_required(diag) {
-                if let Some(action) =
-                    make_insert_required_action(backend, &uri, diag, body, &rope)
+                if let Some(action) = make_insert_required_action(backend, &uri, diag, body, &rope)
                 {
                     actions.push(CodeActionOrCommand::CodeAction(action));
                 }
@@ -84,15 +87,11 @@ pub async fn code_action(
                     actions.push(CodeActionOrCommand::CodeAction(action));
                 }
             } else if is_deprecated_interpolation(diag) {
-                if let Some(action) =
-                    make_unwrap_interpolation_action(&uri, diag, &rope)
-                {
+                if let Some(action) = make_unwrap_interpolation_action(&uri, diag, &rope) {
                     actions.push(CodeActionOrCommand::CodeAction(action));
                 }
             } else if is_deprecated_lookup(diag) {
-                if let Some(action) =
-                    make_convert_lookup_to_index_action(&uri, diag, body, &rope)
-                {
+                if let Some(action) = make_convert_lookup_to_index_action(&uri, diag, body, &rope) {
                     actions.push(CodeActionOrCommand::CodeAction(action));
                 }
             } else if is_deprecated_index(diag) {
@@ -100,9 +99,7 @@ pub async fn code_action(
                     actions.push(CodeActionOrCommand::CodeAction(action));
                 }
             } else if is_empty_list_equality(diag) {
-                if let Some(action) =
-                    make_convert_empty_list_equality_action(&uri, diag, &rope)
-                {
+                if let Some(action) = make_convert_empty_list_equality_action(&uri, diag, &rope) {
                     actions.push(CodeActionOrCommand::CodeAction(action));
                 }
             } else if is_missing_description(diag) {
@@ -132,25 +129,15 @@ pub async fn code_action(
                 actions.push(CodeActionOrCommand::CodeAction(action));
             } else if is_unknown_provider_local(diag) {
                 actions.extend(
-                    make_unknown_provider_local_quickfixes(
-                        &backend.state,
-                        &uri,
-                        diag,
-                        &rope,
-                    )
-                    .into_iter()
-                    .map(CodeActionOrCommand::CodeAction),
+                    make_unknown_provider_local_quickfixes(&backend.state, &uri, diag, &rope)
+                        .into_iter()
+                        .map(CodeActionOrCommand::CodeAction),
                 );
             } else if is_unknown_provider_function(diag) {
                 actions.extend(
-                    make_unknown_provider_function_quickfixes(
-                        &backend.state,
-                        &uri,
-                        diag,
-                        &rope,
-                    )
-                    .into_iter()
-                    .map(CodeActionOrCommand::CodeAction),
+                    make_unknown_provider_function_quickfixes(&backend.state, &uri, diag, &rope)
+                        .into_iter()
+                        .map(CodeActionOrCommand::CodeAction),
                 );
             }
         }
@@ -348,8 +335,7 @@ pub async fn code_action(
     // both deprecations — and adding a third deprecation that
     // hooks into the same cache costs only a leaf-check per
     // expression node, not a fresh body walk.
-    let mut combined_ref_cache: FxHashMap<Url, CombinedDeprecationRefs> =
-        FxHashMap::default();
+    let mut combined_ref_cache: FxHashMap<Url, CombinedDeprecationRefs> = FxHashMap::default();
     emit_null_resource_actions(
         state,
         &uri,
@@ -391,7 +377,11 @@ pub async fn code_action(
     // the menu only shows actionable entries.
     emit_format_actions(state, &uri, selection, &mut actions);
 
-    if actions.is_empty() { Ok(None) } else { Ok(Some(actions)) }
+    if actions.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(actions))
+    }
 }
 
 /// Generic scope iterator for actions whose per-doc transform can
@@ -446,10 +436,7 @@ fn emit_scoped_actions<F>(
             if !scan_cache.contains_key(doc_uri) {
                 scan_cache.insert(doc_uri.clone(), scan(doc_uri, doc));
             }
-            let mut v = scan_cache
-                .get(doc_uri)
-                .cloned()
-                .unwrap_or_default();
+            let mut v = scan_cache.get(doc_uri).cloned().unwrap_or_default();
             if let Scope::Selection { range } = scope {
                 v.retain(|e| range_intersects(&e.range, &range));
             }
@@ -541,11 +528,7 @@ fn emit_declare_undefined_actions(
 /// `scope` would visit. Used as the "declared" set so module-wide
 /// declarations suppress what would otherwise look like undefined
 /// references in a peer file.
-fn per_doc_declared_set(
-    state: &StateStore,
-    primary_uri: &Url,
-    scope: Scope,
-) -> FxHashSet<String> {
+fn per_doc_declared_set(state: &StateStore, primary_uri: &Url, scope: Scope) -> FxHashSet<String> {
     let mut out: FxHashSet<String> = FxHashSet::default();
     for_each_doc_in_scope(state, primary_uri, scope, |_uri, doc| {
         for name in doc.symbols.variables.keys() {
@@ -628,8 +611,7 @@ fn resolve_target_strategy(
     let rope = ropey::Rope::from_str(&content);
     let total = rope.len_bytes();
     let needs_leading_newline = total > 0 && !content.ends_with('\n');
-    let eof = tfls_parser::byte_offset_to_lsp_position(&rope, total)
-        .unwrap_or(Position::new(0, 0));
+    let eof = tfls_parser::byte_offset_to_lsp_position(&rope, total).unwrap_or(Position::new(0, 0));
     TargetFileStrategy::OnDisk {
         eof,
         needs_leading_newline,
@@ -677,8 +659,8 @@ fn build_declare_undefined_workspace_edit(
         }
         TargetFileStrategy::Create => {
             use lsp_types::{
-                CreateFile, CreateFileOptions, DocumentChangeOperation, DocumentChanges,
-                OneOf, OptionalVersionedTextDocumentIdentifier, ResourceOp, TextDocumentEdit,
+                CreateFile, CreateFileOptions, DocumentChangeOperation, DocumentChanges, OneOf,
+                OptionalVersionedTextDocumentIdentifier, ResourceOp, TextDocumentEdit,
             };
             let create_op = DocumentChangeOperation::Op(ResourceOp::Create(CreateFile {
                 uri: target_url.clone(),
@@ -764,20 +746,11 @@ fn emit_move_outputs_actions(
     let strategy = resolve_target_strategy(state, &target_url, &target_path);
     let combined = combine_block_sources(&moved_sources);
 
-    let workspace_edit = build_move_blocks_workspace_edit(
-        &deletions,
-        &target_url,
-        &strategy,
-        &combined,
-    );
+    let workspace_edit =
+        build_move_blocks_workspace_edit(&deletions, &target_url, &strategy, &combined);
 
     let count = moved_sources.len();
-    let title = scope_title(
-        "Move output blocks",
-        "output block",
-        Scope::Module,
-        count,
-    );
+    let title = scope_title("Move output blocks", "output block", Scope::Module, count);
     actions.push(CodeActionOrCommand::CodeAction(CodeAction {
         title: format!("{title} (to `outputs.tf`)"),
         kind: Some(scope_kind(Scope::Module, "move-outputs-to-outputs-tf")),
@@ -836,12 +809,8 @@ fn emit_move_variables_actions(
     let strategy = resolve_target_strategy(state, &target_url, &target_path);
     let combined = combine_block_sources(&moved_sources);
 
-    let workspace_edit = build_move_blocks_workspace_edit(
-        &deletions,
-        &target_url,
-        &strategy,
-        &combined,
-    );
+    let workspace_edit =
+        build_move_blocks_workspace_edit(&deletions, &target_url, &strategy, &combined);
 
     let count = moved_sources.len();
     let title = scope_title(
@@ -868,10 +837,7 @@ fn emit_move_variables_actions(
 ///
 /// Pure — no LSP-state access. Caller decides which docs to
 /// scan and which style to use.
-fn scan_format(
-    rope: &Rope,
-    style: tfls_state::FormatStyle,
-) -> Option<TextEdit> {
+fn scan_format(rope: &Rope, style: tfls_state::FormatStyle) -> Option<TextEdit> {
     let text = rope.to_string();
     let formatted = tfls_format::format_source(&text, style).ok()?;
     if formatted == text {
@@ -893,10 +859,7 @@ fn scan_format(
 /// Falls back to a fresh `scan_format` call when the cache
 /// mutex is poisoned (lock failure is rare and recovery is
 /// cheap — just don't bypass the formatter).
-fn scan_format_cached(
-    doc: &DocumentState,
-    style: tfls_state::FormatStyle,
-) -> Option<TextEdit> {
+fn scan_format_cached(doc: &DocumentState, style: tfls_state::FormatStyle) -> Option<TextEdit> {
     let style_marker = style.marker();
     if let Ok(guard) = doc.format_cache.lock() {
         if let Some(entry) = guard.as_ref() {
@@ -1006,11 +969,7 @@ fn emit_format_actions(
                                 new_text: formatted,
                             }],
                         );
-                        let line_count = range
-                            .end
-                            .line
-                            .saturating_sub(range.start.line)
-                            + 1;
+                        let line_count = range.end.line.saturating_sub(range.start.line) + 1;
                         actions.push(CodeActionOrCommand::CodeAction(CodeAction {
                             title: format!("Format selection ({line_count} lines)"),
                             kind: Some(scope_kind(Scope::Selection { range }, "format")),
@@ -1350,11 +1309,7 @@ fn walk_combined_deprecation_refs(body: &Body, rope: &Rope) -> CombinedDeprecati
 /// `null_resource.<X>[.triggers]` matcher — pushes 1-2 hits
 /// per match (head label rewrite + optional triggers rename),
 /// each tagged with `<X>` so callers can post-filter by name.
-fn push_null_resource_hits(
-    expr: &hcl_edit::expr::Expression,
-    rope: &Rope,
-    out: &mut Vec<RefHit>,
-) {
+fn push_null_resource_hits(expr: &hcl_edit::expr::Expression, rope: &Rope, out: &mut Vec<RefHit>) {
     use hcl_edit::expr::{Expression as Ex, TraversalOperator};
     use hcl_edit::repr::Span as _;
 
@@ -1411,11 +1366,7 @@ fn push_null_resource_hits(
 
 /// `data.template_file.<X>.rendered` matcher — pushes one
 /// `local.<X>` rewrite hit per match.
-fn push_template_file_hit(
-    expr: &hcl_edit::expr::Expression,
-    rope: &Rope,
-    out: &mut Vec<RefHit>,
-) {
+fn push_template_file_hit(expr: &hcl_edit::expr::Expression, rope: &Rope, out: &mut Vec<RefHit>) {
     use hcl_edit::expr::{Expression as Ex, TraversalOperator};
     use hcl_edit::repr::Span as _;
 
@@ -1495,10 +1446,7 @@ fn template_refs_from_cache(
     flatten_filtered(&combined.template_file, Some(names))
 }
 
-fn flatten_filtered(
-    hits: &[RefHit],
-    filter: Option<&FxHashSet<String>>,
-) -> Vec<TextEdit> {
+fn flatten_filtered(hits: &[RefHit], filter: Option<&FxHashSet<String>>) -> Vec<TextEdit> {
     match filter {
         None => hits.iter().map(|h| h.edit.clone()).collect(),
         Some(set) => hits
@@ -1642,7 +1590,9 @@ fn make_replace_null_resource_for_diag(
         if label_str(label) != Some("null_resource") {
             continue;
         }
-        let Some(label_span) = label.span() else { continue };
+        let Some(label_span) = label.span() else {
+            continue;
+        };
         let Ok(label_range) = hcl_span_to_lsp_range(rope, label_span) else {
             continue;
         };
@@ -1658,13 +1608,11 @@ fn make_replace_null_resource_for_diag(
         }
         let mut rewrites: FxHashMap<Url, Vec<TextEdit>> = FxHashMap::default();
         rewrites.insert(uri.clone(), edits);
-        let mut names_by_module: FxHashMap<std::path::PathBuf, Vec<String>> =
-            FxHashMap::default();
+        let mut names_by_module: FxHashMap<std::path::PathBuf, Vec<String>> = FxHashMap::default();
         if let Some(dir) = crate::handlers::util::parent_dir(uri) {
             names_by_module.insert(dir, vec![name.to_string()]);
         }
-        let workspace_edit =
-            build_null_resource_workspace_edit(state, rewrites, names_by_module);
+        let workspace_edit = build_null_resource_workspace_edit(state, rewrites, names_by_module);
         return Some(CodeAction {
             title: format!("Convert null_resource.{name} to terraform_data"),
             kind: Some(CodeActionKind::QUICKFIX),
@@ -1691,11 +1639,15 @@ fn scan_null_resource_block_edits_and_names(
     let mut edits = Vec::new();
     let mut names = Vec::new();
     for structure in body.iter() {
-        let Some(block) = structure.as_block() else { continue };
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
         if block.ident.as_str() != "resource" {
             continue;
         }
-        let Some(label) = block.labels.first() else { continue };
+        let Some(label) = block.labels.first() else {
+            continue;
+        };
         if label_str(label) != Some("null_resource") {
             continue;
         }
@@ -1720,7 +1672,9 @@ fn scan_null_resource_block_edits_and_names(
             }
         }
         for sub in block.body.iter() {
-            let Some(attr) = sub.as_attribute() else { continue };
+            let Some(attr) = sub.as_attribute() else {
+                continue;
+            };
             if attr.key.as_str() != "triggers" {
                 continue;
             }
@@ -1739,7 +1693,6 @@ fn scan_null_resource_block_edits_and_names(
     }
     (edits, names)
 }
-
 
 /// Names already covered by a `moved { from = null_resource.X
 /// to = terraform_data.X }` block in `body`. The generator
@@ -1809,9 +1762,7 @@ fn traversal_attr_string(body: &Body, key: &str) -> Option<String> {
 /// terraform_data.X }` block source. Trailing newline included
 /// so callers can concatenate without separators.
 fn format_moved_block(name: &str) -> String {
-    format!(
-        "moved {{\n  from = null_resource.{name}\n  to   = terraform_data.{name}\n}}\n"
-    )
+    format!("moved {{\n  from = null_resource.{name}\n  to   = terraform_data.{name}\n}}\n")
 }
 
 /// Scope iteration for `null-resource-to-terraform-data`.
@@ -1879,13 +1830,8 @@ fn emit_null_resource_actions(
                     // cost on the 500-block bench).
                     let (block_edits, names) =
                         scan_null_resource_block_edits_and_names(body, &doc.rope, None);
-                    let ref_edits = null_refs_from_cache(
-                        combined_ref_cache,
-                        doc_uri,
-                        body,
-                        &doc.rope,
-                        None,
-                    );
+                    let ref_edits =
+                        null_refs_from_cache(combined_ref_cache, doc_uri, body, &doc.rope, None);
                     let mut all = block_edits;
                     all.extend(ref_edits);
                     if all.is_empty() {
@@ -1906,7 +1852,9 @@ fn emit_null_resource_actions(
                 return;
             }
             let blocks = if matches!(scope, Scope::Selection { .. }) {
-                v.iter().filter(|e| e.new_text == "\"terraform_data\"").count()
+                v.iter()
+                    .filter(|e| e.new_text == "\"terraform_data\"")
+                    .count()
             } else {
                 cached_names.len()
             };
@@ -1922,7 +1870,10 @@ fn emit_null_resource_actions(
             };
             edits_by_uri.insert(doc_uri.clone(), v);
             if let Some(dir) = crate::handlers::util::parent_dir(doc_uri) {
-                names_by_module.entry(dir).or_default().extend(names_in_scope);
+                names_by_module
+                    .entry(dir)
+                    .or_default()
+                    .extend(names_in_scope);
             }
         });
         if edits_by_uri.is_empty() || total_blocks == 0 {
@@ -1936,9 +1887,7 @@ fn emit_null_resource_actions(
             Scope::Workspace => "workspace",
             Scope::Instance => continue,
         };
-        let title = format!(
-            "Convert {total_blocks} null_resource block{plural} in {where_}"
-        );
+        let title = format!("Convert {total_blocks} null_resource block{plural} in {where_}");
         let workspace_edit =
             build_null_resource_workspace_edit(state, edits_by_uri, names_by_module);
         actions.push(CodeActionOrCommand::CodeAction(CodeAction {
@@ -2069,14 +2018,16 @@ fn build_null_resource_workspace_edit(
                 }));
             }
             TargetFileStrategy::Create => {
-                ops.push(DocumentChangeOperation::Op(ResourceOp::Create(CreateFile {
-                    uri: target_url.clone(),
-                    options: Some(CreateFileOptions {
-                        overwrite: Some(false),
-                        ignore_if_exists: Some(true),
-                    }),
-                    annotation_id: None,
-                })));
+                ops.push(DocumentChangeOperation::Op(ResourceOp::Create(
+                    CreateFile {
+                        uri: target_url.clone(),
+                        options: Some(CreateFileOptions {
+                            overwrite: Some(false),
+                            ignore_if_exists: Some(true),
+                        }),
+                        annotation_id: None,
+                    },
+                )));
                 ops.push(DocumentChangeOperation::Edit(TextDocumentEdit {
                     text_document: OptionalVersionedTextDocumentIdentifier {
                         uri: target_url,
@@ -2120,7 +2071,9 @@ fn collect_existing_moved_names(
     let mut out = FxHashSet::default();
     for entry in state.documents.iter() {
         let uri = entry.key();
-        let Ok(path) = uri.to_file_path() else { continue };
+        let Ok(path) = uri.to_file_path() else {
+            continue;
+        };
         if path.parent() != Some(module_dir) {
             continue;
         }
@@ -2180,13 +2133,11 @@ fn make_replace_null_resource_at_cursor(
 
         let mut rewrites: FxHashMap<Url, Vec<TextEdit>> = FxHashMap::default();
         rewrites.insert(uri.clone(), edits);
-        let mut names_by_module: FxHashMap<std::path::PathBuf, Vec<String>> =
-            FxHashMap::default();
+        let mut names_by_module: FxHashMap<std::path::PathBuf, Vec<String>> = FxHashMap::default();
         if let Some(dir) = crate::handlers::util::parent_dir(uri) {
             names_by_module.insert(dir, vec![name.to_string()]);
         }
-        let workspace_edit =
-            build_null_resource_workspace_edit(state, rewrites, names_by_module);
+        let workspace_edit = build_null_resource_workspace_edit(state, rewrites, names_by_module);
         return Some(CodeAction {
             title: format!("Convert null_resource.{name} to terraform_data"),
             kind: Some(CodeActionKind::QUICKFIX),
@@ -2249,11 +2200,7 @@ fn build_move_blocks_workspace_edit(
                 uri: uri.clone(),
                 version: None,
             },
-            edits: edits
-                .iter()
-                .cloned()
-                .map(OneOf::Left)
-                .collect(),
+            edits: edits.iter().cloned().map(OneOf::Left).collect(),
         }));
     }
 
@@ -2380,11 +2327,7 @@ fn make_insert_required_action(
 }
 
 /// Find the innermost resource/data block whose span contains `pos`.
-fn find_block_at<'b>(
-    body: &'b Body,
-    rope: &Rope,
-    pos: Position,
-) -> Option<(&'b Block, Range)> {
+fn find_block_at<'b>(body: &'b Body, rope: &Rope, pos: Position) -> Option<(&'b Block, Range)> {
     for structure in body.iter() {
         let block = structure.as_block()?;
         let span = block.span()?;
@@ -2509,9 +2452,9 @@ fn is_missing_description(diag: &Diagnostic) -> bool {
 }
 
 fn find_named_block<'b>(body: &'b Body, ident: &str, name: &str) -> Option<&'b Block> {
-    body.iter().filter_map(|s| s.as_block()).find(|b| {
-        b.ident.as_str() == ident && b.labels.first().and_then(label_str) == Some(name)
-    })
+    body.iter()
+        .filter_map(|s| s.as_block())
+        .find(|b| b.ident.as_str() == ident && b.labels.first().and_then(label_str) == Some(name))
 }
 
 /// Quick-fix for the documented-variables / documented-outputs warning:
@@ -2775,20 +2718,21 @@ fn make_unknown_provider_function_quickfixes(
         .collect()
 }
 
-fn collect_required_providers_locals(
-    state: &tfls_state::StateStore,
-    uri: &Url,
-) -> Vec<String> {
+fn collect_required_providers_locals(state: &tfls_state::StateStore, uri: &Url) -> Vec<String> {
     use std::collections::BTreeSet;
     let mut out: BTreeSet<String> = BTreeSet::new();
     let mut harvest = |body: &hcl_edit::structure::Body| {
         for structure in body.iter() {
-            let Some(block) = structure.as_block() else { continue };
+            let Some(block) = structure.as_block() else {
+                continue;
+            };
             if block.ident.as_str() != "terraform" {
                 continue;
             }
             for inner in block.body.iter() {
-                let Some(rp_block) = inner.as_block() else { continue };
+                let Some(rp_block) = inner.as_block() else {
+                    continue;
+                };
                 if rp_block.ident.as_str() != "required_providers" {
                     continue;
                 }
@@ -2887,12 +2831,7 @@ fn locate_provider_fn_range(
 /// Compute the `(arg1_src, arg2_src)` pair for the 2-arg `lookup`
 /// FuncCall whose span matches `(start, end)`. Shared between the
 /// per-diag instance action and `scan_lookup_to_index`.
-fn lookup_args_at(
-    body: &Body,
-    rope: &Rope,
-    start: usize,
-    end: usize,
-) -> Option<(String, String)> {
+fn lookup_args_at(body: &Body, rope: &Rope, start: usize, end: usize) -> Option<(String, String)> {
     use hcl_edit::expr::Expression;
     use hcl_edit::repr::Span as _;
 
@@ -2901,7 +2840,9 @@ fn lookup_args_at(
         if found.is_some() {
             return;
         }
-        let Expression::FuncCall(call) = expr else { return };
+        let Expression::FuncCall(call) = expr else {
+            return;
+        };
         if !call.name.namespace.is_empty() {
             return;
         }
@@ -2918,8 +2859,12 @@ fn lookup_args_at(
         let mut args = call.args.iter();
         let arg1 = args.next();
         let arg2 = args.next();
-        let (Some(a1), Some(a2)) = (arg1, arg2) else { return };
-        let (Some(s1), Some(s2)) = (a1.span(), a2.span()) else { return };
+        let (Some(a1), Some(a2)) = (arg1, arg2) else {
+            return;
+        };
+        let (Some(s1), Some(s2)) = (a1.span(), a2.span()) else {
+            return;
+        };
         let arg1_src = rope.byte_slice(s1.start..s1.end).to_string();
         let arg2_src = rope.byte_slice(s2.start..s2.end).to_string();
         found = Some((arg1_src, arg2_src));
@@ -2930,11 +2875,7 @@ fn lookup_args_at(
 /// Compute the `lookup(X, k)` → `X[k]` rewrite for the call whose
 /// span matches `range`. Shared between the per-diag instance
 /// action and the multi-scope per-doc scan.
-fn compute_lookup_to_index_edit(
-    body: &Body,
-    rope: &Rope,
-    range: Range,
-) -> Option<TextEdit> {
+fn compute_lookup_to_index_edit(body: &Body, rope: &Rope, range: Range) -> Option<TextEdit> {
     let start = tfls_parser::lsp_position_to_byte_offset(rope, range.start).ok()?;
     let end = tfls_parser::lsp_position_to_byte_offset(rope, range.end).ok()?;
     let (arg1_src, arg2_src) = lookup_args_at(body, rope, start, end)?;
@@ -3213,7 +3154,9 @@ fn make_insert_variable_type_action_at_cursor(
     let mut target: Option<(&Block, String)> = None;
     let mut block_count = 0usize;
     for structure in body.iter() {
-        let Some(block) = structure.as_block() else { continue };
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
         if block.ident.as_str() != "variable" {
             continue;
         }
@@ -3226,7 +3169,9 @@ fn make_insert_variable_type_action_at_cursor(
             );
             continue;
         };
-        let Ok(range) = hcl_span_to_lsp_range(rope, span) else { continue };
+        let Ok(range) = hcl_span_to_lsp_range(rope, span) else {
+            continue;
+        };
         let inside = contains(&range, cursor);
         tracing::info!(
             cursor_line = cursor.line,
@@ -3353,7 +3298,9 @@ fn scan_insert_variable_types(
     let module_dir = crate::handlers::util::parent_dir(uri);
     let mut edits: Vec<TextEdit> = Vec::new();
     for structure in body.iter() {
-        let Some(block) = structure.as_block() else { continue };
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
         if block.ident.as_str() != "variable" {
             continue;
         }
@@ -3453,7 +3400,9 @@ fn scan_refine_any_types(
     let mut edits: Vec<TextEdit> = Vec::new();
 
     for structure in body.iter() {
-        let Some(block) = structure.as_block() else { continue };
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
         if block.ident.as_str() != "variable" {
             continue;
         }
@@ -3462,7 +3411,9 @@ fn scan_refine_any_types(
         };
         let mut type_value_span: Option<std::ops::Range<usize>> = None;
         for sub in block.body.iter() {
-            let Some(attr) = sub.as_attribute() else { continue };
+            let Some(attr) = sub.as_attribute() else {
+                continue;
+            };
             if attr.key.as_str() != "type" {
                 continue;
             }
@@ -3473,7 +3424,9 @@ fn scan_refine_any_types(
             }
             break;
         }
-        let Some(value_span) = type_value_span else { continue };
+        let Some(value_span) = type_value_span else {
+            continue;
+        };
 
         // Inference: same priority order as the fix-all action.
         let inferred_from_default = symbols
@@ -3525,10 +3478,10 @@ fn find_variable_block<'b>(body: &'b Body, name: &str) -> Option<&'b Block> {
 }
 
 fn block_has_attribute(block: &Block, name: &str) -> bool {
-    block.body.iter().any(|s| {
-        s.as_attribute()
-            .is_some_and(|a| a.key.as_str() == name)
-    })
+    block
+        .body
+        .iter()
+        .any(|s| s.as_attribute().is_some_and(|a| a.key.as_str() == name))
 }
 
 /// Decide whether a `VariableType` is concrete enough to
@@ -3549,7 +3502,6 @@ fn is_actionable_inference(ty: &tfls_core::variable_type::VariableType) -> bool 
         _ => true,
     }
 }
-
 
 fn placeholder_for(attr: &tfls_schema::AttributeSchema) -> &'static str {
     // Quick heuristic based on the primitive type name.
@@ -3611,14 +3563,16 @@ fn scan_template_file_targets(rope: &Rope, body: &Body) -> Vec<TemplateFileTarge
         let Some(name) = block.labels.get(1).and_then(label_str) else {
             continue;
         };
-        let Some(block_span) = block.span() else { continue };
+        let Some(block_span) = block.span() else {
+            continue;
+        };
 
         let template_src = match template_argument_source(rope, &block.body) {
             Some(s) => s,
             None => continue, // malformed input — skip
         };
-        let vars_src = attribute_source(rope, &block.body, "vars")
-            .unwrap_or_else(|| "{}".to_string());
+        let vars_src =
+            attribute_source(rope, &block.body, "vars").unwrap_or_else(|| "{}".to_string());
 
         // Expand the delete range past one trailing newline so
         // we don't leave an empty line where the block was.
@@ -3630,8 +3584,7 @@ fn scan_template_file_targets(rope: &Rope, body: &Body) -> Vec<TemplateFileTarge
                 end += 1;
             }
         }
-        let Ok(start_pos) = tfls_parser::byte_offset_to_lsp_position(rope, block_span.start)
-        else {
+        let Ok(start_pos) = tfls_parser::byte_offset_to_lsp_position(rope, block_span.start) else {
             continue;
         };
         let Ok(end_pos) = tfls_parser::byte_offset_to_lsp_position(rope, end) else {
@@ -3837,10 +3790,7 @@ fn emit_template_file_traversal_edits(
             break;
         }
     }
-    if kind == Some("template_file")
-        && rendered_seen
-        && name.is_some_and(|n| names.contains(n))
-    {
+    if kind == Some("template_file") && rendered_seen && name.is_some_and(|n| names.contains(n)) {
         if let (Some(span), Some(n)) = (t.span(), name) {
             if let (Ok(start), Ok(end)) = (
                 tfls_parser::byte_offset_to_lsp_position(rope, span.start),
@@ -3855,7 +3805,6 @@ fn emit_template_file_traversal_edits(
     }
 }
 
-
 /// Names already declared in any `locals { ... }` block under
 /// `module_dir`. Used to skip conversions that would otherwise
 /// produce a "Duplicate local value definition" Terraform
@@ -3868,7 +3817,9 @@ fn collect_existing_local_names(
     let mut out = FxHashSet::default();
     for entry in state.documents.iter() {
         let uri = entry.key();
-        let Ok(path) = uri.to_file_path() else { continue };
+        let Ok(path) = uri.to_file_path() else {
+            continue;
+        };
         if path.parent() != Some(module_dir) {
             continue;
         }
@@ -3931,13 +3882,11 @@ fn emit_template_file_actions(
     // across File/Module/Workspace scopes hit one walk. Names
     // sorted so the key is canonical regardless of insertion
     // order from the per-doc names_set.
-    let mut ref_edits_cache: FxHashMap<(Url, Vec<String>), Vec<TextEdit>> =
-        FxHashMap::default();
+    let mut ref_edits_cache: FxHashMap<(Url, Vec<String>), Vec<TextEdit>> = FxHashMap::default();
 
     for scope in scopes {
         // Pass 1 — collect convertible targets per doc, gated.
-        let mut targets_by_doc: FxHashMap<Url, Vec<TemplateFileTarget>> =
-            FxHashMap::default();
+        let mut targets_by_doc: FxHashMap<Url, Vec<TemplateFileTarget>> = FxHashMap::default();
         let mut names_by_module: FxHashMap<PathBuf, FxHashSet<String>> = FxHashMap::default();
         let mut total_blocks = 0usize;
 
@@ -3975,8 +3924,7 @@ fn emit_template_file_actions(
                 return;
             }
             total_blocks += targets.len();
-            let names_set: FxHashSet<String> =
-                targets.iter().map(|t| t.name.clone()).collect();
+            let names_set: FxHashSet<String> = targets.iter().map(|t| t.name.clone()).collect();
             names_by_module
                 .entry(dir.clone())
                 .or_default()
@@ -3994,7 +3942,10 @@ fn emit_template_file_actions(
         // Host-doc edits.
         for (uri, targets) in &targets_by_doc {
             let (host_edits, _names) = template_file_host_edits(targets);
-            edits_by_uri.entry(uri.clone()).or_default().extend(host_edits);
+            edits_by_uri
+                .entry(uri.clone())
+                .or_default()
+                .extend(host_edits);
         }
 
         // Per-doc delete ranges (for filtering refs that fall
@@ -4029,7 +3980,9 @@ fn emit_template_file_actions(
 
             for entry in state.documents.iter() {
                 let uri = entry.key();
-                let Ok(path) = uri.to_file_path() else { continue };
+                let Ok(path) = uri.to_file_path() else {
+                    continue;
+                };
                 if path.parent() != Some(module_dir) {
                     continue;
                 }
@@ -4052,17 +4005,12 @@ fn emit_template_file_actions(
                         .unwrap_or_default();
                     ref_edits_cache.insert(cache_key.clone(), computed);
                 }
-                let mut ref_edits = ref_edits_cache
-                    .get(&cache_key)
-                    .cloned()
-                    .unwrap_or_default();
+                let mut ref_edits = ref_edits_cache.get(&cache_key).cloned().unwrap_or_default();
                 if ref_edits.is_empty() {
                     continue;
                 }
                 if let Some(deletes) = delete_ranges_by_uri.get(uri) {
-                    ref_edits.retain(|e| {
-                        !deletes.iter().any(|d| range_intersects(d, &e.range))
-                    });
+                    ref_edits.retain(|e| !deletes.iter().any(|d| range_intersects(d, &e.range)));
                 }
                 if let Scope::Selection { range } = scope {
                     ref_edits.retain(|e| range_intersects(&e.range, &range));
@@ -4161,8 +4109,7 @@ fn make_replace_template_file_at_cursor(
         // Capture delete ranges for this doc so refs that fall
         // inside the deleted block (e.g. self-reference in
         // vars) get filtered — LSP rejects overlapping edits.
-        let host_delete_ranges: Vec<Range> =
-            targets.iter().map(|t| t.delete_range).collect();
+        let host_delete_ranges: Vec<Range> = targets.iter().map(|t| t.delete_range).collect();
 
         // Refs: only this name, throughout the module.
         let mut filter = FxHashSet::default();
@@ -4174,7 +4121,9 @@ fn make_replace_template_file_at_cursor(
         if let Some(dir) = module_dir.as_deref() {
             for entry in state.documents.iter() {
                 let other_uri = entry.key();
-                let Ok(path) = other_uri.to_file_path() else { continue };
+                let Ok(path) = other_uri.to_file_path() else {
+                    continue;
+                };
                 if path.parent() != Some(dir) {
                     continue;
                 }
@@ -4183,12 +4132,7 @@ fn make_replace_template_file_at_cursor(
                     continue;
                 };
                 let mut ref_edits = Vec::new();
-                template_file_reference_edits(
-                    other_body,
-                    &other_doc.rope,
-                    &filter,
-                    &mut ref_edits,
-                );
+                template_file_reference_edits(other_body, &other_doc.rope, &filter, &mut ref_edits);
                 // Filter out ref edits inside the host doc's
                 // pending delete range — overlap would corrupt
                 // the LSP edit set. Only relevant for the host

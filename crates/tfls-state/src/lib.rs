@@ -18,4 +18,4 @@ pub use error::StateError;
 pub use index_cache::IndexCache;
 pub use jobs::{Job, JobQueue, Priority};
 pub use lookup::reference_at_position;
-pub use store::{DirScanState, StateStore, SymbolKey, reference_key};
+pub use store::{reference_key, DirScanState, StateStore, SymbolKey};

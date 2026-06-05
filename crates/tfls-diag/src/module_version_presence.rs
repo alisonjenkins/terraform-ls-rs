@@ -111,9 +111,7 @@ mod tests {
 
     #[test]
     fn flags_registry_module_without_version() {
-        let d = diags(
-            r#"module "vpc" { source = "terraform-aws-modules/vpc/aws" }"#,
-        );
+        let d = diags(r#"module "vpc" { source = "terraform-aws-modules/vpc/aws" }"#);
         assert_eq!(d.len(), 1);
         assert!(d[0].message.contains("`vpc`"), "got: {}", d[0].message);
     }
@@ -137,17 +135,13 @@ mod tests {
 
     #[test]
     fn silent_for_git_source() {
-        let d = diags(
-            r#"module "x" { source = "git::https://example.com/foo.git?ref=v1.0" }"#,
-        );
+        let d = diags(r#"module "x" { source = "git::https://example.com/foo.git?ref=v1.0" }"#);
         assert!(d.is_empty(), "got: {d:?}");
     }
 
     #[test]
     fn flags_private_registry_source() {
-        let d = diags(
-            r#"module "x" { source = "app.terraform.io/example-corp/vpc/aws" }"#,
-        );
+        let d = diags(r#"module "x" { source = "app.terraform.io/example-corp/vpc/aws" }"#);
         assert_eq!(d.len(), 1, "got: {d:?}");
     }
 }

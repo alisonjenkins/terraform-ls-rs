@@ -21,11 +21,7 @@ use tfls_state::{DocumentState, StateStore};
 
 use super::util::{module_source_in_dir, parent_dir, resolve_module_source};
 
-pub fn module_input_hover(
-    state: &StateStore,
-    doc: &DocumentState,
-    pos: Position,
-) -> Option<Hover> {
+pub fn module_input_hover(state: &StateStore, doc: &DocumentState, pos: Position) -> Option<Hover> {
     let body = doc.parsed.body.as_ref()?;
     let offset = lsp_position_to_byte_offset(&doc.rope, pos).ok()?;
 
@@ -113,15 +109,14 @@ fn child_variable(
     state: &StateStore,
     child_dir: &std::path::Path,
     attr_name: &str,
-) -> Option<(
-    tfls_core::Symbol,
-    tfls_core::VariableType,
-)> {
+) -> Option<(tfls_core::Symbol, tfls_core::VariableType)> {
     for entry in state.documents.iter() {
         let Ok(doc_path) = entry.key().to_file_path() else {
             continue;
         };
-        let Some(parent) = doc_path.parent() else { continue };
+        let Some(parent) = doc_path.parent() else {
+            continue;
+        };
         if !super::util::dir_paths_match(parent, child_dir) {
             continue;
         }
@@ -359,7 +354,9 @@ fn child_output(
         let Ok(doc_path) = entry.key().to_file_path() else {
             continue;
         };
-        let Some(parent) = doc_path.parent() else { continue };
+        let Some(parent) = doc_path.parent() else {
+            continue;
+        };
         if !super::util::dir_paths_match(parent, child_dir) {
             continue;
         }
@@ -469,18 +466,20 @@ fn scan_expr_for_module_label(
         Expression::Object(obj) => obj
             .iter()
             .find_map(|(_k, v)| scan_expr_for_module_label(v.expr(), offset, rope)),
-        Expression::ForExpr(f) => scan_expr_for_module_label(&f.intro.collection_expr, offset, rope)
-            .or_else(|| {
-                f.key_expr
-                    .as_ref()
-                    .and_then(|k| scan_expr_for_module_label(k, offset, rope))
-            })
-            .or_else(|| scan_expr_for_module_label(&f.value_expr, offset, rope))
-            .or_else(|| {
-                f.cond
-                    .as_ref()
-                    .and_then(|c| scan_expr_for_module_label(&c.expr, offset, rope))
-            }),
+        Expression::ForExpr(f) => {
+            scan_expr_for_module_label(&f.intro.collection_expr, offset, rope)
+                .or_else(|| {
+                    f.key_expr
+                        .as_ref()
+                        .and_then(|k| scan_expr_for_module_label(k, offset, rope))
+                })
+                .or_else(|| scan_expr_for_module_label(&f.value_expr, offset, rope))
+                .or_else(|| {
+                    f.cond
+                        .as_ref()
+                        .and_then(|c| scan_expr_for_module_label(&c.expr, offset, rope))
+                })
+        }
         _ => None,
     }
 }
@@ -497,7 +496,9 @@ fn build_module_overview(
         let Ok(doc_path) = entry.key().to_file_path() else {
             continue;
         };
-        let Some(parent) = doc_path.parent() else { continue };
+        let Some(parent) = doc_path.parent() else {
+            continue;
+        };
         if !super::util::dir_paths_match(parent, child_dir) {
             continue;
         }

@@ -14,11 +14,11 @@
 use tfls_lsp::Backend;
 use tfls_schema::ProviderSchemas;
 use tfls_state::DocumentState;
-use tower_lsp::LspService;
 use tower_lsp::lsp_types::{
     HoverParams, Position, TextDocumentIdentifier, TextDocumentPositionParams, Url,
     WorkDoneProgressParams,
 };
+use tower_lsp::LspService;
 
 fn uri(path: &str) -> Url {
     Url::parse(path).expect("valid url")
@@ -208,8 +208,7 @@ async fn hover_on_for_each_shows_description() {
         .expect("some hover");
     assert!(md.contains("**meta-argument** `for_each`"), "got: {md}");
     assert!(
-        md.contains("Creates one instance of this resource per key")
-            || md.contains("set(string)"),
+        md.contains("Creates one instance of this resource per key") || md.contains("set(string)"),
         "expected for_each description; got: {md}"
     );
 }
@@ -754,8 +753,7 @@ async fn hover_on_content_keyword_shows_meta_block_description() {
         "expected target-label reference; got: {md}"
     );
     assert!(
-        md.to_lowercase().contains("body template")
-            || md.contains("evaluated"),
+        md.to_lowercase().contains("body template") || md.contains("evaluated"),
         "expected content semantics described; got: {md}"
     );
 }

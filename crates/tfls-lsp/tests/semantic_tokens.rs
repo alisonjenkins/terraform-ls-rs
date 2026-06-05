@@ -9,11 +9,11 @@
 
 use tfls_lsp::Backend;
 use tfls_state::DocumentState;
-use tower_lsp::LspService;
 use tower_lsp::lsp_types::{
     PartialResultParams, SemanticTokensParams, SemanticTokensResult, TextDocumentIdentifier, Url,
     WorkDoneProgressParams,
 };
+use tower_lsp::LspService;
 
 fn uri(path: &str) -> Url {
     Url::parse(path).expect("valid url")
@@ -99,7 +99,11 @@ async fn resource_token_aligns_with_type_label() {
         .iter()
         .filter(|t| t.token_type == TYPE && t.line == 0)
         .collect();
-    assert_eq!(type_tokens.len(), 1, "expected one TYPE token, got {toks:?}");
+    assert_eq!(
+        type_tokens.len(),
+        1,
+        "expected one TYPE token, got {toks:?}"
+    );
     let t = type_tokens[0];
     let (needle_lo, needle_hi) = locate(src.lines().next().unwrap(), "aws_security_group_rule");
     let (name_lo, _) = locate(src.lines().next().unwrap(), "\"test\"");
@@ -150,7 +154,10 @@ async fn module_token_aligns_with_name_label() {
     assert!(t.character <= lo);
     assert!(t.character + t.length >= hi);
     // Must not cover the `module` keyword at column 0..6.
-    assert!(t.character >= 6, "NAMESPACE token overlaps the `module` keyword");
+    assert!(
+        t.character >= 6,
+        "NAMESPACE token overlaps the `module` keyword"
+    );
 }
 
 #[tokio::test]
@@ -166,7 +173,10 @@ async fn variable_token_aligns_with_name_label() {
     let (lo, hi) = locate(src.lines().next().unwrap(), "region");
     assert!(t.character <= lo);
     assert!(t.character + t.length >= hi);
-    assert!(t.character >= 8, "VARIABLE token overlaps the `variable` keyword");
+    assert!(
+        t.character >= 8,
+        "VARIABLE token overlaps the `variable` keyword"
+    );
 }
 
 #[tokio::test]
@@ -183,5 +193,8 @@ async fn tokens_never_span_multiple_lines() {
     }
     // The TYPE token still sits on line 0.
     let type_on_line0 = toks.iter().any(|t| t.token_type == TYPE && t.line == 0);
-    assert!(type_on_line0, "expected a TYPE token on line 0, got {toks:?}");
+    assert!(
+        type_on_line0,
+        "expected a TYPE token on line 0, got {toks:?}"
+    );
 }

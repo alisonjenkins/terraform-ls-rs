@@ -180,10 +180,7 @@ fn extract_top_level_keys(slice: &str, slice_base: usize) -> Vec<(String, std::o
                     j += 1;
                 }
                 if j < bytes.len() && (bytes[j] == b'=' || bytes[j] == b':') {
-                    out.push((
-                        ident.to_string(),
-                        slice_base + start..slice_base + i,
-                    ));
+                    out.push((ident.to_string(), slice_base + start..slice_base + i));
                     at_key_position = false;
                 }
                 i = j;
@@ -364,9 +361,7 @@ fn skip_heredoc(bytes: &[u8], i: usize) -> Option<usize> {
         }
         // Strip trailing whitespace (including CR).
         let mut trim_end = line_end;
-        while trim_end > trim_start
-            && matches!(bytes[trim_end - 1], b' ' | b'\t' | b'\r')
-        {
+        while trim_end > trim_start && matches!(bytes[trim_end - 1], b' ' | b'\t' | b'\r') {
             trim_end -= 1;
         }
 
@@ -473,10 +468,7 @@ mod tests {
     fn heredoc_body_assignment_lines_do_not_trigger_duplicates() {
         let src = "locals {\n  x = {\n    a = <<-EOT\n      name = \"x\"\n      value = \"y\"\n    EOT\n    b = <<-EOT\n      name = \"x\"\n      value = \"z\"\n    EOT\n  }\n}\n";
         let d = diags(src);
-        assert!(
-            d.is_empty(),
-            "heredoc body leaked phantom keys: {d:?}"
-        );
+        assert!(d.is_empty(), "heredoc body leaked phantom keys: {d:?}");
     }
 
     #[test]

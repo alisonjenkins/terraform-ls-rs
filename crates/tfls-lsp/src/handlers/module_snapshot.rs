@@ -12,8 +12,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use hcl_edit::expr::{Expression, ObjectKey};
+use tfls_core::SymbolKind;
 use tfls_state::{StateStore, SymbolKey};
-use tfls_core::{SymbolKind};
 use tower_lsp::lsp_types::Url;
 
 pub struct ModuleSnapshot {
@@ -92,9 +92,12 @@ impl ModuleSnapshot {
                         terraform_uri_candidates.push(doc.key().as_str().to_string());
                         // A `backend` / `cloud` block makes this an
                         // applyable root (state lives somewhere concrete).
-                        if block.body.iter().filter_map(|s| s.as_block()).any(|b| {
-                            matches!(b.ident.as_str(), "backend" | "cloud")
-                        }) {
+                        if block
+                            .body
+                            .iter()
+                            .filter_map(|s| s.as_block())
+                            .any(|b| matches!(b.ident.as_str(), "backend" | "cloud"))
+                        {
                             has_applyable_config = true;
                         }
                         // Providers declared in required_providers entries.
@@ -132,9 +135,7 @@ impl ModuleSnapshot {
                     "resource" | "data" => {
                         if let Some(label) = block.labels.first() {
                             let type_name = match label {
-                                hcl_edit::structure::BlockLabel::String(s) => {
-                                    s.value().as_str()
-                                }
+                                hcl_edit::structure::BlockLabel::String(s) => s.value().as_str(),
                                 hcl_edit::structure::BlockLabel::Ident(i) => i.as_str(),
                             };
                             if let Some(local) = type_name.split('_').next() {
@@ -160,9 +161,7 @@ impl ModuleSnapshot {
                                 hcl_edit::structure::BlockLabel::String(s) => {
                                     s.value().as_str().to_string()
                                 }
-                                hcl_edit::structure::BlockLabel::Ident(i) => {
-                                    i.as_str().to_string()
-                                }
+                                hcl_edit::structure::BlockLabel::Ident(i) => i.as_str().to_string(),
                             };
                             used_provider_locals.insert(name);
                         }
@@ -400,10 +399,7 @@ fn is_root_via_set(module_dir: Option<&Path>, referenced: &HashSet<PathBuf>) -> 
 /// root rather than a module for reuse. Used by the per-call
 /// `ModuleGraphAdapter`; `ModuleSnapshot::build` computes the same flag
 /// inline during its single pass.
-pub(crate) fn module_has_applyable_config(
-    state: &StateStore,
-    module_dir: Option<&Path>,
-) -> bool {
+pub(crate) fn module_has_applyable_config(state: &StateStore, module_dir: Option<&Path>) -> bool {
     for doc in state.documents.iter() {
         if !in_module(doc.key(), module_dir) {
             continue;
@@ -467,11 +463,7 @@ fn compute_is_root(state: &StateStore, module_dir: Option<&Path>) -> bool {
     true
 }
 
-fn source_points_at(
-    source: &str,
-    caller_dir: Option<&Path>,
-    target: &Path,
-) -> bool {
+fn source_points_at(source: &str, caller_dir: Option<&Path>, target: &Path) -> bool {
     if !(source.starts_with("./") || source.starts_with("../") || source.starts_with('/')) {
         return false;
     }
@@ -636,10 +628,7 @@ mod tests {
                 root.join("main.tf"),
                 "module \"net\" { source = \"./modules/net\" }\n",
             ),
-            (
-                child.join("variables.tf"),
-                "variable \"cidr\" {}\n",
-            ),
+            (child.join("variables.tf"), "variable \"cidr\" {}\n"),
         ]);
 
         let referenced = referenced_dirs_in_workspace(&store);
@@ -680,10 +669,7 @@ mod tests {
         // Result must match the slow path.
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
-        let store = make_store_with(&[(
-            root.join("main.tf"),
-            "variable \"x\" {}\n",
-        )]);
+        let store = make_store_with(&[(root.join("main.tf"), "variable \"x\" {}\n")]);
 
         let snap = ModuleSnapshot::build(&store, Some(&root), None);
         assert!(snap.is_root, "standalone module must be root");

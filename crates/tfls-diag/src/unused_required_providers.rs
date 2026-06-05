@@ -138,10 +138,7 @@ mod tests {
 
     #[test]
     fn silent_when_no_required_providers_block() {
-        let d = diags(
-            r#"terraform { required_version = ">= 1.6" }"#,
-            &[],
-        );
+        let d = diags(r#"terraform { required_version = ">= 1.6" }"#, &[]);
         assert!(d.is_empty(), "got: {d:?}");
     }
 }

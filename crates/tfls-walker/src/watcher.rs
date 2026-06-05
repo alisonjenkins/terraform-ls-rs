@@ -38,7 +38,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use notify::{EventKind, RecommendedWatcher, RecursiveMode};
-use notify_debouncer_full::{DebouncedEvent, RecommendedCache, new_debouncer};
+use notify_debouncer_full::{new_debouncer, DebouncedEvent, RecommendedCache};
 use tokio::sync::mpsc;
 
 use crate::discovery::is_ignored_dir;
@@ -84,10 +84,7 @@ impl Drop for WorkspaceWatcher {
 /// `.tf`/`.tf.json` files (create/modify/remove) and
 /// `.terraform.lock.hcl` files are forwarded; everything else is
 /// filtered out.
-pub fn watch_workspace(
-    root: &Path,
-    debounce: Duration,
-) -> Result<WorkspaceWatcher, WalkerError> {
+pub fn watch_workspace(root: &Path, debounce: Duration) -> Result<WorkspaceWatcher, WalkerError> {
     let (tx, rx) = mpsc::unbounded_channel();
 
     let tx_for_notify = tx.clone();
@@ -170,9 +167,7 @@ fn spawn_lock_file_poller(
                                 dir = %parent.display(),
                                 "lock-poller: emit LockFileChanged"
                             );
-                            let _ = tx.send(WorkspaceEvent::LockFileChanged(
-                                parent.to_path_buf(),
-                            ));
+                            let _ = tx.send(WorkspaceEvent::LockFileChanged(parent.to_path_buf()));
                         }
                     }
                 }
@@ -183,9 +178,7 @@ fn spawn_lock_file_poller(
                                 dir = %parent.display(),
                                 "lock-poller: emit LockFileChanged (removed)"
                             );
-                            let _ = tx.send(WorkspaceEvent::LockFileChanged(
-                                parent.to_path_buf(),
-                            ));
+                            let _ = tx.send(WorkspaceEvent::LockFileChanged(parent.to_path_buf()));
                         }
                     }
                 }
@@ -297,8 +290,7 @@ mod tests {
     #[tokio::test]
     async fn notifies_on_tf_file_create() {
         let dir = tmp_dir("create");
-        let mut watcher =
-            watch_workspace(&dir, Duration::from_millis(50)).expect("watcher");
+        let mut watcher = watch_workspace(&dir, Duration::from_millis(50)).expect("watcher");
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         fs::write(dir.join("main.tf"), "").unwrap();
@@ -327,8 +319,7 @@ mod tests {
         let dir = tmp_dir("lockfile-rewrite");
         fs::write(dir.join(".terraform.lock.hcl"), "version = \"1\"\n").unwrap();
 
-        let mut watcher =
-            watch_workspace(&dir, Duration::from_millis(50)).expect("watcher");
+        let mut watcher = watch_workspace(&dir, Duration::from_millis(50)).expect("watcher");
 
         tokio::time::sleep(LOCK_POLL_INTERVAL + Duration::from_millis(200)).await;
         while tokio::time::timeout(Duration::from_millis(50), watcher.events.recv())
@@ -359,14 +350,12 @@ mod tests {
     #[tokio::test]
     async fn ignores_non_terraform_files() {
         let dir = tmp_dir("ignore");
-        let mut watcher =
-            watch_workspace(&dir, Duration::from_millis(50)).expect("watcher");
+        let mut watcher = watch_workspace(&dir, Duration::from_millis(50)).expect("watcher");
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         fs::write(dir.join("README.md"), "").unwrap();
 
-        let got =
-            tokio::time::timeout(Duration::from_millis(600), watcher.events.recv()).await;
+        let got = tokio::time::timeout(Duration::from_millis(600), watcher.events.recv()).await;
         assert!(got.is_err(), "should have timed out, got {got:?}");
 
         fs::remove_dir_all(dir).ok();

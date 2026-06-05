@@ -35,7 +35,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use hcl_edit::expr::{Expression, TraversalOperator};
 use hcl_edit::repr::Span;
-use hcl_edit::structure::{Body, BlockLabel};
+use hcl_edit::structure::{BlockLabel, Body};
 use lsp_types::{
     CodeAction, CodeActionOrCommand, CreateFile, CreateFileOptions, DocumentChangeOperation,
     DocumentChanges, OneOf, OptionalVersionedTextDocumentIdentifier, Position, Range, ResourceOp,
@@ -47,7 +47,7 @@ use tfls_state::StateStore;
 
 use crate::handlers::code_action::walk_expressions;
 use crate::handlers::code_action_scope::{
-    Scope, for_each_doc_in_scope, range_intersects, scope_kind,
+    for_each_doc_in_scope, range_intersects, scope_kind, Scope,
 };
 
 /// Per-call cache of provider-version constraint resolution, keyed by
@@ -126,7 +126,10 @@ const ALL_BLOCK_RENAMES: &[BlockRenameSpec] = &[
     aws_aliased("aws_alb_listener", "aws_lb_listener"),
     aws_aliased("aws_alb_listener_rule", "aws_lb_listener_rule"),
     aws_aliased("aws_alb_target_group", "aws_lb_target_group"),
-    aws_aliased("aws_alb_target_group_attachment", "aws_lb_target_group_attachment"),
+    aws_aliased(
+        "aws_alb_target_group_attachment",
+        "aws_lb_target_group_attachment",
+    ),
     // `aws_s3_bucket_object` → `aws_s3_object` is NOT an alias
     // — they're distinct resources with diverging defaults
     // (`force_destroy`, lifecycle alignment with the v4 S3
@@ -322,7 +325,9 @@ pub fn make_replace_block_at_cursor(
         let Some(&(idx, spec)) = by_kind_label.get(&(kind, label_text)) else {
             continue;
         };
-        let Some(block_span) = block.span() else { continue };
+        let Some(block_span) = block.span() else {
+            continue;
+        };
         let Ok(block_range) = hcl_span_to_lsp_range(rope, block_span) else {
             continue;
         };
@@ -332,7 +337,9 @@ pub fn make_replace_block_at_cursor(
         let Some(name) = block.labels.get(1).and_then(label_str) else {
             continue;
         };
-        let Some(label_span) = label.span() else { continue };
+        let Some(label_span) = label.span() else {
+            continue;
+        };
         let Ok(label_range) = hcl_span_to_lsp_range(rope, label_span) else {
             continue;
         };
@@ -370,8 +377,7 @@ pub fn make_replace_block_at_cursor(
     rewrites.insert(uri.clone(), doc_edits);
 
     // moved.tf entry per the spec's StateMigration kind.
-    let module_admits_terraform_1_8 =
-        module_admits_terraform_at_least(state, &module_dir, "1.8.0");
+    let module_admits_terraform_1_8 = module_admits_terraform_at_least(state, &module_dir, "1.8.0");
     let pending_kind = match spec.state_migration {
         StateMigration::Aliased => Some(PendingKind::Real),
         StateMigration::RequiresTerraform18 => Some(if module_admits_terraform_1_8 {
@@ -418,8 +424,12 @@ fn filter_refs_by_name(
     // Build a position → name map by walking traversals.
     let mut name_by_pos: FxHashMap<(u32, u32), String> = FxHashMap::default();
     walk_expressions(body, &mut |expr| {
-        let Expression::Traversal(t) = expr else { return };
-        let Expression::Variable(v) = &t.expr else { return };
+        let Expression::Traversal(t) = expr else {
+            return;
+        };
+        let Expression::Variable(v) = &t.expr else {
+            return;
+        };
         if v.as_str() != from_type {
             return;
         }
@@ -517,23 +527,15 @@ pub fn emit_block_rename_actions(
             // Per-doc scan: which specs are gate-supported in
             // this module? Cache provider constraints once per
             // (module, provider).
-            let supported = compute_supported_specs(
-                state,
-                &module_dir,
-                &mut provider_constraint_cache,
-            );
+            let supported =
+                compute_supported_specs(state, &module_dir, &mut provider_constraint_cache);
 
             // 1+2. Compute (or fetch from cache) the per-doc
             // block + ref scans. `supported` is module-derived
             // and stable across scopes for a given doc, so the
             // cache key is the URI alone.
             if !scan_cache.contains_key(doc_uri) {
-                let blocks = scan_block_rewrites(
-                    body,
-                    &doc.rope,
-                    &by_kind_label,
-                    &supported,
-                );
+                let blocks = scan_block_rewrites(body, &doc.rope, &by_kind_label, &supported);
                 let refs = scan_ref_rewrites(body, &doc.rope, &by_from, &supported);
                 scan_cache.insert(doc_uri.clone(), (blocks, refs));
             }
@@ -592,10 +594,8 @@ pub fn emit_block_rename_actions(
             total_blocks += blocks.len();
 
             // Merge edits for this doc.
-            let mut doc_edits: Vec<TextEdit> =
-                blocks.into_iter().map(|(_, _, e)| e).collect();
-            let mut filtered_refs: Vec<TextEdit> =
-                refs.into_iter().map(|(_, e)| e).collect();
+            let mut doc_edits: Vec<TextEdit> = blocks.into_iter().map(|(_, _, e)| e).collect();
+            let mut filtered_refs: Vec<TextEdit> = refs.into_iter().map(|(_, e)| e).collect();
             if let Scope::Selection { range } = scope {
                 filtered_refs.retain(|e| range_intersects(&e.range, &range));
             }
@@ -623,11 +623,9 @@ pub fn emit_block_rename_actions(
             Scope::Workspace => "workspace",
             Scope::Instance => continue,
         };
-        let title =
-            format!("Rename {total_blocks} deprecated provider type{plural} in {where_}");
+        let title = format!("Rename {total_blocks} deprecated provider type{plural} in {where_}");
 
-        let workspace_edit =
-            build_workspace_edit(state, edits_by_uri, renames_by_module);
+        let workspace_edit = build_workspace_edit(state, edits_by_uri, renames_by_module);
         actions.push(CodeActionOrCommand::CodeAction(CodeAction {
             title,
             kind: Some(scope_kind(scope, "rename-deprecated-provider-types")),
@@ -709,7 +707,9 @@ fn module_admits_terraform_at_least(
     let mut fragments: Vec<String> = Vec::new();
     for entry in state.documents.iter() {
         let uri = entry.key();
-        let Ok(path) = uri.to_file_path() else { continue };
+        let Ok(path) = uri.to_file_path() else {
+            continue;
+        };
         if path.parent() != Some(module_dir) {
             continue;
         }
@@ -733,8 +733,7 @@ fn module_admits_terraform_at_least(
     if parsed.constraints.is_empty() {
         return false;
     }
-    let Some(min) = tfls_core::version_constraint::min_admitted_version(&parsed.constraints)
-    else {
+    let Some(min) = tfls_core::version_constraint::min_admitted_version(&parsed.constraints) else {
         return false;
     };
     tfls_core::version_constraint::version_at_least(min, floor)
@@ -752,7 +751,9 @@ fn module_constraint_for_provider_dir(
     let mut fragments: Vec<String> = Vec::new();
     for entry in state.documents.iter() {
         let uri = entry.key();
-        let Ok(path) = uri.to_file_path() else { continue };
+        let Ok(path) = uri.to_file_path() else {
+            continue;
+        };
         if path.parent() != Some(module_dir) {
             continue;
         }
@@ -783,7 +784,9 @@ fn module_locked_provider_version_dir(
     let mut source: Option<String> = None;
     for entry in state.documents.iter() {
         let uri = entry.key();
-        let Ok(path) = uri.to_file_path() else { continue };
+        let Ok(path) = uri.to_file_path() else {
+            continue;
+        };
         if path.parent() != Some(module_dir) {
             continue;
         }
@@ -865,12 +868,18 @@ fn scan_ref_rewrites(
 ) -> Vec<(usize, TextEdit)> {
     let mut out: Vec<(usize, TextEdit)> = Vec::new();
     walk_expressions(body, &mut |expr| {
-        let Expression::Traversal(t) = expr else { return };
-        let Expression::Variable(v) = &t.expr else { return };
+        let Expression::Traversal(t) = expr else {
+            return;
+        };
+        let Expression::Variable(v) = &t.expr else {
+            return;
+        };
         let head = v.as_str();
         // O(1) lookup vs the previous linear scan over the
         // 26-spec table per traversal.
-        let Some(&(idx, spec)) = by_from.get(head) else { return };
+        let Some(&(idx, spec)) = by_from.get(head) else {
+            return;
+        };
         if !supported[idx] {
             return;
         }
@@ -945,11 +954,7 @@ fn build_workspace_edit(
             let to_type = resolved_to(spec);
             match kind {
                 PendingKind::Real => {
-                    if existing_real.contains(&(
-                        from_type.clone(),
-                        to_type.clone(),
-                        name.clone(),
-                    )) {
+                    if existing_real.contains(&(from_type.clone(), to_type.clone(), name.clone())) {
                         continue;
                     }
                     real_blocks.push_str(&format!(
@@ -1029,14 +1034,16 @@ fn build_workspace_edit(
                 }));
             }
             TargetFileStrategy::Create => {
-                ops.push(DocumentChangeOperation::Op(ResourceOp::Create(CreateFile {
-                    uri: target_url.clone(),
-                    options: Some(CreateFileOptions {
-                        overwrite: Some(false),
-                        ignore_if_exists: Some(true),
-                    }),
-                    annotation_id: None,
-                })));
+                ops.push(DocumentChangeOperation::Op(ResourceOp::Create(
+                    CreateFile {
+                        uri: target_url.clone(),
+                        options: Some(CreateFileOptions {
+                            overwrite: Some(false),
+                            ignore_if_exists: Some(true),
+                        }),
+                        annotation_id: None,
+                    },
+                )));
                 ops.push(DocumentChangeOperation::Edit(TextDocumentEdit {
                     text_document: OptionalVersionedTextDocumentIdentifier {
                         uri: target_url,
@@ -1105,19 +1112,14 @@ fn commented_18_header() -> String {
 }
 
 fn format_commented_moved(from_type: &str, to_type: &str, name: &str) -> String {
-    format!(
-        "# moved {{\n#   from = {from_type}.{name}\n#   to   = {to_type}.{name}\n# }}\n"
-    )
+    format!("# moved {{\n#   from = {from_type}.{name}\n#   to   = {to_type}.{name}\n# }}\n")
 }
 
 /// Read the raw text of the module's `moved.tf` (loaded
 /// document, on-disk file, or empty if neither exists). Used by
 /// the commented-block dedup — we substring-search rather than
 /// HCL-parse since comments are invisible to the parser.
-fn read_existing_moved_tf_text(
-    state: &StateStore,
-    module_dir: &std::path::Path,
-) -> String {
+fn read_existing_moved_tf_text(state: &StateStore, module_dir: &std::path::Path) -> String {
     let target_path = module_dir.join("moved.tf");
     let Ok(target_url) = Url::from_file_path(&target_path) else {
         return String::new();
@@ -1138,7 +1140,9 @@ fn collect_existing_moved_pairs(
     let mut out = FxHashSet::default();
     for entry in state.documents.iter() {
         let uri = entry.key();
-        let Ok(path) = uri.to_file_path() else { continue };
+        let Ok(path) = uri.to_file_path() else {
+            continue;
+        };
         if path.parent() != Some(module_dir) {
             continue;
         }
@@ -1312,7 +1316,10 @@ mod tests {
                 continue;
             }
             let to = resolved_to(spec);
-            assert!(to.ends_with("_v1"), "spec {spec:?} does not resolve to a _v1 type");
+            assert!(
+                to.ends_with("_v1"),
+                "spec {spec:?} does not resolve to a _v1 type"
+            );
             // Shorthand specs (empty `to`) synthesise `<from>_v1`;
             // explicit specs must keep their spelled-out target.
             let expected = if spec.to.is_empty() {

@@ -246,8 +246,8 @@ async fn try_fetch_provider_dates(
             .text()
             .await
             .map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
-        let parsed: VersionsResp = serde_json::from_str(&body)
-            .map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
+        let parsed: VersionsResp =
+            serde_json::from_str(&body).map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
         let page_len = parsed.data.len();
         for entry in parsed.data {
             if let Some(date) = entry.attributes.published_at {
@@ -530,7 +530,10 @@ pub fn merge_with_provenance(tf: Vec<String>, tofu: Vec<String>) -> Vec<VersionI
 /// merged `VersionInfo` list. Missing keys are left as `None`. Used
 /// by callers that enrich v1 version strings with v2 `published_at`
 /// data after the primary fetch completes.
-pub fn attach_dates(versions: &mut [VersionInfo], dates: &std::collections::HashMap<String, String>) {
+pub fn attach_dates(
+    versions: &mut [VersionInfo],
+    dates: &std::collections::HashMap<String, String>,
+) {
     for v in versions.iter_mut() {
         if v.published_at.is_none() {
             if let Some(d) = dates.get(&v.version) {
@@ -584,10 +587,20 @@ pub async fn fetch_module_versions(
     provider: &str,
 ) -> Result<Vec<VersionInfo>, ProtocolError> {
     let tf = fetch_module_registry_versions(
-        client, TERRAFORM_HOST, "terraform", namespace, name, provider,
+        client,
+        TERRAFORM_HOST,
+        "terraform",
+        namespace,
+        name,
+        provider,
     );
     let tofu = fetch_module_registry_versions(
-        client, OPENTOFU_HOST, "opentofu", namespace, name, provider,
+        client,
+        OPENTOFU_HOST,
+        "opentofu",
+        namespace,
+        name,
+        provider,
     );
     let (tf_res, tofu_res) = tokio::join!(tf, tofu);
     Ok(merge_with_provenance(
@@ -741,12 +754,7 @@ pub fn cached_latest_version(namespace: &str, name: &str) -> Option<String> {
     fn read_cache(path: &Path) -> Option<HashSet<String>> {
         let body = std::fs::read_to_string(path).ok()?;
         let versions: Vec<String> = serde_json::from_str(&body).ok()?;
-        Some(
-            versions
-                .into_iter()
-                .filter(|v| !v.contains('-'))
-                .collect(),
-        )
+        Some(versions.into_iter().filter(|v| !v.contains('-')).collect())
     }
 
     let tf_path = versions_cache_path("terraform", namespace, name);
@@ -839,8 +847,8 @@ async fn try_network_fetch(
         .text()
         .await
         .map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
-    let parsed: VersionsResponse = serde_json::from_str(&body)
-        .map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
+    let parsed: VersionsResponse =
+        serde_json::from_str(&body).map_err(|e| ProtocolError::RegistryHttp(e.to_string()))?;
     Ok(parsed.versions.into_iter().map(|v| v.version).collect())
 }
 
@@ -857,7 +865,9 @@ pub fn build_http_client() -> Result<reqwest::Client, ProtocolError> {
 
 fn cache_root() -> PathBuf {
     if let Some(dir) = std::env::var_os("XDG_CACHE_HOME") {
-        return PathBuf::from(dir).join("terraform-ls-rs").join("registry-versions");
+        return PathBuf::from(dir)
+            .join("terraform-ls-rs")
+            .join("registry-versions");
     }
     if let Some(home) = std::env::var_os("HOME") {
         return PathBuf::from(home)
@@ -961,23 +971,36 @@ mod tests {
     fn cache_path_is_registry_scoped() {
         let p1 = versions_cache_path("terraform", "hashicorp", "aws");
         let p2 = versions_cache_path("opentofu", "hashicorp", "aws");
-        assert_ne!(p1, p2, "same provider must cache under different registries");
+        assert_ne!(
+            p1, p2,
+            "same provider must cache under different registries"
+        );
     }
 
     #[test]
     fn merge_tags_shared_versions_with_both_registries() {
-        let tf = vec!["5.99.0".to_string(), "5.98.0".to_string(), "5.97.0".to_string()];
+        let tf = vec![
+            "5.99.0".to_string(),
+            "5.98.0".to_string(),
+            "5.97.0".to_string(),
+        ];
         let tofu = vec!["5.99.0".to_string(), "5.97.0".to_string()];
         let merged = merge_with_provenance(tf, tofu);
         assert_eq!(merged.len(), 3);
         assert_eq!(merged[0].version, "5.99.0");
-        assert_eq!(merged[0].registries, vec![Registry::Terraform, Registry::OpenTofu]);
+        assert_eq!(
+            merged[0].registries,
+            vec![Registry::Terraform, Registry::OpenTofu]
+        );
         assert_eq!(merged[0].provenance_label(), "terraform + opentofu");
         assert_eq!(merged[1].version, "5.98.0");
         assert_eq!(merged[1].registries, vec![Registry::Terraform]);
         assert_eq!(merged[1].provenance_label(), "terraform only");
         assert_eq!(merged[2].version, "5.97.0");
-        assert_eq!(merged[2].registries, vec![Registry::Terraform, Registry::OpenTofu]);
+        assert_eq!(
+            merged[2].registries,
+            vec![Registry::Terraform, Registry::OpenTofu]
+        );
     }
 
     #[test]
@@ -1075,7 +1098,10 @@ mod tests {
         let cache_path = versions_cache_path("terraform", "hashicorp", "aws");
         let payload = vec!["5.99.0".to_string(), "5.98.0".to_string()];
         write_cache(&cache_path, &payload).await;
-        assert!(tokio::fs::metadata(&cache_path).await.is_ok(), "cache written");
+        assert!(
+            tokio::fs::metadata(&cache_path).await.is_ok(),
+            "cache written"
+        );
 
         let client = build_http_client().expect("http client");
         // 127.0.0.1:1 is the canonical "nothing listens here" port.
@@ -1121,10 +1147,7 @@ mod tests {
 
     #[test]
     fn major_minor_of_extracts_two_parts() {
-        assert_eq!(
-            super::major_minor_of("4.71.0"),
-            Some("4.71".to_string())
-        );
+        assert_eq!(super::major_minor_of("4.71.0"), Some("4.71".to_string()));
         assert_eq!(super::major_minor_of("1.0.0"), Some("1.0".to_string()));
     }
 

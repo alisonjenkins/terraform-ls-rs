@@ -24,7 +24,7 @@
 use std::path::Path;
 
 use hcl_edit::expr::Expression;
-use hcl_edit::structure::{Body, BlockLabel};
+use hcl_edit::structure::{BlockLabel, Body};
 use rustc_hash::FxHashMap;
 
 use crate::types::ProviderAddress;
@@ -48,7 +48,9 @@ impl LockFile {
     /// strictly. Useful when the caller already has a canonical
     /// address.
     pub fn get(&self, addr: &ProviderAddress) -> Option<&LockFileEntry> {
-        self.entries.get(addr).or_else(|| self.find_by_ns_name(&addr.namespace, &addr.r#type))
+        self.entries
+            .get(addr)
+            .or_else(|| self.find_by_ns_name(&addr.namespace, &addr.r#type))
     }
 
     /// Host-tolerant lookup by `(namespace, type)`. Matches the

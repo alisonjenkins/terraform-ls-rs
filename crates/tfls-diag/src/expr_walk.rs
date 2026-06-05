@@ -190,7 +190,11 @@ mod tests {
         let src =
             "output \"x\" {\n  value = <<-EOT\n    %{ if var.on }${var.body}%{ endif }\n  EOT\n}\n";
         let vars = visited_vars(src);
-        assert_eq!(vars.iter().filter(|v| *v == "var").count(), 2, "got: {vars:?}");
+        assert_eq!(
+            vars.iter().filter(|v| *v == "var").count(),
+            2,
+            "got: {vars:?}"
+        );
     }
 
     #[test]
