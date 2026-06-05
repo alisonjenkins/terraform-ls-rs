@@ -72,7 +72,7 @@ jobs:
           echo "ASSET=$staging.tar.gz" >> "$GITHUB_ENV"
 
       - name: Attach to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             ${{ env.ASSET }}
@@ -110,7 +110,7 @@ jobs:
         run: npx @vscode/vsce package --out "tfls-vscode-${GITHUB_REF_NAME}.vsix"
 
       - name: Attach VSIX to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: editors/vscode/tfls-vscode-${{ github.ref_name }}.vsix
           fail_on_unmatched_files: true
