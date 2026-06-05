@@ -20,6 +20,11 @@
         "lockFileMaintenance"
       ],
       "automerge": true
+    },
+    {
+      "description": "tower-lsp 0.20 hard-pins lsp-types 0.94; going past it needs a framework migration (tower-lsp-server), not a dep bump.",
+      "matchPackageNames": ["lsp-types"],
+      "allowedVersions": "<0.95"
     }
   ]
 }
