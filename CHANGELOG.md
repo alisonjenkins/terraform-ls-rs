@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.2](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.5.1...v0.5.2) (2026-06-05)
+
+
+### Bug Fixes
+
+* **lsp:** scope resource/data document links to the type label ([9b91a4a](https://github.com/alisonjenkins/terraform-ls-rs/commit/9b91a4a8d67e7f3e8b1f0591a1a62661d0320458))
+
 ## [0.5.1](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.5.0...v0.5.1) (2026-06-05)
 
 
