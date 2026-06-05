@@ -2,7 +2,7 @@
   "name": "terraform-ls-rs",
   "displayName": "Terraform / OpenTofu (terraform-ls-rs)",
   "description": "Terraform & OpenTofu language support powered by the tfls (terraform-ls-rs) language server.",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "publisher": "alisonjenkins",
   "preview": true,
   "license": "MPL-2.0",

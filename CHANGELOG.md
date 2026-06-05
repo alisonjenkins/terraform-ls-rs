@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.5.0...v0.5.1) (2026-06-05)
+
+
+### Bug Fixes
+
+* **ci:** build linux release as static musl binary ([8eaee7f](https://github.com/alisonjenkins/terraform-ls-rs/commit/8eaee7fb101f241a3db405cee6c384bd4c10f53f))
+
 ## [0.5.0](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.4.2...v0.5.0) (2026-06-05)
 
 
