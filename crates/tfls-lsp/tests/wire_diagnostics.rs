@@ -142,30 +142,37 @@ async fn code_action_envtype_inference_via_wire() {
     client.initialize(Some(&workspace_uri)).await;
     client.did_open(&main_uri, main_text).await;
 
-    // ScanDirectory + rebuild fire on the worker; give them a
-    // beat to populate `assigned_variable_types`.
-    client.settle(500).await;
-
-    let resp = client
-        .code_action(
-            &main_uri,
-            json!({
-                "start": { "line": 0, "character": 0 },
-                "end": { "line": 0, "character": 22 }
-            }),
-            json!([{
-                "range": {
-                    "start": { "line": 0, "character": 9 },
-                    "end": { "line": 0, "character": 17 }
-                },
-                "severity": 2,
-                "source": "terraform-ls-rs",
-                "message": "`envtype` variable has no type"
-            }]),
-        )
-        .await;
-
-    let actions = resp["result"].as_array().cloned().unwrap_or_default();
+    // ScanDirectory + rebuild fire on the worker and populate
+    // `assigned_variable_types` asynchronously. Poll the code action until the
+    // quick-fix shows up rather than racing a single fixed sleep — under
+    // parallel test load the worker can take longer than any one timeout.
+    let mut resp = json!(null);
+    let mut actions = Vec::new();
+    for _ in 0..40 {
+        client.settle(250).await;
+        resp = client
+            .code_action(
+                &main_uri,
+                json!({
+                    "start": { "line": 0, "character": 0 },
+                    "end": { "line": 0, "character": 22 }
+                }),
+                json!([{
+                    "range": {
+                        "start": { "line": 0, "character": 9 },
+                        "end": { "line": 0, "character": 17 }
+                    },
+                    "severity": 2,
+                    "source": "terraform-ls-rs",
+                    "message": "`envtype` variable has no type"
+                }]),
+            )
+            .await;
+        actions = resp["result"].as_array().cloned().unwrap_or_default();
+        if !actions.is_empty() {
+            break;
+        }
+    }
     assert!(
         !actions.is_empty(),
         "expected the `Set variable type` quick-fix; got {resp}",
