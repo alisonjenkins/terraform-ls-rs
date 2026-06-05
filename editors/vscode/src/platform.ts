@@ -9,7 +9,8 @@ const REPO = "alisonjenkins/terraform-ls-rs";
 
 /** Maps a Node `platform-arch` pair to the release asset's Rust target triple. */
 export const TARGETS: Record<string, string> = {
-  "linux-x64": "x86_64-unknown-linux-gnu",
+  // Linux ships a static musl binary (runs on any distro incl. NixOS).
+  "linux-x64": "x86_64-unknown-linux-musl",
   "darwin-arm64": "aarch64-apple-darwin",
   "win32-x64": "x86_64-pc-windows-msvc",
 };

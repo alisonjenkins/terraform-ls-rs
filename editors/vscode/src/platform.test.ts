@@ -11,7 +11,7 @@ import {
 
 describe("targetTriple", () => {
   it("maps supported platform/arch pairs to release triples", () => {
-    expect(targetTriple("linux", "x64")).toBe("x86_64-unknown-linux-gnu");
+    expect(targetTriple("linux", "x64")).toBe("x86_64-unknown-linux-musl");
     expect(targetTriple("darwin", "arm64")).toBe("aarch64-apple-darwin");
     expect(targetTriple("win32", "x64")).toBe("x86_64-pc-windows-msvc");
   });
