@@ -16,11 +16,11 @@
   };
 
   outputs =
-    { self
-    , nixpkgs
+    { nixpkgs
     , flake-utils
     , fenix
     , crane
+    , ...
     }:
     flake-utils.lib.eachDefaultSystem (system:
       let
@@ -49,6 +49,10 @@
             # Vendored tfplugin protobuf definitions consumed by
             # tfls-provider-protocol/build.rs via tonic-build.
             ./crates/tfls-provider-protocol/proto
+            # Frozen registry-doc markdown loaded by integration tests via
+            # include_str!; without these the sandboxed test/clippy builds
+            # (cargoTest / cargoClippy --all-targets) fail to compile.
+            ./crates/tfls-provider-protocol/tests/fixtures
           ];
         };
 
@@ -71,6 +75,12 @@
           # sandboxed nix build uses the pinned protobuf package rather than
           # whatever (if anything) is on $PATH.
           PROTOC = "${pkgs.protobuf}/bin/protoc";
+
+          # Several unit tests construct a reqwest::Client eagerly (before any
+          # offline doc lookup). reqwest's TLS backend aborts at construction if
+          # no system CA bundle is present, which the build sandbox lacks — point
+          # it at the cacert bundle so `cargoTest` runs offline.
+          SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
         };
 
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;

@@ -1,10 +1,10 @@
 name: CI
 
 # Build, lint, format-check and test on every push to main and every PR.
-# Runs through the Nix dev shell so protoc (needed by tonic-build) and the exact
-# toolchain match local dev. We drive cargo inside `nix develop` rather than
-# `nix flake check` because the integration tests read on-disk fixtures that the
-# crane source filter strips from the sandbox.
+# `nix flake check` runs the build + clippy (-D warnings) + fmt --check + the
+# full test suite as the crane-defined checks in flake.nix (deps are built once
+# and cached). cargo deny runs separately because it fetches the advisory DB
+# over the network and so isn't a sandboxed flake check.
 on:
   push:
     branches: [main]
@@ -24,14 +24,8 @@ jobs:
 
       - uses: DeterminateSystems/magic-nix-cache-action@14645543c3b214bedad3b9b49775cb042f4c1fc7 # main
 
-      - name: Check formatting
-        run: nix develop --command cargo fmt --check
-
-      - name: Clippy
-        run: nix develop --command cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Run tests
-        run: nix develop --command cargo test --workspace
+      - name: Flake check (build + clippy + fmt + test)
+        run: nix flake check --print-build-logs
 
       - name: cargo deny
         run: nix develop --command cargo deny check
