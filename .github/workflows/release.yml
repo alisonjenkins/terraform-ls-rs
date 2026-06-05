@@ -16,6 +16,10 @@ on:
         description: Tag to build and attach artifacts to (e.g. v0.2.3)
         required: true
         type: string
+      sha:
+        description: Commit SHA to build (release-please passes this; the draft tag may not exist yet)
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -46,7 +50,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ inputs.sha || inputs.tag || github.ref }}
 
       # tonic-build (crates/tfls-provider-protocol/build.rs) needs protoc
       # to compile the tfplugin5/6 protos.
@@ -91,14 +95,17 @@ jobs:
           fi
           echo "ASSET=$staging.tar.gz" >> "$GITHUB_ENV"
 
-      - name: Attach to release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
-        with:
-          tag_name: ${{ inputs.tag || github.ref_name }}
-          files: |
-            ${{ env.ASSET }}
-            ${{ env.ASSET }}.sha256
-          fail_on_unmatched_files: true
+      # Upload to the DRAFT release (created by release-please) with the gh CLI:
+      # `gh release upload` resolves draft releases by tag, whereas the
+      # get-release-by-tag API softprops uses skips drafts. Assets can only be
+      # added while the release is a draft (immutable once published) — the
+      # final `publish` job flips it to published.
+      - name: Upload to draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: gh release upload "$TAG" "$ASSET" "$ASSET.sha256" --clobber --repo "$GITHUB_REPOSITORY"
 
   # Package the VS Code extension and attach the VSIX to the release so it can
   # be installed and tested. Publishing to the Marketplace / Open VSX is NOT
@@ -114,7 +121,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ inputs.sha || inputs.tag || github.ref }}
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
@@ -134,9 +141,23 @@ jobs:
           VERSION: ${{ inputs.tag || github.ref_name }}
         run: npx @vscode/vsce package --out "tfls-vscode-${VERSION}.vsix"
 
-      - name: Attach VSIX to release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
-        with:
-          tag_name: ${{ inputs.tag || github.ref_name }}
-          files: editors/vscode/tfls-vscode-${{ inputs.tag || github.ref_name }}.vsix
-          fail_on_unmatched_files: true
+      - name: Upload VSIX to draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.tag || github.ref_name }}
+        run: gh release upload "$VERSION" "tfls-vscode-${VERSION}.vsix" --clobber --repo "$GITHUB_REPOSITORY"
+
+  # Publish the draft release once all assets are attached. Publishing makes the
+  # release (now immutable) visible with its binaries + VSIX; doing it last means
+  # we never try to add assets to an already-published immutable release.
+  publish:
+    name: publish release
+    needs: [build, vscode]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: gh release edit "$TAG" --draft=false --latest --repo "$GITHUB_REPOSITORY"
