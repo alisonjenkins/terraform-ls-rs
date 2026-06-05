@@ -32,9 +32,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Linux: build a fully STATIC musl binary (via cargo-zigbuild) instead
+          # of a glibc-dynamic one. A dynamically-linked binary can't run on
+          # distros without an FHS dynamic linker (e.g. NixOS, exit 127); the
+          # static musl binary runs on any Linux. aws-lc-sys compiles fine for
+          # musl under zig.
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             bin: tfls
+            use_zig: true
           # macOS arm64 is DISABLED until a self-hosted Apple-silicon runner is
           # available again (GitHub-hosted macOS runners are billed at a steep
           # multiplier). With no runner the job sits queued forever and blocks
@@ -42,11 +48,13 @@ jobs:
           # - os: [self-hosted, macOS, ARM64]
           #   target: aarch64-apple-darwin
           #   bin: tfls
+          #   use_zig: false
           # Windows: the provider-plugin transport uses TCP on Windows (unix
           # sockets are cfg-gated to unix), so the server now builds here.
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             bin: tfls.exe
+            use_zig: false
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -68,12 +76,25 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # Static musl builds go through cargo-zigbuild (zig provides the C
+      # toolchain for aws-lc-sys/ring under musl).
+      - name: Install zig
+        if: matrix.use_zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+      - name: Install cargo-zigbuild
+        if: matrix.use_zig
+        run: cargo install cargo-zigbuild --locked
+
+      # No --locked: release-please (simple) bumps the version in Cargo.toml but
+      # not the workspace-member entries in Cargo.lock, so on a release tag the
+      # lock is briefly stale. Letting cargo reconcile updates only those
+      # path-crate versions offline; registry deps stay pinned by the committed
+      # lock.
+      - name: Build release binary (zig/musl)
+        if: matrix.use_zig
+        run: cargo zigbuild --release -p tfls-cli --bin tfls --target ${{ matrix.target }}
       - name: Build release binary
-        # No --locked: release-please (simple) bumps the version in Cargo.toml
-        # but not the workspace-member entries in Cargo.lock, so on a release
-        # tag the lock is briefly stale. Letting cargo reconcile updates only
-        # those path-crate versions offline; registry deps stay pinned by the
-        # committed lock.
+        if: ${{ !matrix.use_zig }}
         run: cargo build --release -p tfls-cli --bin tfls --target ${{ matrix.target }}
 
       - name: Package
