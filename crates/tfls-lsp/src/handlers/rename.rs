@@ -23,7 +23,7 @@ use tfls_state::{DocumentState, StateStore, SymbolKey};
 use tower_lsp::jsonrpc;
 
 use crate::backend::Backend;
-use crate::handlers::cursor::{CursorKind, find_symbol_at_cursor};
+use crate::handlers::cursor::{find_symbol_at_cursor, CursorKind};
 
 /// Validate that a rename may happen here; return the range of the
 /// identifier being renamed so the editor can highlight it.
@@ -101,14 +101,28 @@ pub async fn rename(
     // Definitions — label rename.
     if let Some(defs) = backend.state.definitions_by_name.get(&key) {
         for loc in defs.iter() {
-            push_narrow_edit(backend, loc, &key.name, &new_name, &mut edits, EditKind::Label);
+            push_narrow_edit(
+                backend,
+                loc,
+                &key.name,
+                &new_name,
+                &mut edits,
+                EditKind::Label,
+            );
         }
     }
 
     // References — tail-identifier rename.
     if let Some(refs) = backend.state.references_by_name.get(&key) {
         for loc in refs.iter() {
-            push_narrow_edit(backend, loc, &key.name, &new_name, &mut edits, EditKind::Tail);
+            push_narrow_edit(
+                backend,
+                loc,
+                &key.name,
+                &new_name,
+                &mut edits,
+                EditKind::Tail,
+            );
         }
     }
 
@@ -148,13 +162,10 @@ fn push_narrow_edit(
         return;
     };
 
-    edits
-        .entry(loc.uri.clone())
-        .or_default()
-        .push(TextEdit {
-            range,
-            new_text: new_name.to_string(),
-        });
+    edits.entry(loc.uri.clone()).or_default().push(TextEdit {
+        range,
+        new_text: new_name.to_string(),
+    });
 }
 
 fn narrow_tail_identifier(
@@ -177,11 +188,7 @@ fn narrow_label_identifier(
 
 /// Scan the rope text covered by `range` to find the last occurrence
 /// of `name` as a whole identifier word, returning its narrow LSP range.
-pub(crate) fn narrow_identifier_range(
-    rope: &Rope,
-    range: Range,
-    name: &str,
-) -> Option<Range> {
+pub(crate) fn narrow_identifier_range(rope: &Rope, range: Range, name: &str) -> Option<Range> {
     let text = slice_rope(rope, range)?;
     let rel_start = rfind_ident(&text, name)?;
     // Convert back to absolute positions.
@@ -191,11 +198,7 @@ pub(crate) fn narrow_identifier_range(
 /// Like `narrow_identifier_range` but looks for `"<name>"` (the first
 /// quoted label matching `name`). Used for definitions where the name
 /// appears as a block label.
-pub(crate) fn narrow_quoted_label(
-    rope: &Rope,
-    range: Range,
-    name: &str,
-) -> Option<Range> {
+pub(crate) fn narrow_quoted_label(rope: &Rope, range: Range, name: &str) -> Option<Range> {
     let text = slice_rope(rope, range)?;
     let needle = format!("\"{name}\"");
     let rel_pos = text.find(&needle)?;
@@ -214,12 +217,7 @@ fn slice_rope(rope: &Rope, range: Range) -> Option<String> {
     Some(rope.slice(start_char..end_char).to_string())
 }
 
-fn absolute_range(
-    rope: &Rope,
-    outer: Range,
-    rel_start: usize,
-    rel_end: usize,
-) -> Option<Range> {
+fn absolute_range(rope: &Rope, outer: Range, rel_start: usize, rel_end: usize) -> Option<Range> {
     let base = tfls_parser::lsp_position_to_byte_offset(rope, outer.start).ok()?;
     let start = tfls_parser::byte_offset_to_lsp_position(rope, base + rel_start).ok()?;
     let end = tfls_parser::byte_offset_to_lsp_position(rope, base + rel_end).ok()?;
@@ -287,15 +285,11 @@ fn prepare_rename_provider_local(
 fn local_span_at(text: &str, offset: usize) -> Option<(usize, usize, String)> {
     let bytes = text.as_bytes();
     let mut start = offset;
-    while start > 0
-        && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_')
-    {
+    while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
         start -= 1;
     }
     let mut end = offset;
-    while end < bytes.len()
-        && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
-    {
+    while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
         end += 1;
     }
     if start == end {
@@ -338,13 +332,7 @@ fn rename_provider_local(
 
     // 2. Every `provider::OLD::fn` call site, workspace-wide.
     for entry in state.documents.iter() {
-        push_call_site_edits(
-            entry.key(),
-            entry.value(),
-            &old_local,
-            new_name,
-            &mut edits,
-        );
+        push_call_site_edits(entry.key(), entry.value(), &old_local, new_name, &mut edits);
     }
 
     if edits.is_empty() {
@@ -368,13 +356,10 @@ fn push_required_providers_attr_edits(
             return;
         };
         if let Some(range) = required_providers_key_range(body, &doc.rope, old_local) {
-            edits
-                .entry(doc_uri.clone())
-                .or_default()
-                .push(TextEdit {
-                    range,
-                    new_text: new_name.to_string(),
-                });
+            edits.entry(doc_uri.clone()).or_default().push(TextEdit {
+                range,
+                new_text: new_name.to_string(),
+            });
         }
     };
     if let Some(doc) = state.documents.get(uri) {
@@ -405,17 +390,23 @@ fn required_providers_key_range(
 ) -> Option<Range> {
     use hcl_edit::repr::Span as _;
     for structure in body.iter() {
-        let Some(block) = structure.as_block() else { continue };
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
         if block.ident.as_str() != "terraform" {
             continue;
         }
         for inner in block.body.iter() {
-            let Some(rp_block) = inner.as_block() else { continue };
+            let Some(rp_block) = inner.as_block() else {
+                continue;
+            };
             if rp_block.ident.as_str() != "required_providers" {
                 continue;
             }
             for entry in rp_block.body.iter() {
-                let Some(attr) = entry.as_attribute() else { continue };
+                let Some(attr) = entry.as_attribute() else {
+                    continue;
+                };
                 if attr.key.as_str() != local {
                     continue;
                 }
@@ -470,8 +461,7 @@ fn push_call_site_edits(
         // `provider::OLD::` prefix — narrow edits compose better.
         let local_start = abs + "provider::".len();
         let local_end = local_start + old_local.len();
-        let Ok(start_pos) = tfls_parser::byte_offset_to_lsp_position(&doc.rope, local_start)
-        else {
+        let Ok(start_pos) = tfls_parser::byte_offset_to_lsp_position(&doc.rope, local_start) else {
             search_from = abs_end;
             continue;
         };
@@ -479,16 +469,13 @@ fn push_call_site_edits(
             search_from = abs_end;
             continue;
         };
-        edits
-            .entry(doc_uri.clone())
-            .or_default()
-            .push(TextEdit {
-                range: Range {
-                    start: start_pos,
-                    end: end_pos,
-                },
-                new_text: new_name.to_string(),
-            });
+        edits.entry(doc_uri.clone()).or_default().push(TextEdit {
+            range: Range {
+                start: start_pos,
+                end: end_pos,
+            },
+            new_text: new_name.to_string(),
+        });
         search_from = abs_end;
     }
 }

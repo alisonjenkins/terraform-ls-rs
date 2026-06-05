@@ -49,7 +49,9 @@ pub fn cyclic_locals_diagnostics(body: &Body, rope: &Rope) -> Vec<Diagnostic> {
                         range: def.range,
                         severity: Some(DiagnosticSeverity::ERROR),
                         source: Some("terraform-ls-rs".to_string()),
-                        message: format!("`local.{member}` is part of a dependency cycle: {rendered}"),
+                        message: format!(
+                            "`local.{member}` is part of a dependency cycle: {rendered}"
+                        ),
                         ..Default::default()
                     });
                 }
@@ -76,7 +78,9 @@ fn collect_locals(body: &Body, rope: &Rope) -> HashMap<String, LocalDef> {
                 continue;
             };
             let name = attr.key.as_str().to_string();
-            let Some(span) = attr.key.span() else { continue };
+            let Some(span) = attr.key.span() else {
+                continue;
+            };
             let Ok(range) = hcl_span_to_lsp_range(rope, span) else {
                 continue;
             };
@@ -97,7 +101,13 @@ fn collect_locals(body: &Body, rope: &Rope) -> HashMap<String, LocalDef> {
                     u
                 })
                 .unwrap_or(deps);
-            defs.insert(name, LocalDef { deps: dep_union, range });
+            defs.insert(
+                name,
+                LocalDef {
+                    deps: dep_union,
+                    range,
+                },
+            );
         }
     }
     defs
@@ -285,8 +295,9 @@ mod tests {
     fn cycle_message_renders_path() {
         let d = diags("locals {\n  a = local.b\n  b = local.a\n}\n");
         assert!(
-            d.iter().any(|x| x.message.contains("local.a -> local.b -> local.a")
-                || x.message.contains("local.b -> local.a -> local.b")),
+            d.iter()
+                .any(|x| x.message.contains("local.a -> local.b -> local.a")
+                    || x.message.contains("local.b -> local.a -> local.b")),
             "got: {:?}",
             d.iter().map(|x| &x.message).collect::<Vec<_>>()
         );

@@ -238,9 +238,7 @@ mod tests {
 
     #[test]
     fn flags_aws_alb_listener_rule() {
-        let d = diags(
-            "resource \"aws_alb_listener_rule\" \"x\" {\n  listener_arn = \"a\"\n}\n",
-        );
+        let d = diags("resource \"aws_alb_listener_rule\" \"x\" {\n  listener_arn = \"a\"\n}\n");
         assert_eq!(d.len(), 1);
         assert!(d[0].message.contains("aws_lb_listener_rule"));
     }

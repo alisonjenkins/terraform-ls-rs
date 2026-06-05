@@ -19,7 +19,7 @@ use hcl_edit::repr::Span;
 use hcl_edit::structure::Body;
 use lsp_types::{Diagnostic, DiagnosticSeverity};
 use ropey::Rope;
-use tfls_core::version_constraint::{Constraint, satisfies_all};
+use tfls_core::version_constraint::{satisfies_all, Constraint};
 use tfls_parser::hcl_span_to_lsp_range;
 
 /// Source the caller knows version lists for. Attributes are validated
@@ -54,7 +54,9 @@ pub fn constraint_diagnostics(
 ) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for structure in body.iter() {
-        let Some(block) = structure.as_block() else { continue };
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
         match block.ident.as_str() {
             "terraform" => walk_terraform(&block.body, rope, cache, &mut out),
             "module" => walk_module(&block.body, rope, cache, &mut out),
@@ -73,13 +75,7 @@ fn walk_terraform(
     for structure in body.iter() {
         if let Some(attr) = structure.as_attribute() {
             if attr.key.as_str() == "required_version" {
-                validate_string_value_attr(
-                    attr,
-                    rope,
-                    &ConstraintSource::TerraformCli,
-                    cache,
-                    out,
-                );
+                validate_string_value_attr(attr, rope, &ConstraintSource::TerraformCli, cache, out);
             }
         } else if let Some(block) = structure.as_block() {
             if block.ident.as_str() == "required_providers" {
@@ -99,13 +95,19 @@ fn walk_required_providers(
     // with an object expression as its value. Walk the object body for
     // `version` + `source` string attributes.
     for structure in body.iter() {
-        let Some(attr) = structure.as_attribute() else { continue };
+        let Some(attr) = structure.as_attribute() else {
+            continue;
+        };
         let expr = &attr.value;
-        let Some(obj) = object_body(expr) else { continue };
+        let Some(obj) = object_body(expr) else {
+            continue;
+        };
         let mut source_value: Option<String> = None;
         let mut version_value: Option<(String, std::ops::Range<usize>)> = None;
         for (key, value) in obj.iter() {
-            let Some(key_str) = object_key_as_str(key) else { continue };
+            let Some(key_str) = object_key_as_str(key) else {
+                continue;
+            };
             if key_str == "source" {
                 source_value = string_expression(value.expr());
             } else if key_str == "version" {
@@ -162,15 +164,15 @@ fn walk_module(
                     source_str = Some(s);
                 }
             } else if key == "version" {
-                if let (Some(s), Some(span)) =
-                    (string_expression(&attr.value), attr.value.span())
-                {
+                if let (Some(s), Some(span)) = (string_expression(&attr.value), attr.value.span()) {
                     version_attr = Some((s, span));
                 }
             }
         }
     }
-    let Some((_version_str, span)) = version_attr else { return };
+    let Some((_version_str, span)) = version_attr else {
+        return;
+    };
     // Syntax check runs regardless of source. Semantic runs only when
     // the source looks like a registry module path.
     let module_source = source_str
@@ -227,8 +229,12 @@ fn validate_string_value_attr(
     cache: &dyn VersionCacheLookup,
     out: &mut Vec<Diagnostic>,
 ) {
-    let Some(s) = string_expression(&attr.value) else { return };
-    let Some(span) = attr.value.span() else { return };
+    let Some(s) = string_expression(&attr.value) else {
+        return;
+    };
+    let Some(span) = attr.value.span() else {
+        return;
+    };
     validate_constraint_string(&s, span, rope, source, cache, out);
 }
 
@@ -266,7 +272,9 @@ fn validate_constraint_string(
     if !parsed.errors.is_empty() || parsed.constraints.is_empty() {
         return;
     }
-    let Some(versions) = cache.cached_versions(source) else { return };
+    let Some(versions) = cache.cached_versions(source) else {
+        return;
+    };
     let any_match = versions
         .iter()
         .any(|v| satisfies_all(&parsed.constraints, v));
@@ -304,9 +312,7 @@ fn source_label(source: &ConstraintSource) -> String {
 
 // -- hcl-edit helpers ------------------------------------------------------
 
-fn object_body(
-    expr: &hcl_edit::expr::Expression,
-) -> Option<&hcl_edit::expr::Object> {
+fn object_body(expr: &hcl_edit::expr::Expression) -> Option<&hcl_edit::expr::Object> {
     match expr {
         hcl_edit::expr::Expression::Object(o) => Some(o),
         _ => None,
@@ -323,9 +329,7 @@ fn string_expression(expr: &hcl_edit::expr::Expression) -> Option<String> {
             let mut collected = String::new();
             for element in t.iter() {
                 match element {
-                    hcl_edit::template::Element::Literal(lit) => {
-                        collected.push_str(lit.as_str())
-                    }
+                    hcl_edit::template::Element::Literal(lit) => collected.push_str(lit.as_str()),
                     _ => return None,
                 }
             }
@@ -425,7 +429,9 @@ mod tests {
         let (body, rope) = parse_body(src);
         let diags = constraint_diagnostics(&body, &rope, &EmptyCache);
         assert!(!diags.is_empty(), "expected diagnostic; got {diags:?}");
-        assert!(diags.iter().any(|d| d.severity == Some(DiagnosticSeverity::ERROR)));
+        assert!(diags
+            .iter()
+            .any(|d| d.severity == Some(DiagnosticSeverity::ERROR)));
     }
 
     #[test]
@@ -500,8 +506,9 @@ mod tests {
         let (body, rope) = parse_body(malformed);
         let diags = constraint_diagnostics(&body, &rope, &EmptyCache);
         assert!(
-            diags.iter().any(|d| d.message.contains("malformed")
-                && d.message.contains("`c`")),
+            diags
+                .iter()
+                .any(|d| d.message.contains("malformed") && d.message.contains("`c`")),
             "expected malformed `c` diag on first pass: {diags:?}"
         );
 
@@ -531,7 +538,10 @@ mod tests {
     fn provider_source_private_host_is_skipped() {
         // Must NOT resolve to `org/foo` against the public registry.
         assert_eq!(parse_provider_source("app.terraform.io/org/foo"), None);
-        assert_eq!(parse_provider_source("my-internal-mirror.corp/org/foo"), None);
+        assert_eq!(
+            parse_provider_source("my-internal-mirror.corp/org/foo"),
+            None
+        );
     }
 
     #[test]
@@ -548,6 +558,9 @@ mod tests {
 
     #[test]
     fn module_source_private_host_is_skipped() {
-        assert_eq!(parse_module_source_parts("app.terraform.io/org/vpc/aws"), None);
+        assert_eq!(
+            parse_module_source_parts("app.terraform.io/org/vpc/aws"),
+            None
+        );
     }
 }

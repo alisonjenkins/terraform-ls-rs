@@ -68,10 +68,12 @@ pub fn discover_terraform_files(root: &Path) -> Result<Vec<PathBuf>, WalkerError
                 source,
             })?;
             let path = entry.path();
-            let file_type = entry.file_type().map_err(|source| WalkerError::DirectoryRead {
-                path: path.display().to_string(),
-                source,
-            })?;
+            let file_type = entry
+                .file_type()
+                .map_err(|source| WalkerError::DirectoryRead {
+                    path: path.display().to_string(),
+                    source,
+                })?;
             let (is_dir, is_file) = entry_kind(file_type, &path);
 
             if is_dir {
@@ -110,10 +112,12 @@ pub fn discover_terraform_files_in_dir(dir: &Path) -> Result<Vec<PathBuf>, Walke
             source,
         })?;
         let path = entry.path();
-        let file_type = entry.file_type().map_err(|source| WalkerError::DirectoryRead {
-            path: path.display().to_string(),
-            source,
-        })?;
+        let file_type = entry
+            .file_type()
+            .map_err(|source| WalkerError::DirectoryRead {
+                path: path.display().to_string(),
+                source,
+            })?;
         let (_, is_file) = entry_kind(file_type, &path);
         if is_file && is_terraform_file(&path) {
             out.push(path);
@@ -176,10 +180,12 @@ pub fn discover_tfvars_files_in_dir(dir: &Path) -> Result<Vec<PathBuf>, WalkerEr
             source,
         })?;
         let path = entry.path();
-        let file_type = entry.file_type().map_err(|source| WalkerError::DirectoryRead {
-            path: path.display().to_string(),
-            source,
-        })?;
+        let file_type = entry
+            .file_type()
+            .map_err(|source| WalkerError::DirectoryRead {
+                path: path.display().to_string(),
+                source,
+            })?;
         let (_, is_file) = entry_kind(file_type, &path);
         if is_file && is_tfvars_file(&path) {
             out.push(path);
@@ -207,9 +213,7 @@ pub fn discover_tfvars_files_in_dir(dir: &Path) -> Result<Vec<PathBuf>, WalkerEr
 /// not the parent calling `foo`. We detect this by stopping descent
 /// (and skipping tfvars discovery) at any non-root subdir that
 /// contains `.tf` / `.tf.json` files of its own.
-pub fn discover_tfvars_attributable_to(
-    module_dir: &Path,
-) -> Result<Vec<PathBuf>, WalkerError> {
+pub fn discover_tfvars_attributable_to(module_dir: &Path) -> Result<Vec<PathBuf>, WalkerError> {
     let mut out = Vec::new();
     let mut stack: Vec<(PathBuf, bool)> = vec![(module_dir.to_path_buf(), true)];
     let mut visited = std::collections::HashSet::new();
@@ -230,10 +234,12 @@ pub fn discover_tfvars_attributable_to(
                 source,
             })?;
             let path = entry.path();
-            let file_type = entry.file_type().map_err(|source| WalkerError::DirectoryRead {
-                path: path.display().to_string(),
-                source,
-            })?;
+            let file_type = entry
+                .file_type()
+                .map_err(|source| WalkerError::DirectoryRead {
+                    path: path.display().to_string(),
+                    source,
+                })?;
             let (is_dir, is_file) = entry_kind(file_type, &path);
             if is_dir {
                 let name_is_ignored = path
@@ -290,10 +296,12 @@ pub fn discover_tfvars_files(root: &Path) -> Result<Vec<PathBuf>, WalkerError> {
                 source,
             })?;
             let path = entry.path();
-            let file_type = entry.file_type().map_err(|source| WalkerError::DirectoryRead {
-                path: path.display().to_string(),
-                source,
-            })?;
+            let file_type = entry
+                .file_type()
+                .map_err(|source| WalkerError::DirectoryRead {
+                    path: path.display().to_string(),
+                    source,
+                })?;
             let (is_dir, is_file) = entry_kind(file_type, &path);
             if is_dir {
                 let name_is_ignored = path
@@ -349,8 +357,14 @@ mod tests {
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
-        assert!(names.contains(&"inner.tf".to_string()), "symlinked dir not followed: {names:?}");
-        assert!(names.contains(&"linked.tf".to_string()), "symlinked file not found: {names:?}");
+        assert!(
+            names.contains(&"inner.tf".to_string()),
+            "symlinked dir not followed: {names:?}"
+        );
+        assert!(
+            names.contains(&"linked.tf".to_string()),
+            "symlinked file not found: {names:?}"
+        );
 
         fs::remove_dir_all(base).ok();
     }
@@ -459,7 +473,11 @@ mod tests {
         fs::write(dir.join("main.tf"), "").unwrap();
         fs::create_dir_all(dir.join("params/nonprod")).unwrap();
         fs::create_dir_all(dir.join("params/prod")).unwrap();
-        fs::write(dir.join("params/nonprod/params.tfvars"), "envtype = \"nonprod\"").unwrap();
+        fs::write(
+            dir.join("params/nonprod/params.tfvars"),
+            "envtype = \"nonprod\"",
+        )
+        .unwrap();
         fs::write(dir.join("params/prod/params.tfvars"), "envtype = \"prod\"").unwrap();
 
         let found = discover_tfvars_attributable_to(&dir).expect("walk");
@@ -467,8 +485,14 @@ mod tests {
             .iter()
             .map(|p| p.strip_prefix(&dir).unwrap().to_string_lossy().into_owned())
             .collect();
-        assert!(names.contains(&"params/nonprod/params.tfvars".to_string()), "{names:?}");
-        assert!(names.contains(&"params/prod/params.tfvars".to_string()), "{names:?}");
+        assert!(
+            names.contains(&"params/nonprod/params.tfvars".to_string()),
+            "{names:?}"
+        );
+        assert!(
+            names.contains(&"params/prod/params.tfvars".to_string()),
+            "{names:?}"
+        );
 
         fs::remove_dir_all(dir).ok();
     }

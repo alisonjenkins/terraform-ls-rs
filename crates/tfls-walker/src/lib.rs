@@ -10,4 +10,4 @@ pub use discovery::{
     is_tfvars_file,
 };
 pub use error::WalkerError;
-pub use watcher::{WorkspaceEvent, WorkspaceWatcher, watch_workspace};
+pub use watcher::{watch_workspace, WorkspaceEvent, WorkspaceWatcher};

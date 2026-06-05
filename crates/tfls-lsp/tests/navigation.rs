@@ -7,12 +7,12 @@
 use tfls_lsp::Backend;
 use tfls_schema::ProviderSchemas;
 use tfls_state::DocumentState;
-use tower_lsp::LspService;
 use tower_lsp::lsp_types::{
     GotoDefinitionParams, GotoDefinitionResponse, HoverParams, Location, PartialResultParams,
     Position, ReferenceContext, ReferenceParams, TextDocumentIdentifier,
     TextDocumentPositionParams, Url, WorkDoneProgressParams,
 };
+use tower_lsp::LspService;
 
 fn uri(path: &str) -> Url {
     Url::parse(path).expect("valid url")
@@ -37,7 +37,8 @@ fn backend_with(src: &str, u: &Url) -> Backend {
 #[tokio::test]
 async fn goto_definition_finds_variable() {
     let u = uri("file:///test.tf");
-    let src = "variable \"region\" { default = \"us-east-1\" }\noutput \"x\" { value = var.region }\n";
+    let src =
+        "variable \"region\" { default = \"us-east-1\" }\noutput \"x\" { value = var.region }\n";
     let backend = backend_with(src, &u);
 
     // Cursor on "region" inside var.region (line 1, after `var.`).
@@ -102,11 +103,7 @@ output "b" { value = var.region }
 /// pattern used by the goto-def scope regressions lower in the
 /// file but stays local to the references block so the test
 /// shapes stay adjacent to the behaviour they're pinning.
-async fn references_at(
-    backend: &Backend,
-    uri: &Url,
-    pos: Position,
-) -> Vec<Location> {
+async fn references_at(backend: &Backend, uri: &Url, pos: Position) -> Vec<Location> {
     let result = tfls_lsp::handlers::navigation::references(
         backend,
         ReferenceParams {
@@ -137,7 +134,8 @@ fn empty_backend() -> Backend {
 }
 
 fn upsert(b: &Backend, u: &Url, src: &str) {
-    b.state.upsert_document(DocumentState::new(u.clone(), src, 1));
+    b.state
+        .upsert_document(DocumentState::new(u.clone(), src, 1));
 }
 
 #[tokio::test]
@@ -155,17 +153,9 @@ async fn references_scopes_variable_to_reference_module_not_child_module() {
     let child_main = uri("file:///stack/modules/k3s/main.tf");
 
     upsert(&b, &root_vars, "variable \"region\" {}\n");
-    upsert(
-        &b,
-        &root_main,
-        "output \"r\" { value = var.region }\n",
-    );
+    upsert(&b, &root_main, "output \"r\" { value = var.region }\n");
     upsert(&b, &child_vars, "variable \"region\" {}\n");
-    upsert(
-        &b,
-        &child_main,
-        "output \"r\" { value = var.region }\n",
-    );
+    upsert(&b, &child_main, "output \"r\" { value = var.region }\n");
 
     // Cursor on the root's `variable "region"` declaration.
     let locs = references_at(&b, &root_vars, Position::new(0, 10)).await;
@@ -199,8 +189,7 @@ async fn references_does_not_leak_across_unrelated_stacks() {
     // stay in stackA.
     let locs = references_at(&b, &a_vars, Position::new(0, 10)).await;
     assert!(
-        locs.iter()
-            .all(|l| l.uri.as_str().contains("/stackA/")),
+        locs.iter().all(|l| l.uri.as_str().contains("/stackA/")),
         "stackB references leaked into stackA: {locs:?}"
     );
 }
@@ -468,7 +457,11 @@ fn upsert_file(backend: &Backend, path: &Path, source: &str) -> Url {
     u
 }
 
-async fn goto_def_at(backend: &Backend, uri: &Url, pos: Position) -> Option<GotoDefinitionResponse> {
+async fn goto_def_at(
+    backend: &Backend,
+    uri: &Url,
+    pos: Position,
+) -> Option<GotoDefinitionResponse> {
     tfls_lsp::handlers::navigation::goto_definition(
         backend,
         GotoDefinitionParams {
@@ -675,7 +668,10 @@ async fn goto_def_on_unknown_module_input_returns_none() {
     // None (don't fall through to something bogus like jumping to the
     // module's own call header, which would be confusing).
     let result = goto_def_at(&backend, &caller_u, Position::new(2, 4)).await;
-    assert!(result.is_none(), "unknown input should yield None, got {result:?}");
+    assert!(
+        result.is_none(),
+        "unknown input should yield None, got {result:?}"
+    );
 }
 
 #[tokio::test]
@@ -712,9 +708,8 @@ async fn goto_def_on_output_segment_of_indexed_module() {
     // have to hand-count columns.
     let line = caller_src.lines().nth(5).expect("line 5 present");
     let col = line.find("k3s_asg").expect("k3s_asg on line 5");
-    let loc = single_location(
-        goto_def_at(&backend, &caller_u, Position::new(5, col as u32 + 3)).await,
-    );
+    let loc =
+        single_location(goto_def_at(&backend, &caller_u, Position::new(5, col as u32 + 3)).await);
     assert_eq!(loc.uri, child_u, "should land in child's outputs.tf");
     assert_eq!(loc.range.start.line, 0);
 }
@@ -739,11 +734,7 @@ async fn goto_def_scopes_variable_to_reference_module_not_child_module() {
         &child_vars,
         "variable \"region\" { default = \"eu-west-1\" }\n",
     );
-    backend_insert(
-        &b,
-        &root_main,
-        "output \"r\" { value = var.region }\n",
-    );
+    backend_insert(&b, &root_main, "output \"r\" { value = var.region }\n");
 
     // Cursor on `region` in `var.region` (line 0, inside the
     // variable reference).
@@ -757,7 +748,10 @@ async fn goto_def_scopes_variable_to_reference_module_not_child_module() {
         1,
         "expected exactly one in-scope location, got {locs:?}"
     );
-    assert_eq!(locs[0].uri, root_vars, "should resolve to stack root's variables.tf");
+    assert_eq!(
+        locs[0].uri, root_vars,
+        "should resolve to stack root's variables.tf"
+    );
 }
 
 #[tokio::test]
@@ -861,8 +855,7 @@ async fn goto_def_on_module_input_resolved_via_modules_json() {
     );
 
     let caller_path = root.join("main.tf");
-    let caller_src =
-        "module \"net\" {\n  source = \"hashicorp/net/aws\"\n  region = \"eu\"\n}\n";
+    let caller_src = "module \"net\" {\n  source = \"hashicorp/net/aws\"\n  region = \"eu\"\n}\n";
     let caller_u = upsert_file(&backend, &caller_path, caller_src);
 
     let loc = single_location(goto_def_at(&backend, &caller_u, Position::new(2, 4)).await);
@@ -894,7 +887,13 @@ async fn goto_def_on_provider_function_jumps_to_required_providers_entry() {
 
     // Cursor on `trim_prefix` (after `aws_v6::`).
     // line 1 col after `provider::aws_v6::` = 18 chars → col 26 (`  value = ` is 10).
-    let col = (main_src.lines().nth(1).unwrap().find("trim_prefix").unwrap() + 2) as u32;
+    let col = (main_src
+        .lines()
+        .nth(1)
+        .unwrap()
+        .find("trim_prefix")
+        .unwrap()
+        + 2) as u32;
     let loc = single_location(goto_def_at(&backend, &main_u, Position::new(1, col)).await);
     assert_eq!(loc.uri, versions_u);
     assert_eq!(loc.range.start.line, 2, "should land on `aws_v6 = {{` line");
@@ -956,7 +955,9 @@ async fn hover_on_provider_local_shows_source() {
         &backend,
         HoverParams {
             text_document_position_params: TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier { uri: main_u.clone() },
+                text_document: TextDocumentIdentifier {
+                    uri: main_u.clone(),
+                },
                 position: Position::new(1, col),
             },
             work_done_progress_params: WorkDoneProgressParams::default(),

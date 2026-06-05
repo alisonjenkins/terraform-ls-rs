@@ -13,8 +13,8 @@ use std::collections::HashMap;
 
 use tfls_schema::{AttributeSchema, BlockSchema, NestedBlockSchema, NestingMode, Schema};
 
-use crate::ProtocolError;
 use crate::proto;
+use crate::ProtocolError;
 
 pub fn schema_from_proto(src: &proto::Schema) -> Result<Schema, ProtocolError> {
     let block = src
@@ -41,7 +41,11 @@ pub fn block_from_proto(src: &proto::schema::Block) -> Result<BlockSchema, Proto
         }
         let nested = NestedBlockSchema {
             nesting_mode: nesting_mode_from_proto(nb.nesting()),
-            block: block_from_proto(nb.block.as_ref().unwrap_or(&proto::schema::Block::default()))?,
+            block: block_from_proto(
+                nb.block
+                    .as_ref()
+                    .unwrap_or(&proto::schema::Block::default()),
+            )?,
             min_items: u64::try_from(nb.min_items).unwrap_or(0),
             max_items: u64::try_from(nb.max_items).unwrap_or(0),
         };
@@ -56,9 +60,7 @@ pub fn block_from_proto(src: &proto::schema::Block) -> Result<BlockSchema, Proto
     })
 }
 
-fn attribute_from_proto(
-    src: &proto::schema::Attribute,
-) -> Result<AttributeSchema, ProtocolError> {
+fn attribute_from_proto(src: &proto::schema::Attribute) -> Result<AttributeSchema, ProtocolError> {
     // Describe either the scalar `type` or the `nested_type` (block-like
     // object), preferring the scalar when both are present.
     let r#type = if !src.r#type.is_empty() {
@@ -112,7 +114,11 @@ fn string_kind_name(k: proto::StringKind) -> Option<String> {
 }
 
 fn non_empty(s: &str) -> Option<String> {
-    if s.is_empty() { None } else { Some(s.to_string()) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
 }
 
 /// Decode a MessagePack-encoded `cty.Type` into the JSON shape that
@@ -132,8 +138,7 @@ pub fn cty_msgpack_to_json(bytes: &[u8]) -> Result<sonic_rs::Value, ProtocolErro
     // Earlier code used `rmpv` which silently mis-decoded the leading
     // `"` of `"string"` as a positive-fixint and turned every
     // primitive type into `Number(34)`. Parse as JSON directly.
-    sonic_rs::from_slice(bytes)
-        .map_err(|e| ProtocolError::CtyDecode(format!("parse json: {e}")))
+    sonic_rs::from_slice(bytes).map_err(|e| ProtocolError::CtyDecode(format!("parse json: {e}")))
 }
 
 /// Legacy msgpack decoder, retained for tests / fallback paths that
@@ -154,8 +159,7 @@ fn rmpv_to_sonic(v: rmpv::Value) -> Result<sonic_rs::Value, ProtocolError> {
     // the simplest way to avoid maintaining a direct rmpv->sonic codec.
     let text = serde_json::to_string(&s)
         .map_err(|e| ProtocolError::CtyDecode(format!("serialize json: {e}")))?;
-    sonic_rs::from_str(&text)
-        .map_err(|e| ProtocolError::CtyDecode(format!("reparse json: {e}")))
+    sonic_rs::from_str(&text).map_err(|e| ProtocolError::CtyDecode(format!("reparse json: {e}")))
 }
 
 fn rmpv_to_serde_json(v: rmpv::Value) -> Result<serde_json::Value, ProtocolError> {
@@ -188,9 +192,10 @@ fn rmpv_to_serde_json(v: rmpv::Value) -> Result<serde_json::Value, ProtocolError
                 .ok_or_else(|| ProtocolError::CtyDecode("non-utf8 string".into()))?;
             serde_json::Value::String(text)
         }
-        R::Binary(b) => serde_json::Value::String(
-            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b),
-        ),
+        R::Binary(b) => serde_json::Value::String(base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            b,
+        )),
         R::Array(arr) => {
             let mut out = Vec::with_capacity(arr.len());
             for item in arr {

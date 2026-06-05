@@ -65,8 +65,7 @@ async fn main() {
     }
 
     println!("Discovering providers under {}", terraform_dir.display());
-    let binaries = tfls_provider_protocol::discover_providers(&terraform_dir)
-        .expect("discovery");
+    let binaries = tfls_provider_protocol::discover_providers(&terraform_dir).expect("discovery");
     println!("  found {} provider binaries", binaries.len());
     for b in &binaries {
         println!(

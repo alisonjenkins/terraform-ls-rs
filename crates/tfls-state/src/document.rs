@@ -7,8 +7,8 @@ use lsp_types::{TextDocumentContentChangeEvent, TextEdit, Url};
 use ropey::Rope;
 use tfls_core::SymbolTable;
 use tfls_parser::{
-    ParsedFile, Reference, extract_references, extract_references_fallback, extract_symbols,
-    extract_symbols_fallback, lsp_position_to_byte_offset, parse_source_for_uri,
+    extract_references, extract_references_fallback, extract_symbols, extract_symbols_fallback,
+    lsp_position_to_byte_offset, parse_source_for_uri, ParsedFile, Reference,
 };
 
 use crate::error::StateError;
@@ -113,12 +113,13 @@ impl DocumentState {
     ) -> Result<(), StateError> {
         match change.range {
             Some(range) => {
-                let start = lsp_position_to_byte_offset(&self.rope, range.start).map_err(
-                    |source| StateError::EditApplication {
-                        uri: self.uri.to_string(),
-                        source,
-                    },
-                )?;
+                let start =
+                    lsp_position_to_byte_offset(&self.rope, range.start).map_err(|source| {
+                        StateError::EditApplication {
+                            uri: self.uri.to_string(),
+                            source,
+                        }
+                    })?;
                 let end = lsp_position_to_byte_offset(&self.rope, range.end).map_err(|source| {
                     StateError::EditApplication {
                         uri: self.uri.to_string(),
@@ -150,8 +151,7 @@ impl DocumentState {
         let text = self.rope.to_string();
         self.parsed = parse_source_for_uri(&text, self.uri.as_str());
         if self.parsed.body.is_some() {
-            let (symbols, references) =
-                compute_analysis(&self.parsed, &self.uri, &self.rope);
+            let (symbols, references) = compute_analysis(&self.parsed, &self.uri, &self.rope);
             self.symbols = symbols;
             self.references = references;
         }
@@ -162,11 +162,7 @@ impl DocumentState {
     }
 }
 
-fn compute_analysis(
-    parsed: &ParsedFile,
-    uri: &Url,
-    rope: &Rope,
-) -> (SymbolTable, Vec<Reference>) {
+fn compute_analysis(parsed: &ParsedFile, uri: &Url, rope: &Rope) -> (SymbolTable, Vec<Reference>) {
     match &parsed.body {
         Some(body) => {
             let symbols = extract_symbols(body, uri, rope);
@@ -254,11 +250,7 @@ mod tests {
 
     #[test]
     fn reparse_updates_references() {
-        let doc = DocumentState::new(
-            test_uri(),
-            r#"output "x" { value = var.region }"#,
-            1,
-        );
+        let doc = DocumentState::new(test_uri(), r#"output "x" { value = var.region }"#, 1);
         assert!(!doc.references.is_empty());
     }
 

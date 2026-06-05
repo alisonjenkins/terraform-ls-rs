@@ -32,7 +32,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use hcl_edit::expr::Expression;
 use lsp_types::Url;
-use tfls_core::variable_type::{VariableType, parse_type_expr};
+use tfls_core::variable_type::{parse_type_expr, VariableType};
 use tfls_state::{DocumentState, StateStore};
 use tfls_walker::discover_terraform_files;
 
@@ -98,8 +98,7 @@ async fn run(cli: Cli) -> Result<(), String> {
         .map_err(|e| format!("canonicalize {:?}: {e}", cli.dir))?;
 
     let state = StateStore::new();
-    let mut files =
-        discover_terraform_files(&workspace).map_err(|e| format!("discover: {e}"))?;
+    let mut files = discover_terraform_files(&workspace).map_err(|e| format!("discover: {e}"))?;
     let modules_root = workspace.join(".terraform/modules");
     if modules_root.is_dir() {
         for entry in std::fs::read_dir(&modules_root).map_err(|e| format!("read_dir: {e}"))? {
@@ -124,8 +123,7 @@ async fn run(cli: Cli) -> Result<(), String> {
     if !cli.no_schemas {
         let terraform_dir = workspace.join(".terraform");
         if terraform_dir.is_dir() {
-            match tfls_provider_protocol::fetch_schemas_from_plugins_raw(&terraform_dir, None)
-                .await
+            match tfls_provider_protocol::fetch_schemas_from_plugins_raw(&terraform_dir, None).await
             {
                 Ok(raw) => {
                     let count = raw.schemas.provider_schemas.len();
@@ -148,7 +146,11 @@ async fn run(cli: Cli) -> Result<(), String> {
     }
 
     if let Some(d) = cli.dump_dir {
-        let target = if d.is_absolute() { d } else { workspace.join(&d) };
+        let target = if d.is_absolute() {
+            d
+        } else {
+            workspace.join(&d)
+        };
         return dump_dir(&state, &target);
     }
 
@@ -292,7 +294,9 @@ fn classify_callers(state: &StateStore, target_dir: &Path, var_name: &str) -> Ve
             continue;
         };
         for cs in c_body.iter() {
-            let Some(c_block) = cs.as_block() else { continue };
+            let Some(c_block) = cs.as_block() else {
+                continue;
+            };
             if c_block.ident.as_str() != "module" {
                 continue;
             }
@@ -315,7 +319,9 @@ fn classify_callers(state: &StateStore, target_dir: &Path, var_name: &str) -> Ve
                 continue;
             }
             for cb in c_block.body.iter() {
-                let Some(attr) = cb.as_attribute() else { continue };
+                let Some(attr) = cb.as_attribute() else {
+                    continue;
+                };
                 if attr.key.as_str() != var_name {
                     continue;
                 }
@@ -378,7 +384,9 @@ fn equivalent(a: &VariableType, b: &VariableType) -> bool {
         }
         (Object(xs), Object(ys)) => {
             xs.len() == ys.len()
-                && xs.iter().all(|(k, vx)| ys.get(k).is_some_and(|vy| equivalent(vx, vy)))
+                && xs
+                    .iter()
+                    .all(|(k, vx)| ys.get(k).is_some_and(|vy| equivalent(vx, vy)))
         }
         _ => false,
     }

@@ -250,15 +250,15 @@ mod tests {
             applyable: true,
         };
         let d = diags("variable \"x\" { type = string }\n", lookup);
-        assert!(d.iter().any(|x| x.message.contains("variable `x`")), "got: {d:?}");
+        assert!(
+            d.iter().any(|x| x.message.contains("variable `x`")),
+            "got: {d:?}"
+        );
     }
 
     #[test]
     fn flags_unused_variable_in_root_module() {
-        let d = diags(
-            r#"variable "x" { type = string }"#,
-            unused(true),
-        );
+        let d = diags(r#"variable "x" { type = string }"#, unused(true));
         assert_eq!(d.len(), 1, "got: {d:?}");
         assert!(d[0].message.contains("`x`"), "got: {}", d[0].message);
         // Greyed out via the UNNECESSARY tag.
@@ -282,10 +282,7 @@ mod tests {
 
     #[test]
     fn silent_in_non_root_module() {
-        let d = diags(
-            r#"variable "x" { type = string }"#,
-            unused(false),
-        );
+        let d = diags(r#"variable "x" { type = string }"#, unused(false));
         assert!(d.is_empty(), "got: {d:?}");
     }
 
@@ -378,12 +375,13 @@ locals {
 
     #[test]
     fn flags_unused_data_source() {
-        let d = diags(
-            r#"data "aws_ami" "ubuntu" {}"#,
-            unused(true),
-        );
+        let d = diags(r#"data "aws_ami" "ubuntu" {}"#, unused(true));
         assert_eq!(d.len(), 1, "got: {d:?}");
-        assert!(d[0].message.contains("aws_ami.ubuntu"), "got: {}", d[0].message);
+        assert!(
+            d[0].message.contains("aws_ami.ubuntu"),
+            "got: {}",
+            d[0].message
+        );
     }
 
     #[test]

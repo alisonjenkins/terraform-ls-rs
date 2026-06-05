@@ -17,7 +17,7 @@ use std::process::{ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
@@ -143,7 +143,8 @@ async fn run(cli: Cli) -> Result<(), String> {
     let port = pick_free_port().ok_or("no free port for lspmux")?;
     write_lspmux_config(&tmp, port).map_err(|e| format!("write config: {e}"))?;
 
-    let mut daemon = spawn_daemon(&cli.lspmux_path, &tmp).map_err(|e| format!("spawn daemon: {e}"))?;
+    let mut daemon =
+        spawn_daemon(&cli.lspmux_path, &tmp).map_err(|e| format!("spawn daemon: {e}"))?;
     // Pipe daemon stderr to a file for post-mortem inspection.
     let daemon_log = tmp.join("lspmux.stderr.log");
     if let Some(stderr) = daemon.stderr.take() {
@@ -171,7 +172,10 @@ async fn run(cli: Cli) -> Result<(), String> {
         let _ = daemon.kill().await;
         return Err(format!("daemon never bound port {port}: {e}"));
     }
-    eprintln!("lspmux daemon up on 127.0.0.1:{port}, pid={:?}", daemon.id());
+    eprintln!(
+        "lspmux daemon up on 127.0.0.1:{port}, pid={:?}",
+        daemon.id()
+    );
 
     let mut summaries: Vec<SessionSummary> = Vec::new();
     for n in 1..=cli.sessions {
@@ -242,11 +246,10 @@ async fn run(cli: Cli) -> Result<(), String> {
             eprintln!(
                 "BUG REPRODUCED (code actions): session 1 got code actions, subsequent sessions did not."
             );
-        } else if summaries
-            .iter()
-            .all(|s| s.action_count.unwrap_or(0) > 0)
-        {
-            eprintln!("ALL SESSIONS RECEIVED CODE ACTIONS — bug not reproduced for codeAction routing.");
+        } else if summaries.iter().all(|s| s.action_count.unwrap_or(0) > 0) {
+            eprintln!(
+                "ALL SESSIONS RECEIVED CODE ACTIONS — bug not reproduced for codeAction routing."
+            );
         } else if summaries.iter().any(|s| s.action_count.unwrap_or(0) > 0) {
             eprintln!("MIXED OUTCOME (code actions) — see per-session table.");
         } else {
@@ -370,12 +373,12 @@ async fn drive_session(
         let Ok(value): Result<Value, _> = serde_json::from_str(&msg) else {
             continue;
         };
-        if value.get("method").and_then(|m| m.as_str())
-            != Some("textDocument/publishDiagnostics")
-        {
+        if value.get("method").and_then(|m| m.as_str()) != Some("textDocument/publishDiagnostics") {
             continue;
         }
-        let Some(params) = value.get("params") else { continue };
+        let Some(params) = value.get("params") else {
+            continue;
+        };
         let uri = params.get("uri").and_then(|u| u.as_str()).unwrap_or("");
         if !any_uri && uri != file_uri {
             continue;
@@ -429,7 +432,9 @@ async fn drive_session(
                 None
             }
             Err(_) => {
-                eprintln!("  codeAction timed out after {drain_ms}ms — request did not get a response");
+                eprintln!(
+                    "  codeAction timed out after {drain_ms}ms — request did not get a response"
+                );
                 None
             }
         };
@@ -447,10 +452,7 @@ async fn drive_session(
                             .get("title")
                             .and_then(|t| t.as_str())
                             .unwrap_or("(no title)");
-                        let kind = a
-                            .get("kind")
-                            .and_then(|k| k.as_str())
-                            .unwrap_or("");
+                        let kind = a.get("kind").and_then(|k| k.as_str()).unwrap_or("");
                         eprintln!("  action #{:>2} [{kind}] {title}", i + 1);
                     }
                 }
@@ -511,8 +513,7 @@ async fn recv<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<String, String> {
             break;
         }
     }
-    let header_str =
-        std::str::from_utf8(&header).map_err(|e| format!("header utf-8: {e}"))?;
+    let header_str = std::str::from_utf8(&header).map_err(|e| format!("header utf-8: {e}"))?;
     let len: usize = header_str
         .lines()
         .find_map(|l| l.strip_prefix("Content-Length: "))
@@ -527,10 +528,7 @@ async fn recv<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<String, String> {
     String::from_utf8(body).map_err(|e| format!("body utf-8: {e}"))
 }
 
-async fn recv_response<R: AsyncReadExt + Unpin>(
-    r: &mut R,
-    want_id: i64,
-) -> Result<String, String> {
+async fn recv_response<R: AsyncReadExt + Unpin>(r: &mut R, want_id: i64) -> Result<String, String> {
     let id_marker = format!("\"id\":{want_id}");
     loop {
         let body = recv(r).await?;

@@ -2,12 +2,12 @@
 
 use tower_lsp::lsp_types::{
     CodeActionKind, CodeActionOptions, CodeActionProviderCapability, CodeLensOptions,
-    CompletionOptions, DeclarationCapability, DocumentLinkOptions,
-    DocumentOnTypeFormattingOptions, ExecuteCommandOptions, FoldingRangeProviderCapability,
-    HoverProviderCapability, OneOf, RenameOptions, SelectionRangeProviderCapability,
-    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
-    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelpOptions,
-    TextDocumentSyncCapability, TextDocumentSyncKind, WorkDoneProgressOptions,
+    CompletionOptions, DeclarationCapability, DocumentLinkOptions, DocumentOnTypeFormattingOptions,
+    ExecuteCommandOptions, FoldingRangeProviderCapability, HoverProviderCapability, OneOf,
+    RenameOptions, SelectionRangeProviderCapability, SemanticTokensFullOptions,
+    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensServerCapabilities,
+    ServerCapabilities, SignatureHelpOptions, TextDocumentSyncCapability, TextDocumentSyncKind,
+    WorkDoneProgressOptions,
 };
 
 use crate::handlers::semantic_tokens::SEMANTIC_TOKEN_TYPES;
@@ -42,8 +42,8 @@ pub fn server_capabilities() -> ServerCapabilities {
             resolve_provider: Some(false),
             ..Default::default()
         }),
-        semantic_tokens_provider: Some(
-            SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
+        semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
+            SemanticTokensOptions {
                 work_done_progress_options: WorkDoneProgressOptions::default(),
                 legend: SemanticTokensLegend {
                     token_types: SEMANTIC_TOKEN_TYPES.to_vec(),
@@ -51,8 +51,8 @@ pub fn server_capabilities() -> ServerCapabilities {
                 },
                 range: Some(true),
                 full: Some(SemanticTokensFullOptions::Bool(true)),
-            }),
-        ),
+            },
+        )),
         document_formatting_provider: Some(OneOf::Left(true)),
         document_range_formatting_provider: Some(OneOf::Left(true)),
         // Re-format on `}` (close of the enclosing block) and on

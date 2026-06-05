@@ -5,12 +5,12 @@
 use tfls_lsp::Backend;
 use tfls_schema::ProviderSchemas;
 use tfls_state::DocumentState;
-use tower_lsp::LspService;
 use tower_lsp::lsp_types::{
     CompletionContext, CompletionItem, CompletionParams, CompletionResponse, CompletionTextEdit,
     CompletionTriggerKind, PartialResultParams, Position, TextDocumentIdentifier,
     TextDocumentPositionParams, Url, WorkDoneProgressParams,
 };
+use tower_lsp::LspService;
 
 fn uri(path: &str) -> Url {
     Url::parse(path).expect("valid url")
@@ -121,13 +121,11 @@ fn labels(resp: CompletionResponse) -> Vec<String> {
 async fn top_level_suggests_block_keywords() {
     let u = uri("file:///a.tf");
     let backend = fresh_backend("", &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(0, 0)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(0, 0)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&"resource".to_string()));
     assert!(ls.contains(&"variable".to_string()));
@@ -142,13 +140,11 @@ async fn top_level_suggests_block_keywords() {
 async fn top_level_resource_data_chain_into_type_scaffold() {
     let u = uri("file:///a.tf");
     let backend = fresh_backend("", &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(0, 0)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(0, 0)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let CompletionResponse::Array(items) = resp else {
         panic!("expected array");
     };
@@ -172,13 +168,11 @@ async fn resource_type_position_returns_schema_types() {
     install_aws_schema(&backend);
 
     // Cursor immediately after the opening quote.
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(0, 10)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(0, 10)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert_eq!(ls, vec!["aws_instance".to_string()]);
 }
@@ -191,13 +185,11 @@ async fn resource_body_suggests_attributes_from_schema() {
     install_aws_schema(&backend);
 
     // Cursor on the empty line inside the block.
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(1, 0)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 0)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&"ami".to_string()));
     assert!(ls.contains(&"instance_type".to_string()));
@@ -212,17 +204,14 @@ async fn attribute_value_refs_sort_before_functions() {
     let src = "variable \"foo\" {}\nresource \"aws_instance\" \"x\" {\n  instance_type = \n}\n";
     let backend = fresh_backend(src, &u);
     install_aws_schema(&backend);
-    let sig: tfls_schema::FunctionSignature =
-        sonic_rs::from_str("{}").expect("empty function sig");
+    let sig: tfls_schema::FunctionSignature = sonic_rs::from_str("{}").expect("empty function sig");
     backend.state.merge_functions([("upper".to_string(), sig)]);
 
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 18)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(2, 18)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let items = match resp {
         CompletionResponse::Array(a) => a,
         CompletionResponse::List(l) => l.items,
@@ -270,13 +259,11 @@ async fn for_binding_offers_collection_element_fields() {
                locals {\n  names = [for s in var.servers : s.xxx]\n}\n";
     let backend = fresh_backend(src, &u);
     // Cursor right after `s.` (before xxx) on line 4.
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(4, 36)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(4, 36)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&"name".to_string()), "got {ls:?}");
     assert!(ls.contains(&"port".to_string()), "got {ls:?}");
@@ -292,13 +279,11 @@ async fn each_value_field_offers_element_fields() {
                for_each = { a = { size = \"s\", color = \"c\" } }\n  \
                instance_type = each.value.xxx\n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 29)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(2, 29)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&"size".to_string()), "got {ls:?}");
     assert!(ls.contains(&"color".to_string()), "got {ls:?}");
@@ -312,16 +297,17 @@ async fn ignore_changes_offers_resource_attrs_and_all() {
     let backend = fresh_backend(src, &u);
     install_aws_schema(&backend);
     // Cursor between the brackets.
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 22)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(2, 22)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&"all".to_string()), "got {ls:?}");
-    assert!(ls.contains(&"ami".to_string()), "resource attr offered; got {ls:?}");
+    assert!(
+        ls.contains(&"ami".to_string()),
+        "resource attr offered; got {ls:?}"
+    );
     assert!(
         !ls.iter().any(|l| l == "jsonencode"),
         "no function names in ignore_changes; got {ls:?}"
@@ -334,13 +320,11 @@ async fn depends_on_offers_addresses() {
     let src = "resource \"aws_instance\" \"a\" {}\nresource \"aws_instance\" \"b\" {\n  depends_on = [ ]\n}\n";
     let backend = fresh_backend(src, &u);
     install_aws_schema(&backend);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 16)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(2, 16)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(
         ls.contains(&"aws_instance.a".to_string()),
@@ -353,13 +337,11 @@ async fn connection_block_body_offers_transport_attrs() {
     let u = uri("file:///a.tf");
     let src = "resource \"aws_instance\" \"web\" {\n  connection {\n\n  }\n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 0)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(2, 0)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&"host".to_string()), "got {ls:?}");
     assert!(ls.contains(&"private_key".to_string()), "got {ls:?}");
@@ -368,16 +350,13 @@ async fn connection_block_body_offers_transport_attrs() {
 #[tokio::test]
 async fn provisioner_local_exec_body_offers_command() {
     let u = uri("file:///a.tf");
-    let src =
-        "resource \"aws_instance\" \"web\" {\n  provisioner \"local-exec\" {\n\n  }\n}\n";
+    let src = "resource \"aws_instance\" \"web\" {\n  provisioner \"local-exec\" {\n\n  }\n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 0)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(2, 0)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&"command".to_string()), "got {ls:?}");
     assert!(ls.contains(&"working_dir".to_string()), "got {ls:?}");
@@ -388,16 +367,17 @@ async fn top_level_offers_lifecycle_blocks() {
     let u = uri("file:///a.tf");
     let src = "\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(0, 0)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(0, 0)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     for kw in ["import", "moved", "removed", "check"] {
-        assert!(ls.contains(&kw.to_string()), "{kw} block offered; got {ls:?}");
+        assert!(
+            ls.contains(&kw.to_string()),
+            "{kw} block offered; got {ls:?}"
+        );
     }
 }
 
@@ -406,13 +386,11 @@ async fn import_block_body_offers_to_and_id() {
     let u = uri("file:///a.tf");
     let src = "import {\n\n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(1, 0)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 0)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&"to".to_string()), "got {ls:?}");
     assert!(ls.contains(&"id".to_string()), "got {ls:?}");
@@ -439,7 +417,10 @@ async fn tfvars_key_position_offers_declared_variables() {
     .expect("ok")
     .expect("some completions");
     let ls = labels(resp);
-    assert!(ls.contains(&"region".to_string()), "declared var offered; got {ls:?}");
+    assert!(
+        ls.contains(&"region".to_string()),
+        "declared var offered; got {ls:?}"
+    );
     assert!(
         !ls.contains(&"count".to_string()),
         "already-assigned var suppressed; got {ls:?}"
@@ -465,7 +446,10 @@ async fn tfvars_value_position_offers_nothing() {
     .await
     .expect("ok")
     .expect("array response");
-    assert!(labels(resp).is_empty(), "value position yields no suggestions");
+    assert!(
+        labels(resp).is_empty(),
+        "value position yields no suggestions"
+    );
 }
 
 #[tokio::test]
@@ -475,17 +459,24 @@ async fn output_value_offers_reference_roots() {
     let u = uri("file:///a.tf");
     let src = "variable \"foo\" {}\nlocals { bar = 1 }\noutput \"o\" {\n  value = \n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(3, 10)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(3, 10)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
-    assert!(ls.contains(&"var.foo".to_string()), "var ref offered; got {ls:?}");
-    assert!(ls.contains(&"local.bar".to_string()), "local ref offered; got {ls:?}");
-    assert!(ls.contains(&"path".to_string()), "namespace root offered; got {ls:?}");
+    assert!(
+        ls.contains(&"var.foo".to_string()),
+        "var ref offered; got {ls:?}"
+    );
+    assert!(
+        ls.contains(&"local.bar".to_string()),
+        "local ref offered; got {ls:?}"
+    );
+    assert!(
+        ls.contains(&"path".to_string()),
+        "namespace root offered; got {ls:?}"
+    );
 }
 
 #[tokio::test]
@@ -495,13 +486,11 @@ async fn expression_context_offers_for_and_ternary_scaffolds() {
     let u = uri("file:///a.tf");
     let src = "locals {\n  x = \n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(1, 6)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 6)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(
         ls.iter().any(|l| l.starts_with("for (list")),
@@ -522,13 +511,11 @@ async fn required_attributes_sort_above_optional() {
     let src = "resource \"aws_instance\" \"web\" {\n\n}\n";
     let backend = fresh_backend(src, &u);
     install_aws_schema(&backend);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(1, 0)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 0)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let items = match resp {
         CompletionResponse::Array(a) => a,
         CompletionResponse::List(l) => l.items,
@@ -542,8 +529,14 @@ async fn required_attributes_sort_above_optional() {
     };
     let ami = st("ami");
     let inst = st("instance_type");
-    assert!(ami.starts_with("0_"), "required ami in bucket 0, got {ami:?}");
-    assert!(inst.starts_with("1_"), "optional instance_type in bucket 1, got {inst:?}");
+    assert!(
+        ami.starts_with("0_"),
+        "required ami in bucket 0, got {ami:?}"
+    );
+    assert!(
+        inst.starts_with("1_"),
+        "optional instance_type in bucket 1, got {inst:?}"
+    );
     assert!(ami < inst, "required must sort before optional");
 }
 
@@ -556,13 +549,11 @@ async fn nested_block_at_max_items_is_suppressed() {
     let src = "resource \"aws_instance\" \"x\" {\n  metadata_options {}\n  \n}\n";
     let backend = fresh_backend(src, &u);
     install_aws_schema(&backend);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 2)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(2, 2)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(
         !ls.contains(&"metadata_options".to_string()),
@@ -607,13 +598,11 @@ async fn deprecated_attribute_is_tagged_and_sinks_in_sort() {
     .expect("parse schema");
     backend.state.install_schemas(schema);
 
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(1, 0)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 0)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let items = match resp {
         CompletionResponse::Array(a) => a,
         CompletionResponse::List(l) => l.items,
@@ -675,16 +664,20 @@ async fn resource_body_excludes_pure_computed_attributes() {
     .expect("parse schema");
     backend.state.install_schemas(schema);
 
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(1, 0)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 0)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
-    assert!(ls.contains(&"name".to_string()), "required attr should appear");
-    assert!(ls.contains(&"tags".to_string()), "computed-optional attr should appear");
+    assert!(
+        ls.contains(&"name".to_string()),
+        "required attr should appear"
+    );
+    assert!(
+        ls.contains(&"tags".to_string()),
+        "computed-optional attr should appear"
+    );
     assert!(
         !ls.contains(&"id".to_string()),
         "pure computed attr must not appear; labels were {ls:?}"
@@ -703,13 +696,11 @@ async fn resource_body_inside_nested_block_suggests_nested_attrs() {
 
     // Line 2 (0-based), column 4 → inside the nested block body on the
     // indented blank line.
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 4)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(2, 4)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(
         ls.contains(&"volume_size".to_string()),
@@ -749,13 +740,11 @@ async fn nested_block_completion_prefills_required_attrs() {
     let backend = fresh_backend(src, &u);
     install_aws_schema(&backend);
 
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(1, 2)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 2)))
+            .await
+            .expect("ok")
+            .expect("some completions");
 
     let items: Vec<CompletionItem> = match resp {
         CompletionResponse::Array(a) => a,
@@ -799,7 +788,8 @@ async fn cursor_on_nested_block_header_suggests_parent_body_not_child_attrs() {
     // fix: only descend into a block when the cursor is past its
     // opening `{`.
     let u = uri("file:///cursor_on_header.tf");
-    let src = "resource \"aws_instance\" \"x\" {\n  root_block_device {\n    volume_size = 8\n  }\n}\n";
+    let src =
+        "resource \"aws_instance\" \"x\" {\n  root_block_device {\n    volume_size = 8\n  }\n}\n";
     let backend = fresh_backend(src, &u);
     install_aws_schema(&backend);
 
@@ -807,13 +797,11 @@ async fn cursor_on_nested_block_header_suggests_parent_body_not_child_attrs() {
     // line. That's inside the outer resource body, before the nested
     // block's `{`. We should surface the resource-body options, not an
     // empty list.
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(1, 2)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 2)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     // `ami` is a required attr of aws_instance — should appear.
     assert!(
@@ -876,16 +864,20 @@ async fn resource_body_inside_nested_block_excludes_pure_computed() {
     .expect("parse schema");
     backend.state.install_schemas(schema);
 
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 4)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(2, 4)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
-    assert!(ls.contains(&"command".to_string()), "required nested attr missing");
-    assert!(ls.contains(&"env".to_string()), "computed-optional nested attr missing");
+    assert!(
+        ls.contains(&"command".to_string()),
+        "required nested attr missing"
+    );
+    assert!(
+        ls.contains(&"env".to_string()),
+        "computed-optional nested attr missing"
+    );
     assert!(
         !ls.contains(&"exit_code".to_string()),
         "pure-computed nested attr leaked; got {ls:?}"
@@ -944,17 +936,24 @@ async fn resource_body_inside_doubly_nested_block_suggests_innermost_attrs() {
     .expect("parse schema");
     backend.state.install_schemas(schema);
 
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(3, 6)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(3, 6)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
-    assert!(ls.contains(&"leaf_attr".to_string()), "innermost attr missing; got {ls:?}");
-    assert!(!ls.contains(&"outer_attr".to_string()), "outer block attr leaked; got {ls:?}");
-    assert!(!ls.contains(&"root_attr".to_string()), "root attr leaked; got {ls:?}");
+    assert!(
+        ls.contains(&"leaf_attr".to_string()),
+        "innermost attr missing; got {ls:?}"
+    );
+    assert!(
+        !ls.contains(&"outer_attr".to_string()),
+        "outer block attr leaked; got {ls:?}"
+    );
+    assert!(
+        !ls.contains(&"root_attr".to_string()),
+        "root attr leaked; got {ls:?}"
+    );
 }
 
 #[tokio::test]
@@ -970,13 +969,11 @@ async fn completion_on_dynamic_body_offers_meta_args_and_content_scaffold() {
     install_aws_schema(&backend);
 
     // Line 2, col 4 → indented blank line inside the dynamic body.
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 4)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(2, 4)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(
         ls.contains(&"for_each".to_string()),
@@ -1016,13 +1013,11 @@ async fn dynamic_body_filters_already_present_items() {
     install_aws_schema(&backend);
 
     // Line 3, col 4 → blank line between for_each and content.
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(3, 4)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(3, 4)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(
         !ls.contains(&"for_each".to_string()),
@@ -1055,13 +1050,11 @@ async fn resource_body_offers_dynamic_meta_block() {
     install_aws_schema(&backend);
 
     // Line 1, col 2 → blank line inside the resource body.
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(1, 2)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 2)))
+            .await
+            .expect("ok")
+            .expect("some completions");
 
     let items: Vec<CompletionItem> = match resp {
         CompletionResponse::Array(a) => a,
@@ -1102,13 +1095,11 @@ async fn completion_inside_dynamic_content_resolves_target_block_schema() {
 
     // Line 3 (0-based), column 6 → inside `content { }` on the indented
     // blank line.
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(3, 6)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(3, 6)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(
         ls.contains(&"device_name".to_string()),
@@ -1163,16 +1154,20 @@ async fn data_body_inside_nested_block_suggests_nested_attrs() {
     .expect("parse schema");
     backend.state.install_schemas(schema);
 
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 4)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(2, 4)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
-    assert!(ls.contains(&"name".to_string()), "nested attr missing; got {ls:?}");
-    assert!(ls.contains(&"values".to_string()), "nested attr missing; got {ls:?}");
+    assert!(
+        ls.contains(&"name".to_string()),
+        "nested attr missing; got {ls:?}"
+    );
+    assert!(
+        ls.contains(&"values".to_string()),
+        "nested attr missing; got {ls:?}"
+    );
     assert!(
         !ls.contains(&"count".to_string()),
         "meta-argument leaked into nested data block; got {ls:?}"
@@ -1194,13 +1189,11 @@ async fn resource_type_completion_in_closed_label_inserts_bare_name() {
     install_aws_schema(&backend);
 
     // Cursor sits between `a` and the closing quote of the first label.
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(0, 11)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(0, 11)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let CompletionResponse::Array(items) = resp else {
         panic!("expected array response");
     };
@@ -1230,13 +1223,11 @@ async fn data_source_type_completion_in_closed_label_inserts_bare_name() {
 
     // `data ` is 5 chars, `"` at 5, `a` at 6, `"` at 7 — cursor at 7
     // sits between `a` and the closing quote.
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(0, 7)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(0, 7)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let CompletionResponse::Array(items) = resp else {
         panic!("expected array response");
     };
@@ -1260,13 +1251,11 @@ async fn resource_type_completion_on_open_label_keeps_scaffold() {
     let backend = fresh_backend("resource \"", &u);
     install_aws_schema(&backend);
 
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(0, 10)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(0, 10)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let CompletionResponse::Array(items) = resp else {
         panic!("expected array response");
     };
@@ -1325,13 +1314,11 @@ async fn resource_type_scaffold_keeps_dollar_zero_when_no_required_attrs() {
     .expect("parse schema");
     backend.state.install_schemas(schema);
 
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(0, 10)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(0, 10)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let CompletionResponse::Array(items) = resp else {
         panic!("expected array response");
     };
@@ -1353,13 +1340,11 @@ async fn resource_body_suggests_meta_arguments() {
     let backend = fresh_backend(src, &u);
     install_aws_schema(&backend);
 
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(1, 0)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 0)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     for expected in [
         "count",
@@ -1384,13 +1369,11 @@ async fn data_body_suggests_meta_arguments_minus_provisioner_connection() {
     let backend = fresh_backend(src, &u);
     install_aws_schema(&backend);
 
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(1, 0)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 0)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     for expected in ["count", "for_each", "provider", "depends_on", "lifecycle"] {
         assert!(
@@ -1412,7 +1395,8 @@ async fn variable_ref_suggests_defined_variables() {
     // are indexed, then type `var.` to trigger a momentary parse
     // failure. The last-good symbol table keeps completion working.
     let u = uri("file:///a.tf");
-    let valid_src = "variable \"region\" {}\nvariable \"name\" {}\noutput \"x\" { value = var.region }\n";
+    let valid_src =
+        "variable \"region\" {}\nvariable \"name\" {}\noutput \"x\" { value = var.region }\n";
     let backend = fresh_backend(valid_src, &u);
 
     // Overwrite rope to the broken state and reparse — mimicking a
@@ -1493,12 +1477,10 @@ async fn completion_without_schema_returns_none_for_resource_type() {
     let u = uri("file:///a.tf");
     let backend = fresh_backend("resource \"", &u);
 
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(0, 10)),
-    )
-    .await
-    .expect("ok");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(0, 10)))
+            .await
+            .expect("ok");
     assert!(resp.is_none(), "no schemas installed -> no suggestions");
 }
 
@@ -1517,15 +1499,16 @@ async fn resource_body_filters_already_set_schema_attribute() {
     install_aws_schema(&backend);
 
     // Cursor on the empty line inside the body (line 2, col 2).
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 2)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(2, 2)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
-    assert!(!ls.contains(&"ami".to_string()), "ami already set; got: {ls:?}");
+    assert!(
+        !ls.contains(&"ami".to_string()),
+        "ami already set; got: {ls:?}"
+    );
     assert!(ls.contains(&"instance_type".to_string()), "got: {ls:?}");
     assert!(ls.contains(&"tags".to_string()), "got: {ls:?}");
 }
@@ -1537,15 +1520,16 @@ async fn resource_body_filters_already_set_meta_argument() {
     let backend = fresh_backend(src, &u);
     install_aws_schema(&backend);
 
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 2)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(2, 2)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
-    assert!(!ls.contains(&"count".to_string()), "count already set; got: {ls:?}");
+    assert!(
+        !ls.contains(&"count".to_string()),
+        "count already set; got: {ls:?}"
+    );
     for still_offered in ["for_each", "provider", "depends_on"] {
         assert!(
             ls.contains(&still_offered.to_string()),
@@ -1562,13 +1546,11 @@ async fn resource_body_filters_singleton_meta_block() {
     install_aws_schema(&backend);
 
     // Cursor on the empty body line after the lifecycle block closes.
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(4, 2)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(4, 2)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(
         !ls.contains(&"lifecycle".to_string()),
@@ -1585,13 +1567,11 @@ async fn resource_body_keeps_repeatable_meta_block_after_first() {
     let backend = fresh_backend(src, &u);
     install_aws_schema(&backend);
 
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(4, 2)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(4, 2)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(
         ls.contains(&"provisioner".to_string()),
@@ -1607,13 +1587,11 @@ async fn resource_body_filters_schema_single_and_keeps_list_nested_block() {
     install_aws_schema(&backend);
 
     // Cursor on the empty line after both nested blocks (line 7).
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(7, 2)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(7, 2)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(
         !ls.contains(&"root_block_device".to_string()),
@@ -1739,7 +1717,11 @@ async fn data_source_attr_has_focused_response() {
     // didn't leak unrelated variable/local names.
     if let Some(CompletionResponse::Array(items)) = resp {
         for it in &items {
-            assert_ne!(it.label, "ubuntu".to_string(), "data-source name leaked as attr");
+            assert_ne!(
+                it.label,
+                "ubuntu".to_string(),
+                "data-source name leaked as attr"
+            );
         }
     }
 }
@@ -1749,9 +1731,7 @@ async fn var_ref_is_module_scoped_across_files() {
     let ua = uri("file:///mod/a.tf");
     let ub = uri("file:///mod/b.tf");
     let uc = uri("file:///other/c.tf");
-    let (src_a, pos) = src_with_cursor(
-        "variable \"a\" {}\noutput \"x\" { value = var.|xxx }\n",
-    );
+    let (src_a, pos) = src_with_cursor("variable \"a\" {}\noutput \"x\" { value = var.|xxx }\n");
     let backend = fresh_backend(&src_a, &ua);
     insert_doc(&backend, &ub, "variable \"b\" {}\n");
     insert_doc(&backend, &uc, "variable \"c\" {}\n");
@@ -1762,7 +1742,10 @@ async fn var_ref_is_module_scoped_across_files() {
     let ls = labels(resp);
     assert!(ls.contains(&"a".to_string()), "got: {ls:?}");
     assert!(ls.contains(&"b".to_string()), "got: {ls:?}");
-    assert!(!ls.contains(&"c".to_string()), "`c` lives in /other; got: {ls:?}");
+    assert!(
+        !ls.contains(&"c".to_string()),
+        "`c` lives in /other; got: {ls:?}"
+    );
 }
 
 #[tokio::test]
@@ -1770,9 +1753,7 @@ async fn local_ref_is_module_scoped_across_files() {
     let ua = uri("file:///mod/a.tf");
     let ub = uri("file:///mod/b.tf");
     let uc = uri("file:///other/c.tf");
-    let (src_a, pos) = src_with_cursor(
-        "locals { a = 1 }\noutput \"x\" { value = local.|xxx }\n",
-    );
+    let (src_a, pos) = src_with_cursor("locals { a = 1 }\noutput \"x\" { value = local.|xxx }\n");
     let backend = fresh_backend(&src_a, &ua);
     insert_doc(&backend, &ub, "locals { b = 2 }\n");
     insert_doc(&backend, &uc, "locals { c = 3 }\n");
@@ -2041,7 +2022,10 @@ async fn index_key_empty_when_for_each_dynamic() {
     let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&u, pos))
         .await
         .expect("ok");
-    assert!(resp.is_none(), "dynamic for_each shouldn't offer keys; got {resp:?}");
+    assert!(
+        resp.is_none(),
+        "dynamic for_each shouldn't offer keys; got {resp:?}"
+    );
 }
 
 #[tokio::test]
@@ -2068,13 +2052,11 @@ async fn terraform_block_body_suggests_required_version_and_blocks() {
     let u = uri("file:///tf.tf");
     let src = "terraform {\n  \n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(1, 2)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 2)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let items = match resp {
         CompletionResponse::Array(v) => v,
         CompletionResponse::List(l) => l.items,
@@ -2108,7 +2090,10 @@ async fn terraform_block_body_suggests_required_version_and_blocks() {
     );
 
     // Unlabeled blocks must NOT include a stray label placeholder.
-    let rp_item = items.iter().find(|i| i.label == "required_providers").unwrap();
+    let rp_item = items
+        .iter()
+        .find(|i| i.label == "required_providers")
+        .unwrap();
     let rp_insert = rp_item.insert_text.as_deref().unwrap_or("");
     assert!(
         rp_insert.starts_with("required_providers {"),
@@ -2128,13 +2113,11 @@ async fn variable_type_value_top_level_offers_primitives_and_constructors() {
     // Cursor right after `type = `.
     let src = "variable \"x\" {\n  type = \n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(1, 9)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 9)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     for t in ["string", "number", "bool", "any", "null"] {
         assert!(
@@ -2156,13 +2139,11 @@ async fn variable_type_value_inside_list_constructor_also_offers_types() {
     // Cursor inside `list(|)`.
     let src = "variable \"x\" {\n  type = list()\n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(1, 14)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 14)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&"string".to_string()), "got {ls:?}");
     assert!(ls.contains(&"map".to_string()));
@@ -2174,13 +2155,11 @@ async fn variable_type_value_inside_object_constructor() {
     // Cursor at `object({ name = | })`.
     let src = "variable \"x\" {\n  type = object({ name =  })\n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(1, 25)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 25)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&"string".to_string()), "got {ls:?}");
     assert!(ls.contains(&"object".to_string()));
@@ -2193,12 +2172,10 @@ async fn variable_type_value_does_not_fire_for_default() {
     let u = uri("file:///v.tf");
     let src = "variable \"x\" {\n  default = \n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(1, 12)),
-    )
-    .await
-    .expect("ok");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 12)))
+            .await
+            .expect("ok");
     // We may or may not have other suggestions here; the assertion
     // is only that primitive type words aren't polluting the list.
     if let Some(CompletionResponse::Array(items)) = resp {
@@ -2215,13 +2192,11 @@ async fn variable_block_body_suggests_standard_attrs() {
     let u = uri("file:///v.tf");
     let src = "variable \"my_var\" {\n  \n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(1, 2)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 2)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&"type".to_string()));
     assert!(ls.contains(&"default".to_string()));
@@ -2245,13 +2220,11 @@ async fn validation_body_suggests_condition_and_error_message() {
     let u = uri("file:///v.tf");
     let src = "variable \"x\" {\n  validation {\n    \n  }\n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 4)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(2, 4)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(
         ls.contains(&"condition".to_string()),
@@ -2273,13 +2246,11 @@ async fn precondition_body_in_output_suggests_condition_and_error_message() {
     let u = uri("file:///o.tf");
     let src = "output \"x\" {\n  precondition {\n    \n  }\n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 4)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(2, 4)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&"condition".to_string()), "got {ls:?}");
     assert!(ls.contains(&"error_message".to_string()), "got {ls:?}");
@@ -2291,18 +2262,22 @@ async fn lifecycle_body_in_resource_suggests_lifecycle_attrs() {
     let u = uri("file:///r.tf");
     let src = "resource \"aws_instance\" \"x\" {\n  lifecycle {\n    \n  }\n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 4)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(2, 4)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
-    assert!(ls.contains(&"create_before_destroy".to_string()), "got {ls:?}");
+    assert!(
+        ls.contains(&"create_before_destroy".to_string()),
+        "got {ls:?}"
+    );
     assert!(ls.contains(&"prevent_destroy".to_string()), "got {ls:?}");
     assert!(ls.contains(&"ignore_changes".to_string()), "got {ls:?}");
-    assert!(ls.contains(&"replace_triggered_by".to_string()), "got {ls:?}");
+    assert!(
+        ls.contains(&"replace_triggered_by".to_string()),
+        "got {ls:?}"
+    );
     assert!(ls.contains(&"precondition".to_string()), "got {ls:?}");
     assert!(ls.contains(&"postcondition".to_string()), "got {ls:?}");
 }
@@ -2312,17 +2287,18 @@ async fn lifecycle_body_in_data_block_only_allows_postcondition() {
     let u = uri("file:///d.tf");
     let src = "data \"aws_ami\" \"x\" {\n  lifecycle {\n    \n  }\n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 4)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(2, 4)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&"postcondition".to_string()), "got {ls:?}");
     // Resource-only attrs must not appear here.
-    assert!(!ls.contains(&"create_before_destroy".to_string()), "got {ls:?}");
+    assert!(
+        !ls.contains(&"create_before_destroy".to_string()),
+        "got {ls:?}"
+    );
     assert!(!ls.contains(&"prevent_destroy".to_string()), "got {ls:?}");
     assert!(!ls.contains(&"precondition".to_string()), "got {ls:?}");
 }
@@ -2332,13 +2308,11 @@ async fn postcondition_in_lifecycle_offers_condition_and_error_message() {
     let u = uri("file:///r.tf");
     let src = "resource \"aws_instance\" \"x\" {\n  lifecycle {\n    postcondition {\n      \n    }\n  }\n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(3, 6)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(3, 6)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&"condition".to_string()), "got {ls:?}");
     assert!(ls.contains(&"error_message".to_string()), "got {ls:?}");
@@ -2349,13 +2323,11 @@ async fn assume_role_body_in_s3_backend_suggests_role_arn() {
     let u = uri("file:///tf.tf");
     let src = "terraform {\n  backend \"s3\" {\n    assume_role {\n      \n    }\n  }\n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(3, 6)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(3, 6)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&"role_arn".to_string()), "got {ls:?}");
     assert!(ls.contains(&"session_name".to_string()), "got {ls:?}");
@@ -2368,13 +2340,11 @@ async fn endpoints_body_in_s3_backend_suggests_service_overrides() {
     let u = uri("file:///tf.tf");
     let src = "terraform {\n  backend \"s3\" {\n    endpoints {\n      \n    }\n  }\n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(3, 6)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(3, 6)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&"s3".to_string()), "got {ls:?}");
     assert!(ls.contains(&"dynamodb".to_string()), "got {ls:?}");
@@ -2386,13 +2356,11 @@ async fn workspaces_body_in_remote_backend_suggests_name_and_prefix() {
     let u = uri("file:///tf.tf");
     let src = "terraform {\n  backend \"remote\" {\n    workspaces {\n      \n    }\n  }\n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(3, 6)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(3, 6)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&"name".to_string()), "got {ls:?}");
     assert!(ls.contains(&"prefix".to_string()), "got {ls:?}");
@@ -2405,13 +2373,11 @@ async fn cloud_body_suggests_org_and_workspaces() {
     let u = uri("file:///tf.tf");
     let src = "terraform {\n  cloud {\n    \n  }\n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 4)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(2, 4)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&"organization".to_string()), "got {ls:?}");
     assert!(ls.contains(&"hostname".to_string()), "got {ls:?}");
@@ -2425,13 +2391,11 @@ async fn workspaces_body_in_cloud_suggests_name_prefix_tags() {
     let u = uri("file:///tf.tf");
     let src = "terraform {\n  cloud {\n    workspaces {\n      \n    }\n  }\n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(3, 6)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(3, 6)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&"name".to_string()), "got {ls:?}");
     assert!(ls.contains(&"tags".to_string()), "got {ls:?}");
@@ -2444,13 +2408,11 @@ async fn exec_body_in_kubernetes_backend_suggests_api_version_and_command() {
     let u = uri("file:///tf.tf");
     let src = "terraform {\n  backend \"kubernetes\" {\n    exec {\n      \n    }\n  }\n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(3, 6)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(3, 6)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&"api_version".to_string()), "got {ls:?}");
     assert!(ls.contains(&"command".to_string()), "got {ls:?}");
@@ -2476,12 +2438,10 @@ async fn resource_nested_block_uses_provider_schema_not_builtin_router() {
     let u = uri("file:///r.tf");
     let src = "resource \"aws_instance\" \"x\" {\n  root_block_device {\n    \n  }\n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 4)),
-    )
-    .await
-    .expect("ok");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(2, 4)))
+            .await
+            .expect("ok");
     if let Some(CompletionResponse::Array(items)) = resp {
         let ls: Vec<_> = items.iter().map(|i| i.label.clone()).collect();
         // `create_before_destroy` only appears inside `lifecycle`; if
@@ -2507,13 +2467,11 @@ async fn variable_validation_block_prefills_condition_and_error_message() {
     let u = uri("file:///v.tf");
     let src = "variable \"x\" {\n  \n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(1, 2)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 2)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let insert = find_item(resp, "validation")
         .insert_text
         .expect("validation has insert_text");
@@ -2544,13 +2502,11 @@ async fn output_precondition_block_prefills_required_pair() {
     let u = uri("file:///o.tf");
     let src = "output \"x\" {\n  \n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(1, 2)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 2)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let insert = find_item(resp, "precondition")
         .insert_text
         .expect("precondition has insert_text");
@@ -2565,13 +2521,11 @@ async fn s3_backend_assume_role_block_prefills_role_arn() {
     let u = uri("file:///tf.tf");
     let src = "terraform {\n  backend \"s3\" {\n    \n  }\n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 4)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(2, 4)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let insert = find_item(resp, "assume_role")
         .insert_text
         .expect("assume_role has insert_text");
@@ -2586,13 +2540,11 @@ async fn remote_backend_workspaces_block_prefills_name() {
     let u = uri("file:///tf.tf");
     let src = "terraform {\n  backend \"remote\" {\n    \n  }\n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 4)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(2, 4)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let insert = find_item(resp, "workspaces")
         .insert_text
         .expect("workspaces has insert_text");
@@ -2607,13 +2559,11 @@ async fn kubernetes_backend_exec_block_prefills_api_version_and_command() {
     let u = uri("file:///tf.tf");
     let src = "terraform {\n  backend \"kubernetes\" {\n    \n  }\n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 4)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(2, 4)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let insert = find_item(resp, "exec")
         .insert_text
         .expect("exec has insert_text");
@@ -2630,13 +2580,11 @@ async fn terraform_block_required_providers_renders_as_empty_body() {
     let u = uri("file:///tf.tf");
     let src = "terraform {\n  \n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(1, 2)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 2)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let insert = find_item(resp, "required_providers")
         .insert_text
         .expect("required_providers has insert_text");
@@ -2651,13 +2599,11 @@ async fn terraform_block_backend_keeps_label_tabstop() {
     let u = uri("file:///tf.tf");
     let src = "terraform {\n  \n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(1, 2)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 2)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let insert = find_item(resp, "backend")
         .insert_text
         .expect("backend has insert_text");
@@ -2677,13 +2623,11 @@ async fn variable_body_after_complex_type_assignment_offers_attrs_not_type_primi
     let backend = fresh_backend(src, &u);
     // Cursor on the blank line after the `})` that closes the type
     // expression.
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(4, 2)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(4, 2)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(
         ls.contains(&"description".to_string()),
@@ -2705,13 +2649,11 @@ async fn variable_body_after_primitive_type_assignment_offers_attrs() {
     let u = uri("file:///v.tf");
     let src = "variable \"x\" {\n  type = string\n  \n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 2)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(2, 2)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&"description".to_string()), "got {ls:?}");
     assert!(!ls.contains(&"number".to_string()), "got {ls:?}");
@@ -2722,13 +2664,11 @@ async fn output_block_body_suggests_value_and_sensitive() {
     let u = uri("file:///o.tf");
     let src = "output \"my_output\" {\n  \n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(1, 2)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 2)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&"value".to_string()));
     assert!(ls.contains(&"description".to_string()));
@@ -2740,13 +2680,14 @@ async fn locals_block_body_returns_no_completions() {
     let u = uri("file:///l.tf");
     let src = "locals {\n  \n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(1, 2)),
-    )
-    .await
-    .expect("ok");
-    assert!(resp.is_none(), "locals body has no fixed schema; got {resp:?}");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 2)))
+            .await
+            .expect("ok");
+    assert!(
+        resp.is_none(),
+        "locals body has no fixed schema; got {resp:?}"
+    );
 }
 
 #[tokio::test]
@@ -2754,13 +2695,11 @@ async fn backend_s3_body_suggests_bucket_key_region() {
     let u = uri("file:///b.tf");
     let src = "terraform {\n  backend \"s3\" {\n    \n  }\n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 4)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(2, 4)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&"bucket".to_string()));
     assert!(ls.contains(&"key".to_string()));
@@ -2774,12 +2713,10 @@ async fn backend_unknown_name_returns_no_completions() {
     let u = uri("file:///b.tf");
     let src = "terraform {\n  backend \"hypothetical\" {\n    \n  }\n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 4)),
-    )
-    .await
-    .expect("ok");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(2, 4)))
+            .await
+            .expect("ok");
     assert!(
         resp.is_none(),
         "unknown backend must not leak any schema; got {resp:?}"
@@ -2791,13 +2728,11 @@ async fn required_providers_body_suggests_common_entries() {
     let u = uri("file:///rp.tf");
     let src = "terraform {\n  required_providers {\n    \n  }\n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 4)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(2, 4)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&"aws".to_string()));
     assert!(ls.contains(&"azurerm".to_string()));
@@ -2809,13 +2744,11 @@ async fn required_providers_entry_body_suggests_source_and_version() {
     let u = uri("file:///rpe.tf");
     let src = "terraform {\n  required_providers {\n    aws = {\n      \n    }\n  }\n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(3, 6)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(3, 6)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&"source".to_string()));
     assert!(ls.contains(&"version".to_string()));
@@ -2828,18 +2761,17 @@ async fn required_provider_source_value_offers_curated_sources() {
     // common provider source paths (e.g. `hashicorp/aws`) as plain
     // string values.
     let u = uri("file:///src.tf");
-    let src = "terraform {\n  required_providers {\n    aws = {\n      source = \"\"\n    }\n  }\n}\n";
+    let src =
+        "terraform {\n  required_providers {\n    aws = {\n      source = \"\"\n    }\n  }\n}\n";
     let backend = fresh_backend(src, &u);
     // Cursor between the two `"` on the source line (after `source = "`).
     // Line 3 = `      source = ""` — position 16 sits between the
     // two quotes (character 15 is the open `"`, 16 is the close `"`).
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(3, 16)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(3, 16)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     // Default (registry-less) form for each curated source.
     assert!(ls.contains(&"hashicorp/aws".to_string()), "got {ls:?}");
@@ -2860,17 +2792,18 @@ async fn required_provider_version_operator_items_have_descriptions() {
     // (one-liner) and a `documentation` body — the regression guard
     // for the constraint-aware completion wiring.
     let u = uri("file:///ops.tf");
-    let src = "terraform {\n  required_providers {\n    aws = {\n      version = \"\"\n    }\n  }\n}\n";
+    let src =
+        "terraform {\n  required_providers {\n    aws = {\n      version = \"\"\n    }\n  }\n}\n";
     let backend = fresh_backend(src, &u);
     // Cursor at position 17 — between `"` `"` on the version line.
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(3, 17)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
-    let CompletionResponse::Array(items) = resp else { panic!("expected array") };
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(3, 17)))
+            .await
+            .expect("ok")
+            .expect("some completions");
+    let CompletionResponse::Array(items) = resp else {
+        panic!("expected array")
+    };
     let tilde = items
         .iter()
         .find(|i| i.label == "~>")
@@ -2893,16 +2826,15 @@ async fn module_version_value_offers_operators_at_start() {
     // Cursor inside `module "x" { version = "|" }` must now route to
     // the new ModuleVersionValue context and produce operator items.
     let u = uri("file:///m.tf");
-    let src = "module \"x\" {\n  source  = \"terraform-aws-modules/vpc/aws\"\n  version = \"\"\n}\n";
+    let src =
+        "module \"x\" {\n  source  = \"terraform-aws-modules/vpc/aws\"\n  version = \"\"\n}\n";
     let backend = fresh_backend(src, &u);
     // Line 2 `  version = ""` — cursor between the two quotes.
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(2, 13)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(2, 13)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&">=".to_string()), "got {ls:?}");
     assert!(ls.contains(&"~>".to_string()));
@@ -2922,15 +2854,16 @@ async fn required_version_value_offers_constraint_templates() {
     // Line 1 = `  required_version = ""` — between the two quotes.
     // Indices 0-1 spaces, 2-17 `required_version`, 18 space, 19 `=`,
     // 20 space, 21 open `"`, 22 close `"`. Cursor at 22.
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(1, 22)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 22)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
-    assert!(ls.contains(&">=".to_string()), "static template missing; got {ls:?}");
+    assert!(
+        ls.contains(&">=".to_string()),
+        "static template missing; got {ls:?}"
+    );
     assert!(ls.contains(&"~>".to_string()));
     assert!(ls.contains(&"=".to_string()));
 }
@@ -2940,20 +2873,22 @@ async fn required_provider_version_value_offers_constraint_templates() {
     // Without a sibling `source`, we can't hit the registry — but the
     // static constraint operators should still show.
     let u = uri("file:///ver.tf");
-    let src = "terraform {\n  required_providers {\n    aws = {\n      version = \"\"\n    }\n  }\n}\n";
+    let src =
+        "terraform {\n  required_providers {\n    aws = {\n      version = \"\"\n    }\n  }\n}\n";
     let backend = fresh_backend(src, &u);
     // Line 3 = `      version = ""` — position 17 is between the
     // two quotes (indices: 6-12 `version`, 13 space, 14 `=`, 15
     // space, 16 open `"`, 17 close `"`).
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(3, 17)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(3, 17)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
-    assert!(ls.contains(&"~>".to_string()), "pessimistic constraint missing; got {ls:?}");
+    assert!(
+        ls.contains(&"~>".to_string()),
+        "pessimistic constraint missing; got {ls:?}"
+    );
     assert!(ls.contains(&">=".to_string()));
     assert!(ls.contains(&"=".to_string()));
 }
@@ -2987,13 +2922,11 @@ async fn provider_block_body_uses_provider_schema_plus_alias() {
     )
     .expect("parse schema");
     backend.state.install_schemas(schema);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(1, 2)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 2)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&"region".to_string()));
     assert!(ls.contains(&"profile".to_string()));
@@ -3024,13 +2957,11 @@ fn find_item(resp: CompletionResponse, label: &str) -> CompletionItem {
 async fn top_level_variable_scaffold_bundles_default_and_description() {
     let u = uri("file:///a.tf");
     let backend = fresh_backend("", &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(0, 0)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(0, 0)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let insert = find_item(resp, "variable")
         .insert_text
         .expect("variable has insert_text");
@@ -3048,13 +2979,11 @@ async fn top_level_variable_scaffold_bundles_default_and_description() {
 async fn top_level_output_scaffold_bundles_description_but_not_default() {
     let u = uri("file:///a.tf");
     let backend = fresh_backend("", &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(0, 0)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(0, 0)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let insert = find_item(resp, "output")
         .insert_text
         .expect("output has insert_text");
@@ -3076,13 +3005,11 @@ async fn top_level_output_scaffold_bundles_description_but_not_default() {
 async fn top_level_variable_scaffold_orders_attrs_alphabetically_and_no_trailing_blank() {
     let u = uri("file:///a.tf");
     let backend = fresh_backend("", &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(0, 0)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(0, 0)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let insert = find_item(resp, "variable")
         .insert_text
         .expect("variable has insert_text");
@@ -3103,13 +3030,11 @@ async fn top_level_variable_scaffold_orders_attrs_alphabetically_and_no_trailing
 async fn top_level_output_scaffold_orders_attrs_alphabetically_and_no_trailing_blank() {
     let u = uri("file:///a.tf");
     let backend = fresh_backend("", &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(0, 0)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(0, 0)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let insert = find_item(resp, "output")
         .insert_text
         .expect("output has insert_text");
@@ -3134,13 +3059,11 @@ async fn variable_body_type_inserts_only_type() {
     let u = uri("file:///v.tf");
     let src = "variable \"x\" {\n  \n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(1, 2)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 2)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let insert = find_item(resp, "type")
         .insert_text
         .expect("type has insert_text");
@@ -3158,13 +3081,11 @@ async fn output_body_value_inserts_only_value() {
     let u = uri("file:///o.tf");
     let src = "output \"x\" {\n  \n}\n";
     let backend = fresh_backend(src, &u);
-    let resp = tfls_lsp::handlers::completion::completion(
-        &backend,
-        make_params(&u, Position::new(1, 2)),
-    )
-    .await
-    .expect("ok")
-    .expect("some completions");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 2)))
+            .await
+            .expect("ok")
+            .expect("some completions");
     let insert = find_item(resp, "value")
         .insert_text
         .expect("value has insert_text");

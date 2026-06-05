@@ -4,11 +4,11 @@
 
 use tfls_lsp::Backend;
 use tfls_state::DocumentState;
-use tower_lsp::LspService;
 use tower_lsp::lsp_types::{
     FoldingRangeParams, PartialResultParams, Position, SelectionRangeParams,
     TextDocumentIdentifier, Url, WorkDoneProgressParams,
 };
+use tower_lsp::LspService;
 
 fn uri() -> Url {
     Url::parse("file:///f.tf").expect("url")

@@ -135,9 +135,10 @@ output "x" { value = var.region }
         // Simulate cross-file resolution: document has no definitions, but
         // the closure reports the reference as defined elsewhere.
         let (_syms, refs) = analyse(r#"output "x" { value = module.k.out }"#);
-        let diags = undefined_reference_diagnostics(&refs, |kind| {
-            matches!(kind, ReferenceKind::Module { name } if name == "k")
-        });
+        let diags = undefined_reference_diagnostics(
+            &refs,
+            |kind| matches!(kind, ReferenceKind::Module { name } if name == "k"),
+        );
         assert!(
             diags.is_empty(),
             "resolver should satisfy cross-file module ref: {diags:?}"

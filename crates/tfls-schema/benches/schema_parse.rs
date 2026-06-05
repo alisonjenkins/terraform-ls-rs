@@ -4,7 +4,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, Criterion};
 use tfls_schema::ProviderSchemas;
 
 fn synthesize_schema(n_resources: usize, n_attrs: usize) -> String {

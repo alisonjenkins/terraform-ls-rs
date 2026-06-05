@@ -194,13 +194,17 @@ pub fn extract_references_fallback(source: &str, uri: &Url, rope: &Rope) -> Vec<
 }
 
 fn classify(first: &str, segments: &[(usize, usize)], source: &str) -> Option<ReferenceKind> {
-    let seg = |idx: usize| -> Option<&str> {
-        segments.get(idx).map(|(s, e)| &source[*s..*e])
-    };
+    let seg = |idx: usize| -> Option<&str> { segments.get(idx).map(|(s, e)| &source[*s..*e]) };
     match first {
-        "var" => seg(0).map(|n| ReferenceKind::Variable { name: n.to_string() }),
-        "local" => seg(0).map(|n| ReferenceKind::Local { name: n.to_string() }),
-        "module" => seg(0).map(|n| ReferenceKind::Module { name: n.to_string() }),
+        "var" => seg(0).map(|n| ReferenceKind::Variable {
+            name: n.to_string(),
+        }),
+        "local" => seg(0).map(|n| ReferenceKind::Local {
+            name: n.to_string(),
+        }),
+        "module" => seg(0).map(|n| ReferenceKind::Module {
+            name: n.to_string(),
+        }),
         "data" => {
             let ty = seg(0)?;
             let name = seg(1)?;
@@ -264,8 +268,9 @@ mod tests {
     fn finds_var_reference() {
         let r = refs("identifiers = var.admin_users\n");
         assert!(
-            r.iter()
-                .any(|r| matches!(&r.kind, ReferenceKind::Variable { name } if name == "admin_users")),
+            r.iter().any(
+                |r| matches!(&r.kind, ReferenceKind::Variable { name } if name == "admin_users")
+            ),
             "got: {r:?}"
         );
     }

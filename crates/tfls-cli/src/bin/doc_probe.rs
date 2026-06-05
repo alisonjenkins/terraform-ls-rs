@@ -104,24 +104,18 @@ async fn main() -> ExitCode {
         ));
     }
 
-    let index = match registry_docs::fetch_index(
-        &client,
-        &coords.namespace,
-        &coords.name,
-        &coords.version,
-    )
-    .await
-    {
-        Ok(i) => i,
-        Err(e) => {
-            eprintln!("error: fetch_index failed: {e}");
-            return ExitCode::from(1);
-        }
-    };
+    let index =
+        match registry_docs::fetch_index(&client, &coords.namespace, &coords.name, &coords.version)
+            .await
+        {
+            Ok(i) => i,
+            Err(e) => {
+                eprintln!("error: fetch_index failed: {e}");
+                return ExitCode::from(1);
+            }
+        };
     let (n_resources, n_data_sources) = count_index_categories(&index);
-    println!(
-        "index: {n_resources} resources, {n_data_sources} data sources",
-    );
+    println!("index: {n_resources} resources, {n_data_sources} data sources",);
 
     if cli.list_uncovered {
         list_uncovered(&client, &coords, &index).await;
@@ -154,7 +148,9 @@ async fn main() -> ExitCode {
     }
 
     if cli.resource.is_none() && cli.data_source.is_none() {
-        println!("\n(no --resource / --data-source / --list-uncovered specified; nothing more to do)");
+        println!(
+            "\n(no --resource / --data-source / --list-uncovered specified; nothing more to do)"
+        );
     }
 
     ExitCode::SUCCESS
@@ -175,8 +171,7 @@ fn parse_coord(s: &str) -> Option<registry_docs::ProviderCoords> {
 }
 
 fn print_cache_summary(coords: &registry_docs::ProviderCoords) {
-    let path =
-        registry_docs::parsed_cache_path(&coords.namespace, &coords.name, &coords.version);
+    let path = registry_docs::parsed_cache_path(&coords.namespace, &coords.name, &coords.version);
     print!("parsed-descriptions cache: {} ", path.display());
     match std::fs::metadata(&path) {
         Ok(m) => {
@@ -324,8 +319,8 @@ async fn list_uncovered(
     let ns = coords.namespace.clone();
     let name = coords.name.clone();
     let version = coords.version.clone();
-    let results: Vec<(&'static str, String, usize, Option<String>)> = stream::iter(
-        targets.into_iter().map(|(kind, slug, id)| {
+    let results: Vec<(&'static str, String, usize, Option<String>)> =
+        stream::iter(targets.into_iter().map(|(kind, slug, id)| {
             let client = client.clone();
             let ns = ns.clone();
             let name = name.clone();
@@ -339,11 +334,10 @@ async fn list_uncovered(
                     Err(e) => (kind, slug, 0, Some(e.to_string())),
                 }
             }
-        }),
-    )
-    .buffer_unordered(8)
-    .collect()
-    .await;
+        }))
+        .buffer_unordered(8)
+        .collect()
+        .await;
 
     let mut empty: Vec<&(&'static str, String, usize, Option<String>)> =
         results.iter().filter(|(_, _, n, _)| *n == 0).collect();

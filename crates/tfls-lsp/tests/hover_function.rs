@@ -10,11 +10,11 @@
 use tfls_lsp::Backend;
 use tfls_schema::bundled_functions;
 use tfls_state::DocumentState;
-use tower_lsp::LspService;
 use tower_lsp::lsp_types::{
     HoverParams, Position, TextDocumentIdentifier, TextDocumentPositionParams, Url,
     WorkDoneProgressParams,
 };
+use tower_lsp::LspService;
 
 fn uri(path: &str) -> Url {
     Url::parse(path).expect("valid url")
@@ -198,11 +198,8 @@ async fn function_hover_on_unknown_function_returns_none() {
 
     let col = src.find("totally_made_up_fn").unwrap() as u32 + 2;
     let doc = b.state.documents.get(&u).expect("doc");
-    let hover = tfls_lsp::handlers::hover_function::function_hover(
-        &b.state,
-        &doc,
-        Position::new(0, col),
-    );
+    let hover =
+        tfls_lsp::handlers::hover_function::function_hover(&b.state, &doc, Position::new(0, col));
     assert!(
         hover.is_none(),
         "unknown fn should not produce a function hover"

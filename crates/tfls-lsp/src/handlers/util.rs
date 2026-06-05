@@ -58,10 +58,7 @@ pub(crate) fn module_supports_templatefile(state: &StateStore, primary_uri: &Url
 /// True when the active module's `required_version` admits any
 /// 0.10+ Terraform — the floor at which `locals { ... }` blocks
 /// exist (the canonical replacement for `data "null_data_source"`).
-pub(crate) fn module_supports_locals_replacement(
-    state: &StateStore,
-    primary_uri: &Url,
-) -> bool {
+pub(crate) fn module_supports_locals_replacement(state: &StateStore, primary_uri: &Url) -> bool {
     module_constraint_admits_at_least(state, primary_uri, tfls_diag::supports_locals_replacement)
 }
 
@@ -90,7 +87,9 @@ pub(crate) fn module_sensitive_variables(
     };
     for entry in state.documents.iter() {
         let uri = entry.key();
-        let Ok(path) = uri.to_file_path() else { continue };
+        let Ok(path) = uri.to_file_path() else {
+            continue;
+        };
         if path.parent() != Some(&target_dir) {
             continue;
         }
@@ -110,7 +109,9 @@ pub(crate) fn module_constraint_for_provider(
     let mut fragments: Vec<String> = Vec::new();
     for entry in state.documents.iter() {
         let uri = entry.key();
-        let Ok(path) = uri.to_file_path() else { continue };
+        let Ok(path) = uri.to_file_path() else {
+            continue;
+        };
         if path.parent() != Some(&target_dir) {
             continue;
         }
@@ -154,7 +155,9 @@ pub(crate) fn module_locked_provider_version(
     let mut source: Option<String> = None;
     for entry in state.documents.iter() {
         let uri = entry.key();
-        let Ok(path) = uri.to_file_path() else { continue };
+        let Ok(path) = uri.to_file_path() else {
+            continue;
+        };
         if path.parent() != Some(&target_dir) {
             continue;
         }
@@ -187,7 +190,9 @@ fn module_constraint_admits_at_least(
     let mut fragments: Vec<String> = Vec::new();
     for entry in state.documents.iter() {
         let uri = entry.key();
-        let Ok(path) = uri.to_file_path() else { continue };
+        let Ok(path) = uri.to_file_path() else {
+            continue;
+        };
         if path.parent() != Some(&target_dir) {
             continue;
         }
@@ -307,7 +312,9 @@ pub fn module_source_in_dir(
         let Ok(doc_path) = entry.key().to_file_path() else {
             continue;
         };
-        let Some(parent) = doc_path.parent() else { continue };
+        let Some(parent) = doc_path.parent() else {
+            continue;
+        };
         if !dir_paths_match(parent, module_dir) {
             continue;
         }
@@ -328,7 +335,9 @@ pub(crate) fn lookup_child_module_symbol(
         let Ok(doc_path) = entry.key().to_file_path() else {
             continue;
         };
-        let Some(parent) = doc_path.parent() else { continue };
+        let Some(parent) = doc_path.parent() else {
+            continue;
+        };
         if !dir_paths_match(parent, child_dir) {
             continue;
         }
@@ -415,12 +424,7 @@ mod tests {
             r#"variable "region" { type = string }"#,
             1,
         ));
-        let got = lookup_child_module_symbol(
-            &store,
-            &child,
-            SymbolKind::Variable,
-            "region",
-        );
+        let got = lookup_child_module_symbol(&store, &child, SymbolKind::Variable, "region");
         let got = got.expect("variable should resolve");
         assert_eq!(got.uri, u);
     }
@@ -436,12 +440,7 @@ mod tests {
             r#"output "subnet_id" { value = "" }"#,
             1,
         ));
-        let got = lookup_child_module_symbol(
-            &store,
-            &child,
-            SymbolKind::Output,
-            "subnet_id",
-        );
+        let got = lookup_child_module_symbol(&store, &child, SymbolKind::Output, "subnet_id");
         assert!(got.is_some(), "output should resolve");
     }
 
@@ -451,15 +450,8 @@ mod tests {
         let child = temp.path().canonicalize().unwrap();
         let store = StateStore::new();
         let u = uri_in(&child, "variables.tf");
-        store.upsert_document(DocumentState::new(
-            u,
-            r#"variable "region" {}"#,
-            1,
-        ));
-        assert!(
-            lookup_child_module_symbol(&store, &child, SymbolKind::Variable, "nope")
-                .is_none()
-        );
+        store.upsert_document(DocumentState::new(u, r#"variable "region" {}"#, 1));
+        assert!(lookup_child_module_symbol(&store, &child, SymbolKind::Variable, "nope").is_none());
     }
 
     #[test]
@@ -481,8 +473,7 @@ mod tests {
             1,
         ));
         assert!(
-            lookup_child_module_symbol(&store, &child, SymbolKind::Variable, "region")
-                .is_none()
+            lookup_child_module_symbol(&store, &child, SymbolKind::Variable, "region").is_none()
         );
     }
 }

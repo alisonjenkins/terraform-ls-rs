@@ -24,7 +24,7 @@
 //! else.
 
 use std::any::Any;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use hcl_edit::structure::Body;
 use thiserror::Error;
@@ -152,13 +152,17 @@ mod tests {
 
     #[test]
     fn catch_returns_panic_struct_on_explicit_panic() {
-        let result: Result<i32, _> =
-            catch("source body here\nmore content", || panic!("boom from test"));
+        let result: Result<i32, _> = catch("source body here\nmore content", || {
+            panic!("boom from test")
+        });
         let panic = result.expect_err("explicit panic should surface");
         assert!(panic.message.contains("boom from test"));
         assert_eq!(panic.source_bytes, "source body here\nmore content".len());
         assert!(panic.source_excerpt.contains("source body here"));
-        assert!(!panic.source_excerpt.contains('\n'), "newlines should be escaped");
+        assert!(
+            !panic.source_excerpt.contains('\n'),
+            "newlines should be escaped"
+        );
     }
 
     #[test]

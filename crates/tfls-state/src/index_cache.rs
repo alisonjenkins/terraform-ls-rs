@@ -241,11 +241,7 @@ fn cache_root_dir() -> Option<PathBuf> {
         return Some(PathBuf::from(dir).join("terraform-ls-rs"));
     }
     if let Some(home) = std::env::var_os("HOME") {
-        return Some(
-            PathBuf::from(home)
-                .join(".cache")
-                .join("terraform-ls-rs"),
-        );
+        return Some(PathBuf::from(home).join(".cache").join("terraform-ls-rs"));
     }
     None
 }
@@ -280,9 +276,7 @@ fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
     };
     let tmp = parent.join(format!(
         ".{}.tmp.{}",
-        path.file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("cache"),
+        path.file_name().and_then(|s| s.to_str()).unwrap_or("cache"),
         std::process::id(),
     ));
     std::fs::write(&tmp, data)?;
@@ -380,7 +374,9 @@ mod tests {
 
         // Override cache root for the duration of this test.
         let prev = std::env::var_os("XDG_CACHE_HOME");
-        unsafe { std::env::set_var("XDG_CACHE_HOME", xdg.path()); }
+        unsafe {
+            std::env::set_var("XDG_CACHE_HOME", xdg.path());
+        }
 
         let store_a = StateStore::new();
         let uri = Url::from_file_path(&var_path).unwrap();
@@ -439,5 +435,4 @@ mod tests {
             "editor contents preserved"
         );
     }
-
 }

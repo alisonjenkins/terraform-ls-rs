@@ -177,9 +177,7 @@ fn provider_has_function(state: &StateStore, provider: &str, fn_name: &str) -> b
 }
 
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 fn byte_to_pos(rope: &ropey::Rope, byte: usize) -> Option<Position> {

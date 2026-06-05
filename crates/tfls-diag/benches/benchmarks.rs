@@ -1,5 +1,5 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, Criterion};
 use ropey::Rope;
 use tfls_diag::syntax::diagnostics_for_parse_errors;
 use tfls_diag::{
@@ -84,4 +84,3 @@ fn bench_deprecation_walks(c: &mut Criterion) {
 
 criterion_group!(benches, criterion_benchmark, bench_deprecation_walks);
 criterion_main!(benches);
-

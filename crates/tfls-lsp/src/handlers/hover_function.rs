@@ -100,7 +100,13 @@ fn render(name: &str, sig: &FunctionSignature) -> String {
     if !sig.parameters.is_empty() || sig.variadic_parameter.is_some() {
         out.push_str("\n**Parameters**\n");
         for p in &sig.parameters {
-            append_param_line(&mut out, &p.name, &p.r#type, p.description.as_deref(), false);
+            append_param_line(
+                &mut out,
+                &p.name,
+                &p.r#type,
+                p.description.as_deref(),
+                false,
+            );
         }
         if let Some(v) = &sig.variadic_parameter {
             append_param_line(&mut out, &v.name, &v.r#type, v.description.as_deref(), true);

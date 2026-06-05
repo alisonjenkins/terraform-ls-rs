@@ -158,7 +158,10 @@ pub fn parse(input: &str) -> Parsed {
             Err(e) => errors.push(e),
         }
     }
-    Parsed { constraints, errors }
+    Parsed {
+        constraints,
+        errors,
+    }
 }
 
 /// Iterator of `Range<usize>` covering each comma-separated piece's
@@ -199,7 +202,11 @@ fn parse_piece(source: &str, span: Range<usize>) -> Result<Constraint, Constrain
     // Longest-match operator scan.
     let (op, op_len) = detect_operator(content);
     let after_op = &content[op_len..];
-    let version_start_rel = op_len + after_op.bytes().take_while(|b| b.is_ascii_whitespace()).count();
+    let version_start_rel = op_len
+        + after_op
+            .bytes()
+            .take_while(|b| b.is_ascii_whitespace())
+            .count();
     let version_text = content[version_start_rel..].trim_end();
     let version_abs_start = content_start + version_start_rel;
 
@@ -258,7 +265,10 @@ fn detect_operator(s: &str) -> (ConstraintOp, usize) {
 }
 
 fn starts_with_operator_char(s: &str) -> bool {
-    matches!(s.bytes().next(), Some(b'=' | b'!' | b'<' | b'>' | b'~' | b'^' | b'&' | b'|' | b'+'))
+    matches!(
+        s.bytes().next(),
+        Some(b'=' | b'!' | b'<' | b'>' | b'~' | b'^' | b'&' | b'|' | b'+')
+    )
 }
 
 fn non_version_prefix_len(s: &str) -> usize {
@@ -381,10 +391,9 @@ pub fn min_admitted_version(constraints: &[Constraint]) -> Option<&str> {
         let lower_bound = match c.op {
             // Lower-bound contributors. `>` rounds up to ≥ for our
             // discrete-version comparison purposes.
-            ConstraintOp::Eq
-            | ConstraintOp::Gt
-            | ConstraintOp::Gte
-            | ConstraintOp::Pessimistic => Some(c.version.as_str()),
+            ConstraintOp::Eq | ConstraintOp::Gt | ConstraintOp::Gte | ConstraintOp::Pessimistic => {
+                Some(c.version.as_str())
+            }
             ConstraintOp::Lt | ConstraintOp::Lte | ConstraintOp::Ne => None,
         };
         let Some(v) = lower_bound else { continue };
@@ -573,7 +582,11 @@ mod tests {
             ("~> 1.2", ConstraintOp::Pessimistic),
         ] {
             let p = parse(tok);
-            assert!(p.errors.is_empty(), "parse errors for {tok}: {:?}", p.errors);
+            assert!(
+                p.errors.is_empty(),
+                "parse errors for {tok}: {:?}",
+                p.errors
+            );
             assert_eq!(p.constraints.len(), 1);
             assert_eq!(p.constraints[0].op, *op, "wrong op for {tok}");
         }
@@ -663,7 +676,10 @@ mod tests {
     fn cursor_slot_inside_version() {
         let s = ">= 1.2";
         match cursor_slot(s, s.len()) {
-            CursorSlot::InsideVersion { op: ConstraintOp::Gte, partial } => {
+            CursorSlot::InsideVersion {
+                op: ConstraintOp::Gte,
+                partial,
+            } => {
                 assert_eq!(partial, "1.2");
             }
             other => panic!("got {other:?}"),
@@ -790,8 +806,14 @@ mod tests {
     fn four_segment_version_keeps_patch_from_third_segment() {
         // `1.2.3.4` must not fold `"3.4"` into patch (→ 0). It should
         // order above `1.2.0` and below `1.2.5`.
-        assert_eq!(compare_versions("1.2.3.4", "1.2.0"), Some(std::cmp::Ordering::Greater));
-        assert_eq!(compare_versions("1.2.3.4", "1.2.5"), Some(std::cmp::Ordering::Less));
+        assert_eq!(
+            compare_versions("1.2.3.4", "1.2.0"),
+            Some(std::cmp::Ordering::Greater)
+        );
+        assert_eq!(
+            compare_versions("1.2.3.4", "1.2.5"),
+            Some(std::cmp::Ordering::Less)
+        );
     }
 
     #[test]

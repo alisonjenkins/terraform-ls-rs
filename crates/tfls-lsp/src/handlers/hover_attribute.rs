@@ -18,7 +18,9 @@ use hcl_edit::structure::{Attribute, Body};
 use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind, Position, Url};
 use std::sync::Arc;
 use tfls_core::builtin_blocks::{BuiltinAttr, LIFECYCLE_DATA_BLOCK, LIFECYCLE_RESOURCE_BLOCK};
-use tfls_core::{content_meta_block_description, dynamic_meta_attr_description, meta_block_description};
+use tfls_core::{
+    content_meta_block_description, dynamic_meta_attr_description, meta_block_description,
+};
 use tfls_parser::hcl_span_to_lsp_range;
 use tfls_schema::{AttributeSchema, BlockSchema, NestedBlockSchema, NestingMode, ProviderSchema};
 use tfls_state::{DocumentState, StateStore};
@@ -79,9 +81,7 @@ pub fn attribute_hover(
                 render_provider_meta_attr(&hit)
             } else if is_meta_block_path(&hit.nested_path) {
                 render_meta_attribute(&hit, uri)
-            } else if hit.nested_path.is_empty()
-                && tfls_core::is_meta_attr(&hit.attr_name)
-            {
+            } else if hit.nested_path.is_empty() && tfls_core::is_meta_attr(&hit.attr_name) {
                 render_top_level_meta_arg(&hit)
             } else {
                 match resolve_attribute_schema(state, &hit) {
@@ -117,7 +117,9 @@ pub fn attribute_hover(
                     NestedBlockLookup::SchemasNotLoaded => {
                         render_nested_block_schemas_not_loaded(&hit)
                     }
-                    NestedBlockLookup::ProviderMissing => render_nested_block_provider_missing(&hit),
+                    NestedBlockLookup::ProviderMissing => {
+                        render_nested_block_provider_missing(&hit)
+                    }
                     NestedBlockLookup::BlockUnknown => render_nested_block_unknown(&hit),
                 }
             };
@@ -151,7 +153,9 @@ pub fn attribute_hover(
                     NestedBlockLookup::SchemasNotLoaded => {
                         render_nested_block_schemas_not_loaded(&header)
                     }
-                    NestedBlockLookup::ProviderMissing => render_nested_block_provider_missing(&header),
+                    NestedBlockLookup::ProviderMissing => {
+                        render_nested_block_provider_missing(&header)
+                    }
                     NestedBlockLookup::BlockUnknown => render_nested_block_unknown(&header),
                 }
             };
@@ -235,12 +239,8 @@ struct DynamicMetaAttrHit {
 /// True if the nested path passes through a meta-block whose contents
 /// are language-level, not provider-schema-defined.
 fn is_meta_block_path(path: &[String]) -> bool {
-    path.first().is_some_and(|n| {
-        matches!(
-            n.as_str(),
-            "lifecycle" | "provisioner" | "connection"
-        )
-    })
+    path.first()
+        .is_some_and(|n| matches!(n.as_str(), "lifecycle" | "provisioner" | "connection"))
 }
 
 fn render_meta_attribute(hit: &AttributeHit, uri: &Url) -> String {
@@ -415,12 +415,8 @@ fn render_builtin_nested_block(hit: &NestedBlockHeaderHit) -> String {
     // block's own `detail` line (which lives on the parent's
     // `.blocks[name]`, not on the resolved body schema).
     let parent_schema = resolve_builtin_schema_for_hit(root_keyword, &hit.parent_path);
-    let block_info = parent_schema.and_then(|s| {
-        s.blocks
-            .iter()
-            .find(|b| b.name == hit.block_name)
-            .copied()
-    });
+    let block_info =
+        parent_schema.and_then(|s| s.blocks.iter().find(|b| b.name == hit.block_name).copied());
 
     let root_label = match hit.root_kind {
         RootBlockKind::Terraform => "terraform block".to_string(),
@@ -535,9 +531,7 @@ fn resolve_builtin_schema_for_hit(
 
 /// Look up an attribute in `PROVIDER_BLOCK_META_ATTRS` by name.
 /// Returns `None` for names not in the meta list.
-fn provider_meta_attr(
-    name: &str,
-) -> Option<&'static tfls_core::builtin_blocks::BuiltinAttr> {
+fn provider_meta_attr(name: &str) -> Option<&'static tfls_core::builtin_blocks::BuiltinAttr> {
     tfls_core::builtin_blocks::PROVIDER_BLOCK_META_ATTRS
         .iter()
         .find(|a| a.name == name)
@@ -865,7 +859,14 @@ fn scan_dynamic_block(
     // handled by `scan_dynamic_body` directly.
     let target_label = target_label?;
     path.push(target_label.clone());
-    let hit = scan_dynamic_body(&block.body, offset, path, &target_label, root_kind, root_type);
+    let hit = scan_dynamic_body(
+        &block.body,
+        offset,
+        path,
+        &target_label,
+        root_kind,
+        root_type,
+    );
     path.pop();
     hit
 }
@@ -1044,8 +1045,7 @@ fn render_attribute(hit: &AttributeHit, schema: &AttributeSchema) -> String {
     // tfls_provider_protocol::registry_docs::extract_allowed_values).
     if let Some(values) = schema.allowed_values.as_deref() {
         if !values.is_empty() {
-            let formatted: Vec<String> =
-                values.iter().map(|v| format!("`{v}`")).collect();
+            let formatted: Vec<String> = values.iter().map(|v| format!("`{v}`")).collect();
             out.push_str(&format!("\n\n**Valid values:** {}", formatted.join(", ")));
         }
     }
@@ -1071,9 +1071,11 @@ fn attribute_header(hit: &AttributeHit) -> String {
         | RootBlockKind::Output
         | RootBlockKind::Module => "built-in",
     };
-    let mut out = format!("**attribute** `{attr}` on {kind} `{root}`",
+    let mut out = format!(
+        "**attribute** `{attr}` on {kind} `{root}`",
         attr = hit.attr_name,
-        root = hit.root_type);
+        root = hit.root_type
+    );
     if !hit.nested_path.is_empty() {
         out.push_str(&format!(" (block `{}`)", hit.nested_path.join(".")));
     }
@@ -1116,7 +1118,10 @@ enum NestedBlockLookup {
     BlockUnknown,
 }
 
-fn resolve_nested_block_schema(state: &StateStore, hit: &NestedBlockHeaderHit) -> NestedBlockLookup {
+fn resolve_nested_block_schema(
+    state: &StateStore,
+    hit: &NestedBlockHeaderHit,
+) -> NestedBlockLookup {
     if !state.has_real_provider_schemas() && !is_builtin_type(&hit.root_type) {
         return NestedBlockLookup::SchemasNotLoaded;
     }
@@ -1308,9 +1313,9 @@ fn render_dynamic_meta_block(hit: &NestedBlockHeaderHit) -> String {
 fn render_content_meta_block(hit: &NestedBlockHeaderHit) -> String {
     let body = content_meta_block_description();
     match &hit.target_label {
-        Some(label) => format!(
-            "**meta-block** `content` — body template for `dynamic \"{label}\"`\n\n{body}"
-        ),
+        Some(label) => {
+            format!("**meta-block** `content` — body template for `dynamic \"{label}\"`\n\n{body}")
+        }
         None => format!("**meta-block** `content`\n\n{body}"),
     }
 }

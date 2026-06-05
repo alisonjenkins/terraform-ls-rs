@@ -97,10 +97,9 @@ pub fn spawn_eager_tool_versions(client: tower_lsp::Client) {
             let ns = ns.to_string();
             let name = name.to_string();
             joins.push(tokio::spawn(async move {
-                let _ = tfls_provider_protocol::registry_versions::fetch_versions(
-                    &http, &ns, &name,
-                )
-                .await;
+                let _ =
+                    tfls_provider_protocol::registry_versions::fetch_versions(&http, &ns, &name)
+                        .await;
             }));
         }
         for j in joins {
@@ -227,16 +226,16 @@ fn target_is_cached(target: &Target) -> bool {
             namespace,
             name,
             provider,
-        } => tfls_provider_protocol::registry_versions::is_module_cached(
-            namespace, name, provider,
-        ),
+        } => tfls_provider_protocol::registry_versions::is_module_cached(namespace, name, provider),
     }
 }
 
 fn collect_targets(body: &Body) -> HashSet<Target> {
     let mut out: HashSet<Target> = HashSet::new();
     for structure in body.iter() {
-        let Some(block) = structure.as_block() else { continue };
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
         match block.ident.as_str() {
             "terraform" => collect_terraform(&block.body, &mut out),
             "module" => collect_module(&block.body, &mut out),
@@ -255,8 +254,12 @@ fn collect_terraform(body: &Body, out: &mut HashSet<Target>) {
         } else if let Some(nested) = structure.as_block() {
             if nested.ident.as_str() == "required_providers" {
                 for entry in nested.body.iter() {
-                    let Some(attr) = entry.as_attribute() else { continue };
-                    let Expression::Object(obj) = &attr.value else { continue };
+                    let Some(attr) = entry.as_attribute() else {
+                        continue;
+                    };
+                    let Expression::Object(obj) = &attr.value else {
+                        continue;
+                    };
                     for (key, value) in obj.iter() {
                         if let Some(k) = object_key_as_str(key) {
                             if k == "source" {
@@ -280,7 +283,9 @@ fn collect_terraform(body: &Body, out: &mut HashSet<Target>) {
 fn collect_module(body: &Body, out: &mut HashSet<Target>) {
     let mut source_str: Option<String> = None;
     for structure in body.iter() {
-        let Some(attr) = structure.as_attribute() else { continue };
+        let Some(attr) = structure.as_attribute() else {
+            continue;
+        };
         if attr.key.as_str() == "source" {
             source_str = literal_string(&attr.value);
         }
@@ -301,9 +306,7 @@ fn literal_string(expr: &Expression) -> Option<String> {
             let mut collected = String::new();
             for element in t.iter() {
                 match element {
-                    hcl_edit::template::Element::Literal(lit) => {
-                        collected.push_str(lit.as_str())
-                    }
+                    hcl_edit::template::Element::Literal(lit) => collected.push_str(lit.as_str()),
                     _ => return None,
                 }
             }

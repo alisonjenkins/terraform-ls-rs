@@ -351,13 +351,7 @@ fn scan_locals_body(
                     j += 1;
                 }
                 if j < bytes.len() && bytes[j] == b'=' {
-                    let sym = build_symbol(
-                        SymbolKind::Local,
-                        &name,
-                        uri,
-                        rope,
-                        &(start..i),
-                    );
+                    let sym = build_symbol(SymbolKind::Local, &name, uri, rope, &(start..i));
                     table.locals.insert(name, sym);
                 }
                 at_key_position = false;
@@ -387,8 +381,10 @@ fn byte_to_lsp(rope: &Rope, byte: usize) -> Position {
     // chars before a label, shifting goto-definition / rename / symbol
     // columns in text-fallback mode.
     let clamped = byte.min(rope.len_bytes());
-    crate::position::byte_offset_to_lsp_position(rope, clamped)
-        .unwrap_or(Position { line: 0, character: 0 })
+    crate::position::byte_offset_to_lsp_position(rope, clamped).unwrap_or(Position {
+        line: 0,
+        character: 0,
+    })
 }
 
 #[cfg(test)]
@@ -471,7 +467,11 @@ locals {
         // A `}` inside `/* … */` must not terminate the locals scan early.
         let src = "locals {\n  a = 1\n  /* closing brace } here */\n  b = 2\n}\n";
         let t = extract(src);
-        assert!(t.locals.contains_key("a"), "got: {:?}", t.locals.keys().collect::<Vec<_>>());
+        assert!(
+            t.locals.contains_key("a"),
+            "got: {:?}",
+            t.locals.keys().collect::<Vec<_>>()
+        );
         assert!(
             t.locals.contains_key("b"),
             "local after block comment was dropped: {:?}",

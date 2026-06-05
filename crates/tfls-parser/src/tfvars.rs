@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 
-use tfls_core::variable_type::{VariableType, parse_value_shape};
+use tfls_core::variable_type::{parse_value_shape, VariableType};
 
 use crate::safe::parse_body;
 
@@ -69,19 +69,24 @@ mod tests {
 
     #[test]
     fn parses_primitive_assignments() {
-        let m = parse_tfvars(
-            "region = \"us-east-1\"\ncount = 3\nenabled = true\n",
+        let m = parse_tfvars("region = \"us-east-1\"\ncount = 3\nenabled = true\n");
+        assert_eq!(
+            m.get("region"),
+            Some(&VariableType::Primitive(Primitive::String))
         );
-        assert_eq!(m.get("region"), Some(&VariableType::Primitive(Primitive::String)));
-        assert_eq!(m.get("count"), Some(&VariableType::Primitive(Primitive::Number)));
-        assert_eq!(m.get("enabled"), Some(&VariableType::Primitive(Primitive::Bool)));
+        assert_eq!(
+            m.get("count"),
+            Some(&VariableType::Primitive(Primitive::Number))
+        );
+        assert_eq!(
+            m.get("enabled"),
+            Some(&VariableType::Primitive(Primitive::Bool))
+        );
     }
 
     #[test]
     fn parses_nested_object() {
-        let m = parse_tfvars(
-            "server = {\n  name = \"web\"\n  port = 8080\n}\n",
-        );
+        let m = parse_tfvars("server = {\n  name = \"web\"\n  port = 8080\n}\n");
         let ty = m.get("server").expect("server");
         match ty {
             VariableType::Object(fields) => {

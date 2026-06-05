@@ -8,11 +8,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tfls_schema::{SchemaError, SchemaFetcher, functions_cache};
+use tfls_schema::{functions_cache, SchemaError, SchemaFetcher};
 use tfls_state::{DocumentState, Job, JobQueue, Priority, StateStore};
 use tfls_walker::{
-    WalkerError, WorkspaceEvent, discover_terraform_files, discover_terraform_files_in_dir,
-    watch_workspace,
+    discover_terraform_files, discover_terraform_files_in_dir, watch_workspace, WalkerError,
+    WorkspaceEvent,
 };
 use thiserror::Error;
 
@@ -253,8 +253,7 @@ fn resolve_cli_binary() -> PathBuf {
 
 fn which_binary(name: &str) -> Result<PathBuf, std::io::Error> {
     // Minimal PATH search: no need for the `which` crate.
-    let path = std::env::var_os("PATH")
-        .ok_or_else(|| std::io::Error::other("PATH not set"))?;
+    let path = std::env::var_os("PATH").ok_or_else(|| std::io::Error::other("PATH not set"))?;
     for entry in std::env::split_paths(&path) {
         let candidate = entry.join(name);
         if candidate.is_file() {
@@ -271,10 +270,7 @@ pub fn spawn_watcher(
     root: PathBuf,
     client: Option<tower_lsp::Client>,
 ) -> Result<tokio::task::JoinHandle<()>, WalkerError> {
-    let mut watcher = watch_workspace(
-        &root,
-        Duration::from_millis(WATCH_DEBOUNCE_MS),
-    )?;
+    let mut watcher = watch_workspace(&root, Duration::from_millis(WATCH_DEBOUNCE_MS))?;
 
     tracing::info!(root = %root.display(), "watcher: spawned");
     let handle = tokio::spawn(async move {
@@ -394,11 +390,9 @@ async fn dispatch_job(
         Job::FetchSchemas { working_dir } => {
             let progress = match client {
                 Some(c) => {
-                    let rep = crate::progress::ProgressReporter::begin(
-                        c,
-                        "Fetching provider schemas",
-                    )
-                    .await;
+                    let rep =
+                        crate::progress::ProgressReporter::begin(c, "Fetching provider schemas")
+                            .await;
                     // Clue the user in that other startup work is
                     // behind this job in the queue — otherwise the
                     // progress feels like "just one thing happening"
@@ -424,19 +418,13 @@ async fn dispatch_job(
                         std::sync::Arc::new(move |addr: &str, done: usize, total: usize| {
                             let addr_short = addr.rsplit('/').next().unwrap_or(addr).to_string();
                             let msg = format!("{done}/{total} — {addr_short}");
-                            let pct = (done * 100)
-                                .checked_div(total)
-                                .map(|p| p as u32);
+                            let pct = (done * 100).checked_div(total).map(|p| p as u32);
                             sender.send_detached(Some(msg), pct);
                         });
                     cb
                 });
-            let result = fetch_and_install_schemas(
-                Arc::clone(&state),
-                &working_dir,
-                on_provider_done,
-            )
-            .await;
+            let result =
+                fetch_and_install_schemas(Arc::clone(&state), &working_dir, on_provider_done).await;
             if let Some(p) = progress {
                 let message = match &result {
                     Ok(_) => Some("schemas ready".to_string()),
@@ -578,8 +566,7 @@ async fn bulk_workspace_scan(
     // see the `Scheduled` state and skip enqueueing its own
     // redundant `ScanDirectory`. We upgrade to `Completed` below
     // once `scan_files_parallel` has actually parsed everything.
-    let mut dirs: std::collections::HashSet<PathBuf> =
-        std::collections::HashSet::new();
+    let mut dirs: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     for path in &files {
         if let Some(parent) = path.parent() {
             dirs.insert(parent.to_path_buf());
@@ -669,10 +656,7 @@ enum RefreshDecision {
     NoOp,
 }
 
-fn decide_refresh(
-    state: &StateStore,
-    client_attached: bool,
-) -> RefreshDecision {
+fn decide_refresh(state: &StateStore, client_attached: bool) -> RefreshDecision {
     if !client_attached {
         return RefreshDecision::NoClient;
     }
@@ -707,11 +691,7 @@ pub(crate) async fn maybe_refresh_diagnostics(
 /// the store. Used after a background parse so workspace-wide views
 /// (e.g. Trouble's `<leader>xx`) see diagnostics for indexed files
 /// the user hasn't opened directly.
-async fn publish_for_path(
-    state: &StateStore,
-    client: &tower_lsp::Client,
-    path: &Path,
-) {
+async fn publish_for_path(state: &StateStore, client: &tower_lsp::Client, path: &Path) {
     let Ok(uri) = tower_lsp::lsp_types::Url::from_file_path(path) else {
         return;
     };
@@ -736,8 +716,7 @@ async fn publish_for_path(
 /// recomputes fewer diagnostics, overwriting the stale set); pull-mode
 /// clients are nudged via `workspace/diagnostic/refresh`.
 pub(crate) async fn republish_open_docs(state: &StateStore, client: &tower_lsp::Client) {
-    let open: Vec<tower_lsp::lsp_types::Url> =
-        state.open_docs.iter().map(|u| u.clone()).collect();
+    let open: Vec<tower_lsp::lsp_types::Url> = state.open_docs.iter().map(|u| u.clone()).collect();
     for uri in open {
         if let Ok(path) = uri.to_file_path() {
             publish_for_path(state, client, &path).await;
@@ -777,9 +756,7 @@ async fn publish_for_dir(state: &StateStore, client: &tower_lsp::Client, dir: &P
             // doc path is UNDER `dir` (canonicalised either side
             // for the same /private/var symlink reasons).
             let canon_path = path.canonicalize().ok();
-            if let (Some(canon_dir), Some(canon_path)) =
-                (canon_dir.as_ref(), canon_path.as_ref())
-            {
+            if let (Some(canon_dir), Some(canon_path)) = (canon_dir.as_ref(), canon_path.as_ref()) {
                 if canon_path.starts_with(canon_dir) {
                     return Some(uri.clone());
                 }
@@ -898,10 +875,7 @@ fn maybe_enqueue_schema_fetch(state: &StateStore, queue: &JobQueue, init_root: &
         // spam fetches on flaky filesystems.
         return;
     };
-    let prev = state
-        .fetched_schema_dirs
-        .get(init_root)
-        .map(|e| *e.value());
+    let prev = state.fetched_schema_dirs.get(init_root).map(|e| *e.value());
     if prev == Some(current_mtime) {
         return;
     }
@@ -1129,12 +1103,11 @@ async fn scan_files_parallel(
                     .par_iter()
                     .filter_map(|uri| {
                         let version = state.documents.get(uri)?.version;
-                        let lookup =
-                            crate::handlers::module_snapshot::CachedModuleLookup {
-                                snapshot: snapshot_ref,
-                                state,
-                                current_uri: uri,
-                            };
+                        let lookup = crate::handlers::module_snapshot::CachedModuleLookup {
+                            snapshot: snapshot_ref,
+                            state,
+                            current_uri: uri,
+                        };
                         let current_file = uri
                             .path_segments()
                             .and_then(|mut it| it.next_back())
@@ -1236,8 +1209,7 @@ fn element_type_of(
             // the type from the first value that has it. Keeps
             // `each.value.bucket_name → string` working even when
             // some entries omit the field.
-            let mut entries: Vec<&std::collections::BTreeMap<String, VariableType>> =
-                Vec::new();
+            let mut entries: Vec<&std::collections::BTreeMap<String, VariableType>> = Vec::new();
             for v in fields.values() {
                 if let VariableType::Object(inner) = v {
                     entries.push(inner);
@@ -1304,7 +1276,9 @@ impl CallerScopedLookup<'_> {
         F: FnMut(&tfls_core::SymbolTable) -> Option<R>,
     {
         for entry in self.state.documents.iter() {
-            let Ok(p) = entry.key().to_file_path() else { continue };
+            let Ok(p) = entry.key().to_file_path() else {
+                continue;
+            };
             if p.parent() != Some(self.caller_dir) {
                 continue;
             }
@@ -1331,10 +1305,7 @@ impl tfls_core::variable_type::SchemaLookup for CallerScopedLookup<'_> {
     ) -> Option<tfls_core::variable_type::VariableType> {
         self.state.data_source_attr(type_name, attr)
     }
-    fn variable_type(
-        &self,
-        name: &str,
-    ) -> Option<tfls_core::variable_type::VariableType> {
+    fn variable_type(&self, name: &str) -> Option<tfls_core::variable_type::VariableType> {
         // Prefer the declared `type = …` first; fall back to the
         // shape inferred from `default = …` so a typeless variable
         // with `default = "x"` still resolves. Walks every peer
@@ -1347,10 +1318,7 @@ impl tfls_core::variable_type::SchemaLookup for CallerScopedLookup<'_> {
                 .or_else(|| sym.variable_defaults.get(name).cloned())
         })
     }
-    fn local_shape(
-        &self,
-        name: &str,
-    ) -> Option<tfls_core::variable_type::VariableType> {
+    fn local_shape(&self, name: &str) -> Option<tfls_core::variable_type::VariableType> {
         // Recompute the local's shape AT QUERY TIME against the
         // current schema lookup. The cached `local_shapes` on the
         // SymbolTable was populated at parse time via the
@@ -1360,27 +1328,31 @@ impl tfls_core::variable_type::SchemaLookup for CallerScopedLookup<'_> {
         // resource/data attribute resolution + recursive var/local
         // chains.
         for entry in self.state.documents.iter() {
-            let Ok(p) = entry.key().to_file_path() else { continue };
+            let Ok(p) = entry.key().to_file_path() else {
+                continue;
+            };
             if p.parent() != Some(self.caller_dir) {
                 continue;
             }
-            let Some(body) = entry.value().parsed.body.as_ref() else { continue };
+            let Some(body) = entry.value().parsed.body.as_ref() else {
+                continue;
+            };
             for s in body.iter() {
                 let Some(block) = s.as_block() else { continue };
                 if block.ident.as_str() != "locals" {
                     continue;
                 }
                 for sub in block.body.iter() {
-                    let Some(attr) = sub.as_attribute() else { continue };
+                    let Some(attr) = sub.as_attribute() else {
+                        continue;
+                    };
                     if attr.key.as_str() != name {
                         continue;
                     }
-                    return Some(
-                        tfls_core::variable_type::parse_value_shape_with_schema(
-                            &attr.value,
-                            self,
-                        ),
-                    );
+                    return Some(tfls_core::variable_type::parse_value_shape_with_schema(
+                        &attr.value,
+                        self,
+                    ));
                 }
             }
         }
@@ -1396,22 +1368,24 @@ impl tfls_core::variable_type::SchemaLookup for CallerScopedLookup<'_> {
     ) -> Option<tfls_core::variable_type::VariableType> {
         // 1. Find the source for `module "<name>" {}` in any peer
         //    doc of the caller's dir.
-        let source = self.with_caller_dir_symbols(|sym| sym.module_sources.get(module_name).cloned())?;
+        let source =
+            self.with_caller_dir_symbols(|sym| sym.module_sources.get(module_name).cloned())?;
         // 2. Resolve to the child module directory.
-        let child_dir = crate::handlers::util::resolve_module_source(
-            self.caller_dir,
-            module_name,
-            &source,
-        )?;
+        let child_dir =
+            crate::handlers::util::resolve_module_source(self.caller_dir, module_name, &source)?;
         // 3. Walk indexed docs for that child dir; find an
         //    `output "<output>" { value = … }` block; infer the
         //    value's shape.
         for doc in self.state.documents.iter() {
-            let Ok(p) = doc.key().to_file_path() else { continue };
+            let Ok(p) = doc.key().to_file_path() else {
+                continue;
+            };
             if p.parent() != Some(&child_dir) {
                 continue;
             }
-            let Some(body) = doc.value().parsed.body.as_ref() else { continue };
+            let Some(body) = doc.value().parsed.body.as_ref() else {
+                continue;
+            };
             for s in body.iter() {
                 let Some(block) = s.as_block() else { continue };
                 if block.ident.as_str() != "output" {
@@ -1425,7 +1399,9 @@ impl tfls_core::variable_type::SchemaLookup for CallerScopedLookup<'_> {
                     continue;
                 }
                 for sub in block.body.iter() {
-                    let Some(attr) = sub.as_attribute() else { continue };
+                    let Some(attr) = sub.as_attribute() else {
+                        continue;
+                    };
                     if attr.key.as_str() != "value" {
                         continue;
                     }
@@ -1442,12 +1418,10 @@ impl tfls_core::variable_type::SchemaLookup for CallerScopedLookup<'_> {
                         caller_dir: &child_dir,
                         each_value: None,
                     };
-                    return Some(
-                        tfls_core::variable_type::parse_value_shape_with_schema(
-                            &attr.value,
-                            &child_scope,
-                        ),
-                    );
+                    return Some(tfls_core::variable_type::parse_value_shape_with_schema(
+                        &attr.value,
+                        &child_scope,
+                    ));
                 }
             }
         }
@@ -1457,7 +1431,7 @@ impl tfls_core::variable_type::SchemaLookup for CallerScopedLookup<'_> {
 
 pub fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
     use std::collections::HashMap;
-    use tfls_core::variable_type::{VariableType, parse_value_shape_with_schema};
+    use tfls_core::variable_type::{parse_value_shape_with_schema, VariableType};
 
     // Skip meta-attributes that aren't user-declared module inputs.
     fn is_meta_attr(name: &str) -> bool {
@@ -1508,7 +1482,9 @@ pub fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
         let Ok(doc_path) = entry.key().to_file_path() else {
             continue;
         };
-        let Some(parent) = doc_path.parent() else { continue };
+        let Some(parent) = doc_path.parent() else {
+            continue;
+        };
         if !crate::handlers::util::dir_paths_match(parent, dir) {
             continue;
         }
@@ -1528,8 +1504,7 @@ pub fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
             }) else {
                 continue;
             };
-            let Some(source) = entry.value().symbols.module_sources.get(&label).cloned()
-            else {
+            let Some(source) = entry.value().symbols.module_sources.get(&label).cloned() else {
                 continue;
             };
             let Some(child_dir) =
@@ -1621,7 +1596,9 @@ fn enqueue_child_module_scans(state: &StateStore, queue: &JobQueue, dir: &Path) 
         let Ok(doc_path) = uri.to_file_path() else {
             continue;
         };
-        let Some(parent) = doc_path.parent() else { continue };
+        let Some(parent) = doc_path.parent() else {
+            continue;
+        };
         if !crate::handlers::util::dir_paths_match(parent, dir) {
             continue;
         }
@@ -1642,10 +1619,7 @@ fn enqueue_child_module_scans(state: &StateStore, queue: &JobQueue, dir: &Path) 
     }
 }
 
-async fn parse_file_into_state(
-    state: &StateStore,
-    path: &Path,
-) -> Result<(), IndexerError> {
+async fn parse_file_into_state(state: &StateStore, path: &Path) -> Result<(), IndexerError> {
     let text = tokio::fs::read_to_string(path)
         .await
         .map_err(|source| IndexerError::FileRead {
@@ -1685,7 +1659,9 @@ async fn fetch_and_install_schemas(
         match tfls_provider_protocol::fetch_schemas_from_plugins_raw(
             &terraform_dir,
             on_provider_done,
-        ).await {
+        )
+        .await
+        {
             Ok(raw) if !raw.schemas.provider_schemas.is_empty() => {
                 let count = raw.schemas.provider_schemas.len();
                 // Install the bare schemas IMMEDIATELY so completion /
@@ -1699,9 +1675,7 @@ async fn fetch_and_install_schemas(
                 // upgrade-hint diagnostic can render
                 // "you're on vX.Y.Z, available in v<latest>".
                 for coord in &raw.coords {
-                    if let Ok(addr) =
-                        tfls_core::ProviderAddress::parse(&coord.address)
-                    {
+                    if let Ok(addr) = tfls_core::ProviderAddress::parse(&coord.address) {
                         state.record_installed_version(addr, coord.version.clone());
                     }
                 }
@@ -1721,19 +1695,15 @@ async fn fetch_and_install_schemas(
                 // installed ProviderSchemas, mutates it, and
                 // re-installs once done so hover descriptions light
                 // up without blocking completion.
-                spawn_background_enrichment(
-                    Arc::clone(&state),
-                    raw.schemas,
-                    raw.coords,
-                );
+                spawn_background_enrichment(Arc::clone(&state), raw.schemas, raw.coords);
 
                 // Also fetch provider-defined functions from v6 providers.
                 // Dedupe by (ns, name) and reuse a single mTLS identity —
                 // same reasons as the schema fetch above.
                 if let Ok(binaries) = tfls_provider_protocol::discover_providers(&terraform_dir) {
-                    let binaries =
-                        tfls_provider_protocol::dedupe_providers_keep_highest(binaries);
-                    let func_identity = match tfls_provider_protocol::tls::ClientIdentity::generate() {
+                    let binaries = tfls_provider_protocol::dedupe_providers_keep_highest(binaries);
+                    let func_identity = match tfls_provider_protocol::tls::ClientIdentity::generate(
+                    ) {
                         Ok(id) => Some(std::sync::Arc::new(id)),
                         Err(e) => {
                             tracing::warn!(
@@ -1747,7 +1717,9 @@ async fn fetch_and_install_schemas(
                         match tfls_provider_protocol::client::fetch_provider_functions(
                             bin,
                             func_identity.as_deref(),
-                        ).await {
+                        )
+                        .await
+                        {
                             Ok(funcs) if !funcs.is_empty() => {
                                 let fcount = funcs.len();
                                 state.merge_functions(funcs);
@@ -1813,21 +1785,18 @@ fn path_to_url(path: &Path) -> Option<lsp_types::Url> {
 /// per-installed-version enrichment — the upgrade-hint diagnostic
 /// needs to know the SHAPE of the latest release so it can spot
 /// names that the user's installed binary doesn't expose yet.
-fn spawn_latest_docs_prefetch(
-    coords: Vec<tfls_provider_protocol::registry_docs::ProviderCoords>,
-) {
+fn spawn_latest_docs_prefetch(coords: Vec<tfls_provider_protocol::registry_docs::ProviderCoords>) {
     tokio::spawn(async move {
         // Bound concurrency so we don't hammer the registry on
         // workspaces with many providers.
         use futures::stream::{self, StreamExt};
         stream::iter(coords)
             .for_each_concurrent(4, |c| async move {
-                if let Err(e) =
-                    tfls_provider_protocol::registry_docs::fetch_latest_parsed_docs(
-                        &c.namespace,
-                        &c.name,
-                    )
-                    .await
+                if let Err(e) = tfls_provider_protocol::registry_docs::fetch_latest_parsed_docs(
+                    &c.namespace,
+                    &c.name,
+                )
+                .await
                 {
                     tracing::debug!(
                         error = %e,
@@ -1901,7 +1870,7 @@ mod tests {
     //! output enumerates exactly what the async wrapper will do,
     //! and `SendRefresh` is the ONLY variant that can trigger
     //! client-side I/O.
-    use super::{RefreshDecision, decide_refresh, index_module_dir_sync};
+    use super::{decide_refresh, index_module_dir_sync, RefreshDecision};
     use std::fs;
     use std::path::PathBuf;
     use tfls_state::StateStore;
@@ -1939,10 +1908,7 @@ mod tests {
     fn decide_refresh_sends_when_client_supports_refresh() {
         let store = StateStore::new();
         store.set_client_supports_diagnostic_refresh(true);
-        assert_eq!(
-            decide_refresh(&store, true),
-            RefreshDecision::SendRefresh
-        );
+        assert_eq!(decide_refresh(&store, true), RefreshDecision::SendRefresh);
     }
 
     #[test]
@@ -1986,10 +1952,7 @@ mod tests {
         store.set_client_supports_diagnostic_refresh(true);
         store.mark_open(u("file:///stack/main.tf"));
         store.mark_open(u("file:///stack/other.tf"));
-        assert_eq!(
-            decide_refresh(&store, true),
-            RefreshDecision::SendRefresh
-        );
+        assert_eq!(decide_refresh(&store, true), RefreshDecision::SendRefresh);
     }
 
     #[test]
@@ -2027,11 +1990,7 @@ mod tests {
         // Second check without any filesystem change: the
         // stored mtime equals the current mtime → skip.
         maybe_enqueue_schema_fetch(&state, &queue, &init_root);
-        assert_eq!(
-            queue.len(),
-            0,
-            "no-change must NOT re-enqueue"
-        );
+        assert_eq!(queue.len(), 0, "no-change must NOT re-enqueue");
 
         // Simulate `tofu init` installing a new provider by
         // creating a subdirectory under `.terraform/providers/`.
@@ -2049,11 +2008,7 @@ mod tests {
 
         // Third check: mtime differs → enqueue.
         maybe_enqueue_schema_fetch(&state, &queue, &init_root);
-        assert_eq!(
-            queue.len(),
-            1,
-            "providers-dir mtime bump must re-enqueue"
-        );
+        assert_eq!(queue.len(), 1, "providers-dir mtime bump must re-enqueue");
 
         let _ = fs::remove_dir_all(&tree);
     }
@@ -2085,11 +2040,7 @@ mod tests {
     #[test]
     fn index_module_dir_sync_reads_parses_upserts() {
         let dir = tmp_dir("sync-reads-parses-upserts");
-        fs::write(
-            dir.join("variables.tf"),
-            "variable \"region\" {}\n",
-        )
-        .unwrap();
+        fs::write(dir.join("variables.tf"), "variable \"region\" {}\n").unwrap();
         fs::write(
             dir.join("outputs.tf"),
             "output \"x\" { value = var.region }\n",

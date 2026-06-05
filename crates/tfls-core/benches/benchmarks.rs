@@ -48,4 +48,3 @@ fn generate_lock_fixture(n: usize) -> String {
 
 criterion_group!(benches, criterion_benchmark);
 criterion_main!(benches);
-

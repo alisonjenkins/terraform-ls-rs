@@ -9,7 +9,7 @@ use lsp_types::{
 };
 use tfls_core::SymbolKind;
 use tfls_parser::lsp_position_to_byte_offset;
-use tfls_state::{DocumentState, SymbolKey, reference_at_position, reference_key};
+use tfls_state::{reference_at_position, reference_key, DocumentState, SymbolKey};
 use tower_lsp::jsonrpc;
 
 use crate::backend::Backend;
@@ -345,8 +345,10 @@ fn find_module_output_segment_in_expr(
             }
             None
         }
-        Expression::ForExpr(f) => find_module_output_segment_in_expr(&f.intro.collection_expr, offset)
-            .or_else(|| find_module_output_segment_in_expr(&f.value_expr, offset)),
+        Expression::ForExpr(f) => {
+            find_module_output_segment_in_expr(&f.intro.collection_expr, offset)
+                .or_else(|| find_module_output_segment_in_expr(&f.value_expr, offset))
+        }
         _ => None,
     }
 }
@@ -401,9 +403,7 @@ pub(crate) fn extract_provider_local_under_cursor(text: &str, offset: usize) -> 
     let bytes = text.as_bytes();
     // Extend to ident boundary so cursor-mid-name works.
     let mut end = offset;
-    while end < bytes.len()
-        && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
-    {
+    while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
         end += 1;
     }
     // Path 1: cursor on the fn segment — qualified name walks back
@@ -421,9 +421,7 @@ pub(crate) fn extract_provider_local_under_cursor(text: &str, offset: usize) -> 
     // Path 2: cursor on the LOCAL segment — preceded by literal
     // `provider::`, optionally followed by `::<ident>`.
     let mut start = end;
-    while start > 0
-        && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_')
-    {
+    while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
         start -= 1;
     }
     if start == end {
@@ -463,9 +461,7 @@ fn provider_function_references_at(
     let text = doc.rope.to_string();
     let bytes = text.as_bytes();
     let mut end = offset;
-    while end < bytes.len()
-        && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
-    {
+    while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
         end += 1;
     }
     let name = qualified_name_ending_at(&text, end)?;
@@ -578,14 +574,26 @@ fn lookup_provider_local(
     let probe = |body: &hcl_edit::structure::Body| -> Option<String> {
         for structure in body.iter() {
             let block = structure.as_block()?;
-            if block.ident.as_str() != "terraform" { continue }
+            if block.ident.as_str() != "terraform" {
+                continue;
+            }
             for inner in block.body.iter() {
-                let Some(rp_block) = inner.as_block() else { continue };
-                if rp_block.ident.as_str() != "required_providers" { continue }
+                let Some(rp_block) = inner.as_block() else {
+                    continue;
+                };
+                if rp_block.ident.as_str() != "required_providers" {
+                    continue;
+                }
                 for entry in rp_block.body.iter() {
-                    let Some(attr) = entry.as_attribute() else { continue };
+                    let Some(attr) = entry.as_attribute() else {
+                        continue;
+                    };
                     let local = attr.key.as_str().to_string();
-                    if let Some(name) = crate::handlers::completion::required_providers_local_to_name_pub(body, &local) {
+                    if let Some(name) =
+                        crate::handlers::completion::required_providers_local_to_name_pub(
+                            body, &local,
+                        )
+                    {
                         if name == provider_name {
                             return Some(local);
                         }
@@ -605,10 +613,16 @@ fn lookup_provider_local(
     let target_dir = parent_dir(uri)?;
     for entry in state.documents.iter() {
         let other_uri = entry.key();
-        let Ok(path) = other_uri.to_file_path() else { continue };
-        if path.parent() != Some(target_dir.as_path()) { continue }
+        let Ok(path) = other_uri.to_file_path() else {
+            continue;
+        };
+        if path.parent() != Some(target_dir.as_path()) {
+            continue;
+        }
         let doc = entry.value();
-        let Some(body) = doc.parsed.body.as_ref() else { continue };
+        let Some(body) = doc.parsed.body.as_ref() else {
+            continue;
+        };
         if let Some(local) = probe(body) {
             return Some(local);
         }
@@ -634,15 +648,11 @@ fn provider_local_hover(
     // requiring an immediate `provider::` prefix and either EOF/non-
     // ident or `::` boundary right after.
     let mut start = offset;
-    while start > 0
-        && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_')
-    {
+    while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
         start -= 1;
     }
     let mut end = offset;
-    while end < bytes.len()
-        && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
-    {
+    while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
         end += 1;
     }
     if start == end {
@@ -721,29 +731,38 @@ fn lookup_provider_info(
     None
 }
 
-fn scan_provider_info(
-    body: &hcl_edit::structure::Body,
-    local: &str,
-) -> Option<ProviderInfo> {
+fn scan_provider_info(body: &hcl_edit::structure::Body, local: &str) -> Option<ProviderInfo> {
     use hcl_edit::expr::Expression;
     for structure in body.iter() {
-        let Some(block) = structure.as_block() else { continue };
-        if block.ident.as_str() != "terraform" { continue }
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
+        if block.ident.as_str() != "terraform" {
+            continue;
+        }
         for inner in block.body.iter() {
-            let Some(rp_block) = inner.as_block() else { continue };
-            if rp_block.ident.as_str() != "required_providers" { continue }
+            let Some(rp_block) = inner.as_block() else {
+                continue;
+            };
+            if rp_block.ident.as_str() != "required_providers" {
+                continue;
+            }
             for entry in rp_block.body.iter() {
-                let Some(attr) = entry.as_attribute() else { continue };
-                if attr.key.as_str() != local { continue }
+                let Some(attr) = entry.as_attribute() else {
+                    continue;
+                };
+                if attr.key.as_str() != local {
+                    continue;
+                }
                 let mut info = ProviderInfo::default();
                 match &attr.value {
                     Expression::Object(obj) => {
                         for (key, value) in obj.iter() {
                             let key_str = match key {
                                 hcl_edit::expr::ObjectKey::Ident(i) => Some(i.as_str()),
-                                hcl_edit::expr::ObjectKey::Expression(
-                                    Expression::String(s),
-                                ) => Some(s.as_str()),
+                                hcl_edit::expr::ObjectKey::Expression(Expression::String(s)) => {
+                                    Some(s.as_str())
+                                }
                                 _ => None,
                             };
                             let Some(k) = key_str else { continue };
@@ -779,25 +798,29 @@ fn required_providers_attr_location(
     use hcl_edit::repr::Span as _;
     let body = doc.parsed.body.as_ref()?;
     for structure in body.iter() {
-        let Some(block) = structure.as_block() else { continue };
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
         if block.ident.as_str() != "terraform" {
             continue;
         }
         for inner in block.body.iter() {
-            let Some(rp_block) = inner.as_block() else { continue };
+            let Some(rp_block) = inner.as_block() else {
+                continue;
+            };
             if rp_block.ident.as_str() != "required_providers" {
                 continue;
             }
             for entry in rp_block.body.iter() {
-                let Some(attr) = entry.as_attribute() else { continue };
+                let Some(attr) = entry.as_attribute() else {
+                    continue;
+                };
                 if attr.key.as_str() != local {
                     continue;
                 }
                 let span = attr.key.span()?;
-                let start = tfls_parser::byte_offset_to_lsp_position(&doc.rope, span.start)
-                    .ok()?;
-                let end = tfls_parser::byte_offset_to_lsp_position(&doc.rope, span.end)
-                    .ok()?;
+                let start = tfls_parser::byte_offset_to_lsp_position(&doc.rope, span.start).ok()?;
+                let end = tfls_parser::byte_offset_to_lsp_position(&doc.rope, span.end).ok()?;
                 return Some(Location {
                     uri: uri.clone(),
                     range: lsp_types::Range { start, end },
@@ -818,8 +841,7 @@ pub async fn references(
     // Provider-defined function (Terraform 1.8+) — handled BEFORE
     // the symbol-key lookup since these aren't tracked as symbols.
     if let Some(doc) = backend.state.documents.get(&uri) {
-        if let Some(refs) =
-            provider_function_references_at(&backend.state, doc.value(), &uri, pos)
+        if let Some(refs) = provider_function_references_at(&backend.state, doc.value(), &uri, pos)
         {
             if refs.is_empty() {
                 return Ok(None);
@@ -877,7 +899,11 @@ pub async fn references(
         }
     }
 
-    if out.is_empty() { Ok(None) } else { Ok(Some(out)) }
+    if out.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(out))
+    }
 }
 
 pub async fn hover(backend: &Backend, params: HoverParams) -> jsonrpc::Result<Option<Hover>> {
@@ -916,8 +942,7 @@ pub async fn hover(backend: &Backend, params: HoverParams) -> jsonrpc::Result<Op
     // reference. Render a module-overview card with every input +
     // output listed, so the reader can see the child's interface
     // without opening the module's source.
-    if let Some(hover) =
-        hover_module_input::module_overview_hover(&backend.state, &doc, &uri, pos)
+    if let Some(hover) = hover_module_input::module_overview_hover(&backend.state, &doc, &uri, pos)
     {
         return Ok(Some(hover));
     }

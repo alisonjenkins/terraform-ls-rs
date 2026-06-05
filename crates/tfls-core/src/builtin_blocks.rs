@@ -172,8 +172,14 @@ pub const VARIABLE_BLOCK: BuiltinSchema = BuiltinSchema {
         detail: "Custom condition + error_message the value must satisfy",
         label_placeholder: None,
         required_attrs: &[
-            RequiredAttr { name: "condition", quoted: false },
-            RequiredAttr { name: "error_message", quoted: true },
+            RequiredAttr {
+                name: "condition",
+                quoted: false,
+            },
+            RequiredAttr {
+                name: "error_message",
+                quoted: true,
+            },
         ],
         schema_fn: Some(validation_schema),
     }],
@@ -214,8 +220,14 @@ pub const OUTPUT_BLOCK: BuiltinSchema = BuiltinSchema {
         detail: "Expression that must be true before the output is evaluated",
         label_placeholder: None,
         required_attrs: &[
-            RequiredAttr { name: "condition", quoted: false },
-            RequiredAttr { name: "error_message", quoted: true },
+            RequiredAttr {
+                name: "condition",
+                quoted: false,
+            },
+            RequiredAttr {
+                name: "error_message",
+                quoted: true,
+            },
         ],
         schema_fn: Some(precondition_schema),
     }],
@@ -317,7 +329,9 @@ pub const REMOVED_LIFECYCLE_BLOCK: BuiltinSchema = BuiltinSchema {
     }],
     blocks: &[],
 };
-fn removed_lifecycle_schema() -> BuiltinSchema { REMOVED_LIFECYCLE_BLOCK }
+fn removed_lifecycle_schema() -> BuiltinSchema {
+    REMOVED_LIFECYCLE_BLOCK
+}
 
 // --- `check "x" { ... }` (Terraform 1.5+) ---------------------------------
 
@@ -329,8 +343,14 @@ pub const CHECK_BLOCK: BuiltinSchema = BuiltinSchema {
             detail: "Condition + error_message the check asserts",
             label_placeholder: None,
             required_attrs: &[
-                RequiredAttr { name: "condition", quoted: false },
-                RequiredAttr { name: "error_message", quoted: true },
+                RequiredAttr {
+                    name: "condition",
+                    quoted: false,
+                },
+                RequiredAttr {
+                    name: "error_message",
+                    quoted: true,
+                },
             ],
             schema_fn: Some(assert_schema),
         },
@@ -346,7 +366,9 @@ pub const CHECK_BLOCK: BuiltinSchema = BuiltinSchema {
 };
 
 pub const ASSERT_BLOCK: BuiltinSchema = VALIDATION_BLOCK;
-fn assert_schema() -> BuiltinSchema { ASSERT_BLOCK }
+fn assert_schema() -> BuiltinSchema {
+    ASSERT_BLOCK
+}
 
 // --- `required_providers { NAME = { ... } }` entry value ------------------
 
@@ -379,26 +401,50 @@ pub const REQUIRED_PROVIDER_ENTRY_ATTRS: &[BuiltinAttr] = &[
 pub const REQUIRED_PROVIDERS_COMMON_ENTRIES: &[(&str, &str, &str)] = &[
     // (local_name, source, hint shown in detail)
     ("aws", "hashicorp/aws", "Amazon Web Services"),
-    ("azurerm", "hashicorp/azurerm", "Microsoft Azure Resource Manager"),
-    ("azuread", "hashicorp/azuread", "Microsoft Azure Active Directory / Entra ID"),
+    (
+        "azurerm",
+        "hashicorp/azurerm",
+        "Microsoft Azure Resource Manager",
+    ),
+    (
+        "azuread",
+        "hashicorp/azuread",
+        "Microsoft Azure Active Directory / Entra ID",
+    ),
     ("azapi", "azure/azapi", "Azure Resource Manager direct API"),
     ("google", "hashicorp/google", "Google Cloud Platform"),
     ("google-beta", "hashicorp/google-beta", "GCP beta features"),
     ("kubernetes", "hashicorp/kubernetes", "Kubernetes resources"),
     ("helm", "hashicorp/helm", "Helm chart releases"),
-    ("github", "integrations/github", "GitHub org / repo management"),
+    (
+        "github",
+        "integrations/github",
+        "GitHub org / repo management",
+    ),
     ("gitlab", "gitlabhq/gitlab", "GitLab administration"),
     ("cloudflare", "cloudflare/cloudflare", "Cloudflare"),
     ("datadog", "DataDog/datadog", "Datadog monitoring"),
     ("docker", "kreuzwerker/docker", "Docker"),
     ("hetznercloud", "hetznercloud/hcloud", "Hetzner Cloud"),
-    ("random", "hashicorp/random", "Random values for bootstrapping"),
+    (
+        "random",
+        "hashicorp/random",
+        "Random values for bootstrapping",
+    ),
     ("tls", "hashicorp/tls", "TLS key / cert generation"),
     ("null", "hashicorp/null", "null_resource for glue logic"),
     ("local", "hashicorp/local", "Local files and commands"),
-    ("archive", "hashicorp/archive", "Zip / tar archives for deploy bundles"),
+    (
+        "archive",
+        "hashicorp/archive",
+        "Zip / tar archives for deploy bundles",
+    ),
     ("http", "hashicorp/http", "HTTP data source"),
-    ("external", "hashicorp/external", "Shell out to an external program"),
+    (
+        "external",
+        "hashicorp/external",
+        "Shell out to an external program",
+    ),
     ("time", "hashicorp/time", "Time-based resources + rotations"),
 ];
 
@@ -457,33 +503,116 @@ const LOCAL_BACKEND: BuiltinSchema = BuiltinSchema {
 
 const S3_BACKEND: BuiltinSchema = BuiltinSchema {
     attrs: &[
-        BuiltinAttr { name: "bucket", required: true, detail: "S3 bucket name" },
-        BuiltinAttr { name: "key", required: true, detail: "State object key within the bucket" },
-        BuiltinAttr { name: "region", required: false, detail: "AWS region (falls back to AWS_REGION env)" },
-        BuiltinAttr { name: "profile", required: false, detail: "Shared-credentials profile name" },
-        BuiltinAttr { name: "shared_credentials_files", required: false, detail: "Paths to shared credentials files" },
-        BuiltinAttr { name: "shared_config_files", required: false, detail: "Paths to shared config files" },
-        BuiltinAttr { name: "endpoint", required: false, detail: "Custom S3 endpoint (deprecated; use endpoints.s3)" },
-        BuiltinAttr { name: "encrypt", required: false, detail: "Enable server-side encryption of the state object" },
-        BuiltinAttr { name: "kms_key_id", required: false, detail: "KMS key ARN for SSE-KMS" },
-        BuiltinAttr { name: "dynamodb_table", required: false, detail: "DynamoDB table for state locking (deprecated; use use_lockfile)" },
-        BuiltinAttr { name: "use_lockfile", required: false, detail: "Use an S3-native lockfile instead of DynamoDB (TF 1.10+)" },
-        BuiltinAttr { name: "workspace_key_prefix", required: false, detail: "Prefix applied to non-default workspace keys" },
-        BuiltinAttr { name: "role_arn", required: false, detail: "Role to assume for state access" },
-        BuiltinAttr { name: "session_name", required: false, detail: "Session name used with role_arn" },
-        BuiltinAttr { name: "external_id", required: false, detail: "External ID required by the assumed role" },
-        BuiltinAttr { name: "skip_credentials_validation", required: false, detail: "Skip STS GetCallerIdentity" },
-        BuiltinAttr { name: "skip_region_validation", required: false, detail: "Skip validation of the region name" },
-        BuiltinAttr { name: "skip_metadata_api_check", required: false, detail: "Skip the EC2 metadata API credentials probe" },
-        BuiltinAttr { name: "force_path_style", required: false, detail: "Use path-style S3 addressing (legacy)" },
-        BuiltinAttr { name: "use_path_style", required: false, detail: "Use path-style S3 addressing (TF 1.6+ spelling)" },
+        BuiltinAttr {
+            name: "bucket",
+            required: true,
+            detail: "S3 bucket name",
+        },
+        BuiltinAttr {
+            name: "key",
+            required: true,
+            detail: "State object key within the bucket",
+        },
+        BuiltinAttr {
+            name: "region",
+            required: false,
+            detail: "AWS region (falls back to AWS_REGION env)",
+        },
+        BuiltinAttr {
+            name: "profile",
+            required: false,
+            detail: "Shared-credentials profile name",
+        },
+        BuiltinAttr {
+            name: "shared_credentials_files",
+            required: false,
+            detail: "Paths to shared credentials files",
+        },
+        BuiltinAttr {
+            name: "shared_config_files",
+            required: false,
+            detail: "Paths to shared config files",
+        },
+        BuiltinAttr {
+            name: "endpoint",
+            required: false,
+            detail: "Custom S3 endpoint (deprecated; use endpoints.s3)",
+        },
+        BuiltinAttr {
+            name: "encrypt",
+            required: false,
+            detail: "Enable server-side encryption of the state object",
+        },
+        BuiltinAttr {
+            name: "kms_key_id",
+            required: false,
+            detail: "KMS key ARN for SSE-KMS",
+        },
+        BuiltinAttr {
+            name: "dynamodb_table",
+            required: false,
+            detail: "DynamoDB table for state locking (deprecated; use use_lockfile)",
+        },
+        BuiltinAttr {
+            name: "use_lockfile",
+            required: false,
+            detail: "Use an S3-native lockfile instead of DynamoDB (TF 1.10+)",
+        },
+        BuiltinAttr {
+            name: "workspace_key_prefix",
+            required: false,
+            detail: "Prefix applied to non-default workspace keys",
+        },
+        BuiltinAttr {
+            name: "role_arn",
+            required: false,
+            detail: "Role to assume for state access",
+        },
+        BuiltinAttr {
+            name: "session_name",
+            required: false,
+            detail: "Session name used with role_arn",
+        },
+        BuiltinAttr {
+            name: "external_id",
+            required: false,
+            detail: "External ID required by the assumed role",
+        },
+        BuiltinAttr {
+            name: "skip_credentials_validation",
+            required: false,
+            detail: "Skip STS GetCallerIdentity",
+        },
+        BuiltinAttr {
+            name: "skip_region_validation",
+            required: false,
+            detail: "Skip validation of the region name",
+        },
+        BuiltinAttr {
+            name: "skip_metadata_api_check",
+            required: false,
+            detail: "Skip the EC2 metadata API credentials probe",
+        },
+        BuiltinAttr {
+            name: "force_path_style",
+            required: false,
+            detail: "Use path-style S3 addressing (legacy)",
+        },
+        BuiltinAttr {
+            name: "use_path_style",
+            required: false,
+            detail: "Use path-style S3 addressing (TF 1.6+ spelling)",
+        },
     ],
     blocks: &[
         BuiltinBlock {
             name: "assume_role",
             detail: "Nested configuration for sts:AssumeRole",
             label_placeholder: None,
-            required_attrs: &[RequiredAttr { name: "role_arn", quoted: true }],
+            required_attrs: &[RequiredAttr {
+                name: "role_arn",
+                quoted: true,
+            }],
             schema_fn: Some(assume_role_schema),
         },
         BuiltinBlock {
@@ -498,79 +627,275 @@ const S3_BACKEND: BuiltinSchema = BuiltinSchema {
 
 const GCS_BACKEND: BuiltinSchema = BuiltinSchema {
     attrs: &[
-        BuiltinAttr { name: "bucket", required: true, detail: "GCS bucket name" },
-        BuiltinAttr { name: "prefix", required: false, detail: "Prefix applied inside the bucket" },
-        BuiltinAttr { name: "credentials", required: false, detail: "Path to a service-account JSON file" },
-        BuiltinAttr { name: "impersonate_service_account", required: false, detail: "Service account to impersonate" },
-        BuiltinAttr { name: "access_token", required: false, detail: "OAuth2 access token" },
-        BuiltinAttr { name: "encryption_key", required: false, detail: "Base64 CSEK for customer-supplied encryption" },
-        BuiltinAttr { name: "kms_encryption_key", required: false, detail: "Cloud KMS key for server-side encryption" },
+        BuiltinAttr {
+            name: "bucket",
+            required: true,
+            detail: "GCS bucket name",
+        },
+        BuiltinAttr {
+            name: "prefix",
+            required: false,
+            detail: "Prefix applied inside the bucket",
+        },
+        BuiltinAttr {
+            name: "credentials",
+            required: false,
+            detail: "Path to a service-account JSON file",
+        },
+        BuiltinAttr {
+            name: "impersonate_service_account",
+            required: false,
+            detail: "Service account to impersonate",
+        },
+        BuiltinAttr {
+            name: "access_token",
+            required: false,
+            detail: "OAuth2 access token",
+        },
+        BuiltinAttr {
+            name: "encryption_key",
+            required: false,
+            detail: "Base64 CSEK for customer-supplied encryption",
+        },
+        BuiltinAttr {
+            name: "kms_encryption_key",
+            required: false,
+            detail: "Cloud KMS key for server-side encryption",
+        },
     ],
     blocks: &[],
 };
 
 const AZURERM_BACKEND: BuiltinSchema = BuiltinSchema {
     attrs: &[
-        BuiltinAttr { name: "storage_account_name", required: true, detail: "Storage account holding the state" },
-        BuiltinAttr { name: "container_name", required: true, detail: "Blob container name" },
-        BuiltinAttr { name: "key", required: true, detail: "Blob name for the state file" },
-        BuiltinAttr { name: "resource_group_name", required: false, detail: "Resource group of the storage account" },
-        BuiltinAttr { name: "subscription_id", required: false, detail: "Subscription ID" },
-        BuiltinAttr { name: "tenant_id", required: false, detail: "Entra ID tenant" },
-        BuiltinAttr { name: "client_id", required: false, detail: "Service-principal application ID" },
-        BuiltinAttr { name: "client_secret", required: false, detail: "Service-principal secret (sensitive)" },
-        BuiltinAttr { name: "use_msi", required: false, detail: "Authenticate via managed identity" },
-        BuiltinAttr { name: "use_oidc", required: false, detail: "Authenticate via workload-identity / OIDC" },
-        BuiltinAttr { name: "use_azuread_auth", required: false, detail: "Use Entra ID for blob auth (vs storage account key)" },
-        BuiltinAttr { name: "environment", required: false, detail: "Azure cloud environment (public, usgovernment, …)" },
-        BuiltinAttr { name: "snapshot", required: false, detail: "Maintain a blob snapshot after every apply" },
+        BuiltinAttr {
+            name: "storage_account_name",
+            required: true,
+            detail: "Storage account holding the state",
+        },
+        BuiltinAttr {
+            name: "container_name",
+            required: true,
+            detail: "Blob container name",
+        },
+        BuiltinAttr {
+            name: "key",
+            required: true,
+            detail: "Blob name for the state file",
+        },
+        BuiltinAttr {
+            name: "resource_group_name",
+            required: false,
+            detail: "Resource group of the storage account",
+        },
+        BuiltinAttr {
+            name: "subscription_id",
+            required: false,
+            detail: "Subscription ID",
+        },
+        BuiltinAttr {
+            name: "tenant_id",
+            required: false,
+            detail: "Entra ID tenant",
+        },
+        BuiltinAttr {
+            name: "client_id",
+            required: false,
+            detail: "Service-principal application ID",
+        },
+        BuiltinAttr {
+            name: "client_secret",
+            required: false,
+            detail: "Service-principal secret (sensitive)",
+        },
+        BuiltinAttr {
+            name: "use_msi",
+            required: false,
+            detail: "Authenticate via managed identity",
+        },
+        BuiltinAttr {
+            name: "use_oidc",
+            required: false,
+            detail: "Authenticate via workload-identity / OIDC",
+        },
+        BuiltinAttr {
+            name: "use_azuread_auth",
+            required: false,
+            detail: "Use Entra ID for blob auth (vs storage account key)",
+        },
+        BuiltinAttr {
+            name: "environment",
+            required: false,
+            detail: "Azure cloud environment (public, usgovernment, …)",
+        },
+        BuiltinAttr {
+            name: "snapshot",
+            required: false,
+            detail: "Maintain a blob snapshot after every apply",
+        },
     ],
     blocks: &[],
 };
 
 const HTTP_BACKEND: BuiltinSchema = BuiltinSchema {
     attrs: &[
-        BuiltinAttr { name: "address", required: true, detail: "URL for GET/POST of state" },
-        BuiltinAttr { name: "update_method", required: false, detail: "HTTP method for updates (default POST)" },
-        BuiltinAttr { name: "lock_address", required: false, detail: "URL for state locking" },
-        BuiltinAttr { name: "lock_method", required: false, detail: "HTTP method for lock (default LOCK)" },
-        BuiltinAttr { name: "unlock_address", required: false, detail: "URL for unlocking" },
-        BuiltinAttr { name: "unlock_method", required: false, detail: "HTTP method for unlock (default UNLOCK)" },
-        BuiltinAttr { name: "username", required: false, detail: "Basic auth username" },
-        BuiltinAttr { name: "password", required: false, detail: "Basic auth password" },
-        BuiltinAttr { name: "retry_max", required: false, detail: "Maximum retries on HTTP errors" },
-        BuiltinAttr { name: "retry_wait_min", required: false, detail: "Minimum backoff between retries (seconds)" },
-        BuiltinAttr { name: "retry_wait_max", required: false, detail: "Maximum backoff between retries (seconds)" },
-        BuiltinAttr { name: "skip_cert_verification", required: false, detail: "Skip TLS verification (dangerous)" },
-        BuiltinAttr { name: "client_ca_certificate_pem", required: false, detail: "CA bundle for mTLS" },
-        BuiltinAttr { name: "client_certificate_pem", required: false, detail: "Client cert for mTLS" },
-        BuiltinAttr { name: "client_private_key_pem", required: false, detail: "Client key for mTLS" },
+        BuiltinAttr {
+            name: "address",
+            required: true,
+            detail: "URL for GET/POST of state",
+        },
+        BuiltinAttr {
+            name: "update_method",
+            required: false,
+            detail: "HTTP method for updates (default POST)",
+        },
+        BuiltinAttr {
+            name: "lock_address",
+            required: false,
+            detail: "URL for state locking",
+        },
+        BuiltinAttr {
+            name: "lock_method",
+            required: false,
+            detail: "HTTP method for lock (default LOCK)",
+        },
+        BuiltinAttr {
+            name: "unlock_address",
+            required: false,
+            detail: "URL for unlocking",
+        },
+        BuiltinAttr {
+            name: "unlock_method",
+            required: false,
+            detail: "HTTP method for unlock (default UNLOCK)",
+        },
+        BuiltinAttr {
+            name: "username",
+            required: false,
+            detail: "Basic auth username",
+        },
+        BuiltinAttr {
+            name: "password",
+            required: false,
+            detail: "Basic auth password",
+        },
+        BuiltinAttr {
+            name: "retry_max",
+            required: false,
+            detail: "Maximum retries on HTTP errors",
+        },
+        BuiltinAttr {
+            name: "retry_wait_min",
+            required: false,
+            detail: "Minimum backoff between retries (seconds)",
+        },
+        BuiltinAttr {
+            name: "retry_wait_max",
+            required: false,
+            detail: "Maximum backoff between retries (seconds)",
+        },
+        BuiltinAttr {
+            name: "skip_cert_verification",
+            required: false,
+            detail: "Skip TLS verification (dangerous)",
+        },
+        BuiltinAttr {
+            name: "client_ca_certificate_pem",
+            required: false,
+            detail: "CA bundle for mTLS",
+        },
+        BuiltinAttr {
+            name: "client_certificate_pem",
+            required: false,
+            detail: "Client cert for mTLS",
+        },
+        BuiltinAttr {
+            name: "client_private_key_pem",
+            required: false,
+            detail: "Client key for mTLS",
+        },
     ],
     blocks: &[],
 };
 
 const CONSUL_BACKEND: BuiltinSchema = BuiltinSchema {
     attrs: &[
-        BuiltinAttr { name: "path", required: true, detail: "Consul KV path for state" },
-        BuiltinAttr { name: "address", required: false, detail: "Consul HTTP API address" },
-        BuiltinAttr { name: "scheme", required: false, detail: "http or https" },
-        BuiltinAttr { name: "datacenter", required: false, detail: "Consul datacenter" },
-        BuiltinAttr { name: "access_token", required: false, detail: "Consul ACL token" },
-        BuiltinAttr { name: "ca_file", required: false, detail: "CA bundle for TLS" },
-        BuiltinAttr { name: "cert_file", required: false, detail: "Client cert for TLS" },
-        BuiltinAttr { name: "key_file", required: false, detail: "Client key for TLS" },
-        BuiltinAttr { name: "http_auth", required: false, detail: "Basic auth as user:pass" },
-        BuiltinAttr { name: "gzip", required: false, detail: "Compress state in the KV store" },
-        BuiltinAttr { name: "lock", required: false, detail: "Enable locking via Consul sessions" },
+        BuiltinAttr {
+            name: "path",
+            required: true,
+            detail: "Consul KV path for state",
+        },
+        BuiltinAttr {
+            name: "address",
+            required: false,
+            detail: "Consul HTTP API address",
+        },
+        BuiltinAttr {
+            name: "scheme",
+            required: false,
+            detail: "http or https",
+        },
+        BuiltinAttr {
+            name: "datacenter",
+            required: false,
+            detail: "Consul datacenter",
+        },
+        BuiltinAttr {
+            name: "access_token",
+            required: false,
+            detail: "Consul ACL token",
+        },
+        BuiltinAttr {
+            name: "ca_file",
+            required: false,
+            detail: "CA bundle for TLS",
+        },
+        BuiltinAttr {
+            name: "cert_file",
+            required: false,
+            detail: "Client cert for TLS",
+        },
+        BuiltinAttr {
+            name: "key_file",
+            required: false,
+            detail: "Client key for TLS",
+        },
+        BuiltinAttr {
+            name: "http_auth",
+            required: false,
+            detail: "Basic auth as user:pass",
+        },
+        BuiltinAttr {
+            name: "gzip",
+            required: false,
+            detail: "Compress state in the KV store",
+        },
+        BuiltinAttr {
+            name: "lock",
+            required: false,
+            detail: "Enable locking via Consul sessions",
+        },
     ],
     blocks: &[],
 };
 
 const REMOTE_BACKEND: BuiltinSchema = BuiltinSchema {
     attrs: &[
-        BuiltinAttr { name: "hostname", required: false, detail: "Hostname of HCP Terraform / TFE" },
-        BuiltinAttr { name: "organization", required: true, detail: "Organization name" },
-        BuiltinAttr { name: "token", required: false, detail: "API token (prefer TFE_TOKEN env)" },
+        BuiltinAttr {
+            name: "hostname",
+            required: false,
+            detail: "Hostname of HCP Terraform / TFE",
+        },
+        BuiltinAttr {
+            name: "organization",
+            required: true,
+            detail: "Organization name",
+        },
+        BuiltinAttr {
+            name: "token",
+            required: false,
+            detail: "API token (prefer TFE_TOKEN env)",
+        },
     ],
     blocks: &[BuiltinBlock {
         name: "workspaces",
@@ -579,31 +904,80 @@ const REMOTE_BACKEND: BuiltinSchema = BuiltinSchema {
         // `name` and `prefix` are mutually exclusive; one of them is
         // required. Default to `name` since it's the modern usage
         // pattern — users who want `prefix` can delete the line.
-        required_attrs: &[RequiredAttr { name: "name", quoted: true }],
+        required_attrs: &[RequiredAttr {
+            name: "name",
+            quoted: true,
+        }],
         schema_fn: Some(workspaces_schema),
     }],
 };
 
 const KUBERNETES_BACKEND: BuiltinSchema = BuiltinSchema {
     attrs: &[
-        BuiltinAttr { name: "secret_suffix", required: true, detail: "Suffix on the state Secret's name" },
-        BuiltinAttr { name: "labels", required: false, detail: "Additional labels on the state Secret" },
-        BuiltinAttr { name: "namespace", required: false, detail: "Kubernetes namespace" },
-        BuiltinAttr { name: "in_cluster_config", required: false, detail: "Use the pod service account" },
-        BuiltinAttr { name: "load_config_file", required: false, detail: "Load a kubeconfig from disk" },
-        BuiltinAttr { name: "config_path", required: false, detail: "Path to kubeconfig" },
-        BuiltinAttr { name: "config_context", required: false, detail: "Kubeconfig context name" },
-        BuiltinAttr { name: "host", required: false, detail: "Cluster API server URL" },
-        BuiltinAttr { name: "token", required: false, detail: "Bearer token" },
-        BuiltinAttr { name: "insecure", required: false, detail: "Skip TLS verification" },
+        BuiltinAttr {
+            name: "secret_suffix",
+            required: true,
+            detail: "Suffix on the state Secret's name",
+        },
+        BuiltinAttr {
+            name: "labels",
+            required: false,
+            detail: "Additional labels on the state Secret",
+        },
+        BuiltinAttr {
+            name: "namespace",
+            required: false,
+            detail: "Kubernetes namespace",
+        },
+        BuiltinAttr {
+            name: "in_cluster_config",
+            required: false,
+            detail: "Use the pod service account",
+        },
+        BuiltinAttr {
+            name: "load_config_file",
+            required: false,
+            detail: "Load a kubeconfig from disk",
+        },
+        BuiltinAttr {
+            name: "config_path",
+            required: false,
+            detail: "Path to kubeconfig",
+        },
+        BuiltinAttr {
+            name: "config_context",
+            required: false,
+            detail: "Kubeconfig context name",
+        },
+        BuiltinAttr {
+            name: "host",
+            required: false,
+            detail: "Cluster API server URL",
+        },
+        BuiltinAttr {
+            name: "token",
+            required: false,
+            detail: "Bearer token",
+        },
+        BuiltinAttr {
+            name: "insecure",
+            required: false,
+            detail: "Skip TLS verification",
+        },
     ],
     blocks: &[BuiltinBlock {
         name: "exec",
         detail: "Exec-based credential plugin configuration",
         label_placeholder: None,
         required_attrs: &[
-            RequiredAttr { name: "api_version", quoted: true },
-            RequiredAttr { name: "command", quoted: true },
+            RequiredAttr {
+                name: "api_version",
+                quoted: true,
+            },
+            RequiredAttr {
+                name: "command",
+                quoted: true,
+            },
         ],
         schema_fn: Some(exec_schema),
     }],
@@ -611,11 +985,31 @@ const KUBERNETES_BACKEND: BuiltinSchema = BuiltinSchema {
 
 const PG_BACKEND: BuiltinSchema = BuiltinSchema {
     attrs: &[
-        BuiltinAttr { name: "conn_str", required: true, detail: "Postgres connection string" },
-        BuiltinAttr { name: "schema_name", required: false, detail: "Schema holding the state table" },
-        BuiltinAttr { name: "skip_schema_creation", required: false, detail: "Assume the schema already exists" },
-        BuiltinAttr { name: "skip_table_creation", required: false, detail: "Assume the state table already exists" },
-        BuiltinAttr { name: "skip_index_creation", required: false, detail: "Assume the supporting index already exists" },
+        BuiltinAttr {
+            name: "conn_str",
+            required: true,
+            detail: "Postgres connection string",
+        },
+        BuiltinAttr {
+            name: "schema_name",
+            required: false,
+            detail: "Schema holding the state table",
+        },
+        BuiltinAttr {
+            name: "skip_schema_creation",
+            required: false,
+            detail: "Assume the schema already exists",
+        },
+        BuiltinAttr {
+            name: "skip_table_creation",
+            required: false,
+            detail: "Assume the state table already exists",
+        },
+        BuiltinAttr {
+            name: "skip_index_creation",
+            required: false,
+            detail: "Assume the supporting index already exists",
+        },
     ],
     blocks: &[],
 };
@@ -629,35 +1023,79 @@ const PG_BACKEND: BuiltinSchema = BuiltinSchema {
 
 pub const VALIDATION_BLOCK: BuiltinSchema = BuiltinSchema {
     attrs: &[
-        BuiltinAttr { name: "condition", required: true, detail: "Boolean expression — true means the value is valid" },
-        BuiltinAttr { name: "error_message", required: true, detail: "Message shown when the condition fails" },
-        BuiltinAttr { name: "error_message_expression", required: false, detail: "Expression producing the error message (alternative to error_message)" },
+        BuiltinAttr {
+            name: "condition",
+            required: true,
+            detail: "Boolean expression — true means the value is valid",
+        },
+        BuiltinAttr {
+            name: "error_message",
+            required: true,
+            detail: "Message shown when the condition fails",
+        },
+        BuiltinAttr {
+            name: "error_message_expression",
+            required: false,
+            detail: "Expression producing the error message (alternative to error_message)",
+        },
     ],
     blocks: &[],
 };
-fn validation_schema() -> BuiltinSchema { VALIDATION_BLOCK }
+fn validation_schema() -> BuiltinSchema {
+    VALIDATION_BLOCK
+}
 
 pub const PRECONDITION_BLOCK: BuiltinSchema = VALIDATION_BLOCK;
-fn precondition_schema() -> BuiltinSchema { PRECONDITION_BLOCK }
+fn precondition_schema() -> BuiltinSchema {
+    PRECONDITION_BLOCK
+}
 
 pub const POSTCONDITION_BLOCK: BuiltinSchema = VALIDATION_BLOCK;
-fn postcondition_schema() -> BuiltinSchema { POSTCONDITION_BLOCK }
+fn postcondition_schema() -> BuiltinSchema {
+    POSTCONDITION_BLOCK
+}
 
 pub const WORKSPACES_BLOCK: BuiltinSchema = BuiltinSchema {
     attrs: &[
-        BuiltinAttr { name: "name", required: false, detail: "Single workspace name — mutually exclusive with `prefix` and `tags`" },
-        BuiltinAttr { name: "prefix", required: false, detail: "Workspace name prefix — mutually exclusive with `name` (remote backend only)" },
-        BuiltinAttr { name: "tags", required: false, detail: "Set of tags the workspaces must have (cloud block only)" },
+        BuiltinAttr {
+            name: "name",
+            required: false,
+            detail: "Single workspace name — mutually exclusive with `prefix` and `tags`",
+        },
+        BuiltinAttr {
+            name: "prefix",
+            required: false,
+            detail: "Workspace name prefix — mutually exclusive with `name` (remote backend only)",
+        },
+        BuiltinAttr {
+            name: "tags",
+            required: false,
+            detail: "Set of tags the workspaces must have (cloud block only)",
+        },
     ],
     blocks: &[],
 };
-fn workspaces_schema() -> BuiltinSchema { WORKSPACES_BLOCK }
+fn workspaces_schema() -> BuiltinSchema {
+    WORKSPACES_BLOCK
+}
 
 pub const CLOUD_BLOCK: BuiltinSchema = BuiltinSchema {
     attrs: &[
-        BuiltinAttr { name: "organization", required: true, detail: "HCP Terraform / TFE organization name" },
-        BuiltinAttr { name: "hostname", required: false, detail: "Custom hostname (defaults to app.terraform.io)" },
-        BuiltinAttr { name: "token", required: false, detail: "API token (prefer TF_TOKEN_* env vars)" },
+        BuiltinAttr {
+            name: "organization",
+            required: true,
+            detail: "HCP Terraform / TFE organization name",
+        },
+        BuiltinAttr {
+            name: "hostname",
+            required: false,
+            detail: "Custom hostname (defaults to app.terraform.io)",
+        },
+        BuiltinAttr {
+            name: "token",
+            required: false,
+            detail: "API token (prefer TF_TOKEN_* env vars)",
+        },
     ],
     blocks: &[BuiltinBlock {
         name: "workspaces",
@@ -667,56 +1105,156 @@ pub const CLOUD_BLOCK: BuiltinSchema = BuiltinSchema {
         schema_fn: Some(workspaces_schema),
     }],
 };
-fn cloud_schema() -> BuiltinSchema { CLOUD_BLOCK }
+fn cloud_schema() -> BuiltinSchema {
+    CLOUD_BLOCK
+}
 
 pub const ASSUME_ROLE_BLOCK: BuiltinSchema = BuiltinSchema {
     attrs: &[
-        BuiltinAttr { name: "role_arn", required: true, detail: "ARN of the role to assume" },
-        BuiltinAttr { name: "session_name", required: false, detail: "Session name" },
-        BuiltinAttr { name: "external_id", required: false, detail: "External ID required by the assumed role" },
-        BuiltinAttr { name: "policy", required: false, detail: "Session policy JSON" },
-        BuiltinAttr { name: "policy_arns", required: false, detail: "List of managed session policy ARNs" },
-        BuiltinAttr { name: "tags", required: false, detail: "Map of session tags" },
-        BuiltinAttr { name: "transitive_tag_keys", required: false, detail: "Session tags that persist across role chains" },
-        BuiltinAttr { name: "duration", required: false, detail: "Session duration (e.g. `\"1h\"`)" },
-        BuiltinAttr { name: "source_identity", required: false, detail: "Source identity string" },
+        BuiltinAttr {
+            name: "role_arn",
+            required: true,
+            detail: "ARN of the role to assume",
+        },
+        BuiltinAttr {
+            name: "session_name",
+            required: false,
+            detail: "Session name",
+        },
+        BuiltinAttr {
+            name: "external_id",
+            required: false,
+            detail: "External ID required by the assumed role",
+        },
+        BuiltinAttr {
+            name: "policy",
+            required: false,
+            detail: "Session policy JSON",
+        },
+        BuiltinAttr {
+            name: "policy_arns",
+            required: false,
+            detail: "List of managed session policy ARNs",
+        },
+        BuiltinAttr {
+            name: "tags",
+            required: false,
+            detail: "Map of session tags",
+        },
+        BuiltinAttr {
+            name: "transitive_tag_keys",
+            required: false,
+            detail: "Session tags that persist across role chains",
+        },
+        BuiltinAttr {
+            name: "duration",
+            required: false,
+            detail: "Session duration (e.g. `\"1h\"`)",
+        },
+        BuiltinAttr {
+            name: "source_identity",
+            required: false,
+            detail: "Source identity string",
+        },
     ],
     blocks: &[],
 };
-fn assume_role_schema() -> BuiltinSchema { ASSUME_ROLE_BLOCK }
+fn assume_role_schema() -> BuiltinSchema {
+    ASSUME_ROLE_BLOCK
+}
 
 pub const S3_ENDPOINTS_BLOCK: BuiltinSchema = BuiltinSchema {
     attrs: &[
-        BuiltinAttr { name: "s3", required: false, detail: "S3 endpoint URL" },
-        BuiltinAttr { name: "dynamodb", required: false, detail: "DynamoDB endpoint URL" },
-        BuiltinAttr { name: "iam", required: false, detail: "IAM endpoint URL" },
-        BuiltinAttr { name: "sts", required: false, detail: "STS endpoint URL" },
-        BuiltinAttr { name: "sso", required: false, detail: "SSO endpoint URL" },
+        BuiltinAttr {
+            name: "s3",
+            required: false,
+            detail: "S3 endpoint URL",
+        },
+        BuiltinAttr {
+            name: "dynamodb",
+            required: false,
+            detail: "DynamoDB endpoint URL",
+        },
+        BuiltinAttr {
+            name: "iam",
+            required: false,
+            detail: "IAM endpoint URL",
+        },
+        BuiltinAttr {
+            name: "sts",
+            required: false,
+            detail: "STS endpoint URL",
+        },
+        BuiltinAttr {
+            name: "sso",
+            required: false,
+            detail: "SSO endpoint URL",
+        },
     ],
     blocks: &[],
 };
-fn s3_endpoints_schema() -> BuiltinSchema { S3_ENDPOINTS_BLOCK }
+fn s3_endpoints_schema() -> BuiltinSchema {
+    S3_ENDPOINTS_BLOCK
+}
 
 pub const EXEC_BLOCK: BuiltinSchema = BuiltinSchema {
     attrs: &[
-        BuiltinAttr { name: "api_version", required: true, detail: "client-go ExecCredential API version (e.g. `client.authentication.k8s.io/v1`)" },
-        BuiltinAttr { name: "command", required: true, detail: "Executable to invoke" },
-        BuiltinAttr { name: "args", required: false, detail: "Command-line arguments" },
-        BuiltinAttr { name: "env", required: false, detail: "Environment variables (map of strings)" },
+        BuiltinAttr {
+            name: "api_version",
+            required: true,
+            detail: "client-go ExecCredential API version (e.g. `client.authentication.k8s.io/v1`)",
+        },
+        BuiltinAttr {
+            name: "command",
+            required: true,
+            detail: "Executable to invoke",
+        },
+        BuiltinAttr {
+            name: "args",
+            required: false,
+            detail: "Command-line arguments",
+        },
+        BuiltinAttr {
+            name: "env",
+            required: false,
+            detail: "Environment variables (map of strings)",
+        },
     ],
     blocks: &[],
 };
-fn exec_schema() -> BuiltinSchema { EXEC_BLOCK }
+fn exec_schema() -> BuiltinSchema {
+    EXEC_BLOCK
+}
 
 /// `lifecycle { ... }` inside a `resource` block. Data blocks have a
 /// narrower variant below — only `postcondition` is permitted there.
 pub const LIFECYCLE_RESOURCE_BLOCK: BuiltinSchema = BuiltinSchema {
     attrs: &[
-        BuiltinAttr { name: "create_before_destroy", required: false, detail: "Create the replacement before destroying the existing resource" },
-        BuiltinAttr { name: "prevent_destroy", required: false, detail: "Reject any plan that would destroy this resource" },
-        BuiltinAttr { name: "ignore_changes", required: false, detail: "List of attributes (or `all`) to ignore when detecting drift" },
-        BuiltinAttr { name: "replace_triggered_by", required: false, detail: "References whose change forces replacement" },
-        BuiltinAttr { name: "enabled", required: false, detail: "Boolean gate for the resource (OpenTofu 1.11+; warned on `.tf` files)" },
+        BuiltinAttr {
+            name: "create_before_destroy",
+            required: false,
+            detail: "Create the replacement before destroying the existing resource",
+        },
+        BuiltinAttr {
+            name: "prevent_destroy",
+            required: false,
+            detail: "Reject any plan that would destroy this resource",
+        },
+        BuiltinAttr {
+            name: "ignore_changes",
+            required: false,
+            detail: "List of attributes (or `all`) to ignore when detecting drift",
+        },
+        BuiltinAttr {
+            name: "replace_triggered_by",
+            required: false,
+            detail: "References whose change forces replacement",
+        },
+        BuiltinAttr {
+            name: "enabled",
+            required: false,
+            detail: "Boolean gate for the resource (OpenTofu 1.11+; warned on `.tf` files)",
+        },
     ],
     blocks: &[
         BuiltinBlock {
@@ -724,8 +1262,14 @@ pub const LIFECYCLE_RESOURCE_BLOCK: BuiltinSchema = BuiltinSchema {
             detail: "Condition that must hold before the resource is planned",
             label_placeholder: None,
             required_attrs: &[
-                RequiredAttr { name: "condition", quoted: false },
-                RequiredAttr { name: "error_message", quoted: true },
+                RequiredAttr {
+                    name: "condition",
+                    quoted: false,
+                },
+                RequiredAttr {
+                    name: "error_message",
+                    quoted: true,
+                },
             ],
             schema_fn: Some(precondition_schema),
         },
@@ -734,61 +1278,153 @@ pub const LIFECYCLE_RESOURCE_BLOCK: BuiltinSchema = BuiltinSchema {
             detail: "Condition that must hold after the resource is applied",
             label_placeholder: None,
             required_attrs: &[
-                RequiredAttr { name: "condition", quoted: false },
-                RequiredAttr { name: "error_message", quoted: true },
+                RequiredAttr {
+                    name: "condition",
+                    quoted: false,
+                },
+                RequiredAttr {
+                    name: "error_message",
+                    quoted: true,
+                },
             ],
             schema_fn: Some(postcondition_schema),
         },
     ],
 };
-fn lifecycle_resource_schema() -> BuiltinSchema { LIFECYCLE_RESOURCE_BLOCK }
+fn lifecycle_resource_schema() -> BuiltinSchema {
+    LIFECYCLE_RESOURCE_BLOCK
+}
 
 /// `lifecycle { ... }` inside a `data` block. Only `postcondition`
 /// is permitted; `create_before_destroy`/`prevent_destroy`/
 /// `ignore_changes`/`replace_triggered_by` don't apply.
 pub const LIFECYCLE_DATA_BLOCK: BuiltinSchema = BuiltinSchema {
-    attrs: &[
-        BuiltinAttr { name: "enabled", required: false, detail: "Boolean gate for the data source (OpenTofu 1.11+; warned on `.tf` files)" },
-    ],
+    attrs: &[BuiltinAttr {
+        name: "enabled",
+        required: false,
+        detail: "Boolean gate for the data source (OpenTofu 1.11+; warned on `.tf` files)",
+    }],
     blocks: &[BuiltinBlock {
         name: "postcondition",
         detail: "Condition that must hold after the data source is read",
         label_placeholder: None,
         required_attrs: &[
-            RequiredAttr { name: "condition", quoted: false },
-            RequiredAttr { name: "error_message", quoted: true },
+            RequiredAttr {
+                name: "condition",
+                quoted: false,
+            },
+            RequiredAttr {
+                name: "error_message",
+                quoted: true,
+            },
         ],
         schema_fn: Some(postcondition_schema),
     }],
 };
-fn lifecycle_data_schema() -> BuiltinSchema { LIFECYCLE_DATA_BLOCK }
+fn lifecycle_data_schema() -> BuiltinSchema {
+    LIFECYCLE_DATA_BLOCK
+}
 
 // --- `connection { ... }` (provisioner transport) -------------------------
 
 pub const CONNECTION_BLOCK: BuiltinSchema = BuiltinSchema {
     attrs: &[
-        BuiltinAttr { name: "type", required: false, detail: "Transport: `ssh` (default) or `winrm`" },
-        BuiltinAttr { name: "user", required: false, detail: "Username to connect as" },
-        BuiltinAttr { name: "password", required: false, detail: "Password (or WinRM password)" },
-        BuiltinAttr { name: "host", required: true, detail: "Address of the target host" },
-        BuiltinAttr { name: "port", required: false, detail: "Port to connect to (default 22 ssh / 5985 winrm)" },
-        BuiltinAttr { name: "timeout", required: false, detail: "Connection timeout, e.g. `\"5m\"`" },
-        BuiltinAttr { name: "private_key", required: false, detail: "PEM-encoded private key for ssh auth" },
-        BuiltinAttr { name: "certificate", required: false, detail: "PEM-encoded certificate to sign the key" },
-        BuiltinAttr { name: "agent", required: false, detail: "Use the local ssh agent for auth" },
-        BuiltinAttr { name: "agent_identity", required: false, detail: "Preferred identity from the ssh agent" },
-        BuiltinAttr { name: "host_key", required: false, detail: "Expected host key to verify against" },
-        BuiltinAttr { name: "script_path", required: false, detail: "Remote path to upload provisioning scripts to" },
-        BuiltinAttr { name: "target_platform", required: false, detail: "`unix` (default) or `windows`" },
-        BuiltinAttr { name: "bastion_host", required: false, detail: "Bastion/jump host to connect through" },
-        BuiltinAttr { name: "bastion_port", required: false, detail: "Port on the bastion host" },
-        BuiltinAttr { name: "bastion_user", required: false, detail: "Username for the bastion host" },
-        BuiltinAttr { name: "bastion_private_key", required: false, detail: "Private key for the bastion host" },
-        BuiltinAttr { name: "bastion_host_key", required: false, detail: "Expected host key of the bastion" },
+        BuiltinAttr {
+            name: "type",
+            required: false,
+            detail: "Transport: `ssh` (default) or `winrm`",
+        },
+        BuiltinAttr {
+            name: "user",
+            required: false,
+            detail: "Username to connect as",
+        },
+        BuiltinAttr {
+            name: "password",
+            required: false,
+            detail: "Password (or WinRM password)",
+        },
+        BuiltinAttr {
+            name: "host",
+            required: true,
+            detail: "Address of the target host",
+        },
+        BuiltinAttr {
+            name: "port",
+            required: false,
+            detail: "Port to connect to (default 22 ssh / 5985 winrm)",
+        },
+        BuiltinAttr {
+            name: "timeout",
+            required: false,
+            detail: "Connection timeout, e.g. `\"5m\"`",
+        },
+        BuiltinAttr {
+            name: "private_key",
+            required: false,
+            detail: "PEM-encoded private key for ssh auth",
+        },
+        BuiltinAttr {
+            name: "certificate",
+            required: false,
+            detail: "PEM-encoded certificate to sign the key",
+        },
+        BuiltinAttr {
+            name: "agent",
+            required: false,
+            detail: "Use the local ssh agent for auth",
+        },
+        BuiltinAttr {
+            name: "agent_identity",
+            required: false,
+            detail: "Preferred identity from the ssh agent",
+        },
+        BuiltinAttr {
+            name: "host_key",
+            required: false,
+            detail: "Expected host key to verify against",
+        },
+        BuiltinAttr {
+            name: "script_path",
+            required: false,
+            detail: "Remote path to upload provisioning scripts to",
+        },
+        BuiltinAttr {
+            name: "target_platform",
+            required: false,
+            detail: "`unix` (default) or `windows`",
+        },
+        BuiltinAttr {
+            name: "bastion_host",
+            required: false,
+            detail: "Bastion/jump host to connect through",
+        },
+        BuiltinAttr {
+            name: "bastion_port",
+            required: false,
+            detail: "Port on the bastion host",
+        },
+        BuiltinAttr {
+            name: "bastion_user",
+            required: false,
+            detail: "Username for the bastion host",
+        },
+        BuiltinAttr {
+            name: "bastion_private_key",
+            required: false,
+            detail: "Private key for the bastion host",
+        },
+        BuiltinAttr {
+            name: "bastion_host_key",
+            required: false,
+            detail: "Expected host key of the bastion",
+        },
     ],
     blocks: &[],
 };
-fn connection_schema() -> BuiltinSchema { CONNECTION_BLOCK }
+fn connection_schema() -> BuiltinSchema {
+    CONNECTION_BLOCK
+}
 
 /// Meta-attrs + `connection` block shared by every provisioner kind.
 const PROVISIONER_CONNECTION_BLOCK: BuiltinBlock = BuiltinBlock {
@@ -801,35 +1437,103 @@ const PROVISIONER_CONNECTION_BLOCK: BuiltinBlock = BuiltinBlock {
 
 pub const PROVISIONER_LOCAL_EXEC_BLOCK: BuiltinSchema = BuiltinSchema {
     attrs: &[
-        BuiltinAttr { name: "command", required: true, detail: "Command to execute on the machine running Terraform" },
-        BuiltinAttr { name: "working_dir", required: false, detail: "Directory to run the command in" },
-        BuiltinAttr { name: "interpreter", required: false, detail: "Interpreter list, e.g. `[\"/bin/bash\", \"-c\"]`" },
-        BuiltinAttr { name: "environment", required: false, detail: "Map of env vars for the command" },
-        BuiltinAttr { name: "when", required: false, detail: "`create` (default) or `destroy`" },
-        BuiltinAttr { name: "on_failure", required: false, detail: "`fail` (default) or `continue`" },
-        BuiltinAttr { name: "quiet", required: false, detail: "Suppress echoing the command to output" },
+        BuiltinAttr {
+            name: "command",
+            required: true,
+            detail: "Command to execute on the machine running Terraform",
+        },
+        BuiltinAttr {
+            name: "working_dir",
+            required: false,
+            detail: "Directory to run the command in",
+        },
+        BuiltinAttr {
+            name: "interpreter",
+            required: false,
+            detail: "Interpreter list, e.g. `[\"/bin/bash\", \"-c\"]`",
+        },
+        BuiltinAttr {
+            name: "environment",
+            required: false,
+            detail: "Map of env vars for the command",
+        },
+        BuiltinAttr {
+            name: "when",
+            required: false,
+            detail: "`create` (default) or `destroy`",
+        },
+        BuiltinAttr {
+            name: "on_failure",
+            required: false,
+            detail: "`fail` (default) or `continue`",
+        },
+        BuiltinAttr {
+            name: "quiet",
+            required: false,
+            detail: "Suppress echoing the command to output",
+        },
     ],
     blocks: &[],
 };
 
 pub const PROVISIONER_REMOTE_EXEC_BLOCK: BuiltinSchema = BuiltinSchema {
     attrs: &[
-        BuiltinAttr { name: "inline", required: false, detail: "List of commands to run (mutually exclusive with script/scripts)" },
-        BuiltinAttr { name: "script", required: false, detail: "Local script path to copy and run" },
-        BuiltinAttr { name: "scripts", required: false, detail: "List of local script paths to copy and run" },
-        BuiltinAttr { name: "when", required: false, detail: "`create` (default) or `destroy`" },
-        BuiltinAttr { name: "on_failure", required: false, detail: "`fail` (default) or `continue`" },
+        BuiltinAttr {
+            name: "inline",
+            required: false,
+            detail: "List of commands to run (mutually exclusive with script/scripts)",
+        },
+        BuiltinAttr {
+            name: "script",
+            required: false,
+            detail: "Local script path to copy and run",
+        },
+        BuiltinAttr {
+            name: "scripts",
+            required: false,
+            detail: "List of local script paths to copy and run",
+        },
+        BuiltinAttr {
+            name: "when",
+            required: false,
+            detail: "`create` (default) or `destroy`",
+        },
+        BuiltinAttr {
+            name: "on_failure",
+            required: false,
+            detail: "`fail` (default) or `continue`",
+        },
     ],
     blocks: &[PROVISIONER_CONNECTION_BLOCK],
 };
 
 pub const PROVISIONER_FILE_BLOCK: BuiltinSchema = BuiltinSchema {
     attrs: &[
-        BuiltinAttr { name: "source", required: false, detail: "Local file/dir to upload (mutually exclusive with content)" },
-        BuiltinAttr { name: "content", required: false, detail: "Literal content to write at destination" },
-        BuiltinAttr { name: "destination", required: true, detail: "Remote path to upload to" },
-        BuiltinAttr { name: "when", required: false, detail: "`create` (default) or `destroy`" },
-        BuiltinAttr { name: "on_failure", required: false, detail: "`fail` (default) or `continue`" },
+        BuiltinAttr {
+            name: "source",
+            required: false,
+            detail: "Local file/dir to upload (mutually exclusive with content)",
+        },
+        BuiltinAttr {
+            name: "content",
+            required: false,
+            detail: "Literal content to write at destination",
+        },
+        BuiltinAttr {
+            name: "destination",
+            required: true,
+            detail: "Remote path to upload to",
+        },
+        BuiltinAttr {
+            name: "when",
+            required: false,
+            detail: "`create` (default) or `destroy`",
+        },
+        BuiltinAttr {
+            name: "on_failure",
+            required: false,
+            detail: "`fail` (default) or `continue`",
+        },
     ],
     blocks: &[PROVISIONER_CONNECTION_BLOCK],
 };
@@ -930,35 +1634,29 @@ mod content_tests {
         assert_schema_detail_non_empty("variable", &VARIABLE_BLOCK);
         assert_schema_detail_non_empty("output", &OUTPUT_BLOCK);
         assert_schema_detail_non_empty("module", &MODULE_BLOCK);
-        assert_schema_detail_non_empty(
-            "lifecycle_resource",
-            &LIFECYCLE_RESOURCE_BLOCK,
-        );
-        assert_schema_detail_non_empty(
-            "lifecycle_data",
-            &LIFECYCLE_DATA_BLOCK,
-        );
+        assert_schema_detail_non_empty("lifecycle_resource", &LIFECYCLE_RESOURCE_BLOCK);
+        assert_schema_detail_non_empty("lifecycle_data", &LIFECYCLE_DATA_BLOCK);
         assert_schema_detail_non_empty("validation", &VALIDATION_BLOCK);
         assert_schema_detail_non_empty("workspaces", &WORKSPACES_BLOCK);
         assert_schema_detail_non_empty("cloud", &CLOUD_BLOCK);
         assert_schema_detail_non_empty("assume_role", &ASSUME_ROLE_BLOCK);
         assert_schema_detail_non_empty("s3_endpoints", &S3_ENDPOINTS_BLOCK);
         assert_schema_detail_non_empty("exec", &EXEC_BLOCK);
-        assert_schema_detail_non_empty(
-            "resource_root",
-            &RESOURCE_ROOT_SCHEMA,
-        );
+        assert_schema_detail_non_empty("resource_root", &RESOURCE_ROOT_SCHEMA);
         assert_schema_detail_non_empty("data_root", &DATA_ROOT_SCHEMA);
         for label in [
-            "local", "s3", "gcs", "azurerm", "http", "consul", "remote",
-            "kubernetes", "pg",
+            "local",
+            "s3",
+            "gcs",
+            "azurerm",
+            "http",
+            "consul",
+            "remote",
+            "kubernetes",
+            "pg",
         ] {
-            let schema =
-                backend_schema(label).expect("backend schema for {label}");
-            assert_schema_detail_non_empty(
-                &format!("backend.{label}"),
-                &schema,
-            );
+            let schema = backend_schema(label).expect("backend schema for {label}");
+            assert_schema_detail_non_empty(&format!("backend.{label}"), &schema);
         }
     }
 

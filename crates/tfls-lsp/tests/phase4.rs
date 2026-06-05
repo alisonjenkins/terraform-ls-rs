@@ -3,16 +3,16 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use tfls_lsp::Backend;
 use tfls_lsp::handlers::document::compute_diagnostics;
+use tfls_lsp::Backend;
 use tfls_schema::ProviderSchemas;
 use tfls_state::DocumentState;
-use tower_lsp::LspService;
 use tower_lsp::lsp_types::{
     CodeActionContext, CodeActionOrCommand, CodeActionParams, DiagnosticSeverity,
-    DocumentFormattingParams, DocumentLinkParams, FormattingOptions, PartialResultParams,
-    Position, Range, TextDocumentIdentifier, Url, WorkDoneProgressParams,
+    DocumentFormattingParams, DocumentLinkParams, FormattingOptions, PartialResultParams, Position,
+    Range, TextDocumentIdentifier, Url, WorkDoneProgressParams,
 };
+use tower_lsp::LspService;
 
 fn uri(s: &str) -> Url {
     Url::parse(s).expect("valid url")
@@ -93,16 +93,12 @@ fn apply_edits(src: &str, edits: &[lsp_types::TextEdit]) -> String {
     use ropey::Rope;
     let mut rope = Rope::from_str(src);
     let mut sorted: Vec<&lsp_types::TextEdit> = edits.iter().collect();
-    sorted.sort_by_key(|e| {
-        std::cmp::Reverse((e.range.start.line, e.range.start.character))
-    });
+    sorted.sort_by_key(|e| std::cmp::Reverse((e.range.start.line, e.range.start.character)));
     for edit in sorted {
         let start_line = edit.range.start.line as usize;
         let end_line = edit.range.end.line as usize;
-        let start_byte = rope.line_to_byte(start_line)
-            + edit.range.start.character as usize;
-        let end_byte = rope.line_to_byte(end_line)
-            + edit.range.end.character as usize;
+        let start_byte = rope.line_to_byte(start_line) + edit.range.start.character as usize;
+        let end_byte = rope.line_to_byte(end_line) + edit.range.end.character as usize;
         let start_char = rope.byte_to_char(start_byte);
         let end_char = rope.byte_to_char(end_byte);
         rope.remove(start_char..end_char);
@@ -197,13 +193,9 @@ locals {
     let backend = fresh_backend(src, &u);
     install_aws_schema(&backend);
     // Opinionated style — what tf-format calls when reordering.
-    backend
-        .state
-        .config
-        .update_from_json(&sonic_rs::from_str::<sonic_rs::Value>(
-            r#"{"formatStyle":"opinionated"}"#,
-        )
-        .unwrap());
+    backend.state.config.update_from_json(
+        &sonic_rs::from_str::<sonic_rs::Value>(r#"{"formatStyle":"opinionated"}"#).unwrap(),
+    );
 
     // ---- Pre-format diagnostics ----------------------------------------
     let diags_before = compute_diagnostics(&backend.state, &u);
@@ -245,12 +237,7 @@ locals {
 
     // ---- Post-format diagnostics --------------------------------------
     let diags_after = compute_diagnostics(&backend.state, &u);
-    assert_diagnostics_aligned(
-        "post-format",
-        &formatted,
-        &diags_after,
-        pre_expectations,
-    );
+    assert_diagnostics_aligned("post-format", &formatted, &diags_after, pre_expectations);
 }
 
 #[tokio::test]
@@ -279,7 +266,9 @@ async fn reusable_module_inputs_not_flagged_unused() {
     );
     let diags2 = compute_diagnostics(&backend2.state, &u2);
     assert!(
-        diags2.iter().any(|d| d.message.contains("variable `iface`")),
+        diags2
+            .iter()
+            .any(|d| d.message.contains("variable `iface`")),
         "applyable root must flag the unused variable: {:?}",
         diags2.iter().map(|d| &d.message).collect::<Vec<_>>()
     );
@@ -306,10 +295,7 @@ async fn formatting_returns_empty_for_already_formatted_source() {
 #[tokio::test]
 async fn document_links_point_to_registry_docs() {
     let u = uri("file:///a.tf");
-    let backend = fresh_backend(
-        r#"resource "aws_instance" "web" { ami = "x" }"#,
-        &u,
-    );
+    let backend = fresh_backend(r#"resource "aws_instance" "web" { ami = "x" }"#, &u);
     install_aws_schema(&backend);
 
     let links = tfls_lsp::handlers::document_link::document_link(
@@ -325,11 +311,9 @@ async fn document_links_point_to_registry_docs() {
     .expect("some links");
     assert_eq!(links.len(), 1);
     let target = links[0].target.as_ref().expect("target");
-    assert!(
-        target
-            .as_str()
-            .ends_with("/providers/hashicorp/aws/latest/docs/resources/aws_instance")
-    );
+    assert!(target
+        .as_str()
+        .ends_with("/providers/hashicorp/aws/latest/docs/resources/aws_instance"));
 }
 
 #[tokio::test]
@@ -366,8 +350,10 @@ output "x" { value = var.missing }
         "unknown attr: {diags:?}"
     );
     assert!(
-        diags.iter().any(|d| d.message.contains("deprecated")
-            && d.severity == Some(DiagnosticSeverity::WARNING)),
+        diags
+            .iter()
+            .any(|d| d.message.contains("deprecated")
+                && d.severity == Some(DiagnosticSeverity::WARNING)),
         "deprecation: {diags:?}"
     );
 }
@@ -488,10 +474,7 @@ async fn code_action_inserts_inferred_string_type() {
 
     let actions = code_actions_for(&backend, &u, "variable has no type").await;
     let new_text = first_inserted_text(&actions, &u);
-    assert!(
-        new_text.contains("type = string"),
-        "got: {new_text:?}"
-    );
+    assert!(new_text.contains("type = string"), "got: {new_text:?}");
 }
 
 #[tokio::test]
@@ -507,10 +490,7 @@ async fn code_action_inserts_inferred_number_type() {
 
     let actions = code_actions_for(&backend, &u, "variable has no type").await;
     let new_text = first_inserted_text(&actions, &u);
-    assert!(
-        new_text.contains("type = number"),
-        "got: {new_text:?}"
-    );
+    assert!(new_text.contains("type = number"), "got: {new_text:?}");
 }
 
 #[tokio::test]
@@ -526,10 +506,7 @@ async fn code_action_inserts_inferred_bool_type() {
 
     let actions = code_actions_for(&backend, &u, "variable has no type").await;
     let new_text = first_inserted_text(&actions, &u);
-    assert!(
-        new_text.contains("type = bool"),
-        "got: {new_text:?}"
-    );
+    assert!(new_text.contains("type = bool"), "got: {new_text:?}");
 }
 
 #[tokio::test]
@@ -550,10 +527,7 @@ async fn code_action_inserts_inferred_object_type_with_nested_keys() {
     let actions = code_actions_for(&backend, &u, "variable has no type").await;
     let new_text = first_inserted_text(&actions, &u);
     // Object inference renders alphabetically (BTreeMap).
-    assert!(
-        new_text.contains("type = object({"),
-        "got: {new_text:?}"
-    );
+    assert!(new_text.contains("type = object({"), "got: {new_text:?}");
     assert!(new_text.contains("name = string"), "got: {new_text:?}");
     assert!(new_text.contains("port = number"), "got: {new_text:?}");
     assert!(new_text.contains("enabled = bool"), "got: {new_text:?}");
@@ -655,10 +629,7 @@ async fn code_action_falls_back_to_assigned_types_when_no_default() {
 
     let actions = code_actions_for(&backend, &u, "variable has no type").await;
     let new_text = first_inserted_text(&actions, &u);
-    assert!(
-        new_text.contains("type = string"),
-        "got: {new_text:?}"
-    );
+    assert!(new_text.contains("type = string"), "got: {new_text:?}");
     let action = match &actions[0] {
         CodeActionOrCommand::CodeAction(a) => a,
         _ => panic!(),
@@ -1124,9 +1095,7 @@ async fn code_action_declares_undefined_variables() {
     }
     // Target file does not exist → expect documentChanges with
     // a CreateFile op for variables.tf + an initial insert.
-    use tower_lsp::lsp_types::{
-        DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp,
-    };
+    use tower_lsp::lsp_types::{DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp};
     let dc = action
         .edit
         .as_ref()
@@ -1255,7 +1224,8 @@ async fn code_action_refines_type_any_to_inferred() {
 #[tokio::test]
 async fn code_action_refine_any_skips_when_nothing_qualifies() {
     let u = uri("file:///mod/main.tf");
-    let src = "variable \"x\" { type = string }\nvariable \"y\" { type = list(any) default = [] }\n";
+    let src =
+        "variable \"x\" { type = string }\nvariable \"y\" { type = list(any) default = [] }\n";
     let backend = fresh_backend(src, &u);
     let resp = tfls_lsp::handlers::code_action::code_action(
         &backend,
@@ -1278,7 +1248,9 @@ async fn code_action_refine_any_skips_when_nothing_qualifies() {
     .expect("ok");
     let actions = resp.unwrap_or_default();
     let any_refine = actions.iter().any(|a| match a {
-        CodeActionOrCommand::CodeAction(ca) => ca.title.starts_with("Refine ") && ca.title.contains("`type = any`"),
+        CodeActionOrCommand::CodeAction(ca) => {
+            ca.title.starts_with("Refine ") && ca.title.contains("`type = any`")
+        }
         _ => false,
     });
     assert!(!any_refine, "no refine action when nothing qualifies");
@@ -1295,7 +1267,10 @@ async fn code_action_lookup_to_index_handles_complex_first_arg() {
     let backend = fresh_backend(src, &u);
     let actions = code_actions_for(&backend, &u, "two-argument `lookup()`").await;
     let new_text = first_inserted_text(&actions, &u);
-    assert_eq!(new_text, "merge(var.a, var.b)[\"key\"]", "got: {new_text:?}");
+    assert_eq!(
+        new_text, "merge(var.a, var.b)[\"key\"]",
+        "got: {new_text:?}"
+    );
 }
 
 #[tokio::test]
@@ -1438,14 +1413,13 @@ fn doc_change_edits(
 }
 
 /// True when `action` includes a `CreateFile` op for `target`.
-fn has_create_file(
-    action: &tower_lsp::lsp_types::CodeAction,
-    target: &Url,
-) -> bool {
-    use tower_lsp::lsp_types::{
-        DocumentChangeOperation, DocumentChanges, ResourceOp,
-    };
-    let Some(dc) = action.edit.as_ref().and_then(|e| e.document_changes.as_ref()) else {
+fn has_create_file(action: &tower_lsp::lsp_types::CodeAction, target: &Url) -> bool {
+    use tower_lsp::lsp_types::{DocumentChangeOperation, DocumentChanges, ResourceOp};
+    let Some(dc) = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.document_changes.as_ref())
+    else {
         return false;
     };
     let DocumentChanges::Operations(ops) = dc else {
@@ -1481,8 +1455,15 @@ async fn scope_unwrap_interpolation_module_covers_all_files() {
     );
 
     let actions = all_actions_for(&backend, &a).await;
-    let action = find_action(&actions, "Unwrap 3 deprecated interpolations in this module");
-    let changes = action.edit.as_ref().and_then(|e| e.changes.as_ref()).unwrap();
+    let action = find_action(
+        &actions,
+        "Unwrap 3 deprecated interpolations in this module",
+    );
+    let changes = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .unwrap();
     assert_eq!(changes.len(), 3, "all three module files");
     for url in [&a, &b, &c] {
         assert!(changes.contains_key(url), "{url} edited");
@@ -1606,9 +1587,7 @@ async fn scope_declare_undefined_module_uses_union_of_declarations() {
         assert!(!changes.contains_key(&b), "b.tf must not be edited");
         assert!(!changes.contains_key(&a), "a.tf must not be edited");
     }
-    use tower_lsp::lsp_types::{
-        DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp,
-    };
+    use tower_lsp::lsp_types::{DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp};
     let dc = module
         .edit
         .as_ref()
@@ -1658,9 +1637,7 @@ async fn move_outputs_creates_outputs_tf_when_missing() {
     let actions = all_actions_for(&backend, &main).await;
     let action = find_action(&actions, "Move 2 output blocks in this module");
 
-    use tower_lsp::lsp_types::{
-        DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp,
-    };
+    use tower_lsp::lsp_types::{DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp};
     let target = uri("file:///nonexistent-mod-mo/outputs.tf");
     let dc = action
         .edit
@@ -1707,8 +1684,14 @@ async fn move_outputs_creates_outputs_tf_when_missing() {
     }
     assert!(saw_create, "CreateFile op for outputs.tf");
     assert_eq!(saw_main_delete_count, 2, "two deletions on main.tf");
-    assert!(saw_target_text.contains("output \"a\""), "got {saw_target_text:?}");
-    assert!(saw_target_text.contains("output \"b\""), "got {saw_target_text:?}");
+    assert!(
+        saw_target_text.contains("output \"a\""),
+        "got {saw_target_text:?}"
+    );
+    assert!(
+        saw_target_text.contains("output \"b\""),
+        "got {saw_target_text:?}"
+    );
 }
 
 #[tokio::test]
@@ -1726,9 +1709,7 @@ async fn move_outputs_skips_outputs_tf_itself() {
     let actions = all_actions_for(&backend, &main).await;
     let action = find_action(&actions, "Move 1 output block in this module");
 
-    use tower_lsp::lsp_types::{
-        DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp,
-    };
+    use tower_lsp::lsp_types::{DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp};
     let dc = action
         .edit
         .as_ref()
@@ -1755,10 +1736,7 @@ async fn move_outputs_skips_outputs_tf_itself() {
             if te.text_document.uri == main {
                 for e in &te.edits {
                     let OneOf::Left(edit) = e else { continue };
-                    assert!(
-                        edit.new_text.is_empty(),
-                        "main delete: empty new_text"
-                    );
+                    assert!(edit.new_text.is_empty(), "main delete: empty new_text");
                 }
             }
         }
@@ -1777,9 +1755,7 @@ async fn move_variables_creates_variables_tf_when_missing() {
     let actions = all_actions_for(&backend, &main).await;
     let action = find_action(&actions, "Move 2 variable blocks in this module");
 
-    use tower_lsp::lsp_types::{
-        DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp,
-    };
+    use tower_lsp::lsp_types::{DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp};
     let target = uri("file:///nonexistent-mod-mv/variables.tf");
     let dc = action
         .edit
@@ -1838,9 +1814,7 @@ async fn move_variables_skips_variables_tf_itself() {
     let actions = all_actions_for(&backend, &main).await;
     let action = find_action(&actions, "Move 1 variable block in this module");
 
-    use tower_lsp::lsp_types::{
-        DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp,
-    };
+    use tower_lsp::lsp_types::{DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp};
     let dc = action
         .edit
         .as_ref()
@@ -1886,14 +1860,21 @@ async fn scope_kind_namespacing_matches_spec() {
     // Pin the LSP `CodeActionKind` strings the helper produces so
     // clients filtering via `context.only` keep working.
     let u = uri("file:///mod/main.tf");
-    let backend = fresh_backend("output \"o\" { value = \"${var.x}\" }\nvariable \"x\" {}\n", &u);
+    let backend = fresh_backend(
+        "output \"o\" { value = \"${var.x}\" }\nvariable \"x\" {}\n",
+        &u,
+    );
     let actions = all_actions_for(&backend, &u).await;
     let mut seen_file = false;
     let mut seen_module = false;
     let mut seen_workspace = false;
     for a in &actions {
-        let CodeActionOrCommand::CodeAction(ca) = a else { continue };
-        let Some(kind) = ca.kind.as_ref() else { continue };
+        let CodeActionOrCommand::CodeAction(ca) = a else {
+            continue;
+        };
+        let Some(kind) = ca.kind.as_ref() else {
+            continue;
+        };
         if kind.as_str() == "source.fixAll.terraform-ls-rs.unwrap-interpolation" {
             seen_file = true;
         }
@@ -1946,7 +1927,10 @@ async fn format_action_file_skipped_when_clean() {
         CodeActionOrCommand::CodeAction(ca) => ca.title.starts_with("Format"),
         _ => false,
     });
-    assert!(!any_format, "no format action when buffer already formatted");
+    assert!(
+        !any_format,
+        "no format action when buffer already formatted"
+    );
 }
 
 #[tokio::test]
@@ -2069,8 +2053,7 @@ async fn format_action_respects_runtime_style_toggle() {
     }
 
     // Switch to opinionated.
-    let json: sonic_rs::Value =
-        sonic_rs::from_str(r#"{"formatStyle":"opinionated"}"#).unwrap();
+    let json: sonic_rs::Value = sonic_rs::from_str(r#"{"formatStyle":"opinionated"}"#).unwrap();
     backend.state.config.update_from_json(&json);
     assert_eq!(
         backend.state.config.snapshot().format_style,
@@ -2108,16 +2091,27 @@ async fn null_resource_action_instance_at_cursor() {
     let edits = doc_change_edits(action);
     let main_edits = edits.get(&u).expect("file edit");
     assert!(
-        main_edits.iter().any(|e| e.new_text == "\"terraform_data\""),
+        main_edits
+            .iter()
+            .any(|e| e.new_text == "\"terraform_data\""),
         "expected label rewrite, got:\n{main_edits:?}"
     );
     // moved.tf companion: created with one moved block.
     let moved = uri("file:///fmt-nrt-1/moved.tf");
     assert!(has_create_file(action, &moved), "moved.tf created");
     let moved_text = edits.get(&moved).expect("moved.tf edit");
-    let body = moved_text.iter().map(|e| e.new_text.clone()).collect::<String>();
-    assert!(body.contains("from = null_resource.x"), "moved body: {body}");
-    assert!(body.contains("to   = terraform_data.x"), "moved body: {body}");
+    let body = moved_text
+        .iter()
+        .map(|e| e.new_text.clone())
+        .collect::<String>();
+    assert!(
+        body.contains("from = null_resource.x"),
+        "moved body: {body}"
+    );
+    assert!(
+        body.contains("to   = terraform_data.x"),
+        "moved body: {body}"
+    );
 }
 
 #[tokio::test]
@@ -2131,7 +2125,9 @@ async fn null_resource_action_renames_triggers_attribute() {
     let edits = doc_change_edits(action);
     let main_edits = edits.get(&u).expect("file edit");
     assert!(
-        main_edits.iter().any(|e| e.new_text == "\"terraform_data\""),
+        main_edits
+            .iter()
+            .any(|e| e.new_text == "\"terraform_data\""),
         "label rewrite missing"
     );
     assert!(
@@ -2153,9 +2149,16 @@ async fn null_resource_action_module_covers_siblings() {
     assert!(edits.contains_key(&a));
     assert!(edits.contains_key(&b));
     let moved = uri("file:///fmt-nrt-3/moved.tf");
-    assert!(has_create_file(action, &moved), "single moved.tf for module");
-    let body = edits.get(&moved).expect("moved.tf edit").iter()
-        .map(|e| e.new_text.clone()).collect::<String>();
+    assert!(
+        has_create_file(action, &moved),
+        "single moved.tf for module"
+    );
+    let body = edits
+        .get(&moved)
+        .expect("moved.tf edit")
+        .iter()
+        .map(|e| e.new_text.clone())
+        .collect::<String>();
     assert!(body.contains("null_resource.a"), "moved body: {body}");
     assert!(body.contains("null_resource.b"), "moved body: {body}");
 }
@@ -2168,9 +2171,11 @@ async fn null_resource_action_skipped_when_none() {
 
     let actions = all_actions_for(&backend, &u).await;
     let any_convert = actions.iter().any(|a| match a {
-        CodeActionOrCommand::CodeAction(ca) => ca.title.starts_with("Convert null_resource") ||
-            ca.title.starts_with("Convert 1 null_resource") ||
-            ca.title.starts_with("Convert null_resource"),
+        CodeActionOrCommand::CodeAction(ca) => {
+            ca.title.starts_with("Convert null_resource")
+                || ca.title.starts_with("Convert 1 null_resource")
+                || ca.title.starts_with("Convert null_resource")
+        }
         _ => false,
     });
     assert!(!any_convert, "no null_resource action when none present");
@@ -2226,7 +2231,11 @@ async fn null_resource_action_gated_by_sibling_required_version() {
     let main = uri("file:///fmt-nrt-sib/main.tf");
     let versions = uri("file:///fmt-nrt-sib/versions.tf");
     let backend = fresh_backend("resource \"null_resource\" \"x\" {}\n", &main);
-    add_doc(&backend, &versions, "terraform { required_version = \"< 1.3\" }\n");
+    add_doc(
+        &backend,
+        &versions,
+        "terraform { required_version = \"< 1.3\" }\n",
+    );
 
     let actions = all_actions_for(&backend, &main).await;
     let any_convert = actions.iter().any(|a| match a {
@@ -2308,7 +2317,10 @@ async fn null_resource_action_workspace_gates_per_module() {
     let action = find_action(&actions, "Convert 1 null_resource block in workspace");
     let edits = doc_change_edits(action);
     assert!(edits.contains_key(&a_main), "A edited");
-    assert!(!edits.contains_key(&b_main), "B gated out by its own versions.tf");
+    assert!(
+        !edits.contains_key(&b_main),
+        "B gated out by its own versions.tf"
+    );
     // moved.tf only for A's module.
     let moved_a = uri("file:///fmt-nrt-W-A/moved.tf");
     let moved_b = uri("file:///fmt-nrt-W-B/moved.tf");
@@ -2361,8 +2373,14 @@ async fn null_resource_action_rewrites_references() {
     let action = find_action(&actions, "Convert 1 null_resource block in this file");
     let edits = doc_change_edits(action);
     let main_edits = edits.get(&u).expect("main edits");
-    let head_count = main_edits.iter().filter(|e| e.new_text == "terraform_data").count();
-    let triggers_count = main_edits.iter().filter(|e| e.new_text == "triggers_replace").count();
+    let head_count = main_edits
+        .iter()
+        .filter(|e| e.new_text == "terraform_data")
+        .count();
+    let triggers_count = main_edits
+        .iter()
+        .filter(|e| e.new_text == "triggers_replace")
+        .count();
     // Three head rewrites: output ref, locals ref, ... actually
     // the resource block label uses `"terraform_data"` (with
     // quotes). Plain `terraform_data` token should appear at
@@ -2375,7 +2393,9 @@ async fn null_resource_action_rewrites_references() {
     // Spot-check that `null_resource.x.id` is NOT rewritten via
     // a phantom edit on the `id` token.
     assert!(
-        !main_edits.iter().any(|e| e.new_text == "id_something_unexpected"),
+        !main_edits
+            .iter()
+            .any(|e| e.new_text == "id_something_unexpected"),
         "no spurious id rewrites"
     );
 }
@@ -2413,9 +2433,18 @@ async fn null_resource_action_cursor_filters_references_by_name() {
     let main_edits = edits.get(&u).expect("main edits");
     // Exactly ONE `null_resource` head reference rewritten (the
     // one in `output "ox"`); `output "oy"` should be untouched.
-    let head_count = main_edits.iter().filter(|e| e.new_text == "terraform_data").count();
-    assert_eq!(head_count, 1, "expected only x's reference rewritten; got: {main_edits:?}");
-    let triggers_count = main_edits.iter().filter(|e| e.new_text == "triggers_replace").count();
+    let head_count = main_edits
+        .iter()
+        .filter(|e| e.new_text == "terraform_data")
+        .count();
+    assert_eq!(
+        head_count, 1,
+        "expected only x's reference rewritten; got: {main_edits:?}"
+    );
+    let triggers_count = main_edits
+        .iter()
+        .filter(|e| e.new_text == "triggers_replace")
+        .count();
     assert_eq!(triggers_count, 1, "got: {main_edits:?}");
 }
 
@@ -2441,15 +2470,24 @@ async fn template_file_action_instance_at_cursor() {
         .and_then(|c| c.get(&u))
         .expect("file edits");
     // 1. data block deleted
-    let delete = edits.iter().find(|e| e.new_text.is_empty()).expect("delete edit");
+    let delete = edits
+        .iter()
+        .find(|e| e.new_text.is_empty())
+        .expect("delete edit");
     assert_eq!(delete.range.start.line, 0);
     // 2. locals appended at EOF
     let append = edits
         .iter()
         .find(|e| e.new_text.contains("locals {") && e.new_text.contains("templatefile"))
         .expect("locals append edit");
-    assert!(append.new_text.contains("\"hi ${a}\""), "template src spliced: {append:?}");
-    assert!(append.new_text.contains("{ a = \"world\" }"), "vars src spliced: {append:?}");
+    assert!(
+        append.new_text.contains("\"hi ${a}\""),
+        "template src spliced: {append:?}"
+    );
+    assert!(
+        append.new_text.contains("{ a = \"world\" }"),
+        "vars src spliced: {append:?}"
+    );
     // 3. reference rewritten
     let ref_edit = edits
         .iter()
@@ -2561,7 +2599,9 @@ async fn template_file_action_does_not_unwrap_other_funcs() {
         .find(|e| e.new_text.contains("locals {"))
         .expect("locals append");
     assert!(
-        append.new_text.contains("templatefile(jsonencode({ a = 1 }), {})"),
+        append
+            .new_text
+            .contains("templatefile(jsonencode({ a = 1 }), {})"),
         "got: {}",
         append.new_text
     );
@@ -2573,7 +2613,10 @@ async fn template_file_action_handles_missing_vars() {
     let src = "data \"template_file\" \"x\" { template = \"hi\" }\n";
     let backend = fresh_backend(src, &u);
     let actions = all_actions_for(&backend, &u).await;
-    let action = find_action(&actions, "Convert 1 template_file data block to templatefile() in this file");
+    let action = find_action(
+        &actions,
+        "Convert 1 template_file data block to templatefile() in this file",
+    );
     let edits = action
         .edit
         .as_ref()
@@ -2600,7 +2643,10 @@ async fn template_file_action_file_scope_aggregates_locals() {
     );
     let backend = fresh_backend(src, &u);
     let actions = all_actions_for(&backend, &u).await;
-    let action = find_action(&actions, "Convert 2 template_file data blocks to templatefile() in this file");
+    let action = find_action(
+        &actions,
+        "Convert 2 template_file data blocks to templatefile() in this file",
+    );
     let edits = action
         .edit
         .as_ref()
@@ -2610,7 +2656,10 @@ async fn template_file_action_file_scope_aggregates_locals() {
     // Two deletes (one per block) + one combined locals append.
     let deletes = edits.iter().filter(|e| e.new_text.is_empty()).count();
     assert_eq!(deletes, 2);
-    let appends: Vec<&_> = edits.iter().filter(|e| e.new_text.contains("locals {")).collect();
+    let appends: Vec<&_> = edits
+        .iter()
+        .filter(|e| e.new_text.contains("locals {"))
+        .collect();
     assert_eq!(appends.len(), 1, "single combined locals block");
     assert!(appends[0].new_text.contains("a = templatefile"));
     assert!(appends[0].new_text.contains("b = templatefile"));
@@ -2761,7 +2810,10 @@ async fn template_file_action_skips_local_collision_cross_file() {
         CodeActionOrCommand::CodeAction(ca) => ca.title.contains("templatefile()"),
         _ => false,
     });
-    assert!(!any, "cross-file collision must suppress; got:\n{actions:?}");
+    assert!(
+        !any,
+        "cross-file collision must suppress; got:\n{actions:?}"
+    );
 }
 
 /// Only the colliding name is dropped: a 2-block file with one
@@ -2791,8 +2843,14 @@ async fn template_file_action_partial_skip_on_collision() {
         .iter()
         .find(|e| e.new_text.contains("locals {"))
         .expect("locals append");
-    assert!(append.new_text.contains("y = templatefile"), "y converted: {append:?}");
-    assert!(!append.new_text.contains("x = templatefile"), "x skipped: {append:?}");
+    assert!(
+        append.new_text.contains("y = templatefile"),
+        "y converted: {append:?}"
+    );
+    assert!(
+        !append.new_text.contains("x = templatefile"),
+        "x skipped: {append:?}"
+    );
 }
 
 #[tokio::test]
@@ -2830,8 +2888,12 @@ async fn null_resource_action_appends_to_existing_moved_tf() {
         !has_create_file(action, &moved),
         "must not re-create existing moved.tf"
     );
-    let body = edits.get(&moved).expect("moved.tf append").iter()
-        .map(|e| e.new_text.clone()).collect::<String>();
+    let body = edits
+        .get(&moved)
+        .expect("moved.tf append")
+        .iter()
+        .map(|e| e.new_text.clone())
+        .collect::<String>();
     assert!(body.contains("null_resource.y"), "y appended; got {body:?}");
     assert!(
         !body.contains("null_resource.x"),
@@ -2850,10 +2912,7 @@ async fn aws_alb_rename_action_emits_label_rewrite_and_moved_block() {
     );
     let backend = fresh_backend(src, &u);
     let actions = all_actions_for(&backend, &u).await;
-    let action = find_action(
-        &actions,
-        "Rename 1 deprecated provider type in this file",
-    );
+    let action = find_action(&actions, "Rename 1 deprecated provider type in this file");
     let edits = doc_change_edits(action);
     let main_edits = edits.get(&u).expect("main.tf edits");
 
@@ -2907,10 +2966,7 @@ async fn aws_alb_rename_action_skipped_when_provider_pinned_pre_1_7() {
 async fn aws_alb_rename_action_module_scope_covers_siblings() {
     let main = uri("file:///fmt-aws-alb-mod/main.tf");
     let extra = uri("file:///fmt-aws-alb-mod/extra.tf");
-    let backend = fresh_backend(
-        "resource \"aws_alb\" \"a\" {\n  name = \"a\"\n}\n",
-        &main,
-    );
+    let backend = fresh_backend("resource \"aws_alb\" \"a\" {\n  name = \"a\"\n}\n", &main);
     add_doc(
         &backend,
         &extra,
@@ -2963,14 +3019,13 @@ async fn kubernetes_pod_rename_action_emits_commented_moved_with_header() {
     );
     let backend = fresh_backend(src, &u);
     let actions = all_actions_for(&backend, &u).await;
-    let action = find_action(
-        &actions,
-        "Rename 1 deprecated provider type in this file",
-    );
+    let action = find_action(&actions, "Rename 1 deprecated provider type in this file");
     let edits = doc_change_edits(action);
     let main_edits = edits.get(&u).expect("main.tf edits");
 
-    assert!(main_edits.iter().any(|e| e.new_text == "\"kubernetes_pod_v1\""));
+    assert!(main_edits
+        .iter()
+        .any(|e| e.new_text == "\"kubernetes_pod_v1\""));
     assert!(main_edits.iter().any(|e| e.new_text == "kubernetes_pod_v1"));
 
     // moved.tf IS created — but with commented scaffolding,
@@ -2994,8 +3049,7 @@ async fn kubernetes_pod_rename_action_emits_commented_moved_with_header() {
         "verification instruction missing; got {moved_text:?}"
     );
     assert!(
-        moved_text.contains("terraform state mv")
-            || moved_text.contains("terraform import"),
+        moved_text.contains("terraform state mv") || moved_text.contains("terraform import"),
         "alternative migration path instruction missing; got {moved_text:?}"
     );
 
@@ -3007,8 +3061,7 @@ async fn kubernetes_pod_rename_action_emits_commented_moved_with_header() {
         "commented moved scaffolding missing; got {moved_text:?}"
     );
     assert!(
-        !moved_text.contains("\nmoved {")
-            && !moved_text.starts_with("moved {"),
+        !moved_text.contains("\nmoved {") && !moved_text.starts_with("moved {"),
         "must NOT emit an active `moved {{ }}` block for Manual kind; got {moved_text:?}"
     );
 }
@@ -3023,10 +3076,7 @@ async fn kubernetes_rename_action_handles_multiple_kinds_with_commented_moved() 
     );
     let backend = fresh_backend(src, &u);
     let actions = all_actions_for(&backend, &u).await;
-    let action = find_action(
-        &actions,
-        "Rename 3 deprecated provider types in this file",
-    );
+    let action = find_action(&actions, "Rename 3 deprecated provider types in this file");
     let edits = doc_change_edits(action);
 
     let moved = uri("file:///fmt-k8s-multi/moved.tf");
@@ -3070,10 +3120,7 @@ async fn aws_s3_bucket_object_without_terraform_18_emits_commented_with_18_hint(
     );
     let backend = fresh_backend(src, &u);
     let actions = all_actions_for(&backend, &u).await;
-    let action = find_action(
-        &actions,
-        "Rename 1 deprecated provider type in this file",
-    );
+    let action = find_action(&actions, "Rename 1 deprecated provider type in this file");
     let edits = doc_change_edits(action);
     let moved = uri("file:///fmt-aws-s3-no18/moved.tf");
     let moved_text = edits
@@ -3105,10 +3152,7 @@ async fn aws_s3_bucket_object_action_emits_moved_when_terraform_18_admitted() {
     );
     let backend = fresh_backend(src, &u);
     let actions = all_actions_for(&backend, &u).await;
-    let action = find_action(
-        &actions,
-        "Rename 1 deprecated provider type in this file",
-    );
+    let action = find_action(&actions, "Rename 1 deprecated provider type in this file");
     let edits = doc_change_edits(action);
     let moved = uri("file:///fmt-aws-s3-18/moved.tf");
     assert!(
@@ -3202,7 +3246,10 @@ async fn block_rename_cursor_variant_filters_refs_by_name() {
         .expect("code_action ok")
         .unwrap_or_default();
 
-    let action = find_action(&actions, "Convert kubernetes_pod.target to kubernetes_pod_v1");
+    let action = find_action(
+        &actions,
+        "Convert kubernetes_pod.target to kubernetes_pod_v1",
+    );
     let edits = doc_change_edits(action);
     let main_edits = edits.get(&u).expect("main.tf edits");
 
@@ -3211,7 +3258,10 @@ async fn block_rename_cursor_variant_filters_refs_by_name() {
         .iter()
         .filter(|e| e.new_text == "\"kubernetes_pod_v1\"")
         .count();
-    assert_eq!(label_count, 1, "label rewrite should fire on cursor block only");
+    assert_eq!(
+        label_count, 1,
+        "label rewrite should fire on cursor block only"
+    );
 
     // Exactly one ref rewrite (target_meta), NOT other_meta.
     let head_rewrites: Vec<_> = main_edits
@@ -3456,10 +3506,7 @@ async fn rename_action_idempotent_when_moved_block_exists() {
         "moved {\n  from = aws_alb.web\n  to   = aws_lb.web\n}\n",
     );
     let actions = all_actions_for(&backend, &main).await;
-    let action = find_action(
-        &actions,
-        "Rename 1 deprecated provider type in this file",
-    );
+    let action = find_action(&actions, "Rename 1 deprecated provider type in this file");
     let edits = doc_change_edits(action);
     // Action still produces label rewrites (the block in main
     // still says `aws_alb`); it just doesn't re-add the moved

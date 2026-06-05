@@ -15,7 +15,7 @@
 mod support;
 
 use serde_json::json;
-use support::{TestClient, contains_undefined_var};
+use support::{contains_undefined_var, TestClient};
 
 #[tokio::test]
 async fn peer_file_undefined_variable_clears_after_declaration_added() {
@@ -131,8 +131,12 @@ async fn code_action_envtype_inference_via_wire() {
     )
     .unwrap();
 
-    let workspace_uri = lsp_types::Url::from_file_path(&workspace).unwrap().to_string();
-    let main_uri = lsp_types::Url::from_file_path(&main_tf).unwrap().to_string();
+    let workspace_uri = lsp_types::Url::from_file_path(&workspace)
+        .unwrap()
+        .to_string();
+    let main_uri = lsp_types::Url::from_file_path(&main_tf)
+        .unwrap()
+        .to_string();
 
     let mut client = TestClient::new();
     client.initialize(Some(&workspace_uri)).await;

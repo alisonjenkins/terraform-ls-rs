@@ -19,9 +19,9 @@ use lsp_types::{
     GotoDefinitionParams, GotoDefinitionResponse, HoverContents, HoverParams, Position,
     TextDocumentIdentifier, TextDocumentPositionParams, Url, WorkDoneProgressParams,
 };
-use tfls_lsp::Backend;
 use tfls_lsp::handlers::{navigation, util};
 use tfls_lsp::indexer;
+use tfls_lsp::Backend;
 use tfls_state::{DocumentState, StateStore};
 use tfls_walker::discover_terraform_files;
 use tower_lsp::LspService;
@@ -100,12 +100,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         line: line.saturating_sub(1),
         character: col.saturating_sub(1),
     };
-    eprintln!(
-        "# cursor: {}:{}:{}",
-        cursor_path.display(),
-        line,
-        col
-    );
+    eprintln!("# cursor: {}:{}:{}", cursor_path.display(), line, col);
 
     // Build Backend with a test client (same harness the integration
     // tests use). The client is never connected to a real socket —
@@ -122,10 +117,16 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // sources transitively so child-module variables + outputs are
     // in the store before we call the handlers.
     let files = discover_terraform_files(&dir)?;
-    eprintln!("# discovered {} workspace .tf / .tf.json files", files.len());
+    eprintln!(
+        "# discovered {} workspace .tf / .tf.json files",
+        files.len()
+    );
     parse_and_upsert(&backend.state, &files);
     index_child_modules_transitively(&backend.state, &dir);
-    eprintln!("# total indexed documents: {}", backend.state.documents.len());
+    eprintln!(
+        "# total indexed documents: {}",
+        backend.state.documents.len()
+    );
 
     // Functions are cheap + useful for hover_function (which dispatches
     // before symbol hover). Schemas drive attribute hover and
@@ -285,9 +286,7 @@ fn print_cursor_context(state: &StateStore, uri: &Url, pos: Position) {
 fn parse_cursor(s: &str, dir: &Path) -> Result<(PathBuf, u32, u32), String> {
     let parts: Vec<&str> = s.rsplitn(3, ':').collect();
     if parts.len() != 3 {
-        return Err(format!(
-            "bad cursor spec {s:?} — expected path:line:col"
-        ));
+        return Err(format!("bad cursor spec {s:?} — expected path:line:col"));
     }
     let col: u32 = parts[0]
         .parse()
@@ -374,7 +373,7 @@ fn find_terraform_init_root(start: &Path) -> Option<PathBuf> {
 }
 
 fn init_tracing(verbosity: u8) {
-    use tracing_subscriber::{EnvFilter, fmt};
+    use tracing_subscriber::{fmt, EnvFilter};
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         let level = match verbosity {
             0 => "warn",

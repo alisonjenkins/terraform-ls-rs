@@ -4,11 +4,11 @@
 
 use tfls_lsp::Backend;
 use tfls_state::DocumentState;
-use tower_lsp::LspService;
 use tower_lsp::lsp_types::{
-    DocumentSymbolParams, DocumentSymbolResponse, PartialResultParams, TextDocumentIdentifier,
-    Url, WorkDoneProgressParams, WorkspaceSymbolParams,
+    DocumentSymbolParams, DocumentSymbolResponse, PartialResultParams, TextDocumentIdentifier, Url,
+    WorkDoneProgressParams, WorkspaceSymbolParams,
 };
+use tower_lsp::LspService;
 
 fn uri(s: &str) -> Url {
     Url::parse(s).expect("valid url")
@@ -118,11 +118,9 @@ async fn workspace_symbol_fuzzy_matches_across_documents() {
     let u2 = uri("file:///b.tf");
     let (service, _socket) = LspService::new(Backend::new);
     let inner = service.inner();
-    inner.state.upsert_document(DocumentState::new(
-        u1.clone(),
-        r#"variable "region" {}"#,
-        1,
-    ));
+    inner
+        .state
+        .upsert_document(DocumentState::new(u1.clone(), r#"variable "region" {}"#, 1));
     inner.state.upsert_document(DocumentState::new(
         u2.clone(),
         r#"resource "aws_instance" "web" { ami = "x" }"#,
@@ -215,15 +213,11 @@ async fn workspace_symbol_finds_provider_function_calls() {
 
     let names: Vec<String> = resp.iter().map(|s| s.name.clone()).collect();
     assert!(
-        names
-            .iter()
-            .any(|n| n == "provider::aws::trim_prefix"),
+        names.iter().any(|n| n == "provider::aws::trim_prefix"),
         "got: {names:?}"
     );
     assert!(
-        !names
-            .iter()
-            .any(|n| n == "provider::aws::arn_parse"),
+        !names.iter().any(|n| n == "provider::aws::arn_parse"),
         "non-matching call leaked: {names:?}"
     );
 }

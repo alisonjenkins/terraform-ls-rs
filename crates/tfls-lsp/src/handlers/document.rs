@@ -5,15 +5,13 @@
 //! diagnostic families back to the client.
 
 use tfls_core::SymbolKind;
-use tfls_diag::{
-    diagnostics_for_parse_errors, undefined_reference_diagnostics,
-};
+use tfls_diag::{diagnostics_for_parse_errors, undefined_reference_diagnostics};
 use tfls_parser::ReferenceKind;
 use tfls_schema::Schema;
 use tfls_state::{DocumentState, StateStore, SymbolKey};
 use tower_lsp::lsp_types::{
-    Diagnostic, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DidSaveTextDocumentParams, MessageType, Url,
+    Diagnostic, DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    DidSaveTextDocumentParams, MessageType, Url,
 };
 
 use crate::backend::Backend;
@@ -190,10 +188,16 @@ fn cross_file_fingerprint(doc: &DocumentState) -> u64 {
             ReferenceKind::Variable { name } => format!("ref:var.{name}"),
             ReferenceKind::Local { name } => format!("ref:local.{name}"),
             ReferenceKind::Module { name } => format!("ref:module.{name}"),
-            ReferenceKind::Resource { resource_type, name } => {
+            ReferenceKind::Resource {
+                resource_type,
+                name,
+            } => {
                 format!("ref:{resource_type}.{name}")
             }
-            ReferenceKind::DataSource { resource_type, name } => {
+            ReferenceKind::DataSource {
+                resource_type,
+                name,
+            } => {
                 format!("ref:data.{resource_type}.{name}")
             }
         });
@@ -354,11 +358,7 @@ pub async fn did_save(backend: &Backend, params: DidSaveTextDocumentParams) {
     // `refresh_schemas_if_providers_changed` enqueues a fresh
     // FetchSchemas so search / hover / completion pick up the
     // newly-installed provider.
-    crate::indexer::refresh_schemas_if_providers_changed(
-        &backend.state,
-        &backend.jobs,
-        &uri,
-    );
+    crate::indexer::refresh_schemas_if_providers_changed(&backend.state, &backend.jobs, &uri);
     // Re-prefetch in case the user added a new provider / module /
     // updated the Terraform required_version. Fresh caches are a no-op
     // inside the fetch functions so this is cheap when unchanged.
@@ -461,7 +461,10 @@ pub(crate) async fn publish_peer_diagnostics(backend: &Backend, changed_uri: &Ur
         // for the buffer — the stored version on this peer doc is
         // the last edit WE saw, not the one the client has, so
         // sending it is worse than useless.
-        backend.client.publish_diagnostics(uri, diagnostics, None).await;
+        backend
+            .client
+            .publish_diagnostics(uri, diagnostics, None)
+            .await;
     }
 }
 
@@ -562,60 +565,92 @@ pub fn compute_diagnostics_with_lookup(
             ),
         ));
         let cache_lookup = OnDiskVersionCache;
-        out.extend(tag("terraform_constraint", tfls_diag::constraint_diagnostics(
-            body,
-            &doc.rope,
-            &cache_lookup,
-        )));
-        out.extend(tag("terraform_variable_default_type", tfls_diag::variable_default_type_diagnostics(
-            body, &doc.rope,
-        )));
+        out.extend(tag(
+            "terraform_constraint",
+            tfls_diag::constraint_diagnostics(body, &doc.rope, &cache_lookup),
+        ));
+        out.extend(tag(
+            "terraform_variable_default_type",
+            tfls_diag::variable_default_type_diagnostics(body, &doc.rope),
+        ));
         // Pass the module-graph lookup so typed-variables can
         // suppress its warning on variables that are ALSO
         // unused — fixing the type on a soon-to-be-deleted
         // variable wastes the user's time. Lookup is only
         // consulted on root modules, matching
         // `unused_declarations`'s own gating.
-        out.extend(tag("terraform_typed_variables", tfls_diag::typed_variables_diagnostics(
-            body,
-            &doc.rope,
-            Some(graph),
-        )));
-        out.extend(tag("terraform_module_version_presence", tfls_diag::module_version_presence_diagnostics(body, &doc.rope)));
-        out.extend(tag("terraform_module_pinned_source", tfls_diag::module_pinned_source_diagnostics(body, &doc.rope)));
-        out.extend(tag("terraform_module_shallow_clone", tfls_diag::module_shallow_clone_diagnostics(body, &doc.rope)));
-        out.extend(tag("terraform_workspace_remote", tfls_diag::workspace_remote_diagnostics(body, &doc.rope)));
-        out.extend(tag("terraform_deprecated_index", tfls_diag::deprecated_index_diagnostics(body, &doc.rope)));
-        out.extend(tag("terraform_deprecated_interpolation", tfls_diag::deprecated_interpolation_diagnostics(body, &doc.rope)));
-        out.extend(tag("terraform_deprecated_lookup", tfls_diag::deprecated_lookup_diagnostics(body, &doc.rope)));
+        out.extend(tag(
+            "terraform_typed_variables",
+            tfls_diag::typed_variables_diagnostics(body, &doc.rope, Some(graph)),
+        ));
+        out.extend(tag(
+            "terraform_module_version_presence",
+            tfls_diag::module_version_presence_diagnostics(body, &doc.rope),
+        ));
+        out.extend(tag(
+            "terraform_module_pinned_source",
+            tfls_diag::module_pinned_source_diagnostics(body, &doc.rope),
+        ));
+        out.extend(tag(
+            "terraform_module_shallow_clone",
+            tfls_diag::module_shallow_clone_diagnostics(body, &doc.rope),
+        ));
+        out.extend(tag(
+            "terraform_workspace_remote",
+            tfls_diag::workspace_remote_diagnostics(body, &doc.rope),
+        ));
+        out.extend(tag(
+            "terraform_deprecated_index",
+            tfls_diag::deprecated_index_diagnostics(body, &doc.rope),
+        ));
+        out.extend(tag(
+            "terraform_deprecated_interpolation",
+            tfls_diag::deprecated_interpolation_diagnostics(body, &doc.rope),
+        ));
+        out.extend(tag(
+            "terraform_deprecated_lookup",
+            tfls_diag::deprecated_lookup_diagnostics(body, &doc.rope),
+        ));
         // Module-aware gating: a `terraform { required_version }`
         // block typically lives in `versions.tf`, not the file we're
         // scanning, so we aggregate every sibling's constraint before
         // deciding whether to flag `null_resource` / `template_file`
         // blocks here.
         let null_resource_supported = module_supports_terraform_data(state, uri);
-        out.extend(tag("terraform_deprecated_null_resource", tfls_diag::deprecated_null_resource_diagnostics_for_module(
-            body,
-            &doc.rope,
-            null_resource_supported,
-        )));
+        out.extend(tag(
+            "terraform_deprecated_null_resource",
+            tfls_diag::deprecated_null_resource_diagnostics_for_module(
+                body,
+                &doc.rope,
+                null_resource_supported,
+            ),
+        ));
         let templatefile_supported = module_supports_templatefile(state, uri);
-        out.extend(tag("terraform_deprecated_template_file", tfls_diag::deprecated_template_file_diagnostics_for_module(
-            body,
-            &doc.rope,
-            templatefile_supported,
-        )));
-        out.extend(tag("terraform_deprecated_template_dir", tfls_diag::deprecated_template_dir_diagnostics_for_module(
-            body,
-            &doc.rope,
-            templatefile_supported,
-        )));
+        out.extend(tag(
+            "terraform_deprecated_template_file",
+            tfls_diag::deprecated_template_file_diagnostics_for_module(
+                body,
+                &doc.rope,
+                templatefile_supported,
+            ),
+        ));
+        out.extend(tag(
+            "terraform_deprecated_template_dir",
+            tfls_diag::deprecated_template_dir_diagnostics_for_module(
+                body,
+                &doc.rope,
+                templatefile_supported,
+            ),
+        ));
         let locals_supported = module_supports_locals_replacement(state, uri);
-        out.extend(tag("terraform_deprecated_null_data_source", tfls_diag::deprecated_null_data_source_diagnostics_for_module(
-            body,
-            &doc.rope,
-            locals_supported,
-        )));
+        out.extend(tag(
+            "terraform_deprecated_null_data_source",
+            tfls_diag::deprecated_null_data_source_diagnostics_for_module(
+                body,
+                &doc.rope,
+                locals_supported,
+            ),
+        ));
         // Provider-version-gated rule tables. Per provider:
         // pull module-aggregated `required_providers.<name>.version`
         // once, build a `rule_supported` closure that tests each
@@ -624,59 +659,87 @@ pub fn compute_diagnostics_with_lookup(
         // per provider — captured by `run_provider_table` below.
         let aws_constraint = module_constraint_for_provider(state, uri, "aws");
         let aws_locked = module_locked_provider_version(state, uri, "aws");
-        out.extend(tag("terraform_aws_renames", tfls_diag::aws_renames_diagnostics_for_module(
-            body,
-            &doc.rope,
-            &provider_rule_filter(&aws_constraint, aws_locked.as_ref()),
-        )));
-        let kubernetes_constraint =
-            module_constraint_for_provider(state, uri, "kubernetes");
+        out.extend(tag(
+            "terraform_aws_renames",
+            tfls_diag::aws_renames_diagnostics_for_module(
+                body,
+                &doc.rope,
+                &provider_rule_filter(&aws_constraint, aws_locked.as_ref()),
+            ),
+        ));
+        let kubernetes_constraint = module_constraint_for_provider(state, uri, "kubernetes");
         let kubernetes_locked = module_locked_provider_version(state, uri, "kubernetes");
-        out.extend(tag("terraform_kubernetes_renames", tfls_diag::kubernetes_renames_diagnostics_for_module(
-            body,
-            &doc.rope,
-            &provider_rule_filter(&kubernetes_constraint, kubernetes_locked.as_ref()),
-        )));
+        out.extend(tag(
+            "terraform_kubernetes_renames",
+            tfls_diag::kubernetes_renames_diagnostics_for_module(
+                body,
+                &doc.rope,
+                &provider_rule_filter(&kubernetes_constraint, kubernetes_locked.as_ref()),
+            ),
+        ));
         let azurerm_constraint = module_constraint_for_provider(state, uri, "azurerm");
         let azurerm_locked = module_locked_provider_version(state, uri, "azurerm");
-        out.extend(tag("terraform_azurerm_blocks", tfls_diag::azurerm_blocks_diagnostics_for_module(
-            body,
-            &doc.rope,
-            &provider_rule_filter(&azurerm_constraint, azurerm_locked.as_ref()),
-        )));
+        out.extend(tag(
+            "terraform_azurerm_blocks",
+            tfls_diag::azurerm_blocks_diagnostics_for_module(
+                body,
+                &doc.rope,
+                &provider_rule_filter(&azurerm_constraint, azurerm_locked.as_ref()),
+            ),
+        ));
         let google_constraint = module_constraint_for_provider(state, uri, "google");
         let google_locked = module_locked_provider_version(state, uri, "google");
-        out.extend(tag("terraform_google_blocks", tfls_diag::google_blocks_diagnostics_for_module(
-            body,
-            &doc.rope,
-            &provider_rule_filter(&google_constraint, google_locked.as_ref()),
-        )));
+        out.extend(tag(
+            "terraform_google_blocks",
+            tfls_diag::google_blocks_diagnostics_for_module(
+                body,
+                &doc.rope,
+                &provider_rule_filter(&google_constraint, google_locked.as_ref()),
+            ),
+        ));
         let vault_constraint = module_constraint_for_provider(state, uri, "vault");
         let vault_locked = module_locked_provider_version(state, uri, "vault");
-        out.extend(tag("terraform_vault_blocks", tfls_diag::vault_blocks_diagnostics_for_module(
-            body,
-            &doc.rope,
-            &provider_rule_filter(&vault_constraint, vault_locked.as_ref()),
-        )));
-        out.extend(tag("terraform_empty_list_equality", tfls_diag::empty_list_equality_diagnostics(body, &doc.rope)));
-        out.extend(tag("terraform_map_duplicate_keys", tfls_diag::map_duplicate_keys_diagnostics(body, &doc.rope)));
+        out.extend(tag(
+            "terraform_vault_blocks",
+            tfls_diag::vault_blocks_diagnostics_for_module(
+                body,
+                &doc.rope,
+                &provider_rule_filter(&vault_constraint, vault_locked.as_ref()),
+            ),
+        ));
+        out.extend(tag(
+            "terraform_empty_list_equality",
+            tfls_diag::empty_list_equality_diagnostics(body, &doc.rope),
+        ));
+        out.extend(tag(
+            "terraform_map_duplicate_keys",
+            tfls_diag::map_duplicate_keys_diagnostics(body, &doc.rope),
+        ));
         // Same-file duplicate definitions (a hard `terraform validate`
         // error). Cross-file duplicates within a module are a separate,
         // index-driven follow-up.
-        out.extend(tag("terraform_duplicate_definition", tfls_diag::duplicate_definition_diagnostics(body, &doc.rope)));
+        out.extend(tag(
+            "terraform_duplicate_definition",
+            tfls_diag::duplicate_definition_diagnostics(body, &doc.rope),
+        ));
         // count/for_each meta-argument misuse.
-        out.extend(tag("terraform_meta_argument", tfls_diag::meta_argument_diagnostics(body, &doc.rope)));
+        out.extend(tag(
+            "terraform_meta_argument",
+            tfls_diag::meta_argument_diagnostics(body, &doc.rope),
+        ));
         // Dependency cycles among `local` values (a hard Terraform error).
-        out.extend(tag("terraform_cyclic_locals", tfls_diag::cyclic_locals_diagnostics(body, &doc.rope)));
+        out.extend(tag(
+            "terraform_cyclic_locals",
+            tfls_diag::cyclic_locals_diagnostics(body, &doc.rope),
+        ));
         // Sensitive variable leaking into a non-sensitive output. The
         // sensitive-variable set is aggregated across the module (vars
         // and outputs usually live in different files).
         let sensitive_vars = crate::handlers::util::module_sensitive_variables(state, uri);
-        out.extend(tag("terraform_sensitive_output", tfls_diag::sensitive_output_diagnostics(
-            body,
-            &doc.rope,
-            &sensitive_vars,
-        )));
+        out.extend(tag(
+            "terraform_sensitive_output",
+            tfls_diag::sensitive_output_diagnostics(body, &doc.rope, &sensitive_vars),
+        ));
         // Provider-defined function calls (Terraform 1.8+). Lives
         // outside `tfls-diag` because it needs `StateStore` access
         // for `required_providers` peer-walk + `state.functions`
@@ -693,9 +756,10 @@ pub fn compute_diagnostics_with_lookup(
         // Cross-file / module-scoped rules. `graph` is either the
         // fresh per-call adapter (from `compute_diagnostics`) or a
         // cached snapshot (from the bulk-scan path).
-        out.extend(tag("terraform_required_version_presence", tfls_diag::required_version_presence_diagnostics(
-            body, &doc.rope, graph,
-        )));
+        out.extend(tag(
+            "terraform_required_version_presence",
+            tfls_diag::required_version_presence_diagnostics(body, &doc.rope, graph),
+        ));
         // Lock-vs-constraint drift: user bumped a `version`
         // constraint but didn't `terraform init -upgrade` — the
         // lock file still pins the OLD version that no longer
@@ -705,31 +769,49 @@ pub fn compute_diagnostics_with_lookup(
             "terraform_lock_constraint_drift",
             lock_vs_constraint_diagnostics(state, uri, body, &doc.rope),
         ));
-        out.extend(tag("terraform_required_providers_version", tfls_diag::required_providers_version_diagnostics(
-            body, &doc.rope, graph,
-        )));
-        out.extend(tag("terraform_unused_declarations", tfls_diag::unused_declarations_diagnostics(
-            body, &doc.rope, graph,
-        )));
-        out.extend(tag("terraform_unused_required_providers", tfls_diag::unused_required_providers_diagnostics(
-            body, &doc.rope, graph,
-        )));
+        out.extend(tag(
+            "terraform_required_providers_version",
+            tfls_diag::required_providers_version_diagnostics(body, &doc.rope, graph),
+        ));
+        out.extend(tag(
+            "terraform_unused_declarations",
+            tfls_diag::unused_declarations_diagnostics(body, &doc.rope, graph),
+        ));
+        out.extend(tag(
+            "terraform_unused_required_providers",
+            tfls_diag::unused_required_providers_diagnostics(body, &doc.rope, graph),
+        ));
 
         // Pass 3 — opt-in style pack. standard_module_structure belongs
         // here too: it warns on every variable/output when
         // variables.tf/outputs.tf is absent, i.e. on the common
         // single-file `main.tf` module, so it must not fire by default.
         if state.config.snapshot().style_rules {
-            out.extend(tag("terraform_standard_module_structure", tfls_diag::standard_module_structure_diagnostics(
-                body,
-                &doc.rope,
-                current_file,
-                graph,
-            )));
-            out.extend(tag("terraform_documented_variables", tfls_diag::documented_variables_diagnostics(body, &doc.rope)));
-            out.extend(tag("terraform_documented_outputs", tfls_diag::documented_outputs_diagnostics(body, &doc.rope)));
-            out.extend(tag("terraform_naming_convention", tfls_diag::naming_convention_diagnostics(body, &doc.rope)));
-            out.extend(tag("terraform_comment_syntax", tfls_diag::comment_syntax_diagnostics(&doc.rope)));
+            out.extend(tag(
+                "terraform_standard_module_structure",
+                tfls_diag::standard_module_structure_diagnostics(
+                    body,
+                    &doc.rope,
+                    current_file,
+                    graph,
+                ),
+            ));
+            out.extend(tag(
+                "terraform_documented_variables",
+                tfls_diag::documented_variables_diagnostics(body, &doc.rope),
+            ));
+            out.extend(tag(
+                "terraform_documented_outputs",
+                tfls_diag::documented_outputs_diagnostics(body, &doc.rope),
+            ));
+            out.extend(tag(
+                "terraform_naming_convention",
+                tfls_diag::naming_convention_diagnostics(body, &doc.rope),
+            ));
+            out.extend(tag(
+                "terraform_comment_syntax",
+                tfls_diag::comment_syntax_diagnostics(&doc.rope),
+            ));
         }
     }
 
@@ -844,10 +926,7 @@ fn apply_rule_overrides(
 struct OnDiskVersionCache;
 
 impl tfls_diag::VersionCacheLookup for OnDiskVersionCache {
-    fn cached_versions(
-        &self,
-        source: &tfls_diag::ConstraintSource,
-    ) -> Option<Vec<String>> {
+    fn cached_versions(&self, source: &tfls_diag::ConstraintSource) -> Option<Vec<String>> {
         match source {
             tfls_diag::ConstraintSource::TerraformCli => {
                 // Cache directly under $XDG_CACHE_HOME/terraform-ls-rs/tool-versions/
@@ -894,8 +973,7 @@ impl tfls_diag::VersionCacheLookup for OnDiskVersionCache {
             } => {
                 let mut out = Vec::new();
                 for registry in &["terraform", "opentofu"] {
-                    let path =
-                        module_versions_cache_path(registry, namespace, name, provider)?;
+                    let path = module_versions_cache_path(registry, namespace, name, provider)?;
                     if let Ok(body) = std::fs::read_to_string(&path) {
                         if let Ok(vs) = serde_json::from_str::<Vec<String>>(&body) {
                             for v in vs {
@@ -945,27 +1023,33 @@ fn lock_vs_constraint_diagnostics(
         return out;
     };
     for structure in body.iter() {
-        let Some(tf_block) = structure.as_block() else { continue };
+        let Some(tf_block) = structure.as_block() else {
+            continue;
+        };
         if tf_block.ident.as_str() != "terraform" {
             continue;
         }
         for inner in tf_block.body.iter() {
-            let Some(rp_block) = inner.as_block() else { continue };
+            let Some(rp_block) = inner.as_block() else {
+                continue;
+            };
             if rp_block.ident.as_str() != "required_providers" {
                 continue;
             }
             for entry in rp_block.body.iter() {
-                let Some(attr) = entry.as_attribute() else { continue };
+                let Some(attr) = entry.as_attribute() else {
+                    continue;
+                };
                 let provider_local = attr.key.as_str().to_string();
-                let Expression::Object(obj) = &attr.value else { continue };
+                let Expression::Object(obj) = &attr.value else {
+                    continue;
+                };
                 let mut source_str: Option<String> = None;
                 let mut version_lit: Option<(String, lsp_types::Range)> = None;
                 for (key, value) in obj.iter() {
                     let key_str = match key {
                         ObjectKey::Ident(d) => d.as_str().to_string(),
-                        ObjectKey::Expression(Expression::String(s)) => {
-                            s.value().to_string()
-                        }
+                        ObjectKey::Expression(Expression::String(s)) => s.value().to_string(),
                         _ => continue,
                     };
                     match key_str.as_str() {
@@ -1006,10 +1090,7 @@ fn lock_vs_constraint_diagnostics(
                     continue;
                 }
                 let lock_str = lock_entry.version.to_string();
-                if tfls_core::version_constraint::satisfies_all(
-                    &parsed.constraints,
-                    &lock_str,
-                ) {
+                if tfls_core::version_constraint::satisfies_all(&parsed.constraints, &lock_str) {
                     continue;
                 }
                 out.push(Diagnostic {
@@ -1044,13 +1125,7 @@ fn provider_rule_filter<'a>(
     constraint: &'a Option<String>,
     locked: Option<&'a semver::Version>,
 ) -> impl Fn(&tfls_diag::deprecation_rule::DeprecationRule) -> bool + 'a {
-    move |rule| {
-        tfls_diag::deprecation_rule::supports_with_lock(
-            rule,
-            constraint.as_deref(),
-            locked,
-        )
-    }
+    move |rule| tfls_diag::deprecation_rule::supports_with_lock(rule, constraint.as_deref(), locked)
 }
 
 fn cache_root_dir() -> Option<std::path::PathBuf> {
@@ -1190,8 +1265,7 @@ impl RegistryDocsHints<'_> {
     /// the curated set; out-of-set providers stay silent.
     fn resolve_provider(&self, type_name: &str) -> Option<(String, String, String)> {
         let local = type_name.split_once('_').map(|(p, _)| p)?;
-        for (entry_local, source, _) in
-            tfls_core::builtin_blocks::REQUIRED_PROVIDERS_COMMON_ENTRIES
+        for (entry_local, source, _) in tfls_core::builtin_blocks::REQUIRED_PROVIDERS_COMMON_ENTRIES
         {
             if *entry_local != local {
                 continue;
@@ -1231,8 +1305,7 @@ impl tfls_diag::schema_validation::UpgradeHintLookup for RegistryDocsHints<'_> {
         attr_name: &str,
     ) -> Option<tfls_diag::schema_validation::UpgradeHint> {
         let (local, ns, name) = self.resolve_provider(type_name)?;
-        let cached =
-            tfls_provider_protocol::registry_docs::cached_latest_parsed_docs(&ns, &name)?;
+        let cached = tfls_provider_protocol::registry_docs::cached_latest_parsed_docs(&ns, &name)?;
         // The doc cache stores top-level + nested attributes
         // flattened together (registry markdown reuses names
         // across nested blocks, so we lose the boundary at parse
@@ -1251,13 +1324,9 @@ impl tfls_diag::schema_validation::UpgradeHintLookup for RegistryDocsHints<'_> {
         Some(self.make_hint(local, &ns, &name, cached.latest_version))
     }
 
-    fn resource_hint(
-        &self,
-        type_name: &str,
-    ) -> Option<tfls_diag::schema_validation::UpgradeHint> {
+    fn resource_hint(&self, type_name: &str) -> Option<tfls_diag::schema_validation::UpgradeHint> {
         let (local, ns, name) = self.resolve_provider(type_name)?;
-        let cached =
-            tfls_provider_protocol::registry_docs::cached_latest_parsed_docs(&ns, &name)?;
+        let cached = tfls_provider_protocol::registry_docs::cached_latest_parsed_docs(&ns, &name)?;
         if !cached.resources.contains_key(type_name) {
             return None;
         }
@@ -1269,8 +1338,7 @@ impl tfls_diag::schema_validation::UpgradeHintLookup for RegistryDocsHints<'_> {
         type_name: &str,
     ) -> Option<tfls_diag::schema_validation::UpgradeHint> {
         let (local, ns, name) = self.resolve_provider(type_name)?;
-        let cached =
-            tfls_provider_protocol::registry_docs::cached_latest_parsed_docs(&ns, &name)?;
+        let cached = tfls_provider_protocol::registry_docs::cached_latest_parsed_docs(&ns, &name)?;
         if !cached.data_sources.contains_key(type_name) {
             return None;
         }
@@ -1312,7 +1380,11 @@ impl tfls_diag::ModuleGraphLookup for ModuleGraphAdapter<'_> {
     }
 
     fn data_source_is_referenced(&self, type_name: &str, name: &str) -> bool {
-        self.has_ref(&SymbolKey::resource(SymbolKind::DataSource, type_name, name))
+        self.has_ref(&SymbolKey::resource(
+            SymbolKind::DataSource,
+            type_name,
+            name,
+        ))
     }
 
     fn used_provider_locals(&self) -> std::collections::HashSet<String> {
@@ -1369,9 +1441,10 @@ impl tfls_diag::ModuleGraphLookup for ModuleGraphAdapter<'_> {
                     continue;
                 }
             }
-            let has_tf_block = body
-                .iter()
-                .any(|s| s.as_block().is_some_and(|b| b.ident.as_str() == "terraform"));
+            let has_tf_block = body.iter().any(|s| {
+                s.as_block()
+                    .is_some_and(|b| b.ident.as_str() == "terraform")
+            });
             if has_tf_block {
                 candidates.push(doc.key().as_str().to_string());
             }
@@ -1725,7 +1798,7 @@ mod did_open_publish_tests {
     //! future commit can't silently revert the clear to a real
     //! publish (the bug we've regressed into multiple times).
 
-    use super::{DidOpenPublish, did_open_publish_action};
+    use super::{did_open_publish_action, DidOpenPublish};
     use tfls_state::StateStore;
 
     #[test]
@@ -1735,15 +1808,9 @@ mod did_open_publish_tests {
         // produce `PublishReal`.
         let store = StateStore::new();
         store.set_client_supports_pull_diagnostics(true);
-        assert_eq!(
-            did_open_publish_action(&store),
-            DidOpenPublish::PublishReal
-        );
+        assert_eq!(did_open_publish_action(&store), DidOpenPublish::PublishReal);
         let store = StateStore::new();
-        assert_eq!(
-            did_open_publish_action(&store),
-            DidOpenPublish::PublishReal
-        );
+        assert_eq!(did_open_publish_action(&store), DidOpenPublish::PublishReal);
     }
 
     #[test]
@@ -1761,8 +1828,7 @@ mod did_open_publish_tests {
         ];
         for v in variants {
             match v {
-                DidOpenPublish::ClearPushNamespaceThenPull
-                | DidOpenPublish::PublishReal => {}
+                DidOpenPublish::ClearPushNamespaceThenPull | DidOpenPublish::PublishReal => {}
             }
         }
     }

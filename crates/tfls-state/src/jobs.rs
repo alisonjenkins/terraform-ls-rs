@@ -106,11 +106,7 @@ impl JobQueue {
             }
             guard.seq += 1;
             let seq = guard.seq;
-            guard.heap.push(Entry {
-                priority,
-                seq,
-                job,
-            });
+            guard.heap.push(Entry { priority, seq, job });
             true
         };
         if should_notify {

@@ -30,9 +30,7 @@ pub fn documented_variables_diagnostics(body: &Body, rope: &Rope) -> Vec<Diagnos
             .labels
             .first()
             .map(|l| match l {
-                hcl_edit::structure::BlockLabel::String(s) => {
-                    s.value().as_str().to_string()
-                }
+                hcl_edit::structure::BlockLabel::String(s) => s.value().as_str().to_string(),
                 hcl_edit::structure::BlockLabel::Ident(i) => i.as_str().to_string(),
             })
             .unwrap_or_else(|| "?".to_string());

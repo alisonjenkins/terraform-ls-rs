@@ -42,9 +42,8 @@ pub fn module_shallow_clone_diagnostics(body: &Body, rope: &Rope) -> Vec<Diagnos
                 range,
                 severity: Some(DiagnosticSeverity::WARNING),
                 source: Some("terraform-ls-rs".to_string()),
-                message:
-                    "pinned git module source should add `depth=1` for a shallow clone"
-                        .to_string(),
+                message: "pinned git module source should add `depth=1` for a shallow clone"
+                    .to_string(),
                 ..Default::default()
             });
         }
@@ -74,7 +73,8 @@ fn is_pinned_to_tag(src: &str) -> bool {
     // Tag-ish: starts with v and a digit, or is all-digits-and-dots,
     // or is a 7+ char hex sha.
     let first = ref_val.chars().next().unwrap_or(' ');
-    if (first == 'v' || first == 'V') && ref_val.chars().nth(1).is_some_and(|c| c.is_ascii_digit()) {
+    if (first == 'v' || first == 'V') && ref_val.chars().nth(1).is_some_and(|c| c.is_ascii_digit())
+    {
         return true;
     }
     if ref_val.chars().all(|c| c.is_ascii_digit() || c == '.') && !ref_val.is_empty() {
@@ -118,9 +118,7 @@ mod tests {
 
     #[test]
     fn flags_tag_pinned_git_source_without_depth() {
-        let d = diags(
-            r#"module "x" { source = "git::https://example.com/foo.git?ref=v1.2.3" }"#,
-        );
+        let d = diags(r#"module "x" { source = "git::https://example.com/foo.git?ref=v1.2.3" }"#);
         assert_eq!(d.len(), 1, "got: {d:?}");
         assert!(d[0].message.contains("depth=1"));
     }
@@ -135,9 +133,7 @@ mod tests {
 
     #[test]
     fn silent_for_branch_pin() {
-        let d = diags(
-            r#"module "x" { source = "git::https://example.com/foo.git?ref=main" }"#,
-        );
+        let d = diags(r#"module "x" { source = "git::https://example.com/foo.git?ref=main" }"#);
         assert!(d.is_empty(), "got: {d:?}");
     }
 
@@ -152,9 +148,7 @@ mod tests {
 
     #[test]
     fn flags_commit_sha_pin_without_depth() {
-        let d = diags(
-            r#"module "x" { source = "git::https://example.com/foo.git?ref=abc1234" }"#,
-        );
+        let d = diags(r#"module "x" { source = "git::https://example.com/foo.git?ref=abc1234" }"#);
         assert_eq!(d.len(), 1, "got: {d:?}");
     }
 }

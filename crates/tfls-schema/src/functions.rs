@@ -117,16 +117,13 @@ mod tests {
         }"#;
         let schema: FunctionsSchema = sonic_rs::from_str(json).expect("parse");
         let f = schema.function_signatures.get("format").expect("format");
-        assert_eq!(f.label("format"), "format(format: string, args: dynamic...)");
         assert_eq!(
-            f.parameter_for_index(0).expect("p0").name,
-            "format"
+            f.label("format"),
+            "format(format: string, args: dynamic...)"
         );
+        assert_eq!(f.parameter_for_index(0).expect("p0").name, "format");
         // Index 1 falls through to variadic.
-        assert_eq!(
-            f.parameter_for_index(1).expect("variadic").name,
-            "args"
-        );
+        assert_eq!(f.parameter_for_index(1).expect("variadic").name, "args");
         assert_eq!(
             f.parameter_for_index(99).expect("variadic again").name,
             "args"

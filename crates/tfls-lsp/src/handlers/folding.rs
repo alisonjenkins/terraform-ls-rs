@@ -30,7 +30,11 @@ pub async fn folding_range(
 
     let mut out = Vec::new();
     collect_block_folds(body, &doc.rope, &mut out);
-    if out.is_empty() { Ok(None) } else { Ok(Some(out)) }
+    if out.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(out))
+    }
 }
 
 fn collect_block_folds(body: &Body, rope: &Rope, out: &mut Vec<FoldingRange>) {

@@ -216,16 +216,22 @@ mod tests {
 
     #[test]
     fn allows_each_with_for_each() {
-        let d = diags(
-            "resource \"aws_instance\" \"x\" {\n  for_each = var.m\n  name = each.key\n}\n",
+        let d =
+            diags("resource \"aws_instance\" \"x\" {\n  for_each = var.m\n  name = each.key\n}\n");
+        assert!(
+            d.iter().all(|d| !d.message.contains("only valid")),
+            "got: {d:?}"
         );
-        assert!(d.iter().all(|d| !d.message.contains("only valid")), "got: {d:?}");
     }
 
     #[test]
     fn flags_count_index_without_count() {
         let d = diags("resource \"aws_instance\" \"x\" {\n  name = count.index\n}\n");
-        assert!(d.iter().any(|d| d.message.contains("`count.*` is only valid")), "got: {d:?}");
+        assert!(
+            d.iter()
+                .any(|d| d.message.contains("`count.*` is only valid")),
+            "got: {d:?}"
+        );
     }
 
     #[test]
@@ -233,7 +239,10 @@ mod tests {
         let d = diags(
             "resource \"aws_instance\" \"x\" {\n  count = 3\n  name = \"web-${count.index}\"\n}\n",
         );
-        assert!(d.iter().all(|d| !d.message.contains("only valid")), "got: {d:?}");
+        assert!(
+            d.iter().all(|d| !d.message.contains("only valid")),
+            "got: {d:?}"
+        );
     }
 
     #[test]
@@ -241,7 +250,11 @@ mod tests {
         let d = diags(
             "resource \"aws_instance\" \"x\" {\n  ebs_block_device {\n    volume_id = each.value\n  }\n}\n",
         );
-        assert!(d.iter().any(|d| d.message.contains("`each.*` is only valid")), "got: {d:?}");
+        assert!(
+            d.iter()
+                .any(|d| d.message.contains("`each.*` is only valid")),
+            "got: {d:?}"
+        );
     }
 
     #[test]
@@ -254,7 +267,11 @@ mod tests {
             .find(|d| d.message.contains("must be references, not strings"))
             .expect("depends_on string diagnostic");
         assert_eq!(bad.severity, Some(DiagnosticSeverity::ERROR));
-        assert!(bad.message.contains("aws_db_instance.db"), "got: {}", bad.message);
+        assert!(
+            bad.message.contains("aws_db_instance.db"),
+            "got: {}",
+            bad.message
+        );
     }
 
     #[test]
@@ -267,9 +284,11 @@ mod tests {
 
     #[test]
     fn applies_to_module_blocks() {
-        let d = diags(
-            "module \"m\" {\n  source   = \"./x\"\n  count    = 1\n  for_each = var.m\n}\n",
+        let d =
+            diags("module \"m\" {\n  source   = \"./x\"\n  count    = 1\n  for_each = var.m\n}\n");
+        assert!(
+            d.iter().any(|d| d.message.contains("cannot both be set")),
+            "got: {d:?}"
         );
-        assert!(d.iter().any(|d| d.message.contains("cannot both be set")), "got: {d:?}");
     }
 }

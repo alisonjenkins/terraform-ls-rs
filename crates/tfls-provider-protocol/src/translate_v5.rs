@@ -8,9 +8,9 @@ use std::collections::HashMap;
 
 use tfls_schema::{AttributeSchema, BlockSchema, NestedBlockSchema, NestingMode, Schema};
 
-use crate::ProtocolError;
 use crate::proto_v5 as proto;
 use crate::translate::cty_msgpack_to_json;
+use crate::ProtocolError;
 
 pub fn schema_from_proto(src: &proto::Schema) -> Result<Schema, ProtocolError> {
     let block = src
@@ -38,7 +38,9 @@ fn block_from_proto(src: &proto::schema::Block) -> Result<BlockSchema, ProtocolE
         let nested = NestedBlockSchema {
             nesting_mode: nesting_mode_from_proto(nb.nesting()),
             block: block_from_proto(
-                nb.block.as_ref().unwrap_or(&proto::schema::Block::default()),
+                nb.block
+                    .as_ref()
+                    .unwrap_or(&proto::schema::Block::default()),
             )?,
             min_items: u64::try_from(nb.min_items).unwrap_or(0),
             max_items: u64::try_from(nb.max_items).unwrap_or(0),
@@ -54,9 +56,7 @@ fn block_from_proto(src: &proto::schema::Block) -> Result<BlockSchema, ProtocolE
     })
 }
 
-fn attribute_from_proto(
-    src: &proto::schema::Attribute,
-) -> Result<AttributeSchema, ProtocolError> {
+fn attribute_from_proto(src: &proto::schema::Attribute) -> Result<AttributeSchema, ProtocolError> {
     let r#type = if !src.r#type.is_empty() {
         Some(cty_msgpack_to_json(&src.r#type)?)
     } else {

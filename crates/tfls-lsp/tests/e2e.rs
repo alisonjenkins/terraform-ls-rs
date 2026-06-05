@@ -8,17 +8,14 @@ use futures::StreamExt;
 use serde_json::json;
 use tfls_lsp::Backend;
 use tower::Service;
-use tower_lsp::LspService;
 use tower_lsp::jsonrpc::Request;
+use tower_lsp::LspService;
 
 /// Drive the service through a full lifecycle and verify each reply.
 /// We spawn a drainer on the server→client socket so that
 /// `publish_diagnostics` and similar server-initiated messages don't
 /// block the handlers (the socket is a bounded mpsc).
-async fn make_service() -> (
-    LspService<Backend>,
-    tokio::task::JoinHandle<()>,
-) {
+async fn make_service() -> (LspService<Backend>, tokio::task::JoinHandle<()>) {
     let (service, socket) = LspService::new(Backend::new);
     // Drain server→client notifications in the background.
     let drainer = tokio::spawn(async move {
@@ -28,10 +25,7 @@ async fn make_service() -> (
     (service, drainer)
 }
 
-async fn call_json(
-    service: &mut LspService<Backend>,
-    req: Request,
-) -> serde_json::Value {
+async fn call_json(service: &mut LspService<Backend>, req: Request) -> serde_json::Value {
     let resp = service
         .call(req)
         .await
@@ -112,11 +106,7 @@ async fn full_lifecycle_initialize_open_completion_shutdown() {
     assert!(labels.contains(&"variable".to_string()));
 
     // 5. shutdown
-    let body = call_json(
-        &mut service,
-        Request::build("shutdown").id(3).finish(),
-    )
-    .await;
+    let body = call_json(&mut service, Request::build("shutdown").id(3).finish()).await;
     assert_eq!(body["id"], json!(3));
     assert_eq!(body["result"], json!(null));
 

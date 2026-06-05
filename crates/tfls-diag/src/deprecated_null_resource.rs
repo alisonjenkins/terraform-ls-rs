@@ -64,10 +64,7 @@ mod tests {
         assert_eq!(d.len(), 1);
         assert!(d[0].message.contains("terraform_data"));
         // Carries the DEPRECATED tag for editor strike-through.
-        assert_eq!(
-            d[0].tags,
-            Some(vec![lsp_types::DiagnosticTag::DEPRECATED])
-        );
+        assert_eq!(d[0].tags, Some(vec![lsp_types::DiagnosticTag::DEPRECATED]));
     }
 
     #[test]

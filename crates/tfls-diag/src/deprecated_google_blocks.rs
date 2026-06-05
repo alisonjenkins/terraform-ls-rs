@@ -21,19 +21,17 @@ use ropey::Rope;
 
 use crate::deprecation_rule::{self, DeprecationRule, Gate};
 
-pub const GOOGLE_BLOCK_DEPRECATIONS: &[DeprecationRule] = &[
-    DeprecationRule {
-        block_kind: "resource",
-        label: "google_dataflow_job",
-        gate: Gate::ProviderVersion {
-            provider: "google",
-            threshold: "3.45.0",
-        },
-        message: "`google_dataflow_job` is superseded by `google_dataflow_flex_template_job` \
+pub const GOOGLE_BLOCK_DEPRECATIONS: &[DeprecationRule] = &[DeprecationRule {
+    block_kind: "resource",
+    label: "google_dataflow_job",
+    gate: Gate::ProviderVersion {
+        provider: "google",
+        threshold: "3.45.0",
+    },
+    message: "`google_dataflow_job` is superseded by `google_dataflow_flex_template_job` \
                   (google provider 3.45+) — flex templates run from container images with \
                   per-job parameter overrides, the recommended path for new Dataflow jobs.",
-    },
-];
+}];
 
 pub fn google_blocks_diagnostics(body: &Body, rope: &Rope) -> Vec<Diagnostic> {
     deprecation_rule::diagnostics_from_table(body, rope, GOOGLE_BLOCK_DEPRECATIONS, &|rule| {

@@ -50,7 +50,14 @@ pub fn duplicate_definition_diagnostics(body: &Body, rope: &Rope) -> Vec<Diagnos
                 };
                 let key = format!("{}:{ty}.{name}", block.ident.as_str());
                 let kind = block.ident.as_str();
-                record(&mut seen, &mut out, key, range, kind, &format!("{ty}.{name}"));
+                record(
+                    &mut seen,
+                    &mut out,
+                    key,
+                    range,
+                    kind,
+                    &format!("{ty}.{name}"),
+                );
             }
             "locals" => {
                 for entry in block.body.iter() {
@@ -58,11 +65,20 @@ pub fn duplicate_definition_diagnostics(body: &Body, rope: &Rope) -> Vec<Diagnos
                         continue;
                     };
                     let name = attr.key.as_str().to_string();
-                    let Some(span) = attr.key.span() else { continue };
+                    let Some(span) = attr.key.span() else {
+                        continue;
+                    };
                     let Ok(range) = hcl_span_to_lsp_range(rope, span) else {
                         continue;
                     };
-                    record(&mut seen, &mut out, format!("local:{name}"), range, "local", &name);
+                    record(
+                        &mut seen,
+                        &mut out,
+                        format!("local:{name}"),
+                        range,
+                        "local",
+                        &name,
+                    );
                 }
             }
             _ => {}
@@ -113,7 +129,9 @@ fn two_labels(block: &Block, rope: &Rope) -> Option<(String, String, Range)> {
     let ty = label_str(block.labels.first()?)?.to_string();
     let name_label = block.labels.get(1)?;
     let name = label_str(name_label)?.to_string();
-    let span = name_label.span().or_else(|| block.labels.first().and_then(|l| l.span()))?;
+    let span = name_label
+        .span()
+        .or_else(|| block.labels.first().and_then(|l| l.span()))?;
     let range = hcl_span_to_lsp_range(rope, span).ok()?;
     Some((ty, name, range))
 }
@@ -142,28 +160,37 @@ mod tests {
         let d = diags("variable \"x\" {}\nvariable \"x\" {}\n");
         assert_eq!(d.len(), 1, "got: {d:?}");
         assert_eq!(d[0].severity, Some(DiagnosticSeverity::ERROR));
-        assert!(d[0].message.contains("duplicate variable `x`"), "got: {}", d[0].message);
+        assert!(
+            d[0].message.contains("duplicate variable `x`"),
+            "got: {}",
+            d[0].message
+        );
         // Flags the SECOND occurrence (line 1, 0-based).
         assert_eq!(d[0].range.start.line, 1);
-        assert!(d[0].message.contains("line 1"), "should cite first occurrence: {}", d[0].message);
+        assert!(
+            d[0].message.contains("line 1"),
+            "should cite first occurrence: {}",
+            d[0].message
+        );
     }
 
     #[test]
     fn flags_duplicate_resource_same_type_and_name() {
-        let d = diags(
-            "resource \"aws_instance\" \"web\" {}\nresource \"aws_instance\" \"web\" {}\n",
-        );
+        let d =
+            diags("resource \"aws_instance\" \"web\" {}\nresource \"aws_instance\" \"web\" {}\n");
         assert_eq!(d.len(), 1, "got: {d:?}");
-        assert!(d[0].message.contains("aws_instance.web"), "got: {}", d[0].message);
+        assert!(
+            d[0].message.contains("aws_instance.web"),
+            "got: {}",
+            d[0].message
+        );
     }
 
     #[test]
     fn allows_same_name_different_type() {
         // `resource "aws_instance" "web"` and `data "aws_instance" "web"`
         // are distinct addresses.
-        let d = diags(
-            "resource \"aws_instance\" \"web\" {}\ndata \"aws_instance\" \"web\" {}\n",
-        );
+        let d = diags("resource \"aws_instance\" \"web\" {}\ndata \"aws_instance\" \"web\" {}\n");
         assert!(d.is_empty(), "got: {d:?}");
     }
 
@@ -178,13 +205,23 @@ mod tests {
     fn flags_duplicate_local_across_blocks() {
         let d = diags("locals { a = 1 }\nlocals { a = 2 }\n");
         assert_eq!(d.len(), 1, "got: {d:?}");
-        assert!(d[0].message.contains("duplicate local `a`"), "got: {}", d[0].message);
+        assert!(
+            d[0].message.contains("duplicate local `a`"),
+            "got: {}",
+            d[0].message
+        );
     }
 
     #[test]
     fn flags_three_duplicates_as_two_diagnostics() {
-        let d = diags("output \"o\" { value = 1 }\noutput \"o\" { value = 2 }\noutput \"o\" { value = 3 }\n");
-        assert_eq!(d.len(), 2, "first is the original, 2nd and 3rd flagged: {d:?}");
+        let d = diags(
+            "output \"o\" { value = 1 }\noutput \"o\" { value = 2 }\noutput \"o\" { value = 3 }\n",
+        );
+        assert_eq!(
+            d.len(),
+            2,
+            "first is the original, 2nd and 3rd flagged: {d:?}"
+        );
     }
 
     #[test]

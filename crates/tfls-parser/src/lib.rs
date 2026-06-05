@@ -18,11 +18,11 @@ pub use error::ParseError;
 pub use fallback_references::extract_references_fallback;
 pub use fallback_symbols::extract_symbols_fallback;
 pub use json::parse_json_source;
-pub use parse::{ParsedFile, parse_source, parse_source_for_uri};
-pub use safe::{BodyParseError, ParsePanic, parse_body};
+pub use parse::{parse_source, parse_source_for_uri, ParsedFile};
 pub use position::{
     byte_offset_to_lsp_position, hcl_span_to_lsp_range, lsp_position_to_byte_offset,
 };
-pub use references::{Reference, ReferenceKind, extract_references};
+pub use references::{extract_references, Reference, ReferenceKind};
+pub use safe::{parse_body, BodyParseError, ParsePanic};
 pub use tfvars::parse_tfvars;
 pub use traversal::extract_symbols;

@@ -14,21 +14,18 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tfls_lsp::Backend;
 use tfls_state::DocumentState;
-use tower_lsp::LspService;
 use tower_lsp::lsp_types::{
-    CompletionContext, CompletionParams, CompletionResponse, CompletionTriggerKind,
-    HoverParams, PartialResultParams, Position, TextDocumentIdentifier,
-    TextDocumentPositionParams, Url, WorkDoneProgressParams,
+    CompletionContext, CompletionParams, CompletionResponse, CompletionTriggerKind, HoverParams,
+    PartialResultParams, Position, TextDocumentIdentifier, TextDocumentPositionParams, Url,
+    WorkDoneProgressParams,
 };
+use tower_lsp::LspService;
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 fn make_tmp_tree(label: &str) -> PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!(
-        "tfls-module-{label}-{}-{n}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("tfls-module-{label}-{}-{n}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir
@@ -114,22 +111,14 @@ fn src_with_cursor(marked: &str) -> (String, Position) {
 #[tokio::test]
 async fn ensure_module_indexed_triggers_child_scans_even_when_dir_already_scanned() {
     use std::sync::Arc;
-    use tokio::time::{Duration, sleep};
+    use tokio::time::{sleep, Duration};
 
     let tree = make_tmp_tree("already-scanned");
     let root_main = tree.join("main.tf");
     let child_vars = tree.join("mod").join("vars.tf");
     fs::create_dir_all(child_vars.parent().unwrap()).unwrap();
-    fs::write(
-        &child_vars,
-        "variable \"region\" { type = string }\n",
-    )
-    .unwrap();
-    fs::write(
-        &root_main,
-        "module \"web\" { source = \"./mod\" }\n",
-    )
-    .unwrap();
+    fs::write(&child_vars, "variable \"region\" { type = string }\n").unwrap();
+    fs::write(&root_main, "module \"web\" { source = \"./mod\" }\n").unwrap();
 
     // Spin up a real backend + worker so Job::ScanDirectory actually
     // processes.
@@ -140,11 +129,8 @@ async fn ensure_module_indexed_triggers_child_scans_even_when_dir_already_scanne
         inner.state.clone(),
         inner.jobs.clone(),
     );
-    let worker = tfls_lsp::indexer::spawn_worker(
-        Arc::clone(&inner.state),
-        Arc::clone(&inner.jobs),
-        None,
-    );
+    let worker =
+        tfls_lsp::indexer::spawn_worker(Arc::clone(&inner.state), Arc::clone(&inner.jobs), None);
 
     // Simulate the workspace-scan pre-population: mark the dir as
     // Completed without enqueueing a ScanDirectory job. A `Completed`
@@ -173,7 +159,10 @@ async fn ensure_module_indexed_triggers_child_scans_even_when_dir_already_scanne
     let child_uri = Url::from_file_path(&canonical_child).unwrap();
     let found = inner.state.documents.contains_key(&child_uri);
     worker.abort();
-    assert!(found, "child module was not indexed despite ensure_module_indexed");
+    assert!(
+        found,
+        "child module was not indexed despite ensure_module_indexed"
+    );
 }
 
 #[tokio::test]
@@ -182,9 +171,7 @@ async fn module_body_suggests_child_input_variables() {
     let root_main = tree.join("main.tf");
     let child_vars = tree.join("mod").join("vars.tf");
 
-    let (main_src, pos) = src_with_cursor(
-        "module \"web\" {\n  source = \"./mod\"\n  |\n}\n",
-    );
+    let (main_src, pos) = src_with_cursor("module \"web\" {\n  source = \"./mod\"\n  |\n}\n");
     let backend = fresh_backend();
     let _child_uri = insert_doc(
         &backend,
@@ -230,7 +217,10 @@ async fn module_body_filters_already_set_inputs() {
     .expect("ok")
     .expect("some completions");
     let ls = labels(resp);
-    assert!(!ls.contains(&"region".to_string()), "region already set: {ls:?}");
+    assert!(
+        !ls.contains(&"region".to_string()),
+        "region already set: {ls:?}"
+    );
     assert!(ls.contains(&"name".to_string()), "got: {ls:?}");
 }
 
@@ -267,9 +257,7 @@ async fn module_attr_returns_empty_for_unknown_module() {
     let tree = make_tmp_tree("unknown");
     let root_main = tree.join("main.tf");
 
-    let (main_src, pos) = src_with_cursor(
-        "output \"x\" { value = module.web.|xxx }\n",
-    );
+    let (main_src, pos) = src_with_cursor("output \"x\" { value = module.web.|xxx }\n");
     let backend = fresh_backend();
     let main_uri = insert_doc(&backend, &root_main, &main_src);
 
@@ -287,9 +275,8 @@ async fn module_body_empty_for_remote_source_without_lockfile() {
     let tree = make_tmp_tree("remote-no-lock");
     let root_main = tree.join("main.tf");
 
-    let (main_src, pos) = src_with_cursor(
-        "module \"web\" {\n  source = \"hashicorp/vpc/aws\"\n  |\n}\n",
-    );
+    let (main_src, pos) =
+        src_with_cursor("module \"web\" {\n  source = \"hashicorp/vpc/aws\"\n  |\n}\n");
     let backend = fresh_backend();
     let main_uri = insert_doc(&backend, &root_main, &main_src);
 
@@ -317,9 +304,8 @@ async fn module_body_uses_lockfile_for_remote_source() {
     .unwrap();
     let child_vars = cached.join("variables.tf");
 
-    let (main_src, pos) = src_with_cursor(
-        "module \"web\" {\n  source = \"hashicorp/example/aws\"\n  |\n}\n",
-    );
+    let (main_src, pos) =
+        src_with_cursor("module \"web\" {\n  source = \"hashicorp/example/aws\"\n  |\n}\n");
     let backend = fresh_backend();
     let _ = insert_doc(
         &backend,
@@ -367,7 +353,11 @@ async fn hover_on_module_input_renders_description_and_type() {
     };
     assert!(content.value.contains("region"), "got: {}", content.value);
     assert!(content.value.contains("string"), "got: {}", content.value);
-    assert!(content.value.contains("AWS region"), "got: {}", content.value);
+    assert!(
+        content.value.contains("AWS region"),
+        "got: {}",
+        content.value
+    );
 }
 
 #[tokio::test]
@@ -522,14 +512,46 @@ async fn hover_on_module_block_header_label_renders_overview() {
         panic!("expected markup hover");
     };
     // Overview must list inputs + outputs with types and descriptions.
-    assert!(content.value.contains("module.web"), "label in: {}", content.value);
-    assert!(content.value.contains("#### Inputs"), "header in: {}", content.value);
-    assert!(content.value.contains("#### Outputs"), "header in: {}", content.value);
-    assert!(content.value.contains("region"), "region input: {}", content.value);
-    assert!(content.value.contains("AWS region"), "region desc: {}", content.value);
-    assert!(content.value.contains("required"), "required tag: {}", content.value);
-    assert!(content.value.contains("endpoint"), "output: {}", content.value);
-    assert!(content.value.contains("Public URL"), "output desc: {}", content.value);
+    assert!(
+        content.value.contains("module.web"),
+        "label in: {}",
+        content.value
+    );
+    assert!(
+        content.value.contains("#### Inputs"),
+        "header in: {}",
+        content.value
+    );
+    assert!(
+        content.value.contains("#### Outputs"),
+        "header in: {}",
+        content.value
+    );
+    assert!(
+        content.value.contains("region"),
+        "region input: {}",
+        content.value
+    );
+    assert!(
+        content.value.contains("AWS region"),
+        "region desc: {}",
+        content.value
+    );
+    assert!(
+        content.value.contains("required"),
+        "required tag: {}",
+        content.value
+    );
+    assert!(
+        content.value.contains("endpoint"),
+        "output: {}",
+        content.value
+    );
+    assert!(
+        content.value.contains("Public URL"),
+        "output desc: {}",
+        content.value
+    );
 }
 
 #[tokio::test]
@@ -571,7 +593,19 @@ async fn hover_on_module_reference_label_renders_overview() {
     let tower_lsp::lsp_types::HoverContents::Markup(content) = resp.contents else {
         panic!("expected markup hover");
     };
-    assert!(content.value.contains("module.web"), "got: {}", content.value);
-    assert!(content.value.contains("region"), "inputs listed: {}", content.value);
-    assert!(content.value.contains("endpoint"), "outputs listed: {}", content.value);
+    assert!(
+        content.value.contains("module.web"),
+        "got: {}",
+        content.value
+    );
+    assert!(
+        content.value.contains("region"),
+        "inputs listed: {}",
+        content.value
+    );
+    assert!(
+        content.value.contains("endpoint"),
+        "outputs listed: {}",
+        content.value
+    );
 }

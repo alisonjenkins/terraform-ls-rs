@@ -4,7 +4,7 @@
 
 use lsp_types::{
     SemanticToken, SemanticTokenType, SemanticTokens, SemanticTokensParams,
-    SemanticTokensResult, SemanticTokensRangeParams, SemanticTokensRangeResult,
+    SemanticTokensRangeParams, SemanticTokensRangeResult, SemanticTokensResult,
 };
 use tfls_core::{Symbol, SymbolKind as DomainKind, SymbolVisitor};
 use tfls_parser::ReferenceKind;

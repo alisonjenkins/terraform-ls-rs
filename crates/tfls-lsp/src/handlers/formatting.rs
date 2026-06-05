@@ -9,7 +9,9 @@ use lsp_types::{
 };
 use ropey::Rope;
 use tfls_format::format_source;
-use tfls_parser::{byte_offset_to_lsp_position, hcl_span_to_lsp_range, lsp_position_to_byte_offset};
+use tfls_parser::{
+    byte_offset_to_lsp_position, hcl_span_to_lsp_range, lsp_position_to_byte_offset,
+};
 use tower_lsp::jsonrpc;
 
 use crate::backend::Backend;

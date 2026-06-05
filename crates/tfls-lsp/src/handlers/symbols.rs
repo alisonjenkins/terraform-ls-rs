@@ -120,12 +120,7 @@ pub async fn workspace_symbol(
         // of the symbol table (they're expression-position
         // function calls, not declarations), but matching them
         // gives the user a workspace-wide grep affordance.
-        collect_provider_function_calls(
-            doc_entry.key(),
-            doc,
-            &query,
-            &mut results,
-        );
+        collect_provider_function_calls(doc_entry.key(), doc, &query, &mut results);
     }
 
     if results.is_empty() {
@@ -166,11 +161,7 @@ fn collect_provider_function_calls(
         while p < bytes.len() && (bytes[p].is_ascii_alphanumeric() || bytes[p] == b'_') {
             p += 1;
         }
-        if p == local_start
-            || p + 1 >= bytes.len()
-            || bytes[p] != b':'
-            || bytes[p + 1] != b':'
-        {
+        if p == local_start || p + 1 >= bytes.len() || bytes[p] != b':' || bytes[p + 1] != b':' {
             search_from = p;
             continue;
         }

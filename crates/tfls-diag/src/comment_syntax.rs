@@ -110,9 +110,7 @@ pub fn comment_syntax_diagnostics(rope: &Rope) -> Vec<Diagnostic> {
                     j += 1;
                 }
                 let tag_start = j;
-                while j < bytes.len()
-                    && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_')
-                {
+                while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
                     j += 1;
                 }
                 if j > tag_start {
@@ -129,8 +127,14 @@ pub fn comment_syntax_diagnostics(rope: &Rope) -> Vec<Diagnostic> {
                 // Flag this `//` comment.
                 out.push(Diagnostic {
                     range: Range {
-                        start: Position { line, character: col },
-                        end: Position { line, character: col + 2 },
+                        start: Position {
+                            line,
+                            character: col,
+                        },
+                        end: Position {
+                            line,
+                            character: col + 2,
+                        },
                     },
                     severity: Some(DiagnosticSeverity::INFORMATION),
                     source: Some("terraform-ls-rs".to_string()),

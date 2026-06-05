@@ -24,10 +24,7 @@ impl ProviderBinary {
     /// `registry.terraform.io/hashicorp/aws`. Used as the key in
     /// [`tfls_schema::ProviderSchemas::provider_schemas`].
     pub fn full_address(&self) -> String {
-        format!(
-            "{}/{}/{}",
-            self.registry_host, self.namespace, self.name
-        )
+        format!("{}/{}/{}", self.registry_host, self.namespace, self.name)
     }
 }
 
@@ -47,12 +44,11 @@ pub fn dedupe_providers_keep_highest(mut bins: Vec<ProviderBinary>) -> Vec<Provi
     bins.sort_by(|a, b| {
         let ka = (&a.registry_host, &a.namespace, &a.name);
         let kb = (&b.registry_host, &b.namespace, &b.name);
-        ka.cmp(&kb).then_with(|| version_cmp(&b.version, &a.version))
+        ka.cmp(&kb)
+            .then_with(|| version_cmp(&b.version, &a.version))
     });
     bins.dedup_by(|a, b| {
-        a.registry_host == b.registry_host
-            && a.namespace == b.namespace
-            && a.name == b.name
+        a.registry_host == b.registry_host && a.namespace == b.namespace && a.name == b.name
     });
     bins
 }
@@ -85,11 +81,13 @@ pub fn dedupe_providers_using_pins(
     // (`registry.opentofu.org` ↔ `registry.terraform.io`) match
     // each other. Same logic that `ProviderAddress::parse` applies
     // on the lock-file side.
-    let canon = |h: &str| match h {
-        "registry.opentofu.org" | "registry.terraform.io" => "registry.terraform.io",
-        other => other,
-    }
-    .to_string();
+    let canon = |h: &str| {
+        match h {
+            "registry.opentofu.org" | "registry.terraform.io" => "registry.terraform.io",
+            other => other,
+        }
+        .to_string()
+    };
     bins.sort_by(|a, b| {
         let ka = (&a.registry_host, &a.namespace, &a.name);
         let kb = (&b.registry_host, &b.namespace, &b.name);
@@ -110,9 +108,7 @@ pub fn dedupe_providers_using_pins(
         })
     });
     bins.dedup_by(|a, b| {
-        a.registry_host == b.registry_host
-            && a.namespace == b.namespace
-            && a.name == b.name
+        a.registry_host == b.registry_host && a.namespace == b.namespace && a.name == b.name
     });
     bins
 }
@@ -269,10 +265,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let p = std::env::temp_dir().join(format!(
-            "tfls-pp-discovery-{}-{nanos}",
-            std::process::id()
-        ));
+        let p =
+            std::env::temp_dir().join(format!("tfls-pp-discovery-{}-{nanos}", std::process::id()));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
         p
@@ -348,9 +342,14 @@ mod tests {
         assert_eq!(found.len(), 1, "discovered: {found:?}");
         let p = &found[0];
         assert_eq!(p.name, "cloudflare");
-        assert_eq!(p.full_address(), "registry.opentofu.org/cloudflare/cloudflare");
-        assert!(p.binary.file_name().and_then(|s| s.to_str())
-            == Some("terraform-provider-cloudflare_v5.18.0"));
+        assert_eq!(
+            p.full_address(),
+            "registry.opentofu.org/cloudflare/cloudflare"
+        );
+        assert!(
+            p.binary.file_name().and_then(|s| s.to_str())
+                == Some("terraform-provider-cloudflare_v5.18.0")
+        );
 
         fs::remove_dir_all(dir).ok();
     }
@@ -402,10 +401,7 @@ mod tests {
         ];
         let out = dedupe_providers_keep_highest(input);
         assert_eq!(out.len(), 3, "dedupes aws triple: {out:?}");
-        let aws = out
-            .iter()
-            .find(|b| b.name == "aws")
-            .expect("aws retained");
+        let aws = out.iter().find(|b| b.name == "aws").expect("aws retained");
         assert_eq!(aws.version, "6.18.0", "keeps highest: {aws:?}");
     }
 
@@ -439,7 +435,10 @@ mod tests {
         );
         let out = dedupe_providers_using_pins(input, &pins);
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].version, "4.50.0", "lock pin wins over higher: {out:?}");
+        assert_eq!(
+            out[0].version, "4.50.0",
+            "lock pin wins over higher: {out:?}"
+        );
     }
 
     #[test]
@@ -551,7 +550,10 @@ mod tests {
         }
 
         let found = discover_providers(&dir).unwrap();
-        assert!(found.is_empty(), "should not match awscc when name is aws: {found:?}");
+        assert!(
+            found.is_empty(),
+            "should not match awscc when name is aws: {found:?}"
+        );
 
         fs::remove_dir_all(dir).ok();
     }

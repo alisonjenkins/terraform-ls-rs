@@ -23,9 +23,7 @@ use tfls_core::lock_file::{self, LockFile};
 use tfls_core::variable_type::{Primitive, SchemaLookup, VariableType};
 use tfls_core::{ProviderAddress, SymbolKind, SymbolLocation};
 use tfls_parser::ReferenceKind;
-use tfls_schema::{
-    FunctionSignature, FunctionsSchema, ProviderSchema, ProviderSchemas, Schema,
-};
+use tfls_schema::{FunctionSignature, FunctionsSchema, ProviderSchema, ProviderSchemas, Schema};
 
 use crate::document::DocumentState;
 
@@ -103,8 +101,7 @@ pub struct StateStore {
     /// the next check re-enqueues a fetch. Without this, a user who
     /// added a new provider mid-session would never see its schema
     /// load for the rest of the server's lifetime.
-    pub fetched_schema_dirs:
-        FxDashMap<std::path::PathBuf, std::time::SystemTime>,
+    pub fetched_schema_dirs: FxDashMap<std::path::PathBuf, std::time::SystemTime>,
 
     /// Installed provider VERSION per [`ProviderAddress`]. Populated
     /// alongside [`Self::schemas`] when the plugin-protocol /
@@ -123,8 +120,7 @@ pub struct StateStore {
     /// both channels separately) ends up with duplicate
     /// diagnostic entries. Default `false` preserves push-only
     /// behaviour for clients that don't do pull.
-    pub client_supports_pull_diagnostics:
-        std::sync::atomic::AtomicBool,
+    pub client_supports_pull_diagnostics: std::sync::atomic::AtomicBool,
 
     /// True when the client advertised support for
     /// `workspace/diagnostic/refresh` at `initialize`
@@ -134,8 +130,7 @@ pub struct StateStore {
     /// that could invalidate previous per-file results. Default
     /// `false` so clients that don't advertise it don't get spurious
     /// requests.
-    pub client_supports_diagnostic_refresh:
-        std::sync::atomic::AtomicBool,
+    pub client_supports_diagnostic_refresh: std::sync::atomic::AtomicBool,
 
     /// URIs currently open in the client (received `didOpen`, no
     /// matching `didClose` yet). Used to distinguish "client will
@@ -159,8 +154,10 @@ pub struct StateStore {
     /// type-inference code action) can equality-merge across
     /// multiple call sites / env-specific tfvars files. Values
     /// that resolve to `Any` are filtered out at insertion time.
-    pub assigned_variable_types:
-        FxDashMap<std::path::PathBuf, std::collections::HashMap<String, Vec<tfls_core::variable_type::VariableType>>>,
+    pub assigned_variable_types: FxDashMap<
+        std::path::PathBuf,
+        std::collections::HashMap<String, Vec<tfls_core::variable_type::VariableType>>,
+    >,
 
     /// Per-module-dir cache of the parsed `.terraform.lock.hcl`
     /// file. Populated lazily by [`StateStore::lock_file_for`],
@@ -294,7 +291,6 @@ impl StateStore {
     pub fn is_open(&self, uri: &Url) -> bool {
         self.open_docs.contains(uri)
     }
-
 }
 
 /// Resolve a path to its canonical form when possible; fall back
@@ -308,7 +304,6 @@ fn canonical_or_owned(p: &std::path::Path) -> std::path::PathBuf {
 }
 
 impl StateStore {
-
     /// Read the parsed `.terraform.lock.hcl` for `module_dir`.
     /// Cached after first call; reparsed when the on-disk mtime
     /// changes (so a `terraform init` upgrade is picked up the
@@ -684,8 +679,7 @@ impl StateStore {
                 entry.retain(|loc| loc.uri != *uri);
             }
         }
-        self.definitions_by_name
-            .retain(|_, v| !v.is_empty());
+        self.definitions_by_name.retain(|_, v| !v.is_empty());
         self.references_by_name.retain(|_, v| !v.is_empty());
     }
 }
@@ -724,7 +718,11 @@ fn collect_doc_keys(doc: &DocumentState) -> DocKeys {
         ));
     }
 
-    let references = doc.references.iter().map(|r| reference_key(&r.kind)).collect();
+    let references = doc
+        .references
+        .iter()
+        .map(|r| reference_key(&r.kind))
+        .collect();
     DocKeys {
         definitions,
         references,
@@ -794,12 +792,7 @@ pub fn schema_type_to_variable_type(value: &sonic_rs::Value) -> VariableType {
         (Some("map"), Some(t)) => VariableType::Map(Box::new(schema_type_to_variable_type(t))),
         (Some("tuple"), Some(t)) => {
             if let Some(items) = t.as_array() {
-                VariableType::Tuple(
-                    items
-                        .iter()
-                        .map(schema_type_to_variable_type)
-                        .collect(),
-                )
+                VariableType::Tuple(items.iter().map(schema_type_to_variable_type).collect())
             } else {
                 VariableType::Any
             }
@@ -872,11 +865,7 @@ mod tests {
     fn remove_clears_indexes() {
         let store = StateStore::new();
         let u = uri("file:///a.tf");
-        store.upsert_document(DocumentState::new(
-            u.clone(),
-            r#"variable "region" {}"#,
-            1,
-        ));
+        store.upsert_document(DocumentState::new(u.clone(), r#"variable "region" {}"#, 1));
         assert_eq!(store.definitions_by_name.len(), 1);
 
         store.remove_document(&u);
@@ -942,7 +931,9 @@ mod tests {
         store.install_schemas(schemas);
 
         // Built-in types resolve like any other schema...
-        assert!(store.find_data_source_schema("terraform_remote_state").is_some());
+        assert!(store
+            .find_data_source_schema("terraform_remote_state")
+            .is_some());
         assert!(store.find_resource_schema("terraform_data").is_some());
         // ...but the built-in snapshot doesn't count as a "real" fetched
         // provider, so the "run terraform init" hint still applies.
@@ -966,27 +957,21 @@ mod tests {
         let store = StateStore::new();
         let u = uri("file:///a.tf");
         store.upsert_document(DocumentState::new(u.clone(), r#"variable "old" {}"#, 1));
-        assert!(
-            store
-                .definitions_by_name
-                .contains_key(&SymbolKey::new(SymbolKind::Variable, "old"))
-        );
+        assert!(store
+            .definitions_by_name
+            .contains_key(&SymbolKey::new(SymbolKind::Variable, "old")));
 
         if let Some(mut doc) = store.documents.get_mut(&u) {
             doc.rope = ropey::Rope::from_str(r#"variable "new" {}"#);
         }
         store.reparse_document(&u);
 
-        assert!(
-            !store
-                .definitions_by_name
-                .contains_key(&SymbolKey::new(SymbolKind::Variable, "old"))
-        );
-        assert!(
-            store
-                .definitions_by_name
-                .contains_key(&SymbolKey::new(SymbolKind::Variable, "new"))
-        );
+        assert!(!store
+            .definitions_by_name
+            .contains_key(&SymbolKey::new(SymbolKind::Variable, "old")));
+        assert!(store
+            .definitions_by_name
+            .contains_key(&SymbolKey::new(SymbolKind::Variable, "new")));
     }
 
     // --- dir_scans state machine ------------------------------------

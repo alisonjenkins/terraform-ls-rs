@@ -21,7 +21,7 @@
 //! representation.
 
 use crate::error::ParseError;
-use crate::parse::{ParsedFile, parse_source};
+use crate::parse::{parse_source, ParsedFile};
 
 /// Top-level object keys recognised by Terraform's JSON syntax.
 /// Anything else is reported as `terraform_json_syntax` — or in our
@@ -96,8 +96,8 @@ fn write_top_level(out: &mut String, key: &str, val: &serde_json::Value) -> Resu
     match key {
         "terraform" => write_block(out, key, &[], val, 0),
         "locals" => write_locals(out, val),
-        "resource" | "data" | "variable" | "output" | "module" | "provider" | "moved"
-        | "check" | "import" | "removed" => write_labeled_group(out, key, val),
+        "resource" | "data" | "variable" | "output" | "module" | "provider" | "moved" | "check"
+        | "import" | "removed" => write_labeled_group(out, key, val),
         _ => Err(format!("unsupported top-level key `{key}`")),
     }
 }
@@ -105,7 +105,11 @@ fn write_top_level(out: &mut String, key: &str, val: &serde_json::Value) -> Resu
 /// `"resource": { "TYPE": { "NAME": { …body… } } }` flattens into
 /// one `resource "TYPE" "NAME" { … }` block per leaf. `data` /
 /// `variable` / `output` / etc. follow the same layered pattern.
-fn write_labeled_group(out: &mut String, ident: &str, val: &serde_json::Value) -> Result<(), String> {
+fn write_labeled_group(
+    out: &mut String,
+    ident: &str,
+    val: &serde_json::Value,
+) -> Result<(), String> {
     let first_layer = val
         .as_object()
         .ok_or_else(|| format!("`{ident}` must be an object"))?;
@@ -202,11 +206,7 @@ fn write_attr(
     Ok(())
 }
 
-fn write_value(
-    out: &mut String,
-    val: &serde_json::Value,
-    indent: usize,
-) -> Result<(), String> {
+fn write_value(out: &mut String, val: &serde_json::Value, indent: usize) -> Result<(), String> {
     match val {
         serde_json::Value::Null => out.push_str("null"),
         serde_json::Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
@@ -311,10 +311,7 @@ mod tests {
         );
         assert!(parsed.body.is_some(), "got: {:?}", parsed.errors);
         let body = parsed.body.unwrap();
-        let block = body
-            .iter()
-            .find_map(|s| s.as_block())
-            .expect("has block");
+        let block = body.iter().find_map(|s| s.as_block()).expect("has block");
         assert_eq!(block.ident.as_str(), "resource");
         assert_eq!(block.labels.len(), 2);
     }

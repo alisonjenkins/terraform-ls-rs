@@ -14,7 +14,7 @@
 
 mod support;
 
-use support::{TestClient, any_message_contains, contains_undefined_var};
+use support::{any_message_contains, contains_undefined_var, TestClient};
 
 /// An unformatted file gets a `terraform_fmt` INFORMATION diagnostic;
 /// editing it to/from formatted re-evaluates (the format cache clears on
@@ -26,7 +26,9 @@ async fn formatting_diagnostic_tracks_edits() {
     let uri = "file:///mod/main.tf";
 
     // Open already-formatted content — no fmt diagnostic.
-    client.did_open(uri, "variable \"x\" {\n  default = \"a\"\n}\n").await;
+    client
+        .did_open(uri, "variable \"x\" {\n  default = \"a\"\n}\n")
+        .await;
     client.settle(150).await;
     assert!(
         !any_message_contains(&client.last_diagnostics(uri).await, "is not formatted"),
@@ -47,7 +49,11 @@ async fn formatting_diagnostic_tracks_edits() {
                 .is_some_and(|m| m.contains("is not formatted"))
         })
         .expect("unformatted edit must surface a fmt diagnostic");
-    assert_eq!(fmt.get("severity").and_then(|s| s.as_i64()), Some(3), "INFORMATION severity");
+    assert_eq!(
+        fmt.get("severity").and_then(|s| s.as_i64()),
+        Some(3),
+        "INFORMATION severity"
+    );
 
     // Edit back to formatted — the diagnostic clears.
     client
@@ -64,7 +70,10 @@ async fn formatting_diagnostic_tracks_edits() {
         .did_change_full(uri, 4, "variable \"x\" { default=\"a\" }\n")
         .await;
     client.settle(150).await;
-    assert!(any_message_contains(&client.last_diagnostics(uri).await, "is not formatted"));
+    assert!(any_message_contains(
+        &client.last_diagnostics(uri).await,
+        "is not formatted"
+    ));
     client
         .did_change_configuration(serde_json::json!({
             "terraform-ls-rs": { "rules": { "terraform_fmt": "off" } }
@@ -115,7 +124,11 @@ async fn per_rule_override_suppresses_and_remaps() {
                 .is_some_and(|m| m.contains("duplicate variable"))
         })
         .expect("duplicate diagnostic still present after remap");
-    assert_eq!(dup.get("severity").and_then(|s| s.as_i64()), Some(4), "expected HINT severity");
+    assert_eq!(
+        dup.get("severity").and_then(|s| s.as_i64()),
+        Some(4),
+        "expected HINT severity"
+    );
 
     // Now turn it off entirely.
     client
@@ -192,9 +205,13 @@ async fn value_only_edit_skips_peer_recompute() {
 
     let main_uri = "file:///mod/main.tf";
     let vars_uri = "file:///mod/variables.tf";
-    client.did_open(vars_uri, "variable \"foo\" { default = \"a\" }\n").await;
+    client
+        .did_open(vars_uri, "variable \"foo\" { default = \"a\" }\n")
+        .await;
     client.settle(100).await;
-    client.did_open(main_uri, "output \"x\" { value = var.foo }\n").await;
+    client
+        .did_open(main_uri, "output \"x\" { value = var.foo }\n")
+        .await;
     client.settle(200).await;
 
     let before = client.publish_count(main_uri).await;
@@ -213,7 +230,11 @@ async fn value_only_edit_skips_peer_recompute() {
 
     // Now ADD a new variable — cross-file state changes, peer recomputes.
     client
-        .did_change_full(vars_uri, 3, "variable \"foo\" { default = \"b\" }\nvariable \"bar\" {}\n")
+        .did_change_full(
+            vars_uri,
+            3,
+            "variable \"foo\" { default = \"b\" }\nvariable \"bar\" {}\n",
+        )
         .await;
     client.settle(200).await;
     assert!(

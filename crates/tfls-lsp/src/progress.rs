@@ -40,12 +40,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::task::JoinHandle;
-use tower_lsp::Client;
 use tower_lsp::lsp_types::{
-    ProgressParams, ProgressParamsValue, ProgressToken, WorkDoneProgress,
-    WorkDoneProgressBegin, WorkDoneProgressCreateParams, WorkDoneProgressEnd,
-    WorkDoneProgressReport, notification::Progress, request::WorkDoneProgressCreate,
+    notification::Progress, request::WorkDoneProgressCreate, ProgressParams, ProgressParamsValue,
+    ProgressToken, WorkDoneProgress, WorkDoneProgressBegin, WorkDoneProgressCreateParams,
+    WorkDoneProgressEnd, WorkDoneProgressReport,
 };
+use tower_lsp::Client;
 
 /// Monotonic counter that keeps tokens unique across concurrent
 /// reporters. We prefix with `"tfls-"` so the tokens are easy to
@@ -126,13 +126,13 @@ impl ProgressReporter {
                         drain_client
                             .send_notification::<Progress>(ProgressParams {
                                 token: drain_token.clone(),
-                                value: ProgressParamsValue::WorkDone(
-                                    WorkDoneProgress::Report(WorkDoneProgressReport {
+                                value: ProgressParamsValue::WorkDone(WorkDoneProgress::Report(
+                                    WorkDoneProgressReport {
                                         cancellable: Some(false),
                                         message,
                                         percentage,
-                                    }),
-                                ),
+                                    },
+                                )),
                             })
                             .await;
                     }

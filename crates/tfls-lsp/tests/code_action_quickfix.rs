@@ -42,7 +42,10 @@ async fn legacy_index_offers_convert_quickfix() {
             .and_then(|t| t.as_str())
             .is_some_and(|t| t.contains("Convert `.0` to `[0]`"))
     });
-    assert!(convert.is_some(), "expected `.0`→`[0]` quick-fix, got {actions:?}");
+    assert!(
+        convert.is_some(),
+        "expected `.0`→`[0]` quick-fix, got {actions:?}"
+    );
 
     // The action carries a workspace edit replacing `.0` with `[0]`.
     let edit = &convert.unwrap()["edit"]["changes"][uri];
@@ -91,7 +94,10 @@ async fn empty_list_equality_offers_length_quickfix() {
             .and_then(|t| t.as_str())
             .is_some_and(|t| t.contains("length(var.ids) > 0"))
     });
-    assert!(fix.is_some(), "expected `length(var.ids) > 0` fix, got {actions:?}");
+    assert!(
+        fix.is_some(),
+        "expected `length(var.ids) > 0` fix, got {actions:?}"
+    );
 
     client.shutdown().await;
 }
@@ -110,7 +116,9 @@ async fn missing_description_offers_add_quickfix() {
         .await;
 
     let uri = "file:///mod/main.tf";
-    client.did_open(uri, "variable \"region\" {\n  type = string\n}\n").await;
+    client
+        .did_open(uri, "variable \"region\" {\n  type = string\n}\n")
+        .await;
     client.settle(250).await;
 
     let diags = client.last_diagnostics(uri).await;
