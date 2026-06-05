@@ -11,10 +11,10 @@ import { resolveServerBinary } from "./binaryManager";
 const CONFIG_SECTION = "terraform-ls-rs";
 
 let client: LanguageClient | undefined;
-let output: vscode.OutputChannel;
+let output: vscode.LogOutputChannel;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
-  output = vscode.window.createOutputChannel("Terraform (tfls)");
+  output = vscode.window.createOutputChannel("Terraform (tfls)", { log: true });
   context.subscriptions.push(output);
 
   context.subscriptions.push(
