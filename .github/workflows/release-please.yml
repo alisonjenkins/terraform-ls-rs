@@ -29,4 +29,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.release.outputs.tag_name }}
-        run: gh workflow run release.yml -f tag="$TAG" --repo "$GITHUB_REPOSITORY"
+          SHA: ${{ steps.release.outputs.sha }}
+        # Pass the release commit SHA: release-please creates the GitHub release
+        # as a draft (so release.yml can attach assets before publish), and a
+        # draft release does not create the git tag yet — so the build checks out
+        # the SHA, and the final publish step creates the tag.
+        run: gh workflow run release.yml -f tag="$TAG" -f sha="$SHA" --repo "$GITHUB_REPOSITORY"
