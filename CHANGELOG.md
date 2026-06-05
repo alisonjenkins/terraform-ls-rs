@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.4.2...v0.5.0) (2026-06-05)
+
+
+### Features
+
+* **vscode:** add Terraform/HCL syntax highlighting grammar ([bdab242](https://github.com/alisonjenkins/terraform-ls-rs/commit/bdab2427c5eebb0d7eac106c1cbffe7fb613c893))
+
 ## [0.4.2](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.4.1...v0.4.2) (2026-06-05)
 
 
