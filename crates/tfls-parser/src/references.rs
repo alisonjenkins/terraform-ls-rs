@@ -6,10 +6,11 @@ use hcl_edit::expr::{Expression, Traversal, TraversalOperator};
 use hcl_edit::repr::Span;
 use hcl_edit::structure::{Block, Body};
 use hcl_edit::template::{Directive, Element, Template};
-use lsp_types::{Range, Url};
+use lsp_types::Range;
 use ropey::Rope;
 use serde::{Deserialize, Serialize};
 use tfls_core::SymbolLocation;
+use url::Url;
 
 use crate::position::hcl_span_to_lsp_range;
 

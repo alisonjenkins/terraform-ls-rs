@@ -2,10 +2,11 @@
 
 use std::path::{Path, PathBuf};
 
-use lsp_types::{Location, Url};
+use lsp_types::Location;
 use serde::Deserialize;
 use tfls_core::{ProviderAddress, SymbolKind, SymbolLocation};
 use tfls_state::StateStore;
+use url::Url;
 
 /// Filesystem parent directory of a `file://` URI. Returns `None` for
 /// URIs that can't be mapped to a path (e.g. exotic or non-file
@@ -426,7 +427,7 @@ mod tests {
         ));
         let got = lookup_child_module_symbol(&store, &child, SymbolKind::Variable, "region");
         let got = got.expect("variable should resolve");
-        assert_eq!(got.uri, u);
+        assert_eq!(got.uri.as_str(), u.as_str());
     }
 
     #[test]

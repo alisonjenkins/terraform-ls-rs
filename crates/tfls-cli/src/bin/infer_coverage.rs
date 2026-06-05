@@ -31,10 +31,10 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use hcl_edit::expr::Expression;
-use lsp_types::Url;
 use tfls_core::variable_type::{parse_type_expr, VariableType};
 use tfls_state::{DocumentState, StateStore};
 use tfls_walker::discover_terraform_files;
+use url::Url;
 
 #[derive(Debug, Parser)]
 #[command(

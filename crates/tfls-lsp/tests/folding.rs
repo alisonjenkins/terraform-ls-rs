@@ -2,13 +2,14 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use lsp_types::{
+    FoldingRangeParams, PartialResultParams, Position, SelectionRangeParams,
+    TextDocumentIdentifier, WorkDoneProgressParams,
+};
 use tfls_lsp::Backend;
 use tfls_state::DocumentState;
-use tower_lsp::lsp_types::{
-    FoldingRangeParams, PartialResultParams, Position, SelectionRangeParams,
-    TextDocumentIdentifier, Url, WorkDoneProgressParams,
-};
-use tower_lsp::LspService;
+use tower_lsp_server::LspService;
+use url::Url;
 
 fn uri() -> Url {
     Url::parse("file:///f.tf").expect("url")
@@ -43,7 +44,9 @@ resource "aws_instance" "web" {
     let folds = tfls_lsp::handlers::folding::folding_range(
         &backend,
         FoldingRangeParams {
-            text_document: TextDocumentIdentifier { uri: uri() },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&uri()),
+            },
             work_done_progress_params: WorkDoneProgressParams::default(),
             partial_result_params: PartialResultParams::default(),
         },
@@ -62,7 +65,9 @@ async fn folding_skips_single_line_blocks() {
     let folds = tfls_lsp::handlers::folding::folding_range(
         &backend,
         FoldingRangeParams {
-            text_document: TextDocumentIdentifier { uri: uri() },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&uri()),
+            },
             work_done_progress_params: WorkDoneProgressParams::default(),
             partial_result_params: PartialResultParams::default(),
         },
@@ -86,7 +91,9 @@ async fn selection_range_walks_from_inner_to_outer() {
     let ranges = tfls_lsp::handlers::folding::selection_range(
         &backend,
         SelectionRangeParams {
-            text_document: TextDocumentIdentifier { uri: uri() },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&uri()),
+            },
             positions: vec![Position::new(1, col)],
             work_done_progress_params: WorkDoneProgressParams::default(),
             partial_result_params: PartialResultParams::default(),

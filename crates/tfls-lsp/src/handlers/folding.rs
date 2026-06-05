@@ -12,7 +12,7 @@ use lsp_types::{
 };
 use ropey::Rope;
 use tfls_parser::hcl_span_to_lsp_range;
-use tower_lsp::jsonrpc;
+use tower_lsp_server::jsonrpc;
 
 use crate::backend::Backend;
 
@@ -20,7 +20,9 @@ pub async fn folding_range(
     backend: &Backend,
     params: FoldingRangeParams,
 ) -> jsonrpc::Result<Option<Vec<FoldingRange>>> {
-    let uri = params.text_document.uri;
+    let Some(uri) = tfls_core::uri::uri_to_url(&params.text_document.uri) else {
+        return Ok(None);
+    };
     let Some(doc) = backend.state.documents.get(&uri) else {
         return Ok(None);
     };
@@ -67,7 +69,9 @@ pub async fn selection_range(
     backend: &Backend,
     params: SelectionRangeParams,
 ) -> jsonrpc::Result<Option<Vec<SelectionRange>>> {
-    let uri = params.text_document.uri;
+    let Some(uri) = tfls_core::uri::uri_to_url(&params.text_document.uri) else {
+        return Ok(None);
+    };
     let Some(doc) = backend.state.documents.get(&uri) else {
         return Ok(None);
     };

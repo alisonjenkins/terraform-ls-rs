@@ -12,14 +12,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tfls_lsp::Backend;
-use tfls_state::DocumentState;
-use tower_lsp::lsp_types::{
+use lsp_types::{
     CompletionContext, CompletionParams, CompletionResponse, CompletionTriggerKind, HoverParams,
-    PartialResultParams, Position, TextDocumentIdentifier, TextDocumentPositionParams, Url,
+    PartialResultParams, Position, TextDocumentIdentifier, TextDocumentPositionParams,
     WorkDoneProgressParams,
 };
-use tower_lsp::LspService;
+use tfls_lsp::Backend;
+use tfls_state::DocumentState;
+use tower_lsp_server::LspService;
+use url::Url;
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -61,7 +62,9 @@ fn insert_doc(backend: &Backend, path: &Path, text: &str) -> Url {
 fn make_completion_params(uri: &Url, pos: Position) -> CompletionParams {
     CompletionParams {
         text_document_position: TextDocumentPositionParams {
-            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(uri),
+            },
             position: pos,
         },
         work_done_progress_params: WorkDoneProgressParams::default(),
@@ -76,7 +79,9 @@ fn make_completion_params(uri: &Url, pos: Position) -> CompletionParams {
 fn make_hover_params(uri: &Url, pos: Position) -> HoverParams {
     HoverParams {
         text_document_position_params: TextDocumentPositionParams {
-            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(uri),
+            },
             position: pos,
         },
         work_done_progress_params: WorkDoneProgressParams::default(),
@@ -348,7 +353,7 @@ async fn hover_on_module_input_renders_description_and_type() {
     .await
     .expect("ok")
     .expect("some hover");
-    let tower_lsp::lsp_types::HoverContents::Markup(content) = resp.contents else {
+    let lsp_types::HoverContents::Markup(content) = resp.contents else {
         panic!("expected markup hover");
     };
     assert!(content.value.contains("region"), "got: {}", content.value);
@@ -382,7 +387,7 @@ async fn hover_on_module_input_without_description_still_shows_type() {
     .await
     .expect("ok")
     .expect("some hover");
-    let tower_lsp::lsp_types::HoverContents::Markup(content) = resp.contents else {
+    let lsp_types::HoverContents::Markup(content) = resp.contents else {
         panic!("expected markup hover");
     };
     assert!(content.value.contains("region"));
@@ -415,7 +420,7 @@ async fn hover_on_unknown_module_input_returns_none() {
     .await
     .expect("ok");
     if let Some(hover) = resp {
-        if let tower_lsp::lsp_types::HoverContents::Markup(content) = hover.contents {
+        if let lsp_types::HoverContents::Markup(content) = hover.contents {
             assert!(
                 !content.value.contains("### `bogus`"),
                 "module-input hover fired for unknown variable: {}",
@@ -463,7 +468,7 @@ async fn hover_on_module_output_reference_renders_description() {
     .await
     .expect("ok")
     .expect("some hover");
-    let tower_lsp::lsp_types::HoverContents::Markup(content) = resp.contents else {
+    let lsp_types::HoverContents::Markup(content) = resp.contents else {
         panic!("expected markup hover");
     };
     assert!(
@@ -508,7 +513,7 @@ async fn hover_on_module_block_header_label_renders_overview() {
     .await
     .expect("ok")
     .expect("some hover");
-    let tower_lsp::lsp_types::HoverContents::Markup(content) = resp.contents else {
+    let lsp_types::HoverContents::Markup(content) = resp.contents else {
         panic!("expected markup hover");
     };
     // Overview must list inputs + outputs with types and descriptions.
@@ -590,7 +595,7 @@ async fn hover_on_module_reference_label_renders_overview() {
     .await
     .expect("ok")
     .expect("some hover");
-    let tower_lsp::lsp_types::HoverContents::Markup(content) = resp.contents else {
+    let lsp_types::HoverContents::Markup(content) = resp.contents else {
         panic!("expected markup hover");
     };
     assert!(

@@ -9,8 +9,8 @@
 use std::sync::Arc;
 
 use dashmap::{DashMap, DashSet};
-use lsp_types::Url;
 use rustc_hash::FxBuildHasher;
+use url::Url;
 
 /// DashMap aliased to use [`FxBuildHasher`]. We don't need
 /// HashDoS resistance for these internal indexes — every key is

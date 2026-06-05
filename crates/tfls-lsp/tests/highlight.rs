@@ -2,13 +2,14 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use lsp_types::{
+    DocumentHighlightKind, DocumentHighlightParams, PartialResultParams, Position,
+    TextDocumentIdentifier, TextDocumentPositionParams, WorkDoneProgressParams,
+};
 use tfls_lsp::Backend;
 use tfls_state::DocumentState;
-use tower_lsp::lsp_types::{
-    DocumentHighlightKind, DocumentHighlightParams, PartialResultParams, Position,
-    TextDocumentIdentifier, TextDocumentPositionParams, Url, WorkDoneProgressParams,
-};
-use tower_lsp::LspService;
+use tower_lsp_server::LspService;
+use url::Url;
 
 #[tokio::test]
 async fn highlights_definition_as_write_and_refs_as_read() {
@@ -37,7 +38,9 @@ output "b" { value = var.region }
         &backend,
         DocumentHighlightParams {
             text_document_position_params: TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier { uri: u.clone() },
+                text_document: TextDocumentIdentifier {
+                    uri: tfls_core::uri::url_to_uri(&u),
+                },
                 position: Position::new(1, col),
             },
             work_done_progress_params: WorkDoneProgressParams::default(),

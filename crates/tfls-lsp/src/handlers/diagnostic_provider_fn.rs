@@ -14,8 +14,9 @@
 //! access to look up `required_providers` across peer files AND
 //! consult `state.functions`.
 
-use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, Url};
+use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 use tfls_state::{DocumentState, StateStore};
+use url::Url;
 
 use crate::handlers::completion::required_providers_local_to_name_pub;
 use crate::handlers::util::parent_dir;

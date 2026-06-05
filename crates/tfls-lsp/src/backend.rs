@@ -1,13 +1,10 @@
-//! The `Backend` struct — the integration point between `tower_lsp`
+//! The `Backend` struct — the integration point between `tower_lsp_server`
 //! and our domain crates. Also owns the job queue and background
 //! indexer task handles.
 
 use std::sync::Arc;
 
-use tfls_state::{JobQueue, StateStore};
-use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
-use tower_lsp::lsp_types::{
+use lsp_types::{
     request::{GotoDeclarationParams, GotoDeclarationResponse},
     CodeActionParams, CodeActionResponse, CodeLens, CodeLensParams, CompletionParams,
     CompletionResponse, DidChangeConfigurationParams, DidChangeTextDocumentParams,
@@ -22,12 +19,15 @@ use tower_lsp::lsp_types::{
     PrepareRenameResponse, ReferenceParams, RelatedFullDocumentDiagnosticReport, RenameParams,
     SelectionRange, SelectionRangeParams, SemanticTokensParams, SemanticTokensRangeParams,
     SemanticTokensRangeResult, SemanticTokensResult, ServerInfo, SignatureHelp,
-    SignatureHelpParams, SymbolInformation, TextDocumentPositionParams, TextEdit,
-    WorkspaceDiagnosticParams, WorkspaceDiagnosticReport, WorkspaceDiagnosticReportResult,
-    WorkspaceDocumentDiagnosticReport, WorkspaceEdit, WorkspaceFullDocumentDiagnosticReport,
-    WorkspaceSymbolParams,
+    SignatureHelpParams, TextDocumentPositionParams, TextEdit, WorkspaceDiagnosticParams,
+    WorkspaceDiagnosticReport, WorkspaceDiagnosticReportResult, WorkspaceDocumentDiagnosticReport,
+    WorkspaceEdit, WorkspaceFullDocumentDiagnosticReport, WorkspaceSymbolParams,
+    WorkspaceSymbolResponse,
 };
-use tower_lsp::{jsonrpc, Client, LanguageServer};
+use tfls_state::{JobQueue, StateStore};
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
+use tower_lsp_server::{jsonrpc, Client, LanguageServer};
 
 use crate::capabilities::server_capabilities;
 use crate::handlers;
@@ -67,7 +67,7 @@ impl Backend {
 
     /// Construct a Backend sharing state with an existing one.
     /// Intended for tests that need an owned `Backend` without a
-    /// running tower_lsp service.
+    /// running tower_lsp_server service.
     pub fn with_shared_state(client: Client, state: Arc<StateStore>, jobs: Arc<JobQueue>) -> Self {
         Self {
             client,
@@ -155,7 +155,6 @@ impl Backend {
     }
 }
 
-#[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> jsonrpc::Result<InitializeResult> {
         // Record whether the client speaks LSP 3.17 pull diagnostics.
@@ -182,7 +181,7 @@ impl LanguageServer for Backend {
             .capabilities
             .workspace
             .as_ref()
-            .and_then(|w| w.diagnostic.as_ref())
+            .and_then(|w| w.diagnostics.as_ref())
             .and_then(|d| d.refresh_support)
             .unwrap_or(false);
         self.state
@@ -216,15 +215,20 @@ impl LanguageServer for Backend {
         crate::handlers::version_prefetch::spawn_eager_tool_versions(self.client.clone());
 
         for folder in params.workspace_folders.unwrap_or_default() {
-            if let Ok(path) = folder.uri.to_file_path() {
+            if let Some(path) =
+                tfls_core::uri::uri_to_url(&folder.uri).and_then(|u| u.to_file_path().ok())
+            {
                 self.spawn_workspace_watcher(path).await;
             }
         }
         #[allow(deprecated)]
-        if let Some(root_uri) = params.root_uri {
-            if let Ok(path) = root_uri.to_file_path() {
-                self.spawn_workspace_watcher(path).await;
-            }
+        if let Some(path) = params
+            .root_uri
+            .as_ref()
+            .and_then(tfls_core::uri::uri_to_url)
+            .and_then(|u| u.to_file_path().ok())
+        {
+            self.spawn_workspace_watcher(path).await;
         }
 
         Ok(InitializeResult {
@@ -233,6 +237,7 @@ impl LanguageServer for Backend {
                 name: "terraform-ls-rs".to_string(),
                 version: Some(env!("CARGO_PKG_VERSION").to_string()),
             }),
+            offset_encoding: None,
         })
     }
 
@@ -274,7 +279,9 @@ impl LanguageServer for Backend {
         &self,
         params: DocumentDiagnosticParams,
     ) -> jsonrpc::Result<DocumentDiagnosticReportResult> {
-        let uri = params.text_document.uri;
+        let Some(uri) = tfls_core::uri::uri_to_url(&params.text_document.uri) else {
+            return Err(jsonrpc::Error::internal_error());
+        };
         // `compute_diagnostics` is synchronous CPU work that can
         // burn hundreds of ms on a large file + module graph —
         // off to a blocking thread so this handler doesn't tie
@@ -325,7 +332,7 @@ impl LanguageServer for Backend {
                         let diagnostics = handlers::document::compute_diagnostics(&state, &uri);
                         WorkspaceDocumentDiagnosticReport::Full(
                             WorkspaceFullDocumentDiagnosticReport {
-                                uri,
+                                uri: tfls_core::uri::url_to_uri(&uri),
                                 version: Some(version as i64),
                                 full_document_diagnostic_report: FullDocumentDiagnosticReport {
                                     result_id: None,
@@ -424,8 +431,10 @@ impl LanguageServer for Backend {
     async fn symbol(
         &self,
         params: WorkspaceSymbolParams,
-    ) -> jsonrpc::Result<Option<Vec<SymbolInformation>>> {
-        handlers::symbols::workspace_symbol(self, params).await
+    ) -> jsonrpc::Result<Option<WorkspaceSymbolResponse>> {
+        Ok(handlers::symbols::workspace_symbol(self, params)
+            .await?
+            .map(WorkspaceSymbolResponse::Flat))
     }
 
     async fn goto_declaration(

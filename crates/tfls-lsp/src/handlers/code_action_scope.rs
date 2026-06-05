@@ -29,8 +29,9 @@
 
 use std::collections::HashMap;
 
-use lsp_types::{CodeAction, CodeActionKind, Diagnostic, Range, TextEdit, Url, WorkspaceEdit};
+use lsp_types::{CodeAction, CodeActionKind, Diagnostic, Range, TextEdit, WorkspaceEdit};
 use tfls_state::{DocumentState, StateStore};
+use url::Url;
 
 use crate::handlers::util::parent_dir;
 
@@ -152,7 +153,7 @@ pub fn build_scoped_action(
         kind: Some(scope_kind(scope, action_id)),
         diagnostics,
         edit: Some(WorkspaceEdit {
-            changes: Some(edits_by_uri),
+            changes: Some(tfls_core::uri::changes_to_uri(edits_by_uri)),
             ..Default::default()
         }),
         is_preferred: None,

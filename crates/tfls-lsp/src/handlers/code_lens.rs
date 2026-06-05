@@ -4,7 +4,7 @@
 use lsp_types::{CodeLens, CodeLensParams, Command};
 use tfls_core::{ResourceAddress, Symbol, SymbolKind, SymbolVisitor};
 use tfls_state::{DocumentState, StateStore, SymbolKey};
-use tower_lsp::jsonrpc;
+use tower_lsp_server::jsonrpc;
 
 use crate::backend::Backend;
 
@@ -12,7 +12,9 @@ pub async fn code_lens(
     backend: &Backend,
     params: CodeLensParams,
 ) -> jsonrpc::Result<Option<Vec<CodeLens>>> {
-    let uri = params.text_document.uri;
+    let Some(uri) = tfls_core::uri::uri_to_url(&params.text_document.uri) else {
+        return Ok(None);
+    };
     let Some(doc) = backend.state.documents.get(&uri) else {
         return Ok(None);
     };
@@ -81,7 +83,7 @@ fn push_lens(sym: &Symbol, key: SymbolKey, state: &StateStore, out: &mut Vec<Cod
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use lsp_types::Url;
+    use url::Url;
 
     fn uri() -> Url {
         Url::parse("file:///t.tf").expect("url")

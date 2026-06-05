@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use hcl_edit::expr::{Expression, ObjectKey};
 use tfls_core::SymbolKind;
 use tfls_state::{StateStore, SymbolKey};
-use tower_lsp::lsp_types::Url;
+use url::Url;
 
 pub struct ModuleSnapshot {
     pub module_dir: Option<PathBuf>,

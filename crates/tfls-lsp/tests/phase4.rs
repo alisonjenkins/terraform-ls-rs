@@ -3,16 +3,17 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use lsp_types::{
+    CodeActionContext, CodeActionOrCommand, CodeActionParams, DiagnosticSeverity,
+    DocumentFormattingParams, DocumentLinkParams, FormattingOptions, PartialResultParams, Position,
+    Range, TextDocumentIdentifier, WorkDoneProgressParams,
+};
 use tfls_lsp::handlers::document::compute_diagnostics;
 use tfls_lsp::Backend;
 use tfls_schema::ProviderSchemas;
 use tfls_state::DocumentState;
-use tower_lsp::lsp_types::{
-    CodeActionContext, CodeActionOrCommand, CodeActionParams, DiagnosticSeverity,
-    DocumentFormattingParams, DocumentLinkParams, FormattingOptions, PartialResultParams, Position,
-    Range, TextDocumentIdentifier, Url, WorkDoneProgressParams,
-};
-use tower_lsp::LspService;
+use tower_lsp_server::LspService;
+use url::Url;
 
 fn uri(s: &str) -> Url {
     Url::parse(s).expect("valid url")
@@ -68,7 +69,9 @@ async fn formatting_fixes_trailing_whitespace_and_blank_lines() {
     let edits = tfls_lsp::handlers::formatting::formatting(
         &backend,
         DocumentFormattingParams {
-            text_document: TextDocumentIdentifier { uri: u.clone() },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&u),
+            },
             options: FormattingOptions::default(),
             work_done_progress_params: WorkDoneProgressParams::default(),
         },
@@ -213,7 +216,9 @@ locals {
     let edits = tfls_lsp::handlers::formatting::formatting(
         &backend,
         DocumentFormattingParams {
-            text_document: TextDocumentIdentifier { uri: u.clone() },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&u),
+            },
             options: FormattingOptions::default(),
             work_done_progress_params: WorkDoneProgressParams::default(),
         },
@@ -281,7 +286,9 @@ async fn formatting_returns_empty_for_already_formatted_source() {
     let edits = tfls_lsp::handlers::formatting::formatting(
         &backend,
         DocumentFormattingParams {
-            text_document: TextDocumentIdentifier { uri: u },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&u),
+            },
             options: FormattingOptions::default(),
             work_done_progress_params: WorkDoneProgressParams::default(),
         },
@@ -301,7 +308,9 @@ async fn document_links_point_to_registry_docs() {
     let links = tfls_lsp::handlers::document_link::document_link(
         &backend,
         DocumentLinkParams {
-            text_document: TextDocumentIdentifier { uri: u },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&u),
+            },
             work_done_progress_params: WorkDoneProgressParams::default(),
             partial_result_params: PartialResultParams::default(),
         },
@@ -375,7 +384,9 @@ async fn code_action_inserts_missing_required_attribute() {
     let actions = tfls_lsp::handlers::code_action::code_action(
         &backend,
         CodeActionParams {
-            text_document: TextDocumentIdentifier { uri: u.clone() },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&u),
+            },
             range: Range {
                 start: Position::new(0, 0),
                 end: Position::new(0, 10),
@@ -400,7 +411,9 @@ async fn code_action_inserts_missing_required_attribute() {
     };
     let edit = action.edit.as_ref().expect("edit");
     let changes = edit.changes.as_ref().expect("changes");
-    let edits = changes.get(&u).expect("edits for this uri");
+    let edits = changes
+        .get(&tfls_core::uri::url_to_uri(&u))
+        .expect("edits for this uri");
     assert_eq!(edits.len(), 1);
     assert!(
         edits[0].new_text.contains("ami = \"\""),
@@ -431,7 +444,9 @@ async fn code_actions_for(
     tfls_lsp::handlers::code_action::code_action(
         backend,
         CodeActionParams {
-            text_document: TextDocumentIdentifier { uri: u.clone() },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(u),
+            },
             range: diag.range,
             context: CodeActionContext {
                 diagnostics: vec![diag],
@@ -454,7 +469,9 @@ fn first_inserted_text(actions: &[CodeActionOrCommand], u: &Url) -> String {
     };
     let edit = action.edit.as_ref().expect("edit");
     let changes = edit.changes.as_ref().expect("changes");
-    let edits = changes.get(u).expect("edits for this uri");
+    let edits = changes
+        .get(&tfls_core::uri::url_to_uri(u))
+        .expect("edits for this uri");
     edits[0].new_text.clone()
 }
 
@@ -732,7 +749,7 @@ async fn code_action_skips_when_block_already_has_type() {
     // Synthesise a `variable has no type` diagnostic for `region` —
     // the diagnostic rule won't actually emit one here, but a stale
     // pull cache could. The handler must refuse.
-    use tower_lsp::lsp_types::Diagnostic;
+    use lsp_types::Diagnostic;
     let diag = Diagnostic {
         range: Range {
             start: Position::new(0, 0),
@@ -747,7 +764,9 @@ async fn code_action_skips_when_block_already_has_type() {
     let actions = tfls_lsp::handlers::code_action::code_action(
         &backend,
         CodeActionParams {
-            text_document: TextDocumentIdentifier { uri: u.clone() },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&u),
+            },
             range: diag.range,
             context: CodeActionContext {
                 diagnostics: vec![diag],
@@ -873,7 +892,9 @@ async fn code_action_fix_all_inserts_types_for_every_untyped_variable() {
     let resp = tfls_lsp::handlers::code_action::code_action(
         &backend,
         CodeActionParams {
-            text_document: TextDocumentIdentifier { uri: u.clone() },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&u),
+            },
             range: Range {
                 start: Position::new(0, 0),
                 end: Position::new(0, 0),
@@ -907,7 +928,7 @@ async fn code_action_fix_all_inserts_types_for_every_untyped_variable() {
         .edit
         .as_ref()
         .and_then(|e| e.changes.as_ref())
-        .and_then(|c| c.get(&u))
+        .and_then(|c| c.get(&tfls_core::uri::url_to_uri(&u)))
         .expect("edits for this uri");
     assert_eq!(edits.len(), 2, "should fix exactly 2 of 3 variables");
     let combined: String = edits.iter().map(|e| e.new_text.as_str()).collect();
@@ -931,7 +952,9 @@ async fn code_action_inserts_inferred_type_from_cursor_without_diagnostic() {
     let resp = tfls_lsp::handlers::code_action::code_action(
         &backend,
         CodeActionParams {
-            text_document: TextDocumentIdentifier { uri: u.clone() },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&u),
+            },
             range: Range {
                 start: Position::new(0, 13),
                 end: Position::new(0, 13),
@@ -965,7 +988,7 @@ async fn code_action_inserts_inferred_type_from_cursor_without_diagnostic() {
         .edit
         .as_ref()
         .and_then(|e| e.changes.as_ref())
-        .and_then(|c| c.get(&u))
+        .and_then(|c| c.get(&tfls_core::uri::url_to_uri(&u)))
         .expect("edits");
     assert_eq!(edits.len(), 1);
     assert!(edits[0].new_text.contains("type = string"));
@@ -983,7 +1006,9 @@ async fn code_action_offers_any_placeholder_when_no_inference() {
     let resp = tfls_lsp::handlers::code_action::code_action(
         &backend,
         CodeActionParams {
-            text_document: TextDocumentIdentifier { uri: u.clone() },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&u),
+            },
             range: Range {
                 start: Position::new(0, 13),
                 end: Position::new(0, 13),
@@ -1015,7 +1040,7 @@ async fn code_action_offers_any_placeholder_when_no_inference() {
         .edit
         .as_ref()
         .and_then(|e| e.changes.as_ref())
-        .and_then(|c| c.get(&u))
+        .and_then(|c| c.get(&tfls_core::uri::url_to_uri(&u)))
         .expect("edits");
     assert!(edits[0].new_text.contains("type = any"));
 }
@@ -1061,7 +1086,9 @@ async fn code_action_declares_undefined_variables() {
     let resp = tfls_lsp::handlers::code_action::code_action(
         &backend,
         CodeActionParams {
-            text_document: TextDocumentIdentifier { uri: u.clone() },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&u),
+            },
             range: Range {
                 start: Position::new(0, 0),
                 end: Position::new(0, 0),
@@ -1091,11 +1118,14 @@ async fn code_action_declares_undefined_variables() {
         .expect("declare-undefined action present");
     // Active file is main.tf — must NOT be edited.
     if let Some(changes) = action.edit.as_ref().and_then(|e| e.changes.as_ref()) {
-        assert!(!changes.contains_key(&u), "main.tf must not be edited");
+        assert!(
+            !changes.contains_key(&tfls_core::uri::url_to_uri(&u)),
+            "main.tf must not be edited"
+        );
     }
     // Target file does not exist → expect documentChanges with
     // a CreateFile op for variables.tf + an initial insert.
-    use tower_lsp::lsp_types::{DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp};
+    use lsp_types::{DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp};
     let dc = action
         .edit
         .as_ref()
@@ -1111,11 +1141,14 @@ async fn code_action_declares_undefined_variables() {
     for op in ops {
         match op {
             DocumentChangeOperation::Op(ResourceOp::Create(c)) => {
-                assert_eq!(c.uri, target_url);
+                assert_eq!(c.uri, tfls_core::uri::url_to_uri(&target_url));
                 saw_create = true;
             }
             DocumentChangeOperation::Edit(te) => {
-                assert_eq!(te.text_document.uri, target_url);
+                assert_eq!(
+                    te.text_document.uri,
+                    tfls_core::uri::url_to_uri(&target_url)
+                );
                 for e in &te.edits {
                     let OneOf::Left(edit) = e else {
                         panic!("annotated edit not expected");
@@ -1180,7 +1213,9 @@ async fn code_action_refines_type_any_to_inferred() {
     let resp = tfls_lsp::handlers::code_action::code_action(
         &backend,
         CodeActionParams {
-            text_document: TextDocumentIdentifier { uri: u.clone() },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&u),
+            },
             range: Range {
                 start: Position::new(0, 0),
                 end: Position::new(0, 0),
@@ -1213,7 +1248,7 @@ async fn code_action_refines_type_any_to_inferred() {
         .edit
         .as_ref()
         .and_then(|e| e.changes.as_ref())
-        .and_then(|c| c.get(&u))
+        .and_then(|c| c.get(&tfls_core::uri::url_to_uri(&u)))
         .expect("edits");
     assert_eq!(edits.len(), 2, "should refine exactly 2 of 4 vars");
     let texts: Vec<&str> = edits.iter().map(|e| e.new_text.as_str()).collect();
@@ -1230,7 +1265,9 @@ async fn code_action_refine_any_skips_when_nothing_qualifies() {
     let resp = tfls_lsp::handlers::code_action::code_action(
         &backend,
         CodeActionParams {
-            text_document: TextDocumentIdentifier { uri: u.clone() },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&u),
+            },
             range: Range {
                 start: Position::new(0, 0),
                 end: Position::new(0, 0),
@@ -1282,7 +1319,9 @@ async fn code_action_declare_undefined_skips_when_all_resolved() {
     let resp = tfls_lsp::handlers::code_action::code_action(
         &backend,
         CodeActionParams {
-            text_document: TextDocumentIdentifier { uri: u.clone() },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&u),
+            },
             range: Range {
                 start: Position::new(0, 0),
                 end: Position::new(0, 0),
@@ -1323,7 +1362,9 @@ async fn all_actions_for(backend: &Backend, u: &Url) -> Vec<CodeActionOrCommand>
     tfls_lsp::handlers::code_action::code_action(
         backend,
         CodeActionParams {
-            text_document: TextDocumentIdentifier { uri: u.clone() },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(u),
+            },
             range: Range {
                 start: Position::new(0, 0),
                 end: Position::new(0, 0),
@@ -1352,7 +1393,9 @@ async fn all_actions_for_selection(
     tfls_lsp::handlers::code_action::code_action(
         backend,
         CodeActionParams {
-            text_document: TextDocumentIdentifier { uri: u.clone() },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(u),
+            },
             range,
             context: CodeActionContext {
                 diagnostics: vec![],
@@ -1371,7 +1414,7 @@ async fn all_actions_for_selection(
 fn find_action<'a>(
     actions: &'a [CodeActionOrCommand],
     title_prefix: &str,
-) -> &'a tower_lsp::lsp_types::CodeAction {
+) -> &'a lsp_types::CodeAction {
     actions
         .iter()
         .find_map(|a| match a {
@@ -1385,10 +1428,10 @@ fn find_action<'a>(
 /// Useful for actions that may emit `CreateFile` ops (e.g. the
 /// `null_resource → terraform_data` action with `moved.tf`).
 fn doc_change_edits(
-    action: &tower_lsp::lsp_types::CodeAction,
-) -> std::collections::HashMap<Url, Vec<tower_lsp::lsp_types::TextEdit>> {
-    use tower_lsp::lsp_types::{DocumentChangeOperation, DocumentChanges, OneOf};
-    let mut out: std::collections::HashMap<Url, Vec<tower_lsp::lsp_types::TextEdit>> =
+    action: &lsp_types::CodeAction,
+) -> std::collections::HashMap<lsp_types::Uri, Vec<lsp_types::TextEdit>> {
+    use lsp_types::{DocumentChangeOperation, DocumentChanges, OneOf};
+    let mut out: std::collections::HashMap<lsp_types::Uri, Vec<lsp_types::TextEdit>> =
         std::collections::HashMap::new();
     let dc = action
         .edit
@@ -1413,8 +1456,8 @@ fn doc_change_edits(
 }
 
 /// True when `action` includes a `CreateFile` op for `target`.
-fn has_create_file(action: &tower_lsp::lsp_types::CodeAction, target: &Url) -> bool {
-    use tower_lsp::lsp_types::{DocumentChangeOperation, DocumentChanges, ResourceOp};
+fn has_create_file(action: &lsp_types::CodeAction, target: &Url) -> bool {
+    use lsp_types::{DocumentChangeOperation, DocumentChanges, ResourceOp};
     let Some(dc) = action
         .edit
         .as_ref()
@@ -1426,7 +1469,9 @@ fn has_create_file(action: &tower_lsp::lsp_types::CodeAction, target: &Url) -> b
         return false;
     };
     ops.iter().any(|op| match op {
-        DocumentChangeOperation::Op(ResourceOp::Create(c)) => &c.uri == target,
+        DocumentChangeOperation::Op(ResourceOp::Create(c)) => {
+            c.uri == tfls_core::uri::url_to_uri(target)
+        }
         _ => false,
     })
 }
@@ -1466,7 +1511,10 @@ async fn scope_unwrap_interpolation_module_covers_all_files() {
         .unwrap();
     assert_eq!(changes.len(), 3, "all three module files");
     for url in [&a, &b, &c] {
-        assert!(changes.contains_key(url), "{url} edited");
+        assert!(
+            changes.contains_key(&tfls_core::uri::url_to_uri(url)),
+            "{url} edited"
+        );
     }
 }
 
@@ -1499,7 +1547,7 @@ async fn scope_unwrap_interpolation_selection_filters_by_range() {
         .edit
         .as_ref()
         .and_then(|e| e.changes.as_ref())
-        .and_then(|c| c.get(&u))
+        .and_then(|c| c.get(&tfls_core::uri::url_to_uri(&u)))
         .unwrap();
     assert_eq!(edits.len(), 2, "selection narrows to lines 5 + 10");
 }
@@ -1529,7 +1577,7 @@ async fn scope_lookup_to_index_workspace_covers_unrelated_dirs() {
         .and_then(|e| e.changes.as_ref())
         .unwrap();
     assert_eq!(mod_changes.len(), 1, "module scope = one dir");
-    assert!(mod_changes.contains_key(&a));
+    assert!(mod_changes.contains_key(&tfls_core::uri::url_to_uri(&a)));
 
     let workspace = find_action(&actions, "Convert 2 deprecated lookups in workspace");
     let ws_changes = workspace
@@ -1538,8 +1586,8 @@ async fn scope_lookup_to_index_workspace_covers_unrelated_dirs() {
         .and_then(|e| e.changes.as_ref())
         .unwrap();
     assert_eq!(ws_changes.len(), 2, "workspace scope = both dirs");
-    assert!(ws_changes.contains_key(&a));
-    assert!(ws_changes.contains_key(&b));
+    assert!(ws_changes.contains_key(&tfls_core::uri::url_to_uri(&a)));
+    assert!(ws_changes.contains_key(&tfls_core::uri::url_to_uri(&b)));
 }
 
 #[tokio::test]
@@ -1560,8 +1608,14 @@ async fn scope_set_variable_types_module_aggregates_inferences() {
         .and_then(|e| e.changes.as_ref())
         .unwrap();
     assert_eq!(changes.len(), 2);
-    assert_eq!(changes.get(&a).map(Vec::len), Some(1));
-    assert_eq!(changes.get(&b).map(Vec::len), Some(1));
+    assert_eq!(
+        changes.get(&tfls_core::uri::url_to_uri(&a)).map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        changes.get(&tfls_core::uri::url_to_uri(&b)).map(Vec::len),
+        Some(1)
+    );
 }
 
 #[tokio::test]
@@ -1584,10 +1638,16 @@ async fn scope_declare_undefined_module_uses_union_of_declarations() {
 
     // Active file (b.tf) and sibling (a.tf) MUST NOT be edited.
     if let Some(changes) = module.edit.as_ref().and_then(|e| e.changes.as_ref()) {
-        assert!(!changes.contains_key(&b), "b.tf must not be edited");
-        assert!(!changes.contains_key(&a), "a.tf must not be edited");
+        assert!(
+            !changes.contains_key(&tfls_core::uri::url_to_uri(&b)),
+            "b.tf must not be edited"
+        );
+        assert!(
+            !changes.contains_key(&tfls_core::uri::url_to_uri(&a)),
+            "a.tf must not be edited"
+        );
     }
-    use tower_lsp::lsp_types::{DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp};
+    use lsp_types::{DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp};
     let dc = module
         .edit
         .as_ref()
@@ -1603,11 +1663,11 @@ async fn scope_declare_undefined_module_uses_union_of_declarations() {
     for op in ops {
         match op {
             DocumentChangeOperation::Op(ResourceOp::Create(c)) => {
-                assert_eq!(c.uri, target);
+                assert_eq!(c.uri, tfls_core::uri::url_to_uri(&target));
                 saw_create = true;
             }
             DocumentChangeOperation::Edit(te) => {
-                assert_eq!(te.text_document.uri, target);
+                assert_eq!(te.text_document.uri, tfls_core::uri::url_to_uri(&target));
                 for e in &te.edits {
                     let OneOf::Left(edit) = e else {
                         panic!("annotated edit not expected");
@@ -1637,7 +1697,7 @@ async fn move_outputs_creates_outputs_tf_when_missing() {
     let actions = all_actions_for(&backend, &main).await;
     let action = find_action(&actions, "Move 2 output blocks in this module");
 
-    use tower_lsp::lsp_types::{DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp};
+    use lsp_types::{DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp};
     let target = uri("file:///nonexistent-mod-mo/outputs.tf");
     let dc = action
         .edit
@@ -1654,11 +1714,11 @@ async fn move_outputs_creates_outputs_tf_when_missing() {
     for op in ops {
         match op {
             DocumentChangeOperation::Op(ResourceOp::Create(c)) => {
-                assert_eq!(c.uri, target);
+                assert_eq!(c.uri, tfls_core::uri::url_to_uri(&target));
                 saw_create = true;
             }
             DocumentChangeOperation::Edit(te) => {
-                if te.text_document.uri == main {
+                if te.text_document.uri == tfls_core::uri::url_to_uri(&main) {
                     for e in &te.edits {
                         let OneOf::Left(edit) = e else {
                             panic!("annotated edit not expected");
@@ -1670,7 +1730,7 @@ async fn move_outputs_creates_outputs_tf_when_missing() {
                         );
                         saw_main_delete_count += 1;
                     }
-                } else if te.text_document.uri == target {
+                } else if te.text_document.uri == tfls_core::uri::url_to_uri(&target) {
                     for e in &te.edits {
                         let OneOf::Left(edit) = e else {
                             panic!("annotated edit not expected");
@@ -1709,7 +1769,7 @@ async fn move_outputs_skips_outputs_tf_itself() {
     let actions = all_actions_for(&backend, &main).await;
     let action = find_action(&actions, "Move 1 output block in this module");
 
-    use tower_lsp::lsp_types::{DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp};
+    use lsp_types::{DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp};
     let dc = action
         .edit
         .as_ref()
@@ -1724,7 +1784,7 @@ async fn move_outputs_skips_outputs_tf_itself() {
             panic!("must NOT create existing outputs.tf");
         }
         if let DocumentChangeOperation::Edit(te) = op {
-            if te.text_document.uri == outputs {
+            if te.text_document.uri == tfls_core::uri::url_to_uri(&outputs) {
                 for e in &te.edits {
                     let OneOf::Left(edit) = e else { continue };
                     assert!(
@@ -1733,7 +1793,7 @@ async fn move_outputs_skips_outputs_tf_itself() {
                     );
                 }
             }
-            if te.text_document.uri == main {
+            if te.text_document.uri == tfls_core::uri::url_to_uri(&main) {
                 for e in &te.edits {
                     let OneOf::Left(edit) = e else { continue };
                     assert!(edit.new_text.is_empty(), "main delete: empty new_text");
@@ -1755,7 +1815,7 @@ async fn move_variables_creates_variables_tf_when_missing() {
     let actions = all_actions_for(&backend, &main).await;
     let action = find_action(&actions, "Move 2 variable blocks in this module");
 
-    use tower_lsp::lsp_types::{DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp};
+    use lsp_types::{DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp};
     let target = uri("file:///nonexistent-mod-mv/variables.tf");
     let dc = action
         .edit
@@ -1772,11 +1832,11 @@ async fn move_variables_creates_variables_tf_when_missing() {
     for op in ops {
         match op {
             DocumentChangeOperation::Op(ResourceOp::Create(c)) => {
-                assert_eq!(c.uri, target);
+                assert_eq!(c.uri, tfls_core::uri::url_to_uri(&target));
                 saw_create = true;
             }
             DocumentChangeOperation::Edit(te) => {
-                if te.text_document.uri == main {
+                if te.text_document.uri == tfls_core::uri::url_to_uri(&main) {
                     for e in &te.edits {
                         let OneOf::Left(edit) = e else {
                             panic!("annotated edit not expected");
@@ -1784,7 +1844,7 @@ async fn move_variables_creates_variables_tf_when_missing() {
                         assert!(edit.new_text.is_empty());
                         delete_count += 1;
                     }
-                } else if te.text_document.uri == target {
+                } else if te.text_document.uri == tfls_core::uri::url_to_uri(&target) {
                     for e in &te.edits {
                         let OneOf::Left(edit) = e else { continue };
                         target_text.push_str(&edit.new_text);
@@ -1814,7 +1874,7 @@ async fn move_variables_skips_variables_tf_itself() {
     let actions = all_actions_for(&backend, &main).await;
     let action = find_action(&actions, "Move 1 variable block in this module");
 
-    use tower_lsp::lsp_types::{DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp};
+    use lsp_types::{DocumentChangeOperation, DocumentChanges, OneOf, ResourceOp};
     let dc = action
         .edit
         .as_ref()
@@ -1829,7 +1889,7 @@ async fn move_variables_skips_variables_tf_itself() {
             panic!("must NOT create existing variables.tf");
         }
         if let DocumentChangeOperation::Edit(te) = op {
-            if te.text_document.uri == vars {
+            if te.text_document.uri == tfls_core::uri::url_to_uri(&vars) {
                 for e in &te.edits {
                     let OneOf::Left(edit) = e else { continue };
                     assert!(edit.new_text.contains("variable \"a\""));
@@ -1905,7 +1965,7 @@ async fn format_action_file_emits_when_unformatted() {
         .edit
         .as_ref()
         .and_then(|e| e.changes.as_ref())
-        .and_then(|c| c.get(&u))
+        .and_then(|c| c.get(&tfls_core::uri::url_to_uri(&u)))
         .expect("file edit");
     assert_eq!(edits.len(), 1, "single whole-file TextEdit");
     assert!(
@@ -1964,9 +2024,18 @@ async fn format_action_module_covers_dirty_siblings_only() {
         .and_then(|e| e.changes.as_ref())
         .expect("changes map");
     assert_eq!(changes.len(), 2, "exactly the two dirty siblings");
-    assert!(!changes.contains_key(&a), "clean a.tf untouched");
-    assert!(changes.contains_key(&b), "dirty b.tf included");
-    assert!(changes.contains_key(&c), "dirty c.tf included");
+    assert!(
+        !changes.contains_key(&tfls_core::uri::url_to_uri(&a)),
+        "clean a.tf untouched"
+    );
+    assert!(
+        changes.contains_key(&tfls_core::uri::url_to_uri(&b)),
+        "dirty b.tf included"
+    );
+    assert!(
+        changes.contains_key(&tfls_core::uri::url_to_uri(&c)),
+        "dirty c.tf included"
+    );
 }
 
 #[tokio::test]
@@ -1988,8 +2057,8 @@ async fn format_action_workspace_skips_clean_files() {
         .and_then(|e| e.changes.as_ref())
         .unwrap();
     assert_eq!(changes.len(), 1);
-    assert!(changes.contains_key(&dirty));
-    assert!(!changes.contains_key(&clean));
+    assert!(changes.contains_key(&tfls_core::uri::url_to_uri(&dirty)));
+    assert!(!changes.contains_key(&tfls_core::uri::url_to_uri(&clean)));
 }
 
 #[tokio::test]
@@ -2010,7 +2079,7 @@ async fn format_action_selection_uses_range() {
         .edit
         .as_ref()
         .and_then(|e| e.changes.as_ref())
-        .and_then(|c| c.get(&u))
+        .and_then(|c| c.get(&tfls_core::uri::url_to_uri(&u)))
         .expect("selection edit");
     assert_eq!(edits.len(), 1);
     assert_eq!(edits[0].range, range, "edit covers exactly the selection");
@@ -2040,7 +2109,7 @@ async fn format_action_respects_runtime_style_toggle() {
                 .edit
                 .as_ref()
                 .and_then(|e| e.changes.as_ref())
-                .and_then(|c| c.get(&u))
+                .and_then(|c| c.get(&tfls_core::uri::url_to_uri(&u)))
                 .unwrap();
             let z_pos = edits[0].new_text.find('z').unwrap();
             let a_pos = edits[0].new_text.find("\"a\"").unwrap();
@@ -2066,7 +2135,7 @@ async fn format_action_respects_runtime_style_toggle() {
         .edit
         .as_ref()
         .and_then(|e| e.changes.as_ref())
-        .and_then(|c| c.get(&u))
+        .and_then(|c| c.get(&tfls_core::uri::url_to_uri(&u)))
         .unwrap();
     let a_pos = edits[0].new_text.find("\"a\"").unwrap();
     let z_pos = edits[0].new_text.find("\"z\"").unwrap();
@@ -2089,7 +2158,9 @@ async fn null_resource_action_instance_at_cursor() {
     let actions = all_actions_for(&backend, &u).await;
     let action = find_action(&actions, "Convert null_resource.x to terraform_data");
     let edits = doc_change_edits(action);
-    let main_edits = edits.get(&u).expect("file edit");
+    let main_edits = edits
+        .get(&tfls_core::uri::url_to_uri(&u))
+        .expect("file edit");
     assert!(
         main_edits
             .iter()
@@ -2099,7 +2170,9 @@ async fn null_resource_action_instance_at_cursor() {
     // moved.tf companion: created with one moved block.
     let moved = uri("file:///fmt-nrt-1/moved.tf");
     assert!(has_create_file(action, &moved), "moved.tf created");
-    let moved_text = edits.get(&moved).expect("moved.tf edit");
+    let moved_text = edits
+        .get(&tfls_core::uri::url_to_uri(&moved))
+        .expect("moved.tf edit");
     let body = moved_text
         .iter()
         .map(|e| e.new_text.clone())
@@ -2123,7 +2196,9 @@ async fn null_resource_action_renames_triggers_attribute() {
     let actions = all_actions_for(&backend, &u).await;
     let action = find_action(&actions, "Convert 1 null_resource block in this file");
     let edits = doc_change_edits(action);
-    let main_edits = edits.get(&u).expect("file edit");
+    let main_edits = edits
+        .get(&tfls_core::uri::url_to_uri(&u))
+        .expect("file edit");
     assert!(
         main_edits
             .iter()
@@ -2146,15 +2221,15 @@ async fn null_resource_action_module_covers_siblings() {
     let actions = all_actions_for(&backend, &a).await;
     let action = find_action(&actions, "Convert 2 null_resource blocks in this module");
     let edits = doc_change_edits(action);
-    assert!(edits.contains_key(&a));
-    assert!(edits.contains_key(&b));
+    assert!(edits.contains_key(&tfls_core::uri::url_to_uri(&a)));
+    assert!(edits.contains_key(&tfls_core::uri::url_to_uri(&b)));
     let moved = uri("file:///fmt-nrt-3/moved.tf");
     assert!(
         has_create_file(action, &moved),
         "single moved.tf for module"
     );
     let body = edits
-        .get(&moved)
+        .get(&tfls_core::uri::url_to_uri(&moved))
         .expect("moved.tf edit")
         .iter()
         .map(|e| e.new_text.clone())
@@ -2212,8 +2287,14 @@ async fn null_resource_action_workspace_covers_unrelated_dirs() {
     let actions = all_actions_for(&backend, &a).await;
     let action = find_action(&actions, "Convert 2 null_resource blocks in workspace");
     let edits = doc_change_edits(action);
-    assert!(edits.contains_key(&a), "rewrite for A");
-    assert!(edits.contains_key(&b), "rewrite for B");
+    assert!(
+        edits.contains_key(&tfls_core::uri::url_to_uri(&a)),
+        "rewrite for A"
+    );
+    assert!(
+        edits.contains_key(&tfls_core::uri::url_to_uri(&b)),
+        "rewrite for B"
+    );
     // Each module gets its own moved.tf — workspace sweep
     // groups by directory.
     let moved_a = uri("file:///fmt-nrt-A/moved.tf");
@@ -2316,9 +2397,12 @@ async fn null_resource_action_workspace_gates_per_module() {
     let actions = all_actions_for(&backend, &a_main).await;
     let action = find_action(&actions, "Convert 1 null_resource block in workspace");
     let edits = doc_change_edits(action);
-    assert!(edits.contains_key(&a_main), "A edited");
     assert!(
-        !edits.contains_key(&b_main),
+        edits.contains_key(&tfls_core::uri::url_to_uri(&a_main)),
+        "A edited"
+    );
+    assert!(
+        !edits.contains_key(&tfls_core::uri::url_to_uri(&b_main)),
         "B gated out by its own versions.tf"
     );
     // moved.tf only for A's module.
@@ -2344,13 +2428,19 @@ async fn null_resource_action_idempotent_when_moved_present() {
     let actions = all_actions_for(&backend, &main).await;
     let action = find_action(&actions, "Convert 1 null_resource block in this file");
     let edits = doc_change_edits(action);
-    assert!(edits.contains_key(&main), "rewrite still happens");
+    assert!(
+        edits.contains_key(&tfls_core::uri::url_to_uri(&main)),
+        "rewrite still happens"
+    );
     assert!(
         !has_create_file(action, &moved),
         "moved.tf must not be re-created"
     );
     assert!(
-        edits.get(&moved).map(|v| v.is_empty()).unwrap_or(true),
+        edits
+            .get(&tfls_core::uri::url_to_uri(&moved))
+            .map(|v| v.is_empty())
+            .unwrap_or(true),
         "no append when moved block already covers the name"
     );
 }
@@ -2372,7 +2462,9 @@ async fn null_resource_action_rewrites_references() {
     let actions = all_actions_for(&backend, &u).await;
     let action = find_action(&actions, "Convert 1 null_resource block in this file");
     let edits = doc_change_edits(action);
-    let main_edits = edits.get(&u).expect("main edits");
+    let main_edits = edits
+        .get(&tfls_core::uri::url_to_uri(&u))
+        .expect("main edits");
     let head_count = main_edits
         .iter()
         .filter(|e| e.new_text == "terraform_data")
@@ -2414,23 +2506,27 @@ async fn null_resource_action_cursor_filters_references_by_name() {
     );
     let backend = fresh_backend(src, &u);
     // Position the cursor inside the `x` block (line 0).
-    let params = tower_lsp::lsp_types::CodeActionParams {
-        text_document: tower_lsp::lsp_types::TextDocumentIdentifier { uri: u.clone() },
-        range: tower_lsp::lsp_types::Range {
-            start: tower_lsp::lsp_types::Position::new(0, 25),
-            end: tower_lsp::lsp_types::Position::new(0, 25),
+    let params = lsp_types::CodeActionParams {
+        text_document: lsp_types::TextDocumentIdentifier {
+            uri: tfls_core::uri::url_to_uri(&u),
+        },
+        range: lsp_types::Range {
+            start: lsp_types::Position::new(0, 25),
+            end: lsp_types::Position::new(0, 25),
         },
         context: Default::default(),
         work_done_progress_params: Default::default(),
         partial_result_params: Default::default(),
     };
-    let actions = tower_lsp::LanguageServer::code_action(&backend, params)
+    let actions = tower_lsp_server::LanguageServer::code_action(&backend, params)
         .await
         .expect("ok")
         .unwrap_or_default();
     let action = find_action(&actions, "Convert null_resource.x to terraform_data");
     let edits = doc_change_edits(action);
-    let main_edits = edits.get(&u).expect("main edits");
+    let main_edits = edits
+        .get(&tfls_core::uri::url_to_uri(&u))
+        .expect("main edits");
     // Exactly ONE `null_resource` head reference rewritten (the
     // one in `output "ox"`); `output "oy"` should be untouched.
     let head_count = main_edits
@@ -2467,7 +2563,7 @@ async fn template_file_action_instance_at_cursor() {
         .edit
         .as_ref()
         .and_then(|e| e.changes.as_ref())
-        .and_then(|c| c.get(&u))
+        .and_then(|c| c.get(&tfls_core::uri::url_to_uri(&u)))
         .expect("file edits");
     // 1. data block deleted
     let delete = edits
@@ -2520,7 +2616,7 @@ async fn template_file_action_unwraps_file_call() {
         .edit
         .as_ref()
         .and_then(|e| e.changes.as_ref())
-        .and_then(|c| c.get(&u))
+        .and_then(|c| c.get(&tfls_core::uri::url_to_uri(&u)))
         .expect("file edits");
     let append = edits
         .iter()
@@ -2559,7 +2655,7 @@ async fn template_file_action_unwraps_file_with_expr_arg() {
         .edit
         .as_ref()
         .and_then(|e| e.changes.as_ref())
-        .and_then(|c| c.get(&u))
+        .and_then(|c| c.get(&tfls_core::uri::url_to_uri(&u)))
         .expect("file edits");
     let append = edits
         .iter()
@@ -2592,7 +2688,7 @@ async fn template_file_action_does_not_unwrap_other_funcs() {
         .edit
         .as_ref()
         .and_then(|e| e.changes.as_ref())
-        .and_then(|c| c.get(&u))
+        .and_then(|c| c.get(&tfls_core::uri::url_to_uri(&u)))
         .expect("file edits");
     let append = edits
         .iter()
@@ -2621,7 +2717,7 @@ async fn template_file_action_handles_missing_vars() {
         .edit
         .as_ref()
         .and_then(|e| e.changes.as_ref())
-        .and_then(|c| c.get(&u))
+        .and_then(|c| c.get(&tfls_core::uri::url_to_uri(&u)))
         .expect("file edits");
     let append = edits
         .iter()
@@ -2651,7 +2747,7 @@ async fn template_file_action_file_scope_aggregates_locals() {
         .edit
         .as_ref()
         .and_then(|e| e.changes.as_ref())
-        .and_then(|c| c.get(&u))
+        .and_then(|c| c.get(&tfls_core::uri::url_to_uri(&u)))
         .expect("file edits");
     // Two deletes (one per block) + one combined locals append.
     let deletes = edits.iter().filter(|e| e.new_text.is_empty()).count();
@@ -2689,9 +2785,11 @@ async fn template_file_action_module_rewrites_cross_file_refs() {
         .and_then(|e| e.changes.as_ref())
         .expect("changes");
     // Host edits in main.tf.
-    assert!(changes.contains_key(&main));
+    assert!(changes.contains_key(&tfls_core::uri::url_to_uri(&main)));
     // Reference rewrites in outputs.tf.
-    let outputs_edits = changes.get(&outputs).expect("ref edits in outputs.tf");
+    let outputs_edits = changes
+        .get(&tfls_core::uri::url_to_uri(&outputs))
+        .expect("ref edits in outputs.tf");
     assert!(
         outputs_edits.iter().any(|e| e.new_text == "local.x"),
         "got: {outputs_edits:?}"
@@ -2742,7 +2840,7 @@ async fn template_file_action_filters_overlapping_ref_in_deleted_vars() {
         .edit
         .as_ref()
         .and_then(|e| e.changes.as_ref())
-        .and_then(|c| c.get(&u))
+        .and_then(|c| c.get(&tfls_core::uri::url_to_uri(&u)))
         .expect("file edits");
 
     // No two edits in the same file may overlap. If the bug is
@@ -2837,7 +2935,7 @@ async fn template_file_action_partial_skip_on_collision() {
         .edit
         .as_ref()
         .and_then(|e| e.changes.as_ref())
-        .and_then(|c| c.get(&u))
+        .and_then(|c| c.get(&tfls_core::uri::url_to_uri(&u)))
         .expect("file edits");
     let append = edits
         .iter()
@@ -2889,7 +2987,7 @@ async fn null_resource_action_appends_to_existing_moved_tf() {
         "must not re-create existing moved.tf"
     );
     let body = edits
-        .get(&moved)
+        .get(&tfls_core::uri::url_to_uri(&moved))
         .expect("moved.tf append")
         .iter()
         .map(|e| e.new_text.clone())
@@ -2914,7 +3012,9 @@ async fn aws_alb_rename_action_emits_label_rewrite_and_moved_block() {
     let actions = all_actions_for(&backend, &u).await;
     let action = find_action(&actions, "Rename 1 deprecated provider type in this file");
     let edits = doc_change_edits(action);
-    let main_edits = edits.get(&u).expect("main.tf edits");
+    let main_edits = edits
+        .get(&tfls_core::uri::url_to_uri(&u))
+        .expect("main.tf edits");
 
     // Block-label rewrite: `"aws_alb"` → `"aws_lb"`.
     assert!(
@@ -2931,7 +3031,7 @@ async fn aws_alb_rename_action_emits_label_rewrite_and_moved_block() {
     let moved = uri("file:///fmt-aws-alb/moved.tf");
     assert!(has_create_file(action, &moved), "moved.tf must be created");
     let moved_text = edits
-        .get(&moved)
+        .get(&tfls_core::uri::url_to_uri(&moved))
         .expect("moved.tf edits")
         .iter()
         .map(|e| e.new_text.clone())
@@ -2978,8 +3078,14 @@ async fn aws_alb_rename_action_module_scope_covers_siblings() {
         "Rename 2 deprecated provider types in this module",
     );
     let edits = doc_change_edits(action);
-    assert!(edits.contains_key(&main), "main.tf edited");
-    assert!(edits.contains_key(&extra), "extra.tf edited");
+    assert!(
+        edits.contains_key(&tfls_core::uri::url_to_uri(&main)),
+        "main.tf edited"
+    );
+    assert!(
+        edits.contains_key(&tfls_core::uri::url_to_uri(&extra)),
+        "extra.tf edited"
+    );
 }
 
 #[tokio::test]
@@ -3021,7 +3127,9 @@ async fn kubernetes_pod_rename_action_emits_commented_moved_with_header() {
     let actions = all_actions_for(&backend, &u).await;
     let action = find_action(&actions, "Rename 1 deprecated provider type in this file");
     let edits = doc_change_edits(action);
-    let main_edits = edits.get(&u).expect("main.tf edits");
+    let main_edits = edits
+        .get(&tfls_core::uri::url_to_uri(&u))
+        .expect("main.tf edits");
 
     assert!(main_edits
         .iter()
@@ -3033,7 +3141,7 @@ async fn kubernetes_pod_rename_action_emits_commented_moved_with_header() {
     let moved = uri("file:///fmt-k8s-pod/moved.tf");
     assert!(has_create_file(action, &moved));
     let moved_text = edits
-        .get(&moved)
+        .get(&tfls_core::uri::url_to_uri(&moved))
         .expect("moved.tf edits")
         .iter()
         .map(|e| e.new_text.clone())
@@ -3082,7 +3190,7 @@ async fn kubernetes_rename_action_handles_multiple_kinds_with_commented_moved() 
     let moved = uri("file:///fmt-k8s-multi/moved.tf");
     assert!(has_create_file(action, &moved));
     let moved_text = edits
-        .get(&moved)
+        .get(&tfls_core::uri::url_to_uri(&moved))
         .expect("moved.tf edits")
         .iter()
         .map(|e| e.new_text.clone())
@@ -3124,7 +3232,7 @@ async fn aws_s3_bucket_object_without_terraform_18_emits_commented_with_18_hint(
     let edits = doc_change_edits(action);
     let moved = uri("file:///fmt-aws-s3-no18/moved.tf");
     let moved_text = edits
-        .get(&moved)
+        .get(&tfls_core::uri::url_to_uri(&moved))
         .expect("moved.tf edits")
         .iter()
         .map(|e| e.new_text.clone())
@@ -3160,7 +3268,7 @@ async fn aws_s3_bucket_object_action_emits_moved_when_terraform_18_admitted() {
         "terraform 1.8+ admitted ⇒ cross-type moved is safe to emit"
     );
     let moved_body = edits
-        .get(&moved)
+        .get(&tfls_core::uri::url_to_uri(&moved))
         .expect("moved.tf edits")
         .iter()
         .map(|e| e.new_text.clone())
@@ -3192,9 +3300,11 @@ async fn block_rename_cursor_variant_surfaces_aws_alb_quickfix() {
     let src = "resource \"aws_alb\" \"web\" {\n  name = \"web\"\n}\n";
     let backend = fresh_backend(src, &u);
 
-    use tower_lsp::lsp_types::*;
+    use lsp_types::*;
     let params = CodeActionParams {
-        text_document: TextDocumentIdentifier { uri: u.clone() },
+        text_document: TextDocumentIdentifier {
+            uri: tfls_core::uri::url_to_uri(&u),
+        },
         range: Range {
             start: Position::new(0, 22), // inside the block label
             end: Position::new(0, 22),
@@ -3203,7 +3313,7 @@ async fn block_rename_cursor_variant_surfaces_aws_alb_quickfix() {
         work_done_progress_params: Default::default(),
         partial_result_params: Default::default(),
     };
-    let actions = tower_lsp::LanguageServer::code_action(&backend, params)
+    let actions = tower_lsp_server::LanguageServer::code_action(&backend, params)
         .await
         .expect("code_action ok")
         .unwrap_or_default();
@@ -3211,7 +3321,9 @@ async fn block_rename_cursor_variant_surfaces_aws_alb_quickfix() {
     let action = find_action(&actions, "Convert aws_alb.web to aws_lb");
     assert_eq!(action.kind, Some(CodeActionKind::QUICKFIX));
     let edits = doc_change_edits(action);
-    let main_edits = edits.get(&u).expect("main.tf edits");
+    let main_edits = edits
+        .get(&tfls_core::uri::url_to_uri(&u))
+        .expect("main.tf edits");
     assert!(main_edits.iter().any(|e| e.new_text == "\"aws_lb\""));
 }
 
@@ -3230,9 +3342,11 @@ async fn block_rename_cursor_variant_filters_refs_by_name() {
     );
     let backend = fresh_backend(src, &u);
 
-    use tower_lsp::lsp_types::*;
+    use lsp_types::*;
     let params = CodeActionParams {
-        text_document: TextDocumentIdentifier { uri: u.clone() },
+        text_document: TextDocumentIdentifier {
+            uri: tfls_core::uri::url_to_uri(&u),
+        },
         range: Range {
             start: Position::new(0, 22), // inside `kubernetes_pod` "target" block
             end: Position::new(0, 22),
@@ -3241,7 +3355,7 @@ async fn block_rename_cursor_variant_filters_refs_by_name() {
         work_done_progress_params: Default::default(),
         partial_result_params: Default::default(),
     };
-    let actions = tower_lsp::LanguageServer::code_action(&backend, params)
+    let actions = tower_lsp_server::LanguageServer::code_action(&backend, params)
         .await
         .expect("code_action ok")
         .unwrap_or_default();
@@ -3251,7 +3365,9 @@ async fn block_rename_cursor_variant_filters_refs_by_name() {
         "Convert kubernetes_pod.target to kubernetes_pod_v1",
     );
     let edits = doc_change_edits(action);
-    let main_edits = edits.get(&u).expect("main.tf edits");
+    let main_edits = edits
+        .get(&tfls_core::uri::url_to_uri(&u))
+        .expect("main.tf edits");
 
     // Exactly one label rewrite (the target block).
     let label_count = main_edits
@@ -3286,9 +3402,11 @@ async fn block_rename_cursor_variant_suppressed_by_gate() {
     );
     let backend = fresh_backend(src, &u);
 
-    use tower_lsp::lsp_types::*;
+    use lsp_types::*;
     let params = CodeActionParams {
-        text_document: TextDocumentIdentifier { uri: u.clone() },
+        text_document: TextDocumentIdentifier {
+            uri: tfls_core::uri::url_to_uri(&u),
+        },
         range: Range {
             // Inside the aws_alb block (line 5).
             start: Position::new(5, 22),
@@ -3298,7 +3416,7 @@ async fn block_rename_cursor_variant_suppressed_by_gate() {
         work_done_progress_params: Default::default(),
         partial_result_params: Default::default(),
     };
-    let actions = tower_lsp::LanguageServer::code_action(&backend, params)
+    let actions = tower_lsp_server::LanguageServer::code_action(&backend, params)
         .await
         .expect("code_action ok")
         .unwrap_or_default();
@@ -3318,9 +3436,11 @@ async fn block_rename_cursor_variant_emits_real_moved_for_aliased() {
     let src = "resource \"aws_alb\" \"web\" {\n  name = \"web\"\n}\n";
     let backend = fresh_backend(src, &u);
 
-    use tower_lsp::lsp_types::*;
+    use lsp_types::*;
     let params = CodeActionParams {
-        text_document: TextDocumentIdentifier { uri: u.clone() },
+        text_document: TextDocumentIdentifier {
+            uri: tfls_core::uri::url_to_uri(&u),
+        },
         range: Range {
             start: Position::new(0, 22),
             end: Position::new(0, 22),
@@ -3329,7 +3449,7 @@ async fn block_rename_cursor_variant_emits_real_moved_for_aliased() {
         work_done_progress_params: Default::default(),
         partial_result_params: Default::default(),
     };
-    let actions = tower_lsp::LanguageServer::code_action(&backend, params)
+    let actions = tower_lsp_server::LanguageServer::code_action(&backend, params)
         .await
         .expect("code_action ok")
         .unwrap_or_default();
@@ -3339,7 +3459,7 @@ async fn block_rename_cursor_variant_emits_real_moved_for_aliased() {
     let moved = uri("file:///fmt-cursor-alb-moved/moved.tf");
     assert!(has_create_file(action, &moved));
     let body = edits
-        .get(&moved)
+        .get(&tfls_core::uri::url_to_uri(&moved))
         .expect("moved.tf edits")
         .iter()
         .map(|e| e.new_text.clone())
@@ -3358,9 +3478,11 @@ async fn block_rename_cursor_variant_emits_commented_for_manual() {
     let src = "resource \"kubernetes_pod\" \"p\" {\n  metadata {\n    name = \"p\"\n  }\n}\n";
     let backend = fresh_backend(src, &u);
 
-    use tower_lsp::lsp_types::*;
+    use lsp_types::*;
     let params = CodeActionParams {
-        text_document: TextDocumentIdentifier { uri: u.clone() },
+        text_document: TextDocumentIdentifier {
+            uri: tfls_core::uri::url_to_uri(&u),
+        },
         range: Range {
             start: Position::new(0, 22),
             end: Position::new(0, 22),
@@ -3369,7 +3491,7 @@ async fn block_rename_cursor_variant_emits_commented_for_manual() {
         work_done_progress_params: Default::default(),
         partial_result_params: Default::default(),
     };
-    let actions = tower_lsp::LanguageServer::code_action(&backend, params)
+    let actions = tower_lsp_server::LanguageServer::code_action(&backend, params)
         .await
         .expect("code_action ok")
         .unwrap_or_default();
@@ -3378,7 +3500,7 @@ async fn block_rename_cursor_variant_emits_commented_for_manual() {
     let edits = doc_change_edits(action);
     let moved = uri("file:///fmt-cursor-k8s-manual/moved.tf");
     let body = edits
-        .get(&moved)
+        .get(&tfls_core::uri::url_to_uri(&moved))
         .expect("moved.tf edits")
         .iter()
         .map(|e| e.new_text.clone())
@@ -3399,7 +3521,7 @@ async fn block_rename_diag_attached_quickfix_carries_diagnostic() {
     let src = "resource \"aws_alb\" \"web\" {\n  name = \"web\"\n}\n";
     let backend = fresh_backend(src, &u);
 
-    use tower_lsp::lsp_types::*;
+    use lsp_types::*;
     // Synthesise a diagnostic the server would have produced
     // and pass it through `params.context.diagnostics`.
     let diag = Diagnostic {
@@ -3414,7 +3536,9 @@ async fn block_rename_diag_attached_quickfix_carries_diagnostic() {
         ..Default::default()
     };
     let params = CodeActionParams {
-        text_document: TextDocumentIdentifier { uri: u.clone() },
+        text_document: TextDocumentIdentifier {
+            uri: tfls_core::uri::url_to_uri(&u),
+        },
         range: diag.range,
         context: CodeActionContext {
             diagnostics: vec![diag.clone()],
@@ -3424,7 +3548,7 @@ async fn block_rename_diag_attached_quickfix_carries_diagnostic() {
         work_done_progress_params: Default::default(),
         partial_result_params: Default::default(),
     };
-    let actions = tower_lsp::LanguageServer::code_action(&backend, params)
+    let actions = tower_lsp_server::LanguageServer::code_action(&backend, params)
         .await
         .expect("code_action ok")
         .unwrap_or_default();
@@ -3461,9 +3585,11 @@ async fn block_rename_cursor_variant_no_action_outside_block() {
     let src = "resource \"aws_instance\" \"x\" { ami = \"a\" }\n";
     let backend = fresh_backend(src, &u);
 
-    use tower_lsp::lsp_types::*;
+    use lsp_types::*;
     let params = CodeActionParams {
-        text_document: TextDocumentIdentifier { uri: u.clone() },
+        text_document: TextDocumentIdentifier {
+            uri: tfls_core::uri::url_to_uri(&u),
+        },
         range: Range {
             start: Position::new(0, 12),
             end: Position::new(0, 12),
@@ -3472,7 +3598,7 @@ async fn block_rename_cursor_variant_no_action_outside_block() {
         work_done_progress_params: Default::default(),
         partial_result_params: Default::default(),
     };
-    let actions = tower_lsp::LanguageServer::code_action(&backend, params)
+    let actions = tower_lsp_server::LanguageServer::code_action(&backend, params)
         .await
         .expect("code_action ok")
         .unwrap_or_default();
@@ -3511,13 +3637,16 @@ async fn rename_action_idempotent_when_moved_block_exists() {
     // Action still produces label rewrites (the block in main
     // still says `aws_alb`); it just doesn't re-add the moved
     // block (already covered).
-    assert!(edits.contains_key(&main), "main.tf still rewritten");
+    assert!(
+        edits.contains_key(&tfls_core::uri::url_to_uri(&main)),
+        "main.tf still rewritten"
+    );
     assert!(
         !has_create_file(action, &moved),
         "moved.tf must not be re-created"
     );
     let moved_appends = edits
-        .get(&moved)
+        .get(&tfls_core::uri::url_to_uri(&moved))
         .map(|v| v.iter().map(|e| e.new_text.clone()).collect::<String>())
         .unwrap_or_default();
     assert!(
@@ -3557,7 +3686,7 @@ async fn quickfix_unknown_provider_local_offers_known_aliases() {
         &backend,
         CodeActionParams {
             text_document: TextDocumentIdentifier {
-                uri: main_u.clone(),
+                uri: tfls_core::uri::url_to_uri(&main_u),
             },
             range: unknown.range,
             context: CodeActionContext {
@@ -3637,7 +3766,7 @@ async fn quickfix_unknown_provider_function_offers_known_functions() {
         &backend,
         CodeActionParams {
             text_document: TextDocumentIdentifier {
-                uri: main_u.clone(),
+                uri: tfls_core::uri::url_to_uri(&main_u),
             },
             range: bad_fn.range,
             context: CodeActionContext {

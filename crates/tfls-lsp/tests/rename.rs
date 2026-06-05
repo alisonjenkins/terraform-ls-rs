@@ -2,13 +2,14 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use lsp_types::{
+    Position, PrepareRenameResponse, RenameParams, TextDocumentIdentifier,
+    TextDocumentPositionParams, WorkDoneProgressParams,
+};
 use tfls_lsp::Backend;
 use tfls_state::DocumentState;
-use tower_lsp::lsp_types::{
-    Position, PrepareRenameResponse, RenameParams, TextDocumentIdentifier,
-    TextDocumentPositionParams, Url, WorkDoneProgressParams,
-};
-use tower_lsp::LspService;
+use tower_lsp_server::LspService;
+use url::Url;
 
 fn uri(s: &str) -> Url {
     Url::parse(s).expect("url")
@@ -39,7 +40,9 @@ async fn prepare_rename_returns_narrow_range_for_variable_reference() {
     let resp = tfls_lsp::handlers::rename::prepare_rename(
         &backend,
         TextDocumentPositionParams {
-            text_document: TextDocumentIdentifier { uri: u },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&u),
+            },
             position: Position::new(1, col + 2),
         },
     )
@@ -70,7 +73,9 @@ async fn rename_variable_updates_definition_and_reference() {
         &backend,
         RenameParams {
             text_document_position: TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier { uri: u.clone() },
+                text_document: TextDocumentIdentifier {
+                    uri: tfls_core::uri::url_to_uri(&u),
+                },
                 position: Position::new(1, col + 2),
             },
             new_name: "where".to_string(),
@@ -82,7 +87,7 @@ async fn rename_variable_updates_definition_and_reference() {
     .expect("edit");
 
     let changes = edit.changes.expect("changes");
-    let edits = changes.get(&u).expect("edits");
+    let edits = changes.get(&tfls_core::uri::url_to_uri(&u)).expect("edits");
     assert_eq!(edits.len(), 2, "definition + reference");
     for e in edits {
         assert_eq!(e.new_text, "where");
@@ -99,7 +104,9 @@ async fn rename_returns_none_when_cursor_not_on_symbol() {
         &backend,
         RenameParams {
             text_document_position: TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier { uri: u },
+                text_document: TextDocumentIdentifier {
+                    uri: tfls_core::uri::url_to_uri(&u),
+                },
                 position: Position::new(1, 0),
             },
             new_name: "x".to_string(),
@@ -122,7 +129,9 @@ async fn prepare_rename_works_on_variable_definition_label() {
     let resp = tfls_lsp::handlers::rename::prepare_rename(
         &backend,
         TextDocumentPositionParams {
-            text_document: TextDocumentIdentifier { uri: u },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&u),
+            },
             position: Position::new(0, 12),
         },
     )
@@ -152,7 +161,9 @@ async fn rename_from_variable_definition_label_updates_both() {
         &backend,
         RenameParams {
             text_document_position: TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier { uri: u.clone() },
+                text_document: TextDocumentIdentifier {
+                    uri: tfls_core::uri::url_to_uri(&u),
+                },
                 position: Position::new(0, 12),
             },
             new_name: "where".to_string(),
@@ -164,7 +175,7 @@ async fn rename_from_variable_definition_label_updates_both() {
     .expect("edit");
 
     let changes = edit.changes.expect("changes");
-    let edits = changes.get(&u).expect("edits");
+    let edits = changes.get(&tfls_core::uri::url_to_uri(&u)).expect("edits");
     assert_eq!(edits.len(), 2, "definition + reference both get renamed");
     for e in edits {
         assert_eq!(e.new_text, "where");
@@ -185,7 +196,9 @@ output "c" { value = var.x }
         &backend,
         RenameParams {
             text_document_position: TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier { uri: u.clone() },
+                text_document: TextDocumentIdentifier {
+                    uri: tfls_core::uri::url_to_uri(&u),
+                },
                 position: Position::new(1, col),
             },
             new_name: "y".to_string(),
@@ -196,7 +209,11 @@ output "c" { value = var.x }
     .expect("ok")
     .expect("edit");
 
-    let edits = edit.changes.unwrap().remove(&u).unwrap();
+    let edits = edit
+        .changes
+        .unwrap()
+        .remove(&tfls_core::uri::url_to_uri(&u))
+        .unwrap();
     // 1 definition + 3 references = 4.
     assert_eq!(edits.len(), 4);
 }
@@ -238,7 +255,7 @@ async fn rename_provider_local_alias_workspace_wide() {
         RenameParams {
             text_document_position: TextDocumentPositionParams {
                 text_document: TextDocumentIdentifier {
-                    uri: main_u.clone(),
+                    uri: tfls_core::uri::url_to_uri(&main_u),
                 },
                 position: Position::new(1, col),
             },
@@ -252,15 +269,21 @@ async fn rename_provider_local_alias_workspace_wide() {
 
     let mut changes = edit.changes.expect("changes");
     // versions.tf — required_providers attribute key.
-    let versions_edits = changes.remove(&versions_u).expect("versions.tf");
+    let versions_edits = changes
+        .remove(&tfls_core::uri::url_to_uri(&versions_u))
+        .expect("versions.tf");
     assert_eq!(versions_edits.len(), 1);
     assert_eq!(versions_edits[0].new_text, "aws_new");
     // main.tf — call site.
-    let main_edits = changes.remove(&main_u).expect("main.tf");
+    let main_edits = changes
+        .remove(&tfls_core::uri::url_to_uri(&main_u))
+        .expect("main.tf");
     assert_eq!(main_edits.len(), 1);
     assert_eq!(main_edits[0].new_text, "aws_new");
     // other.tf — call site (workspace-wide).
-    let other_edits = changes.remove(&other_u).expect("other.tf");
+    let other_edits = changes
+        .remove(&tfls_core::uri::url_to_uri(&other_u))
+        .expect("other.tf");
     assert_eq!(other_edits.len(), 1);
     assert_eq!(other_edits[0].new_text, "aws_new");
 }

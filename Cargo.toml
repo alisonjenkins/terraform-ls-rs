@@ -31,9 +31,14 @@ sha2 = "0.11"
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 
-# LSP
-tower-lsp = "0.20"
-lsp-types = "0.94"
+# LSP. tower-lsp is unmaintained and pins lsp-types 0.94; tower-lsp-server is
+# the maintained fork and tracks the ls-types fork of lsp-types. We alias
+# ls-types as `lsp_types` so existing `use lsp_types::…` keeps resolving, and
+# keep `url::Url` for internal document identifiers (ls-types uses an opaque
+# `Uri`; we convert only at the LSP boundary).
+tower-lsp-server = "0.23"
+lsp-types = { package = "ls-types", version = "0.0" }
+url = { version = "2", features = ["serde"] }
 
 # HCL parsing
 hcl-edit = "0.9"

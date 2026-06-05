@@ -11,10 +11,11 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
-use lsp_types::{DiagnosticSeverity, Url};
+use lsp_types::DiagnosticSeverity;
 use tfls_lsp::handlers::document::compute_diagnostics;
 use tfls_state::{DocumentState, StateStore};
 use tfls_walker::discover_terraform_files;
+use url::Url;
 
 #[derive(Debug, Parser)]
 #[command(

@@ -131,12 +131,8 @@ async fn code_action_envtype_inference_via_wire() {
     )
     .unwrap();
 
-    let workspace_uri = lsp_types::Url::from_file_path(&workspace)
-        .unwrap()
-        .to_string();
-    let main_uri = lsp_types::Url::from_file_path(&main_tf)
-        .unwrap()
-        .to_string();
+    let workspace_uri = url::Url::from_file_path(&workspace).unwrap().to_string();
+    let main_uri = url::Url::from_file_path(&main_tf).unwrap().to_string();
 
     let mut client = TestClient::new();
     client.initialize(Some(&workspace_uri)).await;

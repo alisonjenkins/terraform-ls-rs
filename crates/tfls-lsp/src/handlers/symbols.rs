@@ -7,7 +7,7 @@ use lsp_types::{
 };
 use tfls_core::{ResourceAddress, Symbol, SymbolKind as DomainKind, SymbolVisitor};
 use tfls_state::DocumentState;
-use tower_lsp::jsonrpc;
+use tower_lsp_server::jsonrpc;
 
 use crate::backend::Backend;
 
@@ -15,7 +15,9 @@ pub async fn document_symbol(
     backend: &Backend,
     params: DocumentSymbolParams,
 ) -> jsonrpc::Result<Option<DocumentSymbolResponse>> {
-    let uri = params.text_document.uri;
+    let Some(uri) = tfls_core::uri::uri_to_url(&params.text_document.uri) else {
+        return Ok(None);
+    };
     let Some(doc) = backend.state.documents.get(&uri) else {
         return Ok(None);
     };
@@ -132,7 +134,7 @@ pub async fn workspace_symbol(
 
 #[allow(deprecated)]
 fn collect_provider_function_calls(
-    uri: &lsp_types::Url,
+    uri: &url::Url,
     doc: &tfls_state::DocumentState,
     query: &str,
     out: &mut Vec<SymbolInformation>,
@@ -194,7 +196,7 @@ fn collect_provider_function_calls(
                     tags: None,
                     deprecated: None,
                     location: lsp_types::Location {
-                        uri: uri.clone(),
+                        uri: tfls_core::uri::url_to_uri(uri),
                         range: lsp_types::Range { start, end },
                     },
                     container_name: None,

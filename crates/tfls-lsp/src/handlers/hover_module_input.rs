@@ -159,7 +159,7 @@ fn span_contains(span: Option<std::ops::Range<usize>>, offset: usize) -> bool {
 pub fn module_output_ref_hover(
     state: &StateStore,
     doc: &DocumentState,
-    uri: &lsp_types::Url,
+    uri: &url::Url,
     pos: Position,
 ) -> Option<Hover> {
     let body = doc.parsed.body.as_ref()?;
@@ -196,7 +196,7 @@ pub fn module_output_ref_hover(
 pub fn module_overview_hover(
     state: &StateStore,
     doc: &DocumentState,
-    uri: &lsp_types::Url,
+    uri: &url::Url,
     pos: Position,
 ) -> Option<Hover> {
     let body = doc.parsed.body.as_ref()?;

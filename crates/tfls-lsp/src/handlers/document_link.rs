@@ -6,9 +6,10 @@
 //! schema installed for a given type, we skip the link rather than
 //! guess.
 
-use lsp_types::{DocumentLink, DocumentLinkParams, Url};
+use lsp_types::{DocumentLink, DocumentLinkParams};
 use tfls_core::ProviderAddress;
-use tower_lsp::jsonrpc;
+use tower_lsp_server::jsonrpc;
+use url::Url;
 
 use crate::backend::Backend;
 
@@ -16,7 +17,9 @@ pub async fn document_link(
     backend: &Backend,
     params: DocumentLinkParams,
 ) -> jsonrpc::Result<Option<Vec<DocumentLink>>> {
-    let uri = params.text_document.uri;
+    let Some(uri) = tfls_core::uri::uri_to_url(&params.text_document.uri) else {
+        return Ok(None);
+    };
     let Some(doc) = backend.state.documents.get(&uri) else {
         return Ok(None);
     };
@@ -32,7 +35,7 @@ pub async fn document_link(
             if let Some(link) = registry_link(&provider, "resources", &addr.resource_type) {
                 out.push(DocumentLink {
                     range: sym.location.range(),
-                    target: Some(link),
+                    target: Some(tfls_core::uri::url_to_uri(&link)),
                     tooltip: Some(format!(
                         "Open `{}` docs on registry.terraform.io",
                         addr.resource_type
@@ -51,7 +54,7 @@ pub async fn document_link(
             if let Some(link) = registry_link(&provider, "data-sources", &addr.resource_type) {
                 out.push(DocumentLink {
                     range: sym.location.range(),
-                    target: Some(link),
+                    target: Some(tfls_core::uri::url_to_uri(&link)),
                     tooltip: Some(format!(
                         "Open `{}` docs on registry.terraform.io",
                         addr.resource_type

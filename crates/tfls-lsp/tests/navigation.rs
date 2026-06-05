@@ -4,15 +4,16 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use lsp_types::{
+    GotoDefinitionParams, GotoDefinitionResponse, HoverParams, Location, PartialResultParams,
+    Position, ReferenceContext, ReferenceParams, TextDocumentIdentifier,
+    TextDocumentPositionParams, WorkDoneProgressParams,
+};
 use tfls_lsp::Backend;
 use tfls_schema::ProviderSchemas;
 use tfls_state::DocumentState;
-use tower_lsp::lsp_types::{
-    GotoDefinitionParams, GotoDefinitionResponse, HoverParams, Location, PartialResultParams,
-    Position, ReferenceContext, ReferenceParams, TextDocumentIdentifier,
-    TextDocumentPositionParams, Url, WorkDoneProgressParams,
-};
-use tower_lsp::LspService;
+use tower_lsp_server::LspService;
+use url::Url;
 
 fn uri(path: &str) -> Url {
     Url::parse(path).expect("valid url")
@@ -47,7 +48,9 @@ async fn goto_definition_finds_variable() {
         &backend,
         GotoDefinitionParams {
             text_document_position_params: TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier { uri: u.clone() },
+                text_document: TextDocumentIdentifier {
+                    uri: tfls_core::uri::url_to_uri(&u),
+                },
                 position: pos,
             },
             work_done_progress_params: WorkDoneProgressParams::default(),
@@ -62,7 +65,7 @@ async fn goto_definition_finds_variable() {
         other => panic!("expected Array response, got {other:?}"),
     };
     assert_eq!(locations.len(), 1);
-    assert_eq!(locations[0].uri, u);
+    assert_eq!(locations[0].uri, tfls_core::uri::url_to_uri(&u));
     // Variable is on line 0.
     assert_eq!(locations[0].range.start.line, 0);
 }
@@ -81,7 +84,9 @@ output "b" { value = var.region }
         &backend,
         ReferenceParams {
             text_document_position: TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier { uri: u.clone() },
+                text_document: TextDocumentIdentifier {
+                    uri: tfls_core::uri::url_to_uri(&u),
+                },
                 position: pos,
             },
             work_done_progress_params: WorkDoneProgressParams::default(),
@@ -108,7 +113,9 @@ async fn references_at(backend: &Backend, uri: &Url, pos: Position) -> Vec<Locat
         backend,
         ReferenceParams {
             text_document_position: TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                text_document: TextDocumentIdentifier {
+                    uri: tfls_core::uri::url_to_uri(uri),
+                },
                 position: pos,
             },
             work_done_progress_params: WorkDoneProgressParams::default(),
@@ -229,7 +236,9 @@ output "x" { value = var.region }
         &backend,
         HoverParams {
             text_document_position_params: TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier { uri: u.clone() },
+                text_document: TextDocumentIdentifier {
+                    uri: tfls_core::uri::url_to_uri(&u),
+                },
                 position: pos,
             },
             work_done_progress_params: WorkDoneProgressParams::default(),
@@ -240,7 +249,7 @@ output "x" { value = var.region }
 
     let hover = hover.expect("some hover");
     let markdown = match hover.contents {
-        tower_lsp::lsp_types::HoverContents::Markup(m) => m.value,
+        lsp_types::HoverContents::Markup(m) => m.value,
         other => panic!("expected markup, got {other:?}"),
     };
     assert!(markdown.contains("variable"), "got: {markdown}");
@@ -263,7 +272,9 @@ async fn hover_works_on_definition_label() {
         &backend,
         HoverParams {
             text_document_position_params: TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier { uri: u.clone() },
+                text_document: TextDocumentIdentifier {
+                    uri: tfls_core::uri::url_to_uri(&u),
+                },
                 position: Position::new(0, 12),
             },
             work_done_progress_params: WorkDoneProgressParams::default(),
@@ -274,7 +285,7 @@ async fn hover_works_on_definition_label() {
     .expect("some hover");
 
     let markdown = match hover.contents {
-        tower_lsp::lsp_types::HoverContents::Markup(m) => m.value,
+        lsp_types::HoverContents::Markup(m) => m.value,
         other => panic!("expected markup, got {other:?}"),
     };
     assert!(markdown.contains("variable"), "got: {markdown}");
@@ -316,7 +327,9 @@ async fn hover_on_resource_attribute_returns_schema_description() {
         &backend,
         HoverParams {
             text_document_position_params: TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier { uri: u },
+                text_document: TextDocumentIdentifier {
+                    uri: tfls_core::uri::url_to_uri(&u),
+                },
                 position: Position::new(1, 3),
             },
             work_done_progress_params: WorkDoneProgressParams::default(),
@@ -327,7 +340,7 @@ async fn hover_on_resource_attribute_returns_schema_description() {
     .expect("some hover");
 
     let markdown = match hover.contents {
-        tower_lsp::lsp_types::HoverContents::Markup(m) => m.value,
+        lsp_types::HoverContents::Markup(m) => m.value,
         other => panic!("expected markup, got {other:?}"),
     };
     assert!(markdown.contains("attribute"), "got: {markdown}");
@@ -386,7 +399,9 @@ async fn hover_on_nested_block_attribute_resolves_through_block_types() {
         &backend,
         HoverParams {
             text_document_position_params: TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier { uri: u },
+                text_document: TextDocumentIdentifier {
+                    uri: tfls_core::uri::url_to_uri(&u),
+                },
                 position: Position::new(2, 6),
             },
             work_done_progress_params: WorkDoneProgressParams::default(),
@@ -397,7 +412,7 @@ async fn hover_on_nested_block_attribute_resolves_through_block_types() {
     .expect("some hover");
 
     let markdown = match hover.contents {
-        tower_lsp::lsp_types::HoverContents::Markup(m) => m.value,
+        lsp_types::HoverContents::Markup(m) => m.value,
         other => panic!("expected markup, got {other:?}"),
     };
     assert!(markdown.contains("volume_size"), "got: {markdown}");
@@ -420,7 +435,9 @@ async fn goto_definition_on_nothing_returns_none() {
         &backend,
         GotoDefinitionParams {
             text_document_position_params: TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier { uri: u },
+                text_document: TextDocumentIdentifier {
+                    uri: tfls_core::uri::url_to_uri(&u),
+                },
                 position: Position::new(0, 0),
             },
             work_done_progress_params: WorkDoneProgressParams::default(),
@@ -466,7 +483,9 @@ async fn goto_def_at(
         backend,
         GotoDefinitionParams {
             text_document_position_params: TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                text_document: TextDocumentIdentifier {
+                    uri: tfls_core::uri::url_to_uri(uri),
+                },
                 position: pos,
             },
             work_done_progress_params: WorkDoneProgressParams::default(),
@@ -477,7 +496,7 @@ async fn goto_def_at(
     .expect("ok")
 }
 
-fn single_location(resp: Option<GotoDefinitionResponse>) -> tower_lsp::lsp_types::Location {
+fn single_location(resp: Option<GotoDefinitionResponse>) -> lsp_types::Location {
     match resp {
         Some(GotoDefinitionResponse::Scalar(loc)) => loc,
         Some(GotoDefinitionResponse::Array(v)) if v.len() == 1 => v.into_iter().next().unwrap(),
@@ -514,7 +533,11 @@ async fn goto_def_on_module_input_attr_jumps_to_variable_decl() {
 
     // Line 2, col 4 → on the `r` of `region = "eu"`.
     let loc = single_location(goto_def_at(&backend, &caller_u, Position::new(2, 4)).await);
-    assert_eq!(loc.uri, child_u, "should land in child's variables.tf");
+    assert_eq!(
+        loc.uri,
+        tfls_core::uri::url_to_uri(&child_u),
+        "should land in child's variables.tf"
+    );
     assert_eq!(loc.range.start.line, 0, "variable is on line 0");
 }
 
@@ -547,7 +570,11 @@ async fn goto_def_on_module_output_segment_jumps_to_output_decl() {
     // Line 4, col 36 → cursor on `s` of `subnet_id` in
     // `output "x" { value = module.net.subnet_id }`.
     let loc = single_location(goto_def_at(&backend, &caller_u, Position::new(4, 36)).await);
-    assert_eq!(loc.uri, child_u, "should land in child's outputs.tf");
+    assert_eq!(
+        loc.uri,
+        tfls_core::uri::url_to_uri(&child_u),
+        "should land in child's outputs.tf"
+    );
     assert_eq!(loc.range.start.line, 0, "output is on line 0");
 }
 
@@ -583,7 +610,11 @@ async fn goto_def_on_module_label_still_jumps_to_module_block() {
 
     // Line 4, col 29 → on `n` of `net` in `module.net.subnet_id`.
     let loc = single_location(goto_def_at(&backend, &caller_u, Position::new(4, 29)).await);
-    assert_eq!(loc.uri, caller_u, "label goto-def stays in the caller");
+    assert_eq!(
+        loc.uri,
+        tfls_core::uri::url_to_uri(&caller_u),
+        "label goto-def stays in the caller"
+    );
     assert_eq!(
         loc.range.start.line, 0,
         "should point at `module \"net\"` call header on line 0"
@@ -633,7 +664,8 @@ async fn goto_def_on_module_output_seg_resolves_when_module_call_in_peer_file() 
     // `output "x" { value = module.net.subnet_id }`.
     let loc = single_location(goto_def_at(&backend, &ref_u, Position::new(0, 32)).await);
     assert_eq!(
-        loc.uri, child_u,
+        loc.uri,
+        tfls_core::uri::url_to_uri(&child_u),
         "should descend into child outputs.tf even when the module call is in a peer",
     );
 }
@@ -710,7 +742,11 @@ async fn goto_def_on_output_segment_of_indexed_module() {
     let col = line.find("k3s_asg").expect("k3s_asg on line 5");
     let loc =
         single_location(goto_def_at(&backend, &caller_u, Position::new(5, col as u32 + 3)).await);
-    assert_eq!(loc.uri, child_u, "should land in child's outputs.tf");
+    assert_eq!(
+        loc.uri,
+        tfls_core::uri::url_to_uri(&child_u),
+        "should land in child's outputs.tf"
+    );
     assert_eq!(loc.range.start.line, 0);
 }
 
@@ -749,7 +785,8 @@ async fn goto_def_scopes_variable_to_reference_module_not_child_module() {
         "expected exactly one in-scope location, got {locs:?}"
     );
     assert_eq!(
-        locs[0].uri, root_vars,
+        locs[0].uri,
+        tfls_core::uri::url_to_uri(&root_vars),
         "should resolve to stack root's variables.tf"
     );
 }
@@ -774,9 +811,11 @@ async fn goto_def_does_not_leak_across_unrelated_stacks() {
         other => panic!("expected Array response, got {other:?}"),
     };
     assert_eq!(locs.len(), 1);
-    assert_eq!(locs[0].uri, a_vars);
+    assert_eq!(locs[0].uri, tfls_core::uri::url_to_uri(&a_vars));
     assert!(
-        !locs.iter().any(|l| l.uri == b_vars),
+        !locs
+            .iter()
+            .any(|l| l.uri == tfls_core::uri::url_to_uri(&b_vars)),
         "stack-B declaration leaked into stack-A goto-def: {locs:?}"
     );
 }
@@ -800,7 +839,7 @@ async fn goto_def_still_resolves_peer_file_in_same_module() {
         other => panic!("expected Array response, got {other:?}"),
     };
     assert_eq!(locs.len(), 1);
-    assert_eq!(locs[0].uri, vars);
+    assert_eq!(locs[0].uri, tfls_core::uri::url_to_uri(&vars));
 }
 
 /// Thin helper to upsert a doc into the test backend's state.
@@ -859,7 +898,11 @@ async fn goto_def_on_module_input_resolved_via_modules_json() {
     let caller_u = upsert_file(&backend, &caller_path, caller_src);
 
     let loc = single_location(goto_def_at(&backend, &caller_u, Position::new(2, 4)).await);
-    assert_eq!(loc.uri, child_u, "should resolve through modules.json");
+    assert_eq!(
+        loc.uri,
+        tfls_core::uri::url_to_uri(&child_u),
+        "should resolve through modules.json"
+    );
     assert_eq!(loc.range.start.line, 0);
 }
 
@@ -895,7 +938,7 @@ async fn goto_def_on_provider_function_jumps_to_required_providers_entry() {
         .unwrap()
         + 2) as u32;
     let loc = single_location(goto_def_at(&backend, &main_u, Position::new(1, col)).await);
-    assert_eq!(loc.uri, versions_u);
+    assert_eq!(loc.uri, tfls_core::uri::url_to_uri(&versions_u));
     assert_eq!(loc.range.start.line, 2, "should land on `aws_v6 = {{` line");
 }
 
@@ -924,7 +967,7 @@ async fn goto_def_on_provider_local_segment_jumps_to_required_providers() {
     // Cursor on `aws_v6` (the LOCAL segment) — column inside `aws_v6`.
     let col = (main_src.lines().nth(1).unwrap().find("aws_v6").unwrap() + 2) as u32;
     let loc = single_location(goto_def_at(&backend, &main_u, Position::new(1, col)).await);
-    assert_eq!(loc.uri, versions_u);
+    assert_eq!(loc.uri, tfls_core::uri::url_to_uri(&versions_u));
     assert_eq!(loc.range.start.line, 2, "should land on `aws_v6 = {{` line");
 }
 
@@ -956,7 +999,7 @@ async fn hover_on_provider_local_shows_source() {
         HoverParams {
             text_document_position_params: TextDocumentPositionParams {
                 text_document: TextDocumentIdentifier {
-                    uri: main_u.clone(),
+                    uri: tfls_core::uri::url_to_uri(&main_u),
                 },
                 position: Position::new(1, col),
             },
@@ -967,7 +1010,7 @@ async fn hover_on_provider_local_shows_source() {
     .expect("ok")
     .expect("hover");
     let md = match resp.contents {
-        tower_lsp::lsp_types::HoverContents::Markup(m) => m.value,
+        lsp_types::HoverContents::Markup(m) => m.value,
         other => panic!("expected markup, got {other:?}"),
     };
     assert!(md.contains("aws_v6"), "missing local: {md}");
@@ -1003,7 +1046,9 @@ async fn references_provider_function_finds_workspace_calls() {
         &backend,
         ReferenceParams {
             text_document_position: TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier { uri: a_u.clone() },
+                text_document: TextDocumentIdentifier {
+                    uri: tfls_core::uri::url_to_uri(&a_u),
+                },
                 position: Position::new(1, col),
             },
             work_done_progress_params: WorkDoneProgressParams::default(),
@@ -1016,7 +1061,7 @@ async fn references_provider_function_finds_workspace_calls() {
     .await
     .expect("ok")
     .expect("references");
-    let uris: std::collections::HashSet<&Url> = resp.iter().map(|l| &l.uri).collect();
-    assert!(uris.contains(&a_u), "missing a.tf: {resp:?}");
-    assert!(uris.contains(&b_u), "missing b.tf: {resp:?}");
+    let uris: std::collections::HashSet<&str> = resp.iter().map(|l| l.uri.as_str()).collect();
+    assert!(uris.contains(a_u.as_str()), "missing a.tf: {resp:?}");
+    assert!(uris.contains(b_u.as_str()), "missing b.tf: {resp:?}");
 }

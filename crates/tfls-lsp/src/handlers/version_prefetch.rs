@@ -16,7 +16,7 @@ use std::sync::Arc;
 use hcl_edit::expr::Expression;
 use hcl_edit::structure::Body;
 use tfls_state::StateStore;
-use tower_lsp::lsp_types::Url;
+use url::Url;
 
 use crate::backend::Backend;
 
@@ -67,7 +67,7 @@ pub fn spawn(backend: &Backend, uri: Url, version: Option<i32>) {
 /// All HTTP fetches respect the existing 24h disk cache; subsequent
 /// server starts are network-free. Provider catalogs prefetched in
 /// parallel with bounded concurrency to stay polite to the registry.
-pub fn spawn_eager_tool_versions(client: tower_lsp::Client) {
+pub fn spawn_eager_tool_versions(client: tower_lsp_server::Client) {
     tokio::spawn(async move {
         let Ok(gh) = tfls_provider_protocol::tool_versions::build_http_client() else {
             return;
@@ -116,7 +116,7 @@ pub fn spawn_eager_tool_versions(client: tower_lsp::Client) {
 
 async fn prefetch_and_refresh(
     state: Arc<StateStore>,
-    client: tower_lsp::Client,
+    client: tower_lsp_server::Client,
     uri: Url,
     _version: Option<i32>,
 ) {

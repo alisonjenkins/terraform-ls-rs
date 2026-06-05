@@ -135,7 +135,7 @@ pub enum SymbolKind {
 /// Location of a symbol, usable as a map key (Range doesn't implement Hash).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SymbolLocation {
-    pub uri: lsp_types::Url,
+    pub uri: url::Url,
     pub start_line: u32,
     pub start_character: u32,
     pub end_line: u32,
@@ -143,7 +143,7 @@ pub struct SymbolLocation {
 }
 
 impl SymbolLocation {
-    pub fn new(uri: lsp_types::Url, range: lsp_types::Range) -> Self {
+    pub fn new(uri: url::Url, range: lsp_types::Range) -> Self {
         Self {
             uri,
             start_line: range.start.line,
@@ -168,7 +168,7 @@ impl SymbolLocation {
 
     pub fn to_lsp_location(&self) -> lsp_types::Location {
         lsp_types::Location {
-            uri: self.uri.clone(),
+            uri: crate::uri::url_to_uri(&self.uri),
             range: self.range(),
         }
     }
@@ -400,7 +400,7 @@ mod tests {
 
         let mut table = SymbolTable::new();
         let addr = ResourceAddress::new("aws_instance", "web");
-        let uri = tower_lsp::lsp_types::Url::parse("file:///x.tf").expect("url");
+        let uri = url::Url::parse("file:///x.tf").expect("url");
         let loc = SymbolLocation::new(
             uri,
             Range {

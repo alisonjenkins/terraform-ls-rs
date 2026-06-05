@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use tfls_core::ProviderAddress;
 use tfls_schema::{BlockSchema, NestedBlockSchema, NestingMode, ProviderSchema, Schema};
 use tfls_state::StateStore;
-use tower_lsp::jsonrpc;
+use tower_lsp_server::jsonrpc;
 
 use crate::backend::Backend;
 
@@ -1502,7 +1502,7 @@ mod tests {
 
     fn make_backend(state: StateStore) -> Backend {
         use tfls_state::JobQueue;
-        let (service, _) = tower_lsp::LspService::new(Backend::new);
+        let (service, _) = tower_lsp_server::LspService::new(Backend::new);
         let client = service.inner().client.clone();
         Backend::with_shared_state(client, Arc::new(state), Arc::new(JobQueue::new()))
     }

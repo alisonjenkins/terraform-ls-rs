@@ -9,8 +9,8 @@ use std::fs;
 use tfls_lsp::handlers::document::compute_diagnostics;
 use tfls_lsp::Backend;
 use tfls_state::DocumentState;
-use tower_lsp::lsp_types::Url;
-use tower_lsp::LspService;
+use tower_lsp_server::LspService;
+use url::Url;
 
 fn uri(path: &str) -> Url {
     Url::parse(path).expect("valid url")
@@ -277,8 +277,8 @@ fn malformed_version_diagnostic_clears_after_simulated_edit() {
     // handler goes through (rope edit → reparse → compute),
     // so any regression that leaves stale AST data / stale
     // derived symbols would surface here.
+    use lsp_types::{Position, Range, TextDocumentContentChangeEvent};
     use ropey::Rope;
-    use tower_lsp::lsp_types::{Position, Range, TextDocumentContentChangeEvent};
 
     let b = backend();
     let u = uri("file:///versions.tf");
@@ -339,7 +339,7 @@ fn undefined_variable_clears_when_declaration_added_to_peer_file() {
     // in CI but the user still sees stale diagnostics in-editor,
     // the bug is on the client-side refresh path (push/pull
     // namespace mismatch, nvim pull cache) — not the store.
-    use tower_lsp::lsp_types::TextDocumentContentChangeEvent;
+    use lsp_types::TextDocumentContentChangeEvent;
 
     let b = backend();
     let main_u = uri("file:///mod/api_gateway_resource/main.tf");

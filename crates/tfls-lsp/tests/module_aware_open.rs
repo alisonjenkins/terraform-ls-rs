@@ -14,10 +14,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use lsp_types::{DidOpenTextDocumentParams, TextDocumentItem};
 use tfls_lsp::{indexer, Backend};
 use tfls_state::{JobQueue, StateStore};
-use tower_lsp::lsp_types::{DidOpenTextDocumentParams, TextDocumentItem, Url};
-use tower_lsp::LspService;
+use tower_lsp_server::LspService;
+use url::Url;
 
 fn tmp_dir(label: &str) -> PathBuf {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -74,7 +75,7 @@ async fn did_open_in_new_directory_indexes_sibling_files() {
         &backend,
         DidOpenTextDocumentParams {
             text_document: TextDocumentItem {
-                uri: main_uri.clone(),
+                uri: tfls_core::uri::url_to_uri(&main_uri),
                 language_id: "terraform".into(),
                 version: 1,
                 text: main_text,
@@ -195,7 +196,7 @@ async fn did_open_synchronously_indexes_peers_so_first_diagnostic_pull_is_correc
         &backend,
         DidOpenTextDocumentParams {
             text_document: TextDocumentItem {
-                uri: main_uri.clone(),
+                uri: tfls_core::uri::url_to_uri(&main_uri),
                 language_id: "terraform".to_string(),
                 version: 1,
                 text: main_text,

@@ -39,11 +39,12 @@ use hcl_edit::structure::{BlockLabel, Body};
 use lsp_types::{
     CodeAction, CodeActionOrCommand, CreateFile, CreateFileOptions, DocumentChangeOperation,
     DocumentChanges, OneOf, OptionalVersionedTextDocumentIdentifier, Position, Range, ResourceOp,
-    TextDocumentEdit, TextEdit, Url, WorkspaceEdit,
+    TextDocumentEdit, TextEdit, WorkspaceEdit,
 };
 use ropey::Rope;
 use tfls_parser::{byte_offset_to_lsp_position, hcl_span_to_lsp_range};
 use tfls_state::StateStore;
+use url::Url;
 
 use crate::handlers::code_action::walk_expressions;
 use crate::handlers::code_action_scope::{
@@ -1021,7 +1022,7 @@ fn build_workspace_edit(
                 text.push_str(&body_text);
                 ops.push(DocumentChangeOperation::Edit(TextDocumentEdit {
                     text_document: OptionalVersionedTextDocumentIdentifier {
-                        uri: target_url,
+                        uri: tfls_core::uri::url_to_uri(&target_url),
                         version: None,
                     },
                     edits: vec![OneOf::Left(TextEdit {
@@ -1036,7 +1037,7 @@ fn build_workspace_edit(
             TargetFileStrategy::Create => {
                 ops.push(DocumentChangeOperation::Op(ResourceOp::Create(
                     CreateFile {
-                        uri: target_url.clone(),
+                        uri: tfls_core::uri::url_to_uri(&target_url),
                         options: Some(CreateFileOptions {
                             overwrite: Some(false),
                             ignore_if_exists: Some(true),
@@ -1046,7 +1047,7 @@ fn build_workspace_edit(
                 )));
                 ops.push(DocumentChangeOperation::Edit(TextDocumentEdit {
                     text_document: OptionalVersionedTextDocumentIdentifier {
-                        uri: target_url,
+                        uri: tfls_core::uri::url_to_uri(&target_url),
                         version: None,
                     },
                     edits: vec![OneOf::Left(TextEdit {
@@ -1063,7 +1064,10 @@ fn build_workspace_edit(
 
     for (uri, edits) in rewrites {
         ops.push(DocumentChangeOperation::Edit(TextDocumentEdit {
-            text_document: OptionalVersionedTextDocumentIdentifier { uri, version: None },
+            text_document: OptionalVersionedTextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&uri),
+                version: None,
+            },
             edits: edits.into_iter().map(OneOf::Left).collect(),
         }));
     }

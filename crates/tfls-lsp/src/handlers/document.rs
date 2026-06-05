@@ -4,15 +4,16 @@
 //! reference indexes in sync) and publishes the union of all
 //! diagnostic families back to the client.
 
+use lsp_types::{
+    Diagnostic, DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    DidSaveTextDocumentParams, MessageType,
+};
 use tfls_core::SymbolKind;
 use tfls_diag::{diagnostics_for_parse_errors, undefined_reference_diagnostics};
 use tfls_parser::ReferenceKind;
 use tfls_schema::Schema;
 use tfls_state::{DocumentState, StateStore, SymbolKey};
-use tower_lsp::lsp_types::{
-    Diagnostic, DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DidSaveTextDocumentParams, MessageType, Url,
-};
+use url::Url;
 
 use crate::backend::Backend;
 use crate::handlers::util::{
@@ -22,7 +23,9 @@ use crate::handlers::util::{
 };
 
 pub async fn did_open(backend: &Backend, params: DidOpenTextDocumentParams) {
-    let uri = params.text_document.uri.clone();
+    let Some(uri) = tfls_core::uri::uri_to_url(&params.text_document.uri) else {
+        return;
+    };
     backend.state.mark_open(uri.clone());
     let doc = DocumentState::new(
         uri.clone(),
@@ -80,7 +83,7 @@ pub async fn did_open(backend: &Backend, params: DidOpenTextDocumentParams) {
             // namespace; nvim's display is pull-only for this URI.
             backend
                 .client
-                .publish_diagnostics(uri.clone(), Vec::new(), None)
+                .publish_diagnostics(tfls_core::uri::url_to_uri(&uri), Vec::new(), None)
                 .await;
         }
         DidOpenPublish::PublishReal => {
@@ -92,7 +95,7 @@ pub async fn did_open(backend: &Backend, params: DidOpenTextDocumentParams) {
             );
             backend
                 .client
-                .publish_diagnostics(uri.clone(), diagnostics, None)
+                .publish_diagnostics(tfls_core::uri::url_to_uri(&uri), diagnostics, None)
                 .await;
         }
     }
@@ -226,7 +229,9 @@ fn cross_file_fingerprint(doc: &DocumentState) -> u64 {
 }
 
 pub async fn did_change(backend: &Backend, params: DidChangeTextDocumentParams) {
-    let uri = params.text_document.uri.clone();
+    let Some(uri) = tfls_core::uri::uri_to_url(&params.text_document.uri) else {
+        return;
+    };
     let version = params.text_document.version;
     tracing::info!(uri = %uri, version, "did_change");
 
@@ -338,7 +343,9 @@ pub async fn did_change(backend: &Backend, params: DidChangeTextDocumentParams) 
 }
 
 pub async fn did_save(backend: &Backend, params: DidSaveTextDocumentParams) {
-    let uri = params.text_document.uri;
+    let Some(uri) = tfls_core::uri::uri_to_url(&params.text_document.uri) else {
+        return;
+    };
     tracing::info!(uri = %uri, "did_save");
     // Same as did_change — off to a blocking thread.
     let state = std::sync::Arc::clone(&backend.state);
@@ -366,7 +373,9 @@ pub async fn did_save(backend: &Backend, params: DidSaveTextDocumentParams) {
 }
 
 pub async fn did_close(backend: &Backend, params: DidCloseTextDocumentParams) {
-    let uri = params.text_document.uri;
+    let Some(uri) = tfls_core::uri::uri_to_url(&params.text_document.uri) else {
+        return;
+    };
     backend.state.mark_closed(&uri);
     backend.state.remove_document(&uri);
     // Always clear on close — symmetric with `did_open`'s
@@ -375,7 +384,7 @@ pub async fn did_close(backend: &Backend, params: DidCloseTextDocumentParams) {
     // `did_open` starts from a known-clean state.
     backend
         .client
-        .publish_diagnostics(uri, Vec::new(), None)
+        .publish_diagnostics(tfls_core::uri::url_to_uri(&uri), Vec::new(), None)
         .await;
 }
 
@@ -463,7 +472,7 @@ pub(crate) async fn publish_peer_diagnostics(backend: &Backend, changed_uri: &Ur
         // sending it is worse than useless.
         backend
             .client
-            .publish_diagnostics(uri, diagnostics, None)
+            .publish_diagnostics(tfls_core::uri::url_to_uri(&uri), diagnostics, None)
             .await;
     }
 }
@@ -488,7 +497,7 @@ async fn publish_current_diagnostics(backend: &Backend, uri: &Url, version: Opti
         .unwrap_or_default();
     backend
         .client
-        .publish_diagnostics(uri.clone(), diagnostics, version)
+        .publish_diagnostics(tfls_core::uri::url_to_uri(uri), diagnostics, version)
         .await;
 }
 

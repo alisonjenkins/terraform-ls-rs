@@ -44,7 +44,7 @@ pub enum IndexerError {
 pub fn spawn_worker(
     state: Arc<StateStore>,
     queue: Arc<JobQueue>,
-    client: Option<tower_lsp::Client>,
+    client: Option<tower_lsp_server::Client>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -77,7 +77,7 @@ pub fn enqueue_workspace_scan(_state: &StateStore, queue: &JobQueue, root: &Path
 /// the same directory trigger at most one scan. Used so opening a file
 /// outside the primary workspace folder still indexes its sibling `.tf`
 /// files (needed for cross-file undefined-reference resolution).
-pub fn ensure_module_indexed(state: &StateStore, queue: &JobQueue, file_uri: &lsp_types::Url) {
+pub fn ensure_module_indexed(state: &StateStore, queue: &JobQueue, file_uri: &url::Url) {
     let Ok(path) = file_uri.to_file_path() else {
         return;
     };
@@ -268,7 +268,7 @@ pub fn spawn_watcher(
     state: Arc<StateStore>,
     queue: Arc<JobQueue>,
     root: PathBuf,
-    client: Option<tower_lsp::Client>,
+    client: Option<tower_lsp_server::Client>,
 ) -> Result<tokio::task::JoinHandle<()>, WalkerError> {
     let mut watcher = watch_workspace(&root, Duration::from_millis(WATCH_DEBOUNCE_MS))?;
 
@@ -336,7 +336,7 @@ pub fn spawn_watcher(
 async fn handle_job(
     state: Arc<StateStore>,
     queue: &JobQueue,
-    client: Option<&tower_lsp::Client>,
+    client: Option<&tower_lsp_server::Client>,
     job: Job,
 ) -> Result<(), IndexerError> {
     let job_kind = job_kind_str(&job);
@@ -365,7 +365,7 @@ fn job_kind_str(job: &Job) -> &'static str {
 async fn dispatch_job(
     state: Arc<StateStore>,
     queue: &JobQueue,
-    client: Option<&tower_lsp::Client>,
+    client: Option<&tower_lsp_server::Client>,
     job: Job,
 ) -> Result<(), IndexerError> {
     match job {
@@ -382,7 +382,8 @@ async fn dispatch_job(
                 if !state.should_skip_push_diagnostics(&url) {
                     let diagnostics = crate::handlers::document::compute_diagnostics(&state, &url);
                     let version = state.documents.get(&url).map(|d| d.version);
-                    c.publish_diagnostics(url, diagnostics, version).await;
+                    c.publish_diagnostics(tfls_core::uri::url_to_uri(&url), diagnostics, version)
+                        .await;
                 }
             }
             Ok(())
@@ -496,7 +497,7 @@ async fn dispatch_job(
 /// for the common rayon + concurrent-publish pipeline.
 async fn bulk_workspace_scan(
     state: &StateStore,
-    client: Option<&tower_lsp::Client>,
+    client: Option<&tower_lsp_server::Client>,
     root: &Path,
 ) -> Result<(), IndexerError> {
     // Discovery happens here (not in `initialize`) so the LSP
@@ -628,7 +629,7 @@ async fn bulk_workspace_scan(
 
 /// What the server should do after a background scan changes the
 /// store — pure decision function so the invariants are unit-
-/// testable without mocking the `tower_lsp::Client`.
+/// testable without mocking the `tower_lsp_server::Client`.
 ///
 /// Critical invariant: under pull-diagnostics mode, the server
 /// MUST NOT `publishDiagnostics` for open buffers. Nvim (and
@@ -673,7 +674,7 @@ fn decide_refresh(state: &StateStore, client_attached: bool) -> RefreshDecision 
 /// no-duplicate-push invariant without mocking the client.
 pub(crate) async fn maybe_refresh_diagnostics(
     state: &StateStore,
-    client: Option<&tower_lsp::Client>,
+    client: Option<&tower_lsp_server::Client>,
 ) {
     match decide_refresh(state, client.is_some()) {
         RefreshDecision::NoClient | RefreshDecision::NoOp => {}
@@ -691,8 +692,8 @@ pub(crate) async fn maybe_refresh_diagnostics(
 /// the store. Used after a background parse so workspace-wide views
 /// (e.g. Trouble's `<leader>xx`) see diagnostics for indexed files
 /// the user hasn't opened directly.
-async fn publish_for_path(state: &StateStore, client: &tower_lsp::Client, path: &Path) {
-    let Ok(uri) = tower_lsp::lsp_types::Url::from_file_path(path) else {
+async fn publish_for_path(state: &StateStore, client: &tower_lsp_server::Client, path: &Path) {
+    let Ok(uri) = url::Url::from_file_path(path) else {
         return;
     };
     if state.should_skip_push_diagnostics(&uri) {
@@ -704,7 +705,7 @@ async fn publish_for_path(state: &StateStore, client: &tower_lsp::Client, path: 
     };
     let diagnostics = crate::handlers::document::compute_diagnostics(state, &uri);
     client
-        .publish_diagnostics(uri, diagnostics, Some(version))
+        .publish_diagnostics(tfls_core::uri::url_to_uri(&uri), diagnostics, Some(version))
         .await;
 }
 
@@ -715,8 +716,8 @@ async fn publish_for_path(state: &StateStore, client: &tower_lsp::Client, path: 
 /// clients get a direct publish per open doc (toggling a rule off
 /// recomputes fewer diagnostics, overwriting the stale set); pull-mode
 /// clients are nudged via `workspace/diagnostic/refresh`.
-pub(crate) async fn republish_open_docs(state: &StateStore, client: &tower_lsp::Client) {
-    let open: Vec<tower_lsp::lsp_types::Url> = state.open_docs.iter().map(|u| u.clone()).collect();
+pub(crate) async fn republish_open_docs(state: &StateStore, client: &tower_lsp_server::Client) {
+    let open: Vec<url::Url> = state.open_docs.iter().map(|u| u.clone()).collect();
     for uri in open {
         if let Ok(path) = uri.to_file_path() {
             publish_for_path(state, client, &path).await;
@@ -734,9 +735,9 @@ pub(crate) async fn republish_open_docs(state: &StateStore, client: &tower_lsp::
 /// don't honour `workspace/diagnostic/refresh`, so this is the
 /// only way to clear stale "unknown attribute" diagnostics for
 /// already-open buffers.
-async fn publish_for_dir(state: &StateStore, client: &tower_lsp::Client, dir: &Path) {
+async fn publish_for_dir(state: &StateStore, client: &tower_lsp_server::Client, dir: &Path) {
     let canon_dir = dir.canonicalize().ok();
-    let uris: Vec<tower_lsp::lsp_types::Url> = state
+    let uris: Vec<url::Url> = state
         .documents
         .iter()
         .filter_map(|entry| {
@@ -772,7 +773,7 @@ async fn publish_for_dir(state: &StateStore, client: &tower_lsp::Client, dir: &P
     // for every doc in it. The per-doc `compute_diagnostics` path builds
     // a fresh adapter that re-walks the module's siblings each call —
     // O(N²) over a dir of N files. A shared snapshot makes it O(N).
-    let mut by_module: std::collections::HashMap<Option<PathBuf>, Vec<tower_lsp::lsp_types::Url>> =
+    let mut by_module: std::collections::HashMap<Option<PathBuf>, Vec<url::Url>> =
         std::collections::HashMap::new();
     for uri in uris {
         if state.should_skip_push_diagnostics(&uri) {
@@ -807,7 +808,9 @@ async fn publish_for_dir(state: &StateStore, client: &tower_lsp::Client, dir: &P
                 &lookup,
                 &current_file,
             );
-            client.publish_diagnostics(uri, diagnostics, version).await;
+            client
+                .publish_diagnostics(tfls_core::uri::url_to_uri(&uri), diagnostics, version)
+                .await;
         }
     }
 }
@@ -842,7 +845,7 @@ fn find_terraform_init_root(start: &Path) -> Option<PathBuf> {
 pub fn refresh_schemas_if_providers_changed(
     state: &StateStore,
     queue: &JobQueue,
-    file_uri: &lsp_types::Url,
+    file_uri: &url::Url,
 ) {
     let Ok(path) = file_uri.to_file_path() else {
         return;
@@ -896,7 +899,7 @@ fn maybe_enqueue_schema_fetch(state: &StateStore, queue: &JobQueue, init_root: &
 async fn scan_dir_into_state(
     state: &StateStore,
     queue: &JobQueue,
-    client: Option<&tower_lsp::Client>,
+    client: Option<&tower_lsp_server::Client>,
     dir: &Path,
 ) -> Result<(), IndexerError> {
     // Single-directory `read_dir` — small but on the hot
@@ -936,7 +939,7 @@ async fn scan_dir_into_state(
 /// [`bulk_workspace_scan`] so both benefit from the same speedups.
 async fn scan_files_parallel(
     state: &StateStore,
-    client: Option<&tower_lsp::Client>,
+    client: Option<&tower_lsp_server::Client>,
     files: Vec<PathBuf>,
     with_progress: bool,
 ) {
@@ -967,7 +970,7 @@ async fn scan_files_parallel(
         // body-walking diagnostics, etc.) need the AST. Re-parse
         // those — the cost is bounded by `cache-hydrated count`
         // and the cache still covers the symbol-side speedup.
-        let skip: std::collections::HashSet<lsp_types::Url> = state
+        let skip: std::collections::HashSet<url::Url> = state
             .documents
             .iter()
             .filter(|e| e.value().parsed.body.is_some())
@@ -1005,7 +1008,7 @@ async fn scan_files_parallel(
         .await;
     }
 
-    let mut uris: Vec<lsp_types::Url> = parsed.iter().map(|d| d.uri.clone()).collect();
+    let mut uris: Vec<url::Url> = parsed.iter().map(|d| d.uri.clone()).collect();
     for doc in parsed {
         state.upsert_document(doc);
     }
@@ -1034,7 +1037,7 @@ async fn scan_files_parallel(
     let diag_start = std::time::Instant::now();
 
     // Group by parent dir so we build one ModuleSnapshot per module.
-    let mut by_module: std::collections::HashMap<Option<PathBuf>, Vec<lsp_types::Url>> =
+    let mut by_module: std::collections::HashMap<Option<PathBuf>, Vec<url::Url>> =
         std::collections::HashMap::new();
     for uri in uris {
         let dir = crate::handlers::util::parent_dir(&uri);
@@ -1097,7 +1100,7 @@ async fn scan_files_parallel(
             Some(&referenced_dirs),
         );
         let snapshot_ref = &snapshot;
-        let results: Vec<(lsp_types::Url, i32, Vec<lsp_types::Diagnostic>)> =
+        let results: Vec<(url::Url, i32, Vec<lsp_types::Diagnostic>)> =
             crate::blocking::run(|| {
                 uris_in_module
                     .par_iter()
@@ -1133,7 +1136,12 @@ async fn scan_files_parallel(
             .map(|(uri, version, diagnostics)| {
                 let c = client.clone();
                 async move {
-                    c.publish_diagnostics(uri, diagnostics, Some(version)).await;
+                    c.publish_diagnostics(
+                        tfls_core::uri::url_to_uri(&uri),
+                        diagnostics,
+                        Some(version),
+                    )
+                    .await;
                 }
             })
             .collect();
@@ -1768,8 +1776,8 @@ async fn fetch_and_install_schemas(
     Ok(())
 }
 
-fn path_to_url(path: &Path) -> Option<lsp_types::Url> {
-    lsp_types::Url::from_file_path(path).ok()
+fn path_to_url(path: &Path) -> Option<url::Url> {
+    url::Url::from_file_path(path).ok()
 }
 
 /// Run registry-doc enrichment off the critical path. Completion and
@@ -1866,7 +1874,7 @@ mod tests {
     //! `maybe_refresh_diagnostics`.
     //!
     //! The pure [`decide_refresh`] function makes the contract
-    //! testable without mocking the `tower_lsp::Client`: its
+    //! testable without mocking the `tower_lsp_server::Client`: its
     //! output enumerates exactly what the async wrapper will do,
     //! and `SendRefresh` is the ONLY variant that can trigger
     //! client-side I/O.
@@ -1874,7 +1882,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use tfls_state::StateStore;
-    use tower_lsp::lsp_types::Url;
+    use url::Url;
 
     fn u(s: &str) -> Url {
         Url::parse(s).expect("valid url")

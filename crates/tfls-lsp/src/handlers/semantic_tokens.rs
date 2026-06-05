@@ -9,7 +9,7 @@ use lsp_types::{
 use tfls_core::{Symbol, SymbolKind as DomainKind, SymbolVisitor};
 use tfls_parser::ReferenceKind;
 use tfls_state::DocumentState;
-use tower_lsp::jsonrpc;
+use tower_lsp_server::jsonrpc;
 
 use crate::backend::Backend;
 
@@ -34,7 +34,9 @@ pub async fn semantic_tokens_full(
     backend: &Backend,
     params: SemanticTokensParams,
 ) -> jsonrpc::Result<Option<SemanticTokensResult>> {
-    let uri = params.text_document.uri;
+    let Some(uri) = tfls_core::uri::uri_to_url(&params.text_document.uri) else {
+        return Ok(None);
+    };
     let Some(doc) = backend.state.documents.get(&uri) else {
         return Ok(None);
     };
@@ -50,7 +52,9 @@ pub async fn semantic_tokens_range(
     backend: &Backend,
     params: SemanticTokensRangeParams,
 ) -> jsonrpc::Result<Option<SemanticTokensRangeResult>> {
-    let uri = params.text_document.uri;
+    let Some(uri) = tfls_core::uri::uri_to_url(&params.text_document.uri) else {
+        return Ok(None);
+    };
     let Some(doc) = backend.state.documents.get(&uri) else {
         return Ok(None);
     };

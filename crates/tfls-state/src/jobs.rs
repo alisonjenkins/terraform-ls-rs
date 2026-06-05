@@ -18,7 +18,7 @@ pub enum Job {
     /// Parse a file from disk and install it in the store.
     ParseFile(PathBuf),
     /// Reparse an open document that has already been edited.
-    ReparseDocument(lsp_types::Url),
+    ReparseDocument(url::Url),
     /// Fetch provider schemas via the terraform/opentofu CLI.
     FetchSchemas { working_dir: PathBuf },
     /// Fetch built-in function signatures via
@@ -152,8 +152,8 @@ impl JobQueue {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use lsp_types::Url;
     use std::time::Duration;
+    use url::Url;
 
     fn doc_job(path: &str) -> Job {
         Job::ReparseDocument(Url::parse(path).expect("url"))

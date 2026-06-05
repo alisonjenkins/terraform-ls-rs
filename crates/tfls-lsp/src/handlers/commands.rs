@@ -11,7 +11,7 @@ use std::time::Duration;
 use lsp_types::{ExecuteCommandParams, MessageType};
 use tfls_state::{Job, Priority};
 use tokio::process::Command;
-use tower_lsp::jsonrpc;
+use tower_lsp_server::jsonrpc;
 
 use crate::backend::Backend;
 

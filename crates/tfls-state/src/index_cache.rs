@@ -29,10 +29,10 @@
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-use lsp_types::Url;
 use serde::{Deserialize, Serialize};
 use tfls_core::SymbolTable;
 use tfls_parser::Reference;
+use url::Url;
 
 use crate::document::DocumentState;
 use crate::store::StateStore;

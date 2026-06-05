@@ -3,14 +3,15 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use lsp_types::{
+    Position, SignatureHelpContext, SignatureHelpParams, SignatureHelpTriggerKind,
+    TextDocumentIdentifier, TextDocumentPositionParams, WorkDoneProgressParams,
+};
 use tfls_lsp::Backend;
 use tfls_schema::functions_cache;
 use tfls_state::DocumentState;
-use tower_lsp::lsp_types::{
-    Position, SignatureHelpContext, SignatureHelpParams, SignatureHelpTriggerKind,
-    TextDocumentIdentifier, TextDocumentPositionParams, Url, WorkDoneProgressParams,
-};
-use tower_lsp::LspService;
+use tower_lsp_server::LspService;
+use url::Url;
 
 fn uri(s: &str) -> Url {
     Url::parse(s).expect("url")
@@ -37,7 +38,9 @@ async fn backend_with_doc(u: &Url, src: &str) -> Backend {
 fn params(u: &Url, pos: Position) -> SignatureHelpParams {
     SignatureHelpParams {
         text_document_position_params: TextDocumentPositionParams {
-            text_document: TextDocumentIdentifier { uri: u.clone() },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(u),
+            },
             position: pos,
         },
         work_done_progress_params: WorkDoneProgressParams::default(),

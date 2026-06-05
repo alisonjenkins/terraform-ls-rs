@@ -1,6 +1,6 @@
 //! Construct the LSP server capabilities we advertise.
 
-use tower_lsp::lsp_types::{
+use lsp_types::{
     CodeActionKind, CodeActionOptions, CodeActionProviderCapability, CodeLensOptions,
     CompletionOptions, DeclarationCapability, DocumentLinkOptions, DocumentOnTypeFormattingOptions,
     ExecuteCommandOptions, FoldingRangeProviderCapability, HoverProviderCapability, OneOf,

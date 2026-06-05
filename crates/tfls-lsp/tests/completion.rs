@@ -2,15 +2,16 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use lsp_types::{
+    CompletionContext, CompletionItem, CompletionParams, CompletionResponse, CompletionTextEdit,
+    CompletionTriggerKind, PartialResultParams, Position, TextDocumentIdentifier,
+    TextDocumentPositionParams, WorkDoneProgressParams,
+};
 use tfls_lsp::Backend;
 use tfls_schema::ProviderSchemas;
 use tfls_state::DocumentState;
-use tower_lsp::lsp_types::{
-    CompletionContext, CompletionItem, CompletionParams, CompletionResponse, CompletionTextEdit,
-    CompletionTriggerKind, PartialResultParams, Position, TextDocumentIdentifier,
-    TextDocumentPositionParams, Url, WorkDoneProgressParams,
-};
-use tower_lsp::LspService;
+use tower_lsp_server::LspService;
+use url::Url;
 
 fn uri(path: &str) -> Url {
     Url::parse(path).expect("valid url")
@@ -89,7 +90,9 @@ fn install_aws_schema(backend: &Backend) {
 fn make_params(u: &Url, pos: Position) -> CompletionParams {
     CompletionParams {
         text_document_position: TextDocumentPositionParams {
-            text_document: TextDocumentIdentifier { uri: u.clone() },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(u),
+            },
             position: pos,
         },
         work_done_progress_params: WorkDoneProgressParams::default(),
