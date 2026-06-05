@@ -1,0 +1,32 @@
+name: release-please
+
+# Maintains a release PR from conventional commits. Merging it bumps the
+# version, updates the changelog and pushes a `v*` tag. Because tags pushed with
+# GITHUB_TOKEN do NOT trigger `on: push: tags` workflows, the release build is
+# kicked off explicitly via `gh workflow run release.yml`.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      - name: Dispatch release workflow
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+        run: gh workflow run release.yml -f tag="$TAG" --repo "$GITHUB_REPOSITORY"

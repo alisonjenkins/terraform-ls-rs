@@ -1,0 +1,43 @@
+# cargo-deny configuration. Checked in CI via `cargo deny check` (see
+# .github/workflows/ci.yml). Run `nix develop --command cargo deny check`
+# locally to reproduce.
+
+[advisories]
+version = 2
+yanked = "deny"
+# Add specific advisory IDs here to ignore with a justification.
+ignore = [
+  # rustls-pemfile is unmaintained but pulled in transitively (reqwest/tonic
+  # stack) with no safe upgrade available yet. Not a security vulnerability;
+  # revisit when the upstream chain drops it.
+  "RUSTSEC-2025-0134",
+]
+
+[licenses]
+version = 2
+# Workspace crates are MPL-2.0; the rest are the SPDX ids present in the
+# dependency tree. Tighten/extend after a `cargo deny check licenses` run.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MPL-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+  "CC0-1.0",
+  # webpki-roots / webpki-root-certs (the Mozilla CA bundle) ship under this.
+  "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "allow"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
