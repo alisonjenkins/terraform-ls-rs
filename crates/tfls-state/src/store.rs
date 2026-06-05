@@ -466,6 +466,16 @@ impl StateStore {
             .map(|e| e.value().clone())
     }
 
+    /// True when at least one "real" (non-built-in) provider schema is
+    /// loaded. The built-in `terraform` provider snapshot is injected at
+    /// session start and is always present, so a plain `schemas.is_empty()`
+    /// can no longer answer "has this workspace had `terraform init` run?".
+    /// Callers that want to surface a "run terraform init" hint should use
+    /// this instead.
+    pub fn has_real_provider_schemas(&self) -> bool {
+        self.schemas.iter().any(|e| !e.key().is_builtin())
+    }
+
     /// Look up a resource schema by its unqualified type name across
     /// all installed providers.
     pub fn find_resource_schema(&self, type_name: &str) -> Option<Arc<ProviderSchema>> {
@@ -906,6 +916,49 @@ mod tests {
 
         let resources = store.all_resource_types();
         assert_eq!(resources, vec!["aws_instance".to_string()]);
+    }
+
+    #[test]
+    fn builtin_provider_schema_resolves_and_is_not_counted_as_real() {
+        let schemas: ProviderSchemas = sonic_rs::from_str(
+            r#"{
+                "format_version": "1.0",
+                "provider_schemas": {
+                    "terraform.io/builtin/terraform": {
+                        "provider": { "version": 0, "block": {} },
+                        "resource_schemas": {
+                            "terraform_data": { "version": 0, "block": {} }
+                        },
+                        "data_source_schemas": {
+                            "terraform_remote_state": { "version": 0, "block": {} }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("parse");
+
+        let store = StateStore::new();
+        store.install_schemas(schemas);
+
+        // Built-in types resolve like any other schema...
+        assert!(store.find_data_source_schema("terraform_remote_state").is_some());
+        assert!(store.find_resource_schema("terraform_data").is_some());
+        // ...but the built-in snapshot doesn't count as a "real" fetched
+        // provider, so the "run terraform init" hint still applies.
+        assert!(!store.has_real_provider_schemas());
+
+        // Adding an actual provider flips it.
+        let aws: ProviderSchemas = sonic_rs::from_str(
+            r#"{ "format_version": "1.0", "provider_schemas": {
+                "registry.terraform.io/hashicorp/aws": {
+                    "provider": { "version": 0, "block": {} },
+                    "resource_schemas": { "aws_instance": { "version": 1, "block": {} } }
+                } } }"#,
+        )
+        .expect("parse");
+        store.install_schemas(aws);
+        assert!(store.has_real_provider_schemas());
     }
 
     #[test]

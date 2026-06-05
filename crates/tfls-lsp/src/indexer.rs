@@ -221,6 +221,24 @@ pub fn enqueue_functions_fetch(queue: &JobQueue) {
     queue.enqueue(Job::FetchFunctions { binary }, Priority::Normal);
 }
 
+/// Install the bundled built-in `terraform` provider schema
+/// (`terraform_remote_state`, `terraform_data`) into the global schema
+/// store. This provider is compiled into Terraform core and never
+/// arrives via the plugin protocol or `providers schema -json`, so we
+/// inject the compiled-in snapshot once at session start. Infallible —
+/// a decode failure is logged and leaves the store unchanged.
+pub fn install_builtin_provider_schema(state: &StateStore) {
+    match tfls_schema::bundled_builtin_provider() {
+        Ok(schemas) => {
+            state.install_schemas(schemas);
+            tracing::debug!("installed bundled built-in terraform provider schema");
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "bundled built-in provider schema failed to load");
+        }
+    }
+}
+
 fn resolve_cli_binary() -> PathBuf {
     if let Ok(path) = which_binary("tofu") {
         return path;

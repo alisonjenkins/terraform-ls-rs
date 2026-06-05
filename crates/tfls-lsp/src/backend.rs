@@ -93,6 +93,11 @@ impl Backend {
         indexer::enqueue_schema_fetch(&self.jobs, &root);
         // Functions are workspace-independent — fetch once per session.
         indexer::enqueue_functions_fetch(&self.jobs);
+        // Built-in `terraform` provider (terraform_remote_state,
+        // terraform_data) — never shipped via plugin protocol or CLI;
+        // inject the bundled snapshot synchronously so completion/hover
+        // for those types work even with no providers installed.
+        indexer::install_builtin_provider_schema(&self.state);
         match indexer::spawn_watcher(
             Arc::clone(&self.state),
             Arc::clone(&self.jobs),

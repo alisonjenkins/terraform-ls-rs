@@ -49,6 +49,15 @@ impl ProviderAddress {
         Self::new("registry.terraform.io", "hashicorp", name)
     }
 
+    /// True for Terraform's built-in provider family
+    /// (`terraform.io/builtin/<type>`) — compiled into core rather than
+    /// installed as a plugin. Used to distinguish the always-present
+    /// bundled schema from "real" provider schemas a workspace has
+    /// actually fetched via `terraform init`.
+    pub fn is_builtin(&self) -> bool {
+        self.hostname == "terraform.io" && self.namespace == "builtin"
+    }
+
     /// Parse a provider address like `registry.terraform.io/hashicorp/aws`
     /// or the short form `hashicorp/aws` (assumes registry.terraform.io).
     ///

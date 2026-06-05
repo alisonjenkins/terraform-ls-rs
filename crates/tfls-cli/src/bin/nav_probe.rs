@@ -133,6 +133,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let functions = tfls_schema::functions_cache::bundled()?;
     backend.state.install_functions(functions);
 
+    // Built-in `terraform` provider snapshot (terraform_remote_state,
+    // terraform_data) — the server injects this at startup, so mirror it
+    // here for fidelity even when --no-schemas skips the fetch.
+    tfls_lsp::indexer::install_builtin_provider_schema(&backend.state);
+
     if !cli.no_schemas {
         if let Some(init_root) = find_terraform_init_root(&dir) {
             eprintln!("# fetching schemas from {}", init_root.display());

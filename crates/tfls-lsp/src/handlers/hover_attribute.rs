@@ -606,8 +606,17 @@ enum AttributeLookup {
     AttributeUnknown,
 }
 
+/// Types served by the always-present built-in `terraform` provider
+/// snapshot. For these we can resolve even when no real provider schema
+/// has been fetched, so the "run terraform init" hint must not fire.
+fn is_builtin_type(type_name: &str) -> bool {
+    matches!(type_name, "terraform_remote_state" | "terraform_data")
+}
+
 fn resolve_attribute_schema(state: &StateStore, hit: &AttributeHit) -> AttributeLookup {
-    if state.schemas.is_empty() {
+    // The built-in provider snapshot is always present, so emptiness no
+    // longer signals "schemas not fetched"; gate on real provider schemas.
+    if !state.has_real_provider_schemas() && !is_builtin_type(&hit.root_type) {
         return AttributeLookup::SchemasNotLoaded;
     }
 
@@ -1108,7 +1117,7 @@ enum NestedBlockLookup {
 }
 
 fn resolve_nested_block_schema(state: &StateStore, hit: &NestedBlockHeaderHit) -> NestedBlockLookup {
-    if state.schemas.is_empty() {
+    if !state.has_real_provider_schemas() && !is_builtin_type(&hit.root_type) {
         return NestedBlockLookup::SchemasNotLoaded;
     }
 
