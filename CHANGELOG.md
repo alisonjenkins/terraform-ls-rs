@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.4.1...v0.4.2) (2026-06-05)
+
+
+### Bug Fixes
+
+* **vscode:** bump extension version with each release ([ad05bfa](https://github.com/alisonjenkins/terraform-ls-rs/commit/ad05bfad5b3b36bfc9df8e6ed3f7c0834dceecfb))
+
 ## [0.4.1](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.4.0...v0.4.1) (2026-06-05)
 
 
