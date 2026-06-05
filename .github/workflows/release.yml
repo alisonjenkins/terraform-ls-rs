@@ -64,7 +64,12 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build release binary
-        run: cargo build --release --locked -p tfls-cli --bin tfls --target ${{ matrix.target }}
+        # No --locked: release-please (simple) bumps the version in Cargo.toml
+        # but not the workspace-member entries in Cargo.lock, so on a release
+        # tag the lock is briefly stale. Letting cargo reconcile updates only
+        # those path-crate versions offline; registry deps stay pinned by the
+        # committed lock.
+        run: cargo build --release -p tfls-cli --bin tfls --target ${{ matrix.target }}
 
       - name: Package
         shell: bash
