@@ -138,6 +138,7 @@
     "watch": "node esbuild.js --watch",
     "check": "tsc --noEmit",
     "lint": "eslint src",
+    "test": "vitest run",
     "vscode:prepublish": "node esbuild.js --production"
   },
   "dependencies": {
@@ -153,6 +154,7 @@
     "eslint": "^10.0.0",
     "ovsx": "^1.0.0",
     "typescript": "^6.0.0",
-    "typescript-eslint": "^8.60.0"
+    "typescript-eslint": "^8.60.0",
+    "vitest": "^3.0.0"
   }
 }
