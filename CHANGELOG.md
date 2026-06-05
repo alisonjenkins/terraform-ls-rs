@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.4.0...v0.4.1) (2026-06-05)
+
+
+### Bug Fixes
+
+* **ci:** publish releases via draft flow for immutable releases ([b480905](https://github.com/alisonjenkins/terraform-ls-rs/commit/b4809056a3617d178f353668729dba27b1f49f69))
+
 ## [0.4.0](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.3.0...v0.4.0) (2026-06-05)
 
 
