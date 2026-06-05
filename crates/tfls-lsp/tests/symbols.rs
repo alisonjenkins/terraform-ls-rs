@@ -2,13 +2,14 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use tfls_lsp::Backend;
-use tfls_state::DocumentState;
-use tower_lsp::lsp_types::{
-    DocumentSymbolParams, DocumentSymbolResponse, PartialResultParams, TextDocumentIdentifier, Url,
+use lsp_types::{
+    DocumentSymbolParams, DocumentSymbolResponse, PartialResultParams, TextDocumentIdentifier,
     WorkDoneProgressParams, WorkspaceSymbolParams,
 };
-use tower_lsp::LspService;
+use tfls_lsp::Backend;
+use tfls_state::DocumentState;
+use tower_lsp_server::LspService;
+use url::Url;
 
 fn uri(s: &str) -> Url {
     Url::parse(s).expect("valid url")
@@ -44,7 +45,9 @@ module "net" { source = "./n" }
     let resp = tfls_lsp::handlers::symbols::document_symbol(
         &backend,
         DocumentSymbolParams {
-            text_document: TextDocumentIdentifier { uri: u.clone() },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&u),
+            },
             work_done_progress_params: WorkDoneProgressParams::default(),
             partial_result_params: PartialResultParams::default(),
         },
@@ -77,7 +80,9 @@ variable "a" {}
     let resp = tfls_lsp::handlers::symbols::document_symbol(
         &backend,
         DocumentSymbolParams {
-            text_document: TextDocumentIdentifier { uri: u },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&u),
+            },
             work_done_progress_params: WorkDoneProgressParams::default(),
             partial_result_params: PartialResultParams::default(),
         },
@@ -102,7 +107,9 @@ async fn document_symbol_none_for_empty_document() {
     let resp = tfls_lsp::handlers::symbols::document_symbol(
         &backend,
         DocumentSymbolParams {
-            text_document: TextDocumentIdentifier { uri: u },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&u),
+            },
             work_done_progress_params: WorkDoneProgressParams::default(),
             partial_result_params: PartialResultParams::default(),
         },

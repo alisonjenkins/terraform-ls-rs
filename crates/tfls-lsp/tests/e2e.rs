@@ -8,8 +8,8 @@ use futures::StreamExt;
 use serde_json::json;
 use tfls_lsp::Backend;
 use tower::Service;
-use tower_lsp::jsonrpc::Request;
-use tower_lsp::LspService;
+use tower_lsp_server::jsonrpc::Request;
+use tower_lsp_server::LspService;
 
 /// Drive the service through a full lifecycle and verify each reply.
 /// We spawn a drainer on the server→client socket so that

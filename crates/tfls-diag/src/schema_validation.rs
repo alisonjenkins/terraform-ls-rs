@@ -8,11 +8,12 @@
 use hcl_edit::expr::Expression;
 use hcl_edit::repr::Span;
 use hcl_edit::structure::{Block, BlockLabel, Body};
-use lsp_types::{Diagnostic, DiagnosticSeverity, Url};
+use lsp_types::{Diagnostic, DiagnosticSeverity};
 use ropey::Rope;
 use tfls_core::{is_meta_attr, lifecycle_attrs, lifecycle_blocks, BlockKind, CONDITION_ATTRS};
 use tfls_parser::hcl_span_to_lsp_range;
 use tfls_schema::{BlockSchema, ProviderSchemas, Schema};
+use url::Url;
 
 /// How we look up a schema by (kind, type_name).
 pub trait SchemaLookup {

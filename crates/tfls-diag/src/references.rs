@@ -70,9 +70,9 @@ where
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use lsp_types::Url;
     use ropey::Rope;
     use tfls_parser::{extract_references, extract_symbols, parse_source};
+    use url::Url;
 
     fn uri() -> Url {
         Url::parse("file:///t.tf").expect("url")

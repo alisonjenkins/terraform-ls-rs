@@ -30,8 +30,8 @@ use std::time::Duration;
 use clap::Parser;
 use tfls_lsp::Backend;
 use tfls_state::DocumentState;
-use tower_lsp::lsp_types::Url;
-use tower_lsp::LspService;
+use tower_lsp_server::LspService;
+use url::Url;
 
 #[derive(Debug, Parser)]
 #[command(

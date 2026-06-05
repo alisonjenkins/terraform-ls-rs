@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use tfls_lsp::indexer;
 use tfls_state::{JobQueue, StateStore, SymbolKey};
-use tower_lsp::lsp_types::Url;
+use url::Url;
 
 fn tmp_dir(suffix: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(

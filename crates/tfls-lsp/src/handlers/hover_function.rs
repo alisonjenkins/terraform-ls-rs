@@ -40,7 +40,7 @@ pub fn function_hover(state: &StateStore, doc: &DocumentState, pos: Position) ->
 /// Look up the function the cursor is on or inside. Returns `(name, sig)`.
 fn lookup_at_cursor(
     state: &StateStore,
-    uri: &lsp_types::Url,
+    uri: &url::Url,
     text: &str,
     offset: usize,
 ) -> Option<(String, Arc<FunctionSignature>)> {

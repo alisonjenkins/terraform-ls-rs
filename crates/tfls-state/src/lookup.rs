@@ -36,8 +36,8 @@ fn range_length(range: &lsp_types::Range) -> u64 {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use lsp_types::Url;
     use tfls_parser::ReferenceKind;
+    use url::Url;
 
     fn uri() -> Url {
         Url::parse("file:///test.tf").expect("valid url")

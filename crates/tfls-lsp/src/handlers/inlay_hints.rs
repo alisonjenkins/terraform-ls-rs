@@ -19,12 +19,13 @@ use hcl_edit::repr::Span;
 use hcl_edit::structure::{Block, BlockLabel, Body};
 use lsp_types::{
     InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams, InlayHintTooltip, MarkupContent,
-    MarkupKind, Range, Url,
+    MarkupKind, Range,
 };
 use ropey::Rope;
 use std::collections::HashMap;
 use tfls_parser::{hcl_span_to_lsp_range, ReferenceKind};
-use tower_lsp::jsonrpc;
+use tower_lsp_server::jsonrpc;
+use url::Url;
 
 use crate::backend::Backend;
 
@@ -32,7 +33,9 @@ pub async fn inlay_hint(
     backend: &Backend,
     params: InlayHintParams,
 ) -> jsonrpc::Result<Option<Vec<InlayHint>>> {
-    let uri = params.text_document.uri;
+    let Some(uri) = tfls_core::uri::uri_to_url(&params.text_document.uri) else {
+        return Ok(None);
+    };
     let Some(doc) = backend.state.documents.get(&uri) else {
         return Ok(None);
     };

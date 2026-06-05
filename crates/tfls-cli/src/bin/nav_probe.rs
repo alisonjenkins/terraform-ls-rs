@@ -17,14 +17,15 @@ use std::process::ExitCode;
 use clap::{Parser, ValueEnum};
 use lsp_types::{
     GotoDefinitionParams, GotoDefinitionResponse, HoverContents, HoverParams, Position,
-    TextDocumentIdentifier, TextDocumentPositionParams, Url, WorkDoneProgressParams,
+    TextDocumentIdentifier, TextDocumentPositionParams, WorkDoneProgressParams,
 };
 use tfls_lsp::handlers::{navigation, util};
 use tfls_lsp::indexer;
 use tfls_lsp::Backend;
 use tfls_state::{DocumentState, StateStore};
 use tfls_walker::discover_terraform_files;
-use tower_lsp::LspService;
+use tower_lsp_server::LspService;
+use url::Url;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum Command {
@@ -182,7 +183,9 @@ async fn run_goto_def(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let params = GotoDefinitionParams {
         text_document_position_params: TextDocumentPositionParams {
-            text_document: TextDocumentIdentifier { uri },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&uri),
+            },
             position,
         },
         work_done_progress_params: WorkDoneProgressParams::default(),
@@ -202,7 +205,7 @@ async fn run_goto_def(
             for link in links {
                 println!(
                     "  {} @ {}:{} → {}:{}",
-                    link.target_uri,
+                    link.target_uri.as_str(),
                     link.target_range.start.line + 1,
                     link.target_range.start.character + 1,
                     link.target_range.end.line + 1,
@@ -222,7 +225,9 @@ async fn run_hover(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let params = HoverParams {
         text_document_position_params: TextDocumentPositionParams {
-            text_document: TextDocumentIdentifier { uri },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&uri),
+            },
             position,
         },
         work_done_progress_params: WorkDoneProgressParams::default(),
@@ -254,11 +259,10 @@ fn marked_to_string(m: &lsp_types::MarkedString) -> String {
 }
 
 fn print_location(prefix: &str, loc: &lsp_types::Location) {
-    let path = loc
-        .uri
-        .to_file_path()
+    let path = tfls_core::uri::uri_to_url(&loc.uri)
+        .and_then(|u| u.to_file_path().ok())
         .map(|p| p.display().to_string())
-        .unwrap_or_else(|()| loc.uri.to_string());
+        .unwrap_or_else(|| loc.uri.as_str().to_string());
     println!(
         "{prefix}: {}:{}:{} — {}:{}",
         path,

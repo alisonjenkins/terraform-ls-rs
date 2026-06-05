@@ -29,8 +29,8 @@ use serde_json::{json, Value};
 use tfls_lsp::Backend;
 use tokio::sync::Mutex;
 use tower::Service;
-use tower_lsp::jsonrpc::Request;
-use tower_lsp::LspService;
+use tower_lsp_server::jsonrpc::Request;
+use tower_lsp_server::LspService;
 
 pub type Captured = Arc<Mutex<Vec<Value>>>;
 

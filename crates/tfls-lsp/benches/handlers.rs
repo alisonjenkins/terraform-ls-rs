@@ -5,15 +5,16 @@
 use std::sync::Arc;
 
 use criterion::{criterion_group, criterion_main, Criterion};
+use lsp_types::{
+    CodeActionContext, CodeActionParams, DocumentSymbolParams, PartialResultParams, Position,
+    Range, TextDocumentIdentifier, WorkDoneProgressParams, WorkspaceSymbolParams,
+};
 use tfls_lsp::handlers;
 use tfls_lsp::Backend;
 use tfls_state::{DocumentState, JobQueue, StateStore};
 use tokio::runtime::Runtime;
-use tower_lsp::lsp_types::{
-    CodeActionContext, CodeActionParams, DocumentSymbolParams, PartialResultParams, Position,
-    Range, TextDocumentIdentifier, Url, WorkDoneProgressParams, WorkspaceSymbolParams,
-};
-use tower_lsp::LspService;
+use tower_lsp_server::LspService;
+use url::Url;
 
 /// Build a realistic workspace with many symbols across many files.
 fn populate(state: &StateStore, files: usize, per_file_vars: usize) {
@@ -91,7 +92,9 @@ fn bench_document_symbol(c: &mut Criterion) {
                 let _ = handlers::symbols::document_symbol(
                     &backend,
                     DocumentSymbolParams {
-                        text_document: TextDocumentIdentifier { uri: uri.clone() },
+                        text_document: TextDocumentIdentifier {
+                            uri: tfls_core::uri::url_to_uri(&uri),
+                        },
                         work_done_progress_params: WorkDoneProgressParams::default(),
                         partial_result_params: PartialResultParams::default(),
                     },
@@ -216,7 +219,9 @@ fn bench_code_action_isolated(c: &mut Criterion) {
         let backend = backend(Arc::clone(&state), Arc::clone(&jobs));
 
         let params = CodeActionParams {
-            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&uri),
+            },
             range: Range {
                 start: Position::new(2, 0),
                 end: Position::new(2, 0),
@@ -254,7 +259,9 @@ fn bench_code_action_deprecation_pipeline(c: &mut Criterion) {
         let backend = backend(Arc::clone(&state), Arc::clone(&jobs));
 
         let params = CodeActionParams {
-            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&uri),
+            },
             range: Range {
                 start: Position::new(2, 0),
                 end: Position::new(2, 0),
@@ -344,7 +351,9 @@ fn bench_code_action_block_rename(c: &mut Criterion) {
         let backend = backend(Arc::clone(&state), Arc::clone(&jobs));
 
         let params = CodeActionParams {
-            text_document: TextDocumentIdentifier { uri: main_uri },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&main_uri),
+            },
             range: Range {
                 start: Position::new(2, 0),
                 end: Position::new(2, 0),
@@ -385,7 +394,9 @@ fn bench_code_action_block_rename_cursor(c: &mut Criterion) {
 
         // Cursor on the first `aws_alb` block label.
         let params = CodeActionParams {
-            text_document: TextDocumentIdentifier { uri: main_uri },
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&main_uri),
+            },
             range: Range {
                 // Line 5 = first resource block's header (after
                 // the 5-line `terraform {}` preamble).

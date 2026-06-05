@@ -3,9 +3,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use lsp_types::{Position, Url};
+use lsp_types::Position;
 use ropey::Rope;
 use tfls_parser::{extract_references, extract_symbols, lsp_position_to_byte_offset, parse_source};
+use url::Url;
 
 fn synthesize(n_blocks: usize) -> String {
     let mut s = String::with_capacity(n_blocks * 100);

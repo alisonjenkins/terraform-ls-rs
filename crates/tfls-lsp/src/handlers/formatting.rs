@@ -12,7 +12,7 @@ use tfls_format::format_source;
 use tfls_parser::{
     byte_offset_to_lsp_position, hcl_span_to_lsp_range, lsp_position_to_byte_offset,
 };
-use tower_lsp::jsonrpc;
+use tower_lsp_server::jsonrpc;
 
 use crate::backend::Backend;
 
@@ -20,7 +20,9 @@ pub async fn formatting(
     backend: &Backend,
     params: DocumentFormattingParams,
 ) -> jsonrpc::Result<Option<Vec<TextEdit>>> {
-    let uri = params.text_document.uri;
+    let Some(uri) = tfls_core::uri::uri_to_url(&params.text_document.uri) else {
+        return Ok(None);
+    };
     let style = backend.state.config.snapshot().format_style;
     tracing::info!(uri = %uri, ?style, "formatting: invocation");
     let Some(doc) = backend.state.documents.get(&uri) else {
@@ -62,7 +64,9 @@ pub async fn range_formatting(
     backend: &Backend,
     params: DocumentRangeFormattingParams,
 ) -> jsonrpc::Result<Option<Vec<TextEdit>>> {
-    let uri = params.text_document.uri;
+    let Some(uri) = tfls_core::uri::uri_to_url(&params.text_document.uri) else {
+        return Ok(None);
+    };
     let Some(doc) = backend.state.documents.get(&uri) else {
         return Ok(None);
     };
@@ -98,7 +102,10 @@ pub async fn on_type_formatting(
         return Ok(None);
     }
 
-    let uri = params.text_document_position.text_document.uri;
+    let Some(uri) = tfls_core::uri::uri_to_url(&params.text_document_position.text_document.uri)
+    else {
+        return Ok(None);
+    };
     let pos = params.text_document_position.position;
     let Some(doc) = backend.state.documents.get(&uri) else {
         return Ok(None);

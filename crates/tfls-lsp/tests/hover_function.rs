@@ -7,14 +7,15 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use lsp_types::{
+    HoverParams, Position, TextDocumentIdentifier, TextDocumentPositionParams,
+    WorkDoneProgressParams,
+};
 use tfls_lsp::Backend;
 use tfls_schema::bundled_functions;
 use tfls_state::DocumentState;
-use tower_lsp::lsp_types::{
-    HoverParams, Position, TextDocumentIdentifier, TextDocumentPositionParams, Url,
-    WorkDoneProgressParams,
-};
-use tower_lsp::LspService;
+use tower_lsp_server::LspService;
+use url::Url;
 
 fn uri(path: &str) -> Url {
     Url::parse(path).expect("valid url")
@@ -42,7 +43,9 @@ async fn hover_markdown(backend: &Backend, u: &Url, pos: Position) -> Option<Str
         backend,
         HoverParams {
             text_document_position_params: TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier { uri: u.clone() },
+                text_document: TextDocumentIdentifier {
+                    uri: tfls_core::uri::url_to_uri(u),
+                },
                 position: pos,
             },
             work_done_progress_params: WorkDoneProgressParams::default(),
@@ -51,7 +54,7 @@ async fn hover_markdown(backend: &Backend, u: &Url, pos: Position) -> Option<Str
     .await
     .expect("ok")?;
     match hover.contents {
-        tower_lsp::lsp_types::HoverContents::Markup(m) => Some(m.value),
+        lsp_types::HoverContents::Markup(m) => Some(m.value),
         other => panic!("expected markup, got {other:?}"),
     }
 }

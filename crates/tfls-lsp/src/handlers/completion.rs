@@ -12,7 +12,7 @@ use hcl_edit::structure::{Block, Body};
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionItemTag, CompletionParams, CompletionResponse,
     CompletionTextEdit, Documentation, InsertTextFormat, MarkupContent, MarkupKind, Position,
-    Range, TextEdit, Url,
+    Range, TextEdit,
 };
 use tfls_core::{
     builtin_blocks, classify_context, is_singleton_meta_block, merge_shapes, meta_blocks,
@@ -21,7 +21,8 @@ use tfls_core::{
 };
 use tfls_parser::lsp_position_to_byte_offset;
 use tfls_schema::NestingMode;
-use tower_lsp::jsonrpc;
+use tower_lsp_server::jsonrpc;
+use url::Url;
 
 use super::util::{parent_dir, resolve_module_source};
 
@@ -88,7 +89,10 @@ pub async fn completion(
     backend: &Backend,
     params: CompletionParams,
 ) -> jsonrpc::Result<Option<CompletionResponse>> {
-    let uri = params.text_document_position.text_document.uri;
+    let Some(uri) = tfls_core::uri::uri_to_url(&params.text_document_position.text_document.uri)
+    else {
+        return Ok(None);
+    };
     let pos = params.text_document_position.position;
     let trigger_char = params
         .context

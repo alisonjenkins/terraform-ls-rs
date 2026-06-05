@@ -30,8 +30,12 @@ pub async fn did_change_configuration(backend: &Backend, params: DidChangeConfig
 
 pub async fn did_change_watched_files(backend: &Backend, params: DidChangeWatchedFilesParams) {
     for event in params.changes {
-        let Ok(path) = event.uri.to_file_path() else {
-            tracing::warn!(uri = %event.uri, "watched file URI is not a path");
+        let Some(file_url) = tfls_core::uri::uri_to_url(&event.uri) else {
+            tracing::warn!(uri = event.uri.as_str(), "watched file URI is not a path");
+            continue;
+        };
+        let Ok(path) = file_url.to_file_path() else {
+            tracing::warn!(uri = event.uri.as_str(), "watched file URI is not a path");
             continue;
         };
         match event.typ {
@@ -39,7 +43,7 @@ pub async fn did_change_watched_files(backend: &Backend, params: DidChangeWatche
                 backend.jobs.enqueue(Job::ParseFile(path), Priority::Normal);
             }
             FileChangeType::DELETED => {
-                backend.state.remove_document(&event.uri);
+                backend.state.remove_document(&file_url);
                 // Clear the deleted file's published diagnostics (they'd
                 // otherwise linger in the client forever), then refresh
                 // open peers in the same dir — deleting e.g. variables.tf
@@ -48,7 +52,7 @@ pub async fn did_change_watched_files(backend: &Backend, params: DidChangeWatche
                     .client
                     .publish_diagnostics(event.uri.clone(), Vec::new(), None)
                     .await;
-                crate::handlers::document::publish_peer_diagnostics(backend, &event.uri).await;
+                crate::handlers::document::publish_peer_diagnostics(backend, &file_url).await;
             }
             _ => {}
         }

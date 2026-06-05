@@ -12,14 +12,15 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use lsp_types::{
+    CodeActionContext, CodeActionParams, PartialResultParams, Position, Range,
+    TextDocumentIdentifier, WorkDoneProgressParams,
+};
 use tfls_lsp::handlers;
 use tfls_lsp::Backend;
 use tfls_state::{DocumentState, JobQueue, StateStore};
-use tower_lsp::lsp_types::{
-    CodeActionContext, CodeActionParams, PartialResultParams, Position, Range,
-    TextDocumentIdentifier, Url, WorkDoneProgressParams,
-};
-use tower_lsp::LspService;
+use tower_lsp_server::LspService;
+use url::Url;
 
 /// Build a synthetic 500-block fixture mirroring the
 /// `code_action_deprecation` bench's `large` case so flame
@@ -72,7 +73,9 @@ async fn main() {
         Backend::with_shared_state(service.inner().client.clone(), Arc::clone(&state), jobs);
 
     let params = CodeActionParams {
-        text_document: TextDocumentIdentifier { uri },
+        text_document: TextDocumentIdentifier {
+            uri: tfls_core::uri::url_to_uri(&uri),
+        },
         range: Range {
             start: Position::new(2, 0),
             end: Position::new(2, 0),

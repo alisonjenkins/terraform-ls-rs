@@ -2,7 +2,7 @@
 
 use clap::Parser;
 use tfls_lsp::Backend;
-use tower_lsp::{LspService, Server};
+use tower_lsp_server::{LspService, Server};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -58,7 +58,7 @@ fn init_tracing(verbosity: u8) {
             1 => "debug",
             _ => "trace",
         };
-        EnvFilter::new(format!("tfls={level},tower_lsp=info"))
+        EnvFilter::new(format!("tfls={level},tower_lsp_server=info"))
     });
 
     // File sink path. Defaults to `$XDG_RUNTIME_DIR/tfls.log`

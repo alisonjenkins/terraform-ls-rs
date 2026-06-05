@@ -5,12 +5,13 @@ use hcl_edit::repr::Span;
 use hcl_edit::structure::Body;
 use lsp_types::{
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams, Location,
-    MarkupContent, MarkupKind, Position, ReferenceParams, Url,
+    MarkupContent, MarkupKind, Position, ReferenceParams,
 };
 use tfls_core::SymbolKind;
 use tfls_parser::lsp_position_to_byte_offset;
 use tfls_state::{reference_at_position, reference_key, DocumentState, SymbolKey};
-use tower_lsp::jsonrpc;
+use tower_lsp_server::jsonrpc;
+use url::Url;
 
 use crate::backend::Backend;
 use crate::handlers::cursor::{find_symbol_at_cursor, key_at_cursor};
@@ -36,7 +37,11 @@ pub async fn goto_definition(
     params: GotoDefinitionParams,
 ) -> jsonrpc::Result<Option<GotoDefinitionResponse>> {
     let pos = params.text_document_position_params.position;
-    let uri = params.text_document_position_params.text_document.uri;
+    let Some(uri) =
+        tfls_core::uri::uri_to_url(&params.text_document_position_params.text_document.uri)
+    else {
+        return Ok(None);
+    };
 
     // Module-scoped goto-def — handled BEFORE the generic
     // `reference_at_position` path because those positions (an
@@ -512,7 +517,7 @@ fn provider_function_references_at(
                     tfls_parser::byte_offset_to_lsp_position(&other.rope, abs_end),
                 ) {
                     out.push(Location {
-                        uri: doc_uri.clone(),
+                        uri: tfls_core::uri::url_to_uri(doc_uri),
                         range: lsp_types::Range { start: s, end: e },
                     });
                 }
@@ -822,7 +827,7 @@ fn required_providers_attr_location(
                 let start = tfls_parser::byte_offset_to_lsp_position(&doc.rope, span.start).ok()?;
                 let end = tfls_parser::byte_offset_to_lsp_position(&doc.rope, span.end).ok()?;
                 return Some(Location {
-                    uri: uri.clone(),
+                    uri: tfls_core::uri::url_to_uri(uri),
                     range: lsp_types::Range { start, end },
                 });
             }
@@ -836,7 +841,10 @@ pub async fn references(
     params: ReferenceParams,
 ) -> jsonrpc::Result<Option<Vec<Location>>> {
     let pos = params.text_document_position.position;
-    let uri = params.text_document_position.text_document.uri;
+    let Some(uri) = tfls_core::uri::uri_to_url(&params.text_document_position.text_document.uri)
+    else {
+        return Ok(None);
+    };
 
     // Provider-defined function (Terraform 1.8+) — handled BEFORE
     // the symbol-key lookup since these aren't tracked as symbols.
@@ -908,7 +916,11 @@ pub async fn references(
 
 pub async fn hover(backend: &Backend, params: HoverParams) -> jsonrpc::Result<Option<Hover>> {
     let pos = params.text_document_position_params.position;
-    let uri = params.text_document_position_params.text_document.uri;
+    let Some(uri) =
+        tfls_core::uri::uri_to_url(&params.text_document_position_params.text_document.uri)
+    else {
+        return Ok(None);
+    };
 
     let Some(doc) = backend.state.documents.get(&uri) else {
         return Ok(None);

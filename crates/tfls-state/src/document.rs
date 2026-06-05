@@ -3,13 +3,14 @@
 
 use std::sync::Mutex;
 
-use lsp_types::{TextDocumentContentChangeEvent, TextEdit, Url};
+use lsp_types::{TextDocumentContentChangeEvent, TextEdit};
 use ropey::Rope;
 use tfls_core::SymbolTable;
 use tfls_parser::{
     extract_references, extract_references_fallback, extract_symbols, extract_symbols_fallback,
     lsp_position_to_byte_offset, parse_source_for_uri, ParsedFile, Reference,
 };
+use url::Url;
 
 use crate::error::StateError;
 

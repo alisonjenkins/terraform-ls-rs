@@ -7,9 +7,10 @@
 use hcl_edit::repr::{Decorated, Span};
 use hcl_edit::structure::{Block, BlockLabel, Body};
 use hcl_edit::Ident;
-use lsp_types::{Range, Url};
+use lsp_types::Range;
 use ropey::Rope;
 use tfls_core::{ResourceAddress, Symbol, SymbolKind, SymbolLocation, SymbolTable};
+use url::Url;
 
 use crate::position::hcl_span_to_lsp_range;
 

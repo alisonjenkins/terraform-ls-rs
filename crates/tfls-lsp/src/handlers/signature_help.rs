@@ -12,7 +12,7 @@ use lsp_types::{
 };
 use tfls_parser::lsp_position_to_byte_offset;
 use tfls_schema::FunctionSignature;
-use tower_lsp::jsonrpc;
+use tower_lsp_server::jsonrpc;
 
 use crate::backend::Backend;
 
@@ -20,7 +20,11 @@ pub async fn signature_help(
     backend: &Backend,
     params: SignatureHelpParams,
 ) -> jsonrpc::Result<Option<SignatureHelp>> {
-    let uri = params.text_document_position_params.text_document.uri;
+    let Some(uri) =
+        tfls_core::uri::uri_to_url(&params.text_document_position_params.text_document.uri)
+    else {
+        return Ok(None);
+    };
     let pos = params.text_document_position_params.position;
 
     let Some(doc) = backend.state.documents.get(&uri) else {
@@ -161,7 +165,7 @@ pub(crate) fn qualified_name_ending_at(text: &str, end: usize) -> Option<String>
 /// } }` entry that remaps `<local>` to a different provider name.
 pub(crate) fn resolve_function(
     state: &tfls_state::StateStore,
-    uri: Option<&lsp_types::Url>,
+    uri: Option<&url::Url>,
     name: &str,
 ) -> Option<(String, std::sync::Arc<FunctionSignature>)> {
     if let Some(sig) = state.functions.get(name).map(|s| s.clone()) {
@@ -206,7 +210,7 @@ pub(crate) fn resolve_function(
 /// in the same dir. Returns `None` if the local is unmapped.
 fn rewrite_provider_local(
     state: &tfls_state::StateStore,
-    uri: &lsp_types::Url,
+    uri: &url::Url,
     name: &str,
 ) -> Option<String> {
     let mut parts = name.split("::");
@@ -227,7 +231,7 @@ fn rewrite_provider_local(
 
 fn lookup_local_in_workspace(
     state: &tfls_state::StateStore,
-    uri: &lsp_types::Url,
+    uri: &url::Url,
     local: &str,
 ) -> Option<String> {
     if let Some(doc) = state.documents.get(uri) {

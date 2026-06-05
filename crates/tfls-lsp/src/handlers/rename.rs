@@ -14,13 +14,13 @@
 use std::collections::HashMap;
 
 use lsp_types::{
-    PrepareRenameResponse, Range, RenameParams, TextDocumentPositionParams, TextEdit, Url,
-    WorkspaceEdit,
+    PrepareRenameResponse, Range, RenameParams, TextDocumentPositionParams, TextEdit, WorkspaceEdit,
 };
 use ropey::Rope;
 use tfls_core::{SymbolKind, SymbolLocation};
 use tfls_state::{DocumentState, StateStore, SymbolKey};
-use tower_lsp::jsonrpc;
+use tower_lsp_server::jsonrpc;
+use url::Url;
 
 use crate::backend::Backend;
 use crate::handlers::cursor::{find_symbol_at_cursor, CursorKind};
@@ -31,7 +31,9 @@ pub async fn prepare_rename(
     backend: &Backend,
     params: TextDocumentPositionParams,
 ) -> jsonrpc::Result<Option<PrepareRenameResponse>> {
-    let uri = params.text_document.uri;
+    let Some(uri) = tfls_core::uri::uri_to_url(&params.text_document.uri) else {
+        return Ok(None);
+    };
     let Some(doc) = backend.state.documents.get(&uri) else {
         return Ok(None);
     };
@@ -67,7 +69,10 @@ pub async fn rename(
     backend: &Backend,
     params: RenameParams,
 ) -> jsonrpc::Result<Option<WorkspaceEdit>> {
-    let uri = params.text_document_position.text_document.uri;
+    let Some(uri) = tfls_core::uri::uri_to_url(&params.text_document_position.text_document.uri)
+    else {
+        return Ok(None);
+    };
     let new_name = params.new_name;
 
     // Provider local alias rename — workspace-wide. Tried BEFORE
@@ -130,7 +135,7 @@ pub async fn rename(
         Ok(None)
     } else {
         Ok(Some(WorkspaceEdit {
-            changes: Some(edits),
+            changes: Some(tfls_core::uri::changes_to_uri(edits)),
             ..Default::default()
         }))
     }
@@ -339,7 +344,7 @@ fn rename_provider_local(
         return None;
     }
     Some(WorkspaceEdit {
-        changes: Some(edits),
+        changes: Some(tfls_core::uri::changes_to_uri(edits)),
         ..Default::default()
     })
 }

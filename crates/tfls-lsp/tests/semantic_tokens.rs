@@ -7,13 +7,14 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use tfls_lsp::Backend;
-use tfls_state::DocumentState;
-use tower_lsp::lsp_types::{
-    PartialResultParams, SemanticTokensParams, SemanticTokensResult, TextDocumentIdentifier, Url,
+use lsp_types::{
+    PartialResultParams, SemanticTokensParams, SemanticTokensResult, TextDocumentIdentifier,
     WorkDoneProgressParams,
 };
-use tower_lsp::LspService;
+use tfls_lsp::Backend;
+use tfls_state::DocumentState;
+use tower_lsp_server::LspService;
+use url::Url;
 
 fn uri(path: &str) -> Url {
     Url::parse(path).expect("valid url")
@@ -44,7 +45,9 @@ async fn tokens(src: &str) -> Vec<AbsToken> {
     let u = uri("file:///t.tf");
     let backend = fresh_backend(src, &u);
     let params = SemanticTokensParams {
-        text_document: TextDocumentIdentifier { uri: u.clone() },
+        text_document: TextDocumentIdentifier {
+            uri: tfls_core::uri::url_to_uri(&u),
+        },
         work_done_progress_params: WorkDoneProgressParams::default(),
         partial_result_params: PartialResultParams::default(),
     };

@@ -6,7 +6,7 @@
 
 use lsp_types::{DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams};
 use tfls_state::{reference_at_position, reference_key};
-use tower_lsp::jsonrpc;
+use tower_lsp_server::jsonrpc;
 
 use crate::backend::Backend;
 
@@ -14,11 +14,11 @@ pub async fn document_highlight(
     backend: &Backend,
     params: DocumentHighlightParams,
 ) -> jsonrpc::Result<Option<Vec<DocumentHighlight>>> {
-    let uri = params
-        .text_document_position_params
-        .text_document
-        .uri
-        .clone();
+    let Some(uri) =
+        tfls_core::uri::uri_to_url(&params.text_document_position_params.text_document.uri)
+    else {
+        return Ok(None);
+    };
     let pos = params.text_document_position_params.position;
 
     let key = {

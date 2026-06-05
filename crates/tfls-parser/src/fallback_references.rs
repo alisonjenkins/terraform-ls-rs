@@ -32,9 +32,10 @@
 //! whole `prefix.name[.name]` byte span, which is what the
 //! AST extractor does too.
 
-use lsp_types::{Range, Url};
+use lsp_types::Range;
 use ropey::Rope;
 use tfls_core::SymbolLocation;
+use url::Url;
 
 use crate::position::byte_offset_to_lsp_position;
 use crate::references::{Reference, ReferenceKind};

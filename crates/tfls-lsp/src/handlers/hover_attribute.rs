@@ -15,7 +15,7 @@
 
 use hcl_edit::repr::Span;
 use hcl_edit::structure::{Attribute, Body};
-use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind, Position, Url};
+use lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind, Position};
 use std::sync::Arc;
 use tfls_core::builtin_blocks::{BuiltinAttr, LIFECYCLE_DATA_BLOCK, LIFECYCLE_RESOURCE_BLOCK};
 use tfls_core::{
@@ -24,6 +24,7 @@ use tfls_core::{
 use tfls_parser::hcl_span_to_lsp_range;
 use tfls_schema::{AttributeSchema, BlockSchema, NestedBlockSchema, NestingMode, ProviderSchema};
 use tfls_state::{DocumentState, StateStore};
+use url::Url;
 
 /// Try to produce a hover for an attribute key under the cursor. Always
 /// returns `Some(...)` when the cursor is on an attribute key inside a

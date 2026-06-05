@@ -12,13 +12,14 @@ use hcl_edit::repr::Span;
 use hcl_edit::structure::{Block, BlockLabel, Body};
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams, CodeActionResponse,
-    Diagnostic, DiagnosticSeverity, Position, Range, TextEdit, Url, WorkspaceEdit,
+    Diagnostic, DiagnosticSeverity, Position, Range, TextEdit, WorkspaceEdit,
 };
 use ropey::Rope;
 use sonic_rs::JsonValueTrait;
 use tfls_parser::hcl_span_to_lsp_range;
 use tfls_state::{DocumentState, StateStore};
-use tower_lsp::jsonrpc;
+use tower_lsp_server::jsonrpc;
+use url::Url;
 
 use crate::backend::Backend;
 use crate::handlers::code_action_scope::{
@@ -30,7 +31,9 @@ pub async fn code_action(
     backend: &Backend,
     params: CodeActionParams,
 ) -> jsonrpc::Result<Option<CodeActionResponse>> {
-    let uri = params.text_document.uri.clone();
+    let Some(uri) = tfls_core::uri::uri_to_url(&params.text_document.uri) else {
+        return Ok(None);
+    };
 
     // Snapshot the bits we need out of the shard guard, then drop it
     // IMMEDIATELY. Several builders below (`make_unknown_provider_*`,
@@ -653,7 +656,7 @@ fn build_declare_undefined_workspace_edit(
             let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
             changes.insert(target_url.clone(), vec![edit]);
             WorkspaceEdit {
-                changes: Some(changes),
+                changes: Some(tfls_core::uri::changes_to_uri(changes)),
                 ..Default::default()
             }
         }
@@ -663,7 +666,7 @@ fn build_declare_undefined_workspace_edit(
                 OptionalVersionedTextDocumentIdentifier, ResourceOp, TextDocumentEdit,
             };
             let create_op = DocumentChangeOperation::Op(ResourceOp::Create(CreateFile {
-                uri: target_url.clone(),
+                uri: tfls_core::uri::url_to_uri(target_url),
                 options: Some(CreateFileOptions {
                     overwrite: Some(false),
                     ignore_if_exists: Some(true),
@@ -679,7 +682,7 @@ fn build_declare_undefined_workspace_edit(
             };
             let doc_edit = DocumentChangeOperation::Edit(TextDocumentEdit {
                 text_document: OptionalVersionedTextDocumentIdentifier {
-                    uri: target_url.clone(),
+                    uri: tfls_core::uri::url_to_uri(target_url),
                     version: None,
                 },
                 edits: vec![OneOf::Left(initial_edit)],
@@ -974,7 +977,7 @@ fn emit_format_actions(
                             title: format!("Format selection ({line_count} lines)"),
                             kind: Some(scope_kind(Scope::Selection { range }, "format")),
                             edit: Some(WorkspaceEdit {
-                                changes: Some(changes),
+                                changes: Some(tfls_core::uri::changes_to_uri(changes)),
                                 ..Default::default()
                             }),
                             ..Default::default()
@@ -1032,7 +1035,7 @@ fn emit_format_actions(
             title,
             kind: Some(scope_kind(scope, "format")),
             edit: Some(WorkspaceEdit {
-                changes: Some(edits_by_uri),
+                changes: Some(tfls_core::uri::changes_to_uri(edits_by_uri)),
                 ..Default::default()
             }),
             ..Default::default()
@@ -2005,7 +2008,7 @@ fn build_null_resource_workspace_edit(
                 text.push_str(&body_text);
                 ops.push(DocumentChangeOperation::Edit(TextDocumentEdit {
                     text_document: OptionalVersionedTextDocumentIdentifier {
-                        uri: target_url,
+                        uri: tfls_core::uri::url_to_uri(&target_url),
                         version: None,
                     },
                     edits: vec![OneOf::Left(TextEdit {
@@ -2020,7 +2023,7 @@ fn build_null_resource_workspace_edit(
             TargetFileStrategy::Create => {
                 ops.push(DocumentChangeOperation::Op(ResourceOp::Create(
                     CreateFile {
-                        uri: target_url.clone(),
+                        uri: tfls_core::uri::url_to_uri(&target_url),
                         options: Some(CreateFileOptions {
                             overwrite: Some(false),
                             ignore_if_exists: Some(true),
@@ -2030,7 +2033,7 @@ fn build_null_resource_workspace_edit(
                 )));
                 ops.push(DocumentChangeOperation::Edit(TextDocumentEdit {
                     text_document: OptionalVersionedTextDocumentIdentifier {
-                        uri: target_url,
+                        uri: tfls_core::uri::url_to_uri(&target_url),
                         version: None,
                     },
                     edits: vec![OneOf::Left(TextEdit {
@@ -2051,7 +2054,10 @@ fn build_null_resource_workspace_edit(
     // most clients are sequential.)
     for (uri, edits) in rewrites {
         ops.push(DocumentChangeOperation::Edit(TextDocumentEdit {
-            text_document: OptionalVersionedTextDocumentIdentifier { uri, version: None },
+            text_document: OptionalVersionedTextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&uri),
+                version: None,
+            },
             edits: edits.into_iter().map(OneOf::Left).collect(),
         }));
     }
@@ -2197,7 +2203,7 @@ fn build_move_blocks_workspace_edit(
         }
         ops.push(DocumentChangeOperation::Edit(TextDocumentEdit {
             text_document: OptionalVersionedTextDocumentIdentifier {
-                uri: uri.clone(),
+                uri: tfls_core::uri::url_to_uri(uri),
                 version: None,
             },
             edits: edits.iter().cloned().map(OneOf::Left).collect(),
@@ -2229,7 +2235,7 @@ fn build_move_blocks_workspace_edit(
             };
             ops.push(DocumentChangeOperation::Edit(TextDocumentEdit {
                 text_document: OptionalVersionedTextDocumentIdentifier {
-                    uri: target_url.clone(),
+                    uri: tfls_core::uri::url_to_uri(target_url),
                     version: None,
                 },
                 edits: vec![OneOf::Left(append)],
@@ -2238,7 +2244,7 @@ fn build_move_blocks_workspace_edit(
         TargetFileStrategy::Create => {
             ops.push(DocumentChangeOperation::Op(ResourceOp::Create(
                 CreateFile {
-                    uri: target_url.clone(),
+                    uri: tfls_core::uri::url_to_uri(target_url),
                     options: Some(CreateFileOptions {
                         overwrite: Some(false),
                         ignore_if_exists: Some(true),
@@ -2255,7 +2261,7 @@ fn build_move_blocks_workspace_edit(
             };
             ops.push(DocumentChangeOperation::Edit(TextDocumentEdit {
                 text_document: OptionalVersionedTextDocumentIdentifier {
-                    uri: target_url.clone(),
+                    uri: tfls_core::uri::url_to_uri(target_url),
                     version: None,
                 },
                 edits: vec![OneOf::Left(initial)],
@@ -2318,7 +2324,7 @@ fn make_insert_required_action(
         kind: Some(CodeActionKind::QUICKFIX),
         diagnostics: Some(vec![diag.clone()]),
         edit: Some(WorkspaceEdit {
-            changes: Some(changes),
+            changes: Some(tfls_core::uri::changes_to_uri(changes)),
             ..Default::default()
         }),
         is_preferred: Some(true),
@@ -2495,7 +2501,7 @@ fn make_add_description_action(
         kind: Some(CodeActionKind::QUICKFIX),
         diagnostics: Some(vec![diag.clone()]),
         edit: Some(WorkspaceEdit {
-            changes: Some(changes),
+            changes: Some(tfls_core::uri::changes_to_uri(changes)),
             ..Default::default()
         }),
         is_preferred: Some(true),
@@ -2548,7 +2554,7 @@ fn make_convert_empty_list_equality_action(
         kind: Some(CodeActionKind::QUICKFIX),
         diagnostics: Some(vec![diag.clone()]),
         edit: Some(WorkspaceEdit {
-            changes: Some(changes),
+            changes: Some(tfls_core::uri::changes_to_uri(changes)),
             ..Default::default()
         }),
         is_preferred: Some(true),
@@ -2584,7 +2590,7 @@ fn make_convert_legacy_index_action(
         kind: Some(CodeActionKind::QUICKFIX),
         diagnostics: Some(vec![diag.clone()]),
         edit: Some(WorkspaceEdit {
-            changes: Some(changes),
+            changes: Some(tfls_core::uri::changes_to_uri(changes)),
             ..Default::default()
         }),
         is_preferred: Some(true),
@@ -2640,7 +2646,7 @@ fn make_unknown_provider_local_quickfixes(
                 kind: Some(CodeActionKind::QUICKFIX),
                 diagnostics: Some(vec![diag.clone()]),
                 edit: Some(WorkspaceEdit {
-                    changes: Some(changes),
+                    changes: Some(tfls_core::uri::changes_to_uri(changes)),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -2709,7 +2715,7 @@ fn make_unknown_provider_function_quickfixes(
                 kind: Some(CodeActionKind::QUICKFIX),
                 diagnostics: Some(vec![diag.clone()]),
                 edit: Some(WorkspaceEdit {
-                    changes: Some(changes),
+                    changes: Some(tfls_core::uri::changes_to_uri(changes)),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -2926,7 +2932,7 @@ fn make_convert_lookup_to_index_action(
         kind: Some(CodeActionKind::QUICKFIX),
         diagnostics: Some(vec![diag.clone()]),
         edit: Some(WorkspaceEdit {
-            changes: Some(changes),
+            changes: Some(tfls_core::uri::changes_to_uri(changes)),
             ..Default::default()
         }),
         // Index notation is semantics-preserving, but `X.k` may
@@ -3017,7 +3023,7 @@ fn make_unwrap_interpolation_action(
         kind: Some(CodeActionKind::QUICKFIX),
         diagnostics: Some(vec![diag.clone()]),
         edit: Some(WorkspaceEdit {
-            changes: Some(changes),
+            changes: Some(tfls_core::uri::changes_to_uri(changes)),
             ..Default::default()
         }),
         is_preferred: Some(true),
@@ -3119,7 +3125,7 @@ fn make_insert_variable_type_action(
         kind: Some(CodeActionKind::QUICKFIX),
         diagnostics: Some(vec![diag.clone()]),
         edit: Some(WorkspaceEdit {
-            changes: Some(changes),
+            changes: Some(tfls_core::uri::changes_to_uri(changes)),
             ..Default::default()
         }),
         // Object/tuple shapes can be coarse — leave the action
@@ -3263,7 +3269,7 @@ fn make_insert_variable_type_action_at_cursor(
         kind: Some(CodeActionKind::QUICKFIX),
         diagnostics: None,
         edit: Some(WorkspaceEdit {
-            changes: Some(changes),
+            changes: Some(tfls_core::uri::changes_to_uri(changes)),
             ..Default::default()
         }),
         // Placeholder shouldn't auto-apply via "fix all"
@@ -3373,7 +3379,7 @@ fn make_fix_all_variable_types_action(
         kind: Some(CodeActionKind::SOURCE_FIX_ALL),
         diagnostics: None,
         edit: Some(WorkspaceEdit {
-            changes: Some(changes),
+            changes: Some(tfls_core::uri::changes_to_uri(changes)),
             ..Default::default()
         }),
         is_preferred: None,
@@ -4047,7 +4053,7 @@ fn emit_template_file_actions(
             title,
             kind: Some(scope_kind(scope, "template-file-to-templatefile")),
             edit: Some(WorkspaceEdit {
-                changes: Some(changes),
+                changes: Some(tfls_core::uri::changes_to_uri(changes)),
                 ..Default::default()
             }),
             ..Default::default()
@@ -4158,7 +4164,7 @@ fn make_replace_template_file_at_cursor(
             kind: Some(CodeActionKind::QUICKFIX),
             diagnostics: None,
             edit: Some(WorkspaceEdit {
-                changes: Some(edits_by_uri),
+                changes: Some(tfls_core::uri::changes_to_uri(edits_by_uri)),
                 ..Default::default()
             }),
             is_preferred: Some(true),

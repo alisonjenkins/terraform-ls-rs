@@ -15,9 +15,10 @@
 //! without `hcl-edit` is out of scope — the main point is to keep
 //! the symbol table populated.
 
-use lsp_types::{Position, Range, Url};
+use lsp_types::{Position, Range};
 use ropey::Rope;
 use tfls_core::{ResourceAddress, Symbol, SymbolKind, SymbolLocation, SymbolTable};
+use url::Url;
 
 /// Scan `source` for top-level symbol declarations and populate a
 /// [`SymbolTable`]. Respects string literals and both `#` and `//`
