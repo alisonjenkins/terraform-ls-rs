@@ -579,10 +579,17 @@ pub fn extract_allowed_values(desc: &str) -> Option<Vec<String>> {
             break;
         };
         let m = cap.get(0)?;
-        let v = cap.get(1)?.as_str().to_string();
-        // Reject empty / whitespace-only tokens.
-        if !v.trim().is_empty() {
-            values.push(v);
+        // Registry prose often quotes enum values inside the backticks
+        // (`"generalPurpose"`); strip surrounding quotes so they compare
+        // equal to the unquoted HCL string value. Dedup (the same value can
+        // appear quoted and unquoted, or be listed twice).
+        let v = cap
+            .get(1)?
+            .as_str()
+            .trim()
+            .trim_matches(|c| c == '"' || c == '\'');
+        if !v.is_empty() && !values.iter().any(|e| e == v) {
+            values.push(v.to_string());
         }
         cursor += m.end();
 
