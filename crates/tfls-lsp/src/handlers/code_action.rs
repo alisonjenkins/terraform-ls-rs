@@ -319,6 +319,22 @@ pub async fn code_action(
         &uri,
         selection,
         true,
+        "Add `depth=1` to pinned git module sources",
+        "shallow-clone opportunity",
+        "module-shallow-clone-depth",
+        &mut actions,
+        |_doc_uri, doc| {
+            let Some(body) = doc.parsed.body.as_ref() else {
+                return Vec::new();
+            };
+            tfls_diag::shallow_clone_edits(body, &doc.rope)
+        },
+    );
+    emit_scoped_actions(
+        state,
+        &uri,
+        selection,
+        true,
         "Refine `type = any`",
         "`type = any` variable",
         "refine-any-types",

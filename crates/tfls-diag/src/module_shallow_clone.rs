@@ -51,6 +51,53 @@ pub fn module_shallow_clone_diagnostics(body: &Body, rope: &Rope) -> Vec<Diagnos
     out
 }
 
+/// Code-action edits for the shallow-clone diagnostic: for each flagged
+/// module `source`, insert `&depth=1` just before the closing quote of the
+/// URL. Only the query (`?…`) form is handled — go-getter expects `depth` as
+/// a query parameter; the rarer `#fragment` pin form is left to the user.
+pub fn shallow_clone_edits(body: &Body, rope: &Rope) -> Vec<lsp_types::TextEdit> {
+    let mut out = Vec::new();
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
+        if block.ident.as_str() != "module" {
+            continue;
+        }
+        for attr in block.body.iter().filter_map(|s| s.as_attribute()) {
+            if attr.key.as_str() != "source" {
+                continue;
+            }
+            let Expression::String(s) = &attr.value else {
+                continue;
+            };
+            let raw = s.value().as_str();
+            if !is_git_source(raw) || !is_pinned_to_tag(raw) || has_depth_one(raw) {
+                continue;
+            }
+            if !raw.contains('?') {
+                continue; // only the query form gets an auto-fix
+            }
+            let Some(span) = attr.value.span() else {
+                continue;
+            };
+            // Insert before the closing quote (span covers the quoted string).
+            let insert_byte = span.end.saturating_sub(1);
+            let Ok(pos) = tfls_parser::byte_offset_to_lsp_position(rope, insert_byte) else {
+                continue;
+            };
+            out.push(lsp_types::TextEdit {
+                range: lsp_types::Range {
+                    start: pos,
+                    end: pos,
+                },
+                new_text: "&depth=1".to_string(),
+            });
+        }
+    }
+    out
+}
+
 fn is_git_source(src: &str) -> bool {
     let trimmed = src.trim();
     trimmed.starts_with("git::")
@@ -150,5 +197,15 @@ mod tests {
     fn flags_commit_sha_pin_without_depth() {
         let d = diags(r#"module "x" { source = "git::https://example.com/foo.git?ref=abc1234" }"#);
         assert_eq!(d.len(), 1, "got: {d:?}");
+    }
+
+    #[test]
+    fn edit_inserts_depth_one_before_closing_quote() {
+        let src = r#"module "x" { source = "git::https://example.com/foo.git?ref=v1.2.3" }"#;
+        let body = hcl_edit::parser::parse_body(src).expect("parse");
+        let rope = ropey::Rope::from_str(src);
+        let edits = super::shallow_clone_edits(&body, &rope);
+        assert_eq!(edits.len(), 1, "one fix expected");
+        assert_eq!(edits[0].new_text, "&depth=1");
     }
 }

@@ -91,7 +91,7 @@ pub use map_duplicate_keys::map_duplicate_keys_diagnostics;
 pub use meta_arguments::meta_argument_diagnostics;
 pub use module_graph::ModuleGraphLookup;
 pub use module_pinned_source::module_pinned_source_diagnostics;
-pub use module_shallow_clone::module_shallow_clone_diagnostics;
+pub use module_shallow_clone::{module_shallow_clone_diagnostics, shallow_clone_edits};
 pub use module_version_presence::module_version_presence_diagnostics;
 pub use naming_convention::naming_convention_diagnostics;
 pub use references::{
