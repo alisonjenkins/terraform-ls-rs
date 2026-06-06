@@ -23,6 +23,38 @@ To use your own build instead, set:
 "terraform-ls-rs.serverPath": "/path/to/tfls"
 ```
 
+## Code actions
+
+Two ways to invoke them (VS Code splits them by kind):
+
+- **Quick fixes** (convert `null_resource` → `terraform_data`, set a variable
+  type, add `depth=1`, unwrap interpolation, …) — put the cursor on the line and
+  press **`Ctrl+.`** (macOS **`Cmd+.`**), or click the 💡 lightbulb.
+- **Scoped "source" actions** — the same fixes applied across a wider scope
+  (**File / Module / Workspace**) are `source.*` actions, which `Ctrl+.` hides.
+  Run them via **Command Palette → "Source Action…"**.
+
+Each scoped action has a stable kind: `source.fixAll.terraform-ls-rs.<id>` plus
+`.module` / `.workspace` variants (`<id>` e.g. `set-variable-types`,
+`convert-lookup-to-index`, `module-shallow-clone-depth`, `unwrap-interpolation`).
+
+Bind a key to a scope, or run on save:
+
+```jsonc
+// keybindings.json — apply a workspace-wide fix on demand
+{
+  "key": "ctrl+alt+w",
+  "command": "editor.action.codeAction",
+  "args": { "kind": "source.fixAll.terraform-ls-rs", "apply": "first" }
+}
+```
+```jsonc
+// settings.json — fix on save (kind is a prefix; narrow as needed)
+"editor.codeActionsOnSave": {
+  "source.fixAll.terraform-ls-rs.module-shallow-clone-depth": "explicit"
+}
+```
+
 ## Commands
 
 - **Terraform: Toggle Format Style** — flip `minimal` ↔ `opinionated` live.
