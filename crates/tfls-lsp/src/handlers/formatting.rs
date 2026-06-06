@@ -78,6 +78,7 @@ pub async fn range_formatting(
     let Ok(formatted) = format_source(&slice, style) else {
         return Ok(None);
     };
+    let formatted = match_trailing_newline(formatted, &slice);
     if formatted == slice {
         return Ok(Some(Vec::new()));
     }
@@ -86,6 +87,19 @@ pub async fn range_formatting(
         range: params.range,
         new_text: formatted,
     }]))
+}
+
+/// `format_source` always appends a trailing newline, but a partial-range
+/// slice (an enclosing block or a user selection) does not include the
+/// document's newline that follows the range — emitting the formatter's
+/// trailing newline would then insert a spurious blank line after the range.
+/// Match the slice's trailing-newline-ness.
+fn match_trailing_newline(formatted: String, slice: &str) -> String {
+    if slice.ends_with('\n') {
+        formatted
+    } else {
+        formatted.trim_end_matches('\n').to_string()
+    }
 }
 
 /// `textDocument/onTypeFormatting` — triggered after typing `}`
@@ -124,6 +138,7 @@ pub async fn on_type_formatting(
     let Ok(formatted) = format_source(&slice, style) else {
         return Ok(None);
     };
+    let formatted = match_trailing_newline(formatted, &slice);
     if formatted == slice {
         return Ok(Some(Vec::new()));
     }
@@ -198,4 +213,41 @@ fn area(r: &Range) -> u64 {
 #[allow(dead_code)]
 fn _byte_noop() {
     let _ = byte_offset_to_lsp_position;
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use lsp_types::Position;
+    use tfls_state::FormatStyle;
+
+    // Regression: on-type / range formatting must not append a trailing
+    // newline when the formatted range ends at `}` (no newline) — doing so
+    // inserts a spurious blank line after the block.
+    #[test]
+    fn enclosing_block_format_keeps_no_trailing_newline() {
+        let src = "variable \"v\" {\n  type = list(string)\n  description = \"x\"\n}\n";
+        let body = hcl_edit::parser::parse_body(src).expect("parse");
+        let rope = Rope::from_str(src);
+        let range = enclosing_block_range(&body, &rope, Position::new(1, 7)).expect("range");
+        let slice = slice_text(&rope, range).expect("slice");
+        assert!(
+            !slice.ends_with('\n'),
+            "block slice ends at }} (no newline)"
+        );
+        let formatted = format_source(&slice, FormatStyle::Minimal).expect("fmt");
+        let edit = match_trailing_newline(formatted, &slice);
+        assert!(
+            !edit.ends_with('\n'),
+            "formatted block must not end with a newline; got:\n{edit:?}"
+        );
+        assert!(edit.contains("type        = list(string)"));
+    }
+
+    #[test]
+    fn match_trailing_newline_respects_slice() {
+        assert_eq!(match_trailing_newline("a\n".into(), "a"), "a");
+        assert_eq!(match_trailing_newline("a\n".into(), "a\n"), "a\n");
+    }
 }
