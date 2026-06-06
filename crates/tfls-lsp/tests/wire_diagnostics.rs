@@ -142,11 +142,18 @@ async fn code_action_envtype_inference_via_wire() {
     // `assigned_variable_types` asynchronously. Poll the code action until the
     // quick-fix shows up rather than racing a single fixed sleep — under
     // parallel test load the worker can take longer than any one timeout.
+    // Poll until the SPECIFIC expected action is ready, not just any action:
+    // under parallel load the worker populates incrementally, so an early
+    // poll can return a placeholder action (e.g. `type = any`) before the
+    // tfvars/module-caller inference finishes. Wait for the `string` variant
+    // and match it by title at any index. Generous budget (exits early on
+    // success); only the ceiling matters on a genuine hang.
+    let wanted = |a: &serde_json::Value| {
+        let t = a["title"].as_str().unwrap_or("");
+        t.contains("Set variable type to `string`") && t.contains("tfvars / module callers")
+    };
     let mut resp = json!(null);
-    let mut actions = Vec::new();
-    // Generous budget: under nextest parallel load the background worker
-    // (ScanDirectory + rebuild) is CPU-starved, so 10s wasn't always enough.
-    // Exits early on success, so the ceiling only matters on real failure.
+    let mut found = false;
     for _ in 0..120 {
         client.settle(250).await;
         resp = client
@@ -167,20 +174,15 @@ async fn code_action_envtype_inference_via_wire() {
                 }]),
             )
             .await;
-        actions = resp["result"].as_array().cloned().unwrap_or_default();
-        if !actions.is_empty() {
+        let actions = resp["result"].as_array().cloned().unwrap_or_default();
+        if actions.iter().any(wanted) {
+            found = true;
             break;
         }
     }
     assert!(
-        !actions.is_empty(),
-        "expected the `Set variable type` quick-fix; got {resp}",
-    );
-    let title = actions[0]["title"].as_str().unwrap_or("");
-    assert!(
-        title.contains("Set variable type to `string`")
-            && title.contains("tfvars / module callers"),
-        "unexpected action title: {title}",
+        found,
+        "expected a `Set variable type to `string` … tfvars / module callers` action; got {resp}",
     );
 
     client.shutdown().await;
