@@ -371,13 +371,23 @@ fn validate_block<H: UpgradeHintLookup>(
             continue;
         };
         let value = s.value().as_str();
-        if allowed.iter().any(|a| a == value) {
+        // Normalise surrounding quotes on both sides: registry-mined values may
+        // be stored quoted (e.g. `"generalPurpose"`) — older cached docs in
+        // particular — while the HCL value is unquoted. Compare unquoted.
+        fn unquote(x: &str) -> &str {
+            x.trim().trim_matches(|c| c == '"' || c == '\'')
+        }
+        let value_n = unquote(value);
+        if allowed.iter().any(|a| unquote(a) == value_n) {
             continue;
         }
         let span = attr.value.span().unwrap_or(0..0);
         let range = hcl_span_to_lsp_range(rope, span).unwrap_or_default();
+        let mut seen = std::collections::HashSet::new();
         let opts = allowed
             .iter()
+            .map(|a| unquote(a))
+            .filter(|a| seen.insert(*a))
             .map(|a| format!("`{a}`"))
             .collect::<Vec<_>>()
             .join(", ");
