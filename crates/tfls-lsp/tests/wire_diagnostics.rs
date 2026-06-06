@@ -144,7 +144,10 @@ async fn code_action_envtype_inference_via_wire() {
     // parallel test load the worker can take longer than any one timeout.
     let mut resp = json!(null);
     let mut actions = Vec::new();
-    for _ in 0..40 {
+    // Generous budget: under nextest parallel load the background worker
+    // (ScanDirectory + rebuild) is CPU-starved, so 10s wasn't always enough.
+    // Exits early on success, so the ceiling only matters on real failure.
+    for _ in 0..120 {
         client.settle(250).await;
         resp = client
             .code_action(
