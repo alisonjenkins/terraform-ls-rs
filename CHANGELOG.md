@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.0](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.5.2...v0.6.0) (2026-06-06)
+
+
+### Features
+
+* **code-action:** add depth=1 to pinned git module sources ([5c55ee7](https://github.com/alisonjenkins/terraform-ls-rs/commit/5c55ee72ab635ff5c0f30591418e443dc0dfb1ca))
+
+
+### Bug Fixes
+
+* **diag:** stop false-positive enum warning from quoted allowed values ([1adc586](https://github.com/alisonjenkins/terraform-ls-rs/commit/1adc586236f1b4170eb932bbda6793d2bc60f960))
+* **lsp:** on-type/range formatting no longer inserts a blank line ([1f9773e](https://github.com/alisonjenkins/terraform-ls-rs/commit/1f9773e4bd20c8ecbadf4090e6dc08279e300911))
+* **lsp:** strip provider prefix from registry doc-link URLs ([e72b567](https://github.com/alisonjenkins/terraform-ls-rs/commit/e72b5679fc9fce61a2ed7fdc8bebacedb48fdf6a))
+
 ## [0.5.2](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.5.1...v0.5.2) (2026-06-05)
 
 
