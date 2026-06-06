@@ -95,9 +95,14 @@ fn registry_link(provider: &ProviderAddress, kind: &str, type_name: &str) -> Opt
     if provider.hostname != "registry.terraform.io" {
         return None;
     }
+    // Registry doc paths drop the provider prefix: the type `aws_ami_ids`
+    // is documented at `.../data-sources/ami_ids`, not `.../aws_ami_ids`.
+    let doc_name = type_name
+        .strip_prefix(&format!("{}_", provider.r#type))
+        .unwrap_or(type_name);
     Url::parse(&format!(
         "https://registry.terraform.io/providers/{}/{}/latest/docs/{}/{}",
-        provider.namespace, provider.r#type, kind, type_name
+        provider.namespace, provider.r#type, kind, doc_name
     ))
     .ok()
 }
@@ -111,17 +116,18 @@ mod tests {
     fn registry_link_for_resource() {
         let p = ProviderAddress::hashicorp("aws");
         let link = registry_link(&p, "resources", "aws_instance").expect("link");
+        // Registry path drops the `aws_` provider prefix.
         assert_eq!(
             link.as_str(),
-            "https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/aws_instance"
+            "https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/instance"
         );
     }
 
     #[test]
     fn registry_link_for_data_source() {
         let p = ProviderAddress::hashicorp("aws");
-        let link = registry_link(&p, "data-sources", "aws_ami").expect("link");
-        assert!(link.as_str().ends_with("/docs/data-sources/aws_ami"));
+        let link = registry_link(&p, "data-sources", "aws_ami_ids").expect("link");
+        assert!(link.as_str().ends_with("/docs/data-sources/ami_ids"));
     }
 
     #[test]

@@ -322,7 +322,7 @@ async fn document_links_point_to_registry_docs() {
     let target = links[0].target.as_ref().expect("target");
     assert!(target
         .as_str()
-        .ends_with("/providers/hashicorp/aws/latest/docs/resources/aws_instance"));
+        .ends_with("/providers/hashicorp/aws/latest/docs/resources/instance"));
 }
 
 #[tokio::test]
