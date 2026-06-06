@@ -88,9 +88,14 @@ jobs:
       - name: Install zig
         if: matrix.use_zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+      # Install cargo-zigbuild as a prebuilt binary rather than
+      # `cargo install` (which compiles it and flaked on a crates.io
+      # download of one of its deps).
       - name: Install cargo-zigbuild
         if: matrix.use_zig
-        run: cargo install cargo-zigbuild --locked
+        uses: taiki-e/install-action@59012be0884e296ca2da49b530610e72c49039ad # v2
+        with:
+          tool: cargo-zigbuild
 
       # No --locked: release-please (simple) bumps the version in Cargo.toml but
       # not the workspace-member entries in Cargo.lock, so on a release tag the
