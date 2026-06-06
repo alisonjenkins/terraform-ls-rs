@@ -111,6 +111,23 @@ mod tests {
     }
 
     #[test]
+    fn minimal_preserves_leading_header_comments() {
+        // Regression: tf-format <= 0.4.5 deleted a file's leading comments +
+        // the blank line after them on minimal format, so the LSP wiped header
+        // comments. Fixed in tf-format 0.4.6 (preserve first-structure prefix).
+        let src = "# Module: networking\n# Owner: platform\n\nlocals {\n  a = 1\n}\n";
+        let out = format_source(src, FormatStyle::Minimal).expect("formats");
+        assert!(
+            out.contains("# Module: networking") && out.contains("# Owner: platform"),
+            "leading header comments must survive minimal format; got:\n{out}"
+        );
+        assert!(
+            out.starts_with("# Module: networking"),
+            "header comments must stay at the top of the file; got:\n{out}"
+        );
+    }
+
+    #[test]
     fn idempotent_on_clean_input_minimal() {
         let src = "resource \"x\" \"y\" {\n  ami           = \"a\"\n  instance_type = \"t\"\n}\n";
         let once = format_source(src, FormatStyle::Minimal).expect("formats");
