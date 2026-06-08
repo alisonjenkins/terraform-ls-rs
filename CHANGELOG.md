@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.1](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.7.0...v0.7.1) (2026-06-08)
+
+
+### Bug Fixes
+
+* **build:** keep Cargo.lock in sync with the release version ([aa59354](https://github.com/alisonjenkins/terraform-ls-rs/commit/aa59354ce08b571a8f2c0e99d2140e6eaff8563b))
+* **release:** revert to simple release-type (rust breaks on virtual workspace) ([c432893](https://github.com/alisonjenkins/terraform-ls-rs/commit/c4328938fc50bbe7228bce5098beae949fe5e4a6))
+
 ## [0.7.0](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.6.0...v0.7.0) (2026-06-06)
 
 
