@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
-  "release-type": "simple",
+  "release-type": "rust",
   "include-component-in-tag": false,
   "include-v-in-tag": true,
   "draft": true,
@@ -8,7 +8,6 @@
     ".": {
       "package-name": "terraform-ls-rs",
       "extra-files": [
-        "Cargo.toml",
         {
           "type": "json",
           "path": "editors/vscode/package.json",
