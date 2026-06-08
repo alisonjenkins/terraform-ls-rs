@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.7.1...v0.8.0) (2026-06-08)
+
+
+### Features
+
+* **diag:** flag mutable git module refs; pin/switch/verify via git ls-remote ([bee1891](https://github.com/alisonjenkins/terraform-ls-rs/commit/bee1891c15816e80f227e28b37c5a97d7313065d))
+
 ## [0.7.1](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.7.0...v0.7.1) (2026-06-08)
 
 
