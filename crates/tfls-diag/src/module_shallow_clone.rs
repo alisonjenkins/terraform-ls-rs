@@ -10,6 +10,8 @@ use lsp_types::{Diagnostic, DiagnosticSeverity};
 use ropey::Rope;
 use tfls_parser::hcl_span_to_lsp_range;
 
+use crate::git_source::{extract_ref, is_git_source};
+
 pub fn module_shallow_clone_diagnostics(body: &Body, rope: &Rope) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for structure in body.iter() {
@@ -98,16 +100,6 @@ pub fn shallow_clone_edits(body: &Body, rope: &Rope) -> Vec<lsp_types::TextEdit>
     out
 }
 
-fn is_git_source(src: &str) -> bool {
-    let trimmed = src.trim();
-    trimmed.starts_with("git::")
-        || trimmed.starts_with("github.com/")
-        || trimmed.starts_with("bitbucket.org/")
-        || trimmed.ends_with(".git")
-        || trimmed.contains(".git?")
-        || trimmed.contains(".git#")
-}
-
 /// Heuristic for "pinned to a tag, not a branch" — `ref=vX.Y.Z`,
 /// `ref=X.Y.Z`, or a commit SHA. Skip when pinned to something that
 /// looks like a branch name (`main`, `master`, arbitrary word). Only
@@ -131,20 +123,6 @@ fn is_pinned_to_tag(src: &str) -> bool {
         return true;
     }
     false
-}
-
-fn extract_ref(src: &str) -> Option<&str> {
-    for marker in ["?ref=", "&ref="] {
-        if let Some(start) = src.find(marker) {
-            let rest = &src[start + marker.len()..];
-            let end = rest.find('&').unwrap_or(rest.len());
-            return Some(&rest[..end]);
-        }
-    }
-    if let Some(start) = src.find('#') {
-        return Some(&src[start + 1..]);
-    }
-    None
 }
 
 fn has_depth_one(src: &str) -> bool {
