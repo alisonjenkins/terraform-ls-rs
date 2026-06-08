@@ -24,6 +24,50 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
+      # release-please's rust updater can't bump Cargo.lock here: this is a
+      # virtual workspace (root Cargo.toml is `[workspace]`-only), so there is
+      # no `terraform-ls-rs` package entry in the lock — only the `tfls-*`
+      # members. Without this, the release tag ships a Cargo.lock whose member
+      # versions lag Cargo.toml, breaking every `--locked` (crane / Nix flake)
+      # build at the tag. Sync the lock on the release PR branch so the tag is
+      # consistent. Pure text rewrite — no cargo/toolchain/network needed.
+      - name: Checkout (for Cargo.lock sync)
+        if: ${{ steps.release.outputs.pr }}
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync Cargo.lock on the release PR
+        if: ${{ steps.release.outputs.pr }}
+        env:
+          PR_JSON: ${{ steps.release.outputs.pr }}
+        run: |
+          set -euo pipefail
+          BRANCH=$(printf '%s' "$PR_JSON" | jq -r '.headBranchName')
+          git fetch origin "$BRANCH"
+          git checkout "$BRANCH"
+          python3 - <<'PY'
+          import re, pathlib
+          toml = pathlib.Path("Cargo.toml").read_text()
+          m = re.search(r'version\s*=\s*"([^"]+)"\s*#\s*x-release-please-version', toml)
+          assert m, "could not find x-release-please-version marker in Cargo.toml"
+          new = m.group(1)
+          lock_path = pathlib.Path("Cargo.lock")
+          lock = lock_path.read_text()
+          # Bump the version of every workspace-member package (name = "tfls-*").
+          lock = re.sub(r'(name = "tfls-[^"]+"\nversion = ")[^"]+(")',
+                        lambda mm: mm.group(1) + new + mm.group(2), lock)
+          lock_path.write_text(lock)
+          print("synced Cargo.lock tfls-* versions to", new)
+          PY
+          if ! git diff --quiet Cargo.lock; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add Cargo.lock
+            git commit -m "chore: sync Cargo.lock to release version"
+            git push origin "$BRANCH"
+          fi
+
       - name: Dispatch release workflow
         if: ${{ steps.release.outputs.release_created == 'true' }}
         env:
