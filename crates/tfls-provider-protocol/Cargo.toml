@@ -16,6 +16,7 @@ workspace = true
 [dependencies]
 thiserror.workspace = true
 tokio = { workspace = true }
+async-trait.workspace = true
 tracing = "0.1"
 # tonic 0.14 split prost integration into tonic-prost (runtime) and
 # tonic-prost-build (codegen). TLS uses our own rustls connector (see

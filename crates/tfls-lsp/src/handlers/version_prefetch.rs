@@ -32,6 +32,12 @@ enum Target {
         name: String,
         provider: String,
     },
+    /// A git module repo whose tag list powers the mutable-ref / mismatch /
+    /// outdated diagnostics. `url` is the normalized clonable URL (deduped
+    /// across modules sharing a repo, e.g. a monorepo's subdir modules).
+    GitRepo {
+        url: String,
+    },
 }
 
 /// Fire-and-forget: parse the document, fetch every uncached version
@@ -153,6 +159,8 @@ async fn prefetch_and_refresh(
     let Ok(gh) = tfls_provider_protocol::tool_versions::build_http_client() else {
         return;
     };
+    // Git tag-list resolution shells out to `git`; honor the cliEnabled gate.
+    let cli_enabled = state.config.snapshot().cli_enabled;
 
     // User-visible progress for the batch. Individual fetches run
     // concurrently so we can't report "provider 3/10" meaningfully
@@ -187,6 +195,10 @@ async fn prefetch_and_refresh(
                         &http, &namespace, &name, &provider,
                     )
                     .await;
+                }
+                Target::GitRepo { url } => {
+                    let _ =
+                        tfls_provider_protocol::git_refs::list_repo_tags(&url, cli_enabled).await;
                 }
             }
         }));
@@ -227,6 +239,7 @@ fn target_is_cached(target: &Target) -> bool {
             name,
             provider,
         } => tfls_provider_protocol::registry_versions::is_module_cached(namespace, name, provider),
+        Target::GitRepo { url } => tfls_provider_protocol::git_refs::is_repo_tags_cached(url),
     }
 }
 
@@ -290,12 +303,20 @@ fn collect_module(body: &Body, out: &mut HashSet<Target>) {
             source_str = literal_string(&attr.value);
         }
     }
-    if let Some(s) = source_str.as_deref().and_then(parse_module_source) {
-        out.insert(Target::Module {
-            namespace: s.0,
-            name: s.1,
-            provider: s.2,
-        });
+    if let Some(s) = source_str.as_deref() {
+        if let Some(reg) = parse_module_source(s) {
+            out.insert(Target::Module {
+                namespace: reg.0,
+                name: reg.1,
+                provider: reg.2,
+            });
+        } else if tfls_diag::is_git_source(s) {
+            // Dedup by normalized repo URL so a monorepo's N subdir modules
+            // trigger a single tag-list fetch.
+            if let Some(url) = tfls_provider_protocol::git_refs::normalize_git_url(s) {
+                out.insert(Target::GitRepo { url });
+            }
+        }
     }
 }
 

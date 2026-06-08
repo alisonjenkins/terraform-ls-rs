@@ -22,6 +22,7 @@ use tower_lsp_server::jsonrpc;
 use url::Url;
 
 use crate::backend::Backend;
+use crate::handlers::code_action_git_ref;
 use crate::handlers::code_action_scope::{
     build_scoped_action, for_each_doc_in_scope, range_intersects, range_is_empty, Scope,
 };
@@ -142,6 +143,33 @@ pub async fn code_action(
                         .into_iter()
                         .map(CodeActionOrCommand::CodeAction),
                 );
+            } else if code_action_git_ref::is_mutable_ref(diag) {
+                if let Some(action) =
+                    code_action_git_ref::pin_ref_action(backend, &uri, diag, body, &rope).await
+                {
+                    actions.push(CodeActionOrCommand::CodeAction(action));
+                }
+            } else if code_action_git_ref::is_ref_tag_mismatch(diag) {
+                actions.extend(
+                    code_action_git_ref::mismatch_actions(backend, &uri, diag, body, &rope)
+                        .await
+                        .into_iter()
+                        .map(CodeActionOrCommand::CodeAction),
+                );
+            } else if code_action_git_ref::is_outdated(diag) {
+                actions.extend(
+                    code_action_git_ref::switch_version_actions(
+                        backend,
+                        &uri,
+                        diag.range.start,
+                        body,
+                        &rope,
+                        Some(diag),
+                    )
+                    .await
+                    .into_iter()
+                    .map(CodeActionOrCommand::CodeAction),
+                );
             }
         }
     }
@@ -156,6 +184,44 @@ pub async fn code_action(
             make_fix_all_variable_types_action(&uri, body, &rope, &symbols, &backend.state)
         {
             actions.push(CodeActionOrCommand::CodeAction(action));
+        }
+    }
+
+    // Cursor-driven git-ref actions: add a tag comment to a SHA-pinned source
+    // with none, and offer version-switches even without the (info-level)
+    // outdated diagnostic in context. The switch is skipped when an outdated
+    // diag is present (the diag-driven path above already produced it).
+    if let Some(body) = body.as_ref() {
+        if let Some(action) = code_action_git_ref::add_sha_comment_action(
+            backend,
+            &uri,
+            params.range.start,
+            body,
+            &rope,
+        )
+        .await
+        {
+            actions.push(CodeActionOrCommand::CodeAction(action));
+        }
+        let has_outdated = params
+            .context
+            .diagnostics
+            .iter()
+            .any(code_action_git_ref::is_outdated);
+        if !has_outdated {
+            actions.extend(
+                code_action_git_ref::switch_version_actions(
+                    backend,
+                    &uri,
+                    params.range.start,
+                    body,
+                    &rope,
+                    None,
+                )
+                .await
+                .into_iter()
+                .map(CodeActionOrCommand::CodeAction),
+            );
         }
     }
 

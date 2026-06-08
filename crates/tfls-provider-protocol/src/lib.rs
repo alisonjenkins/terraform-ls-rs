@@ -12,6 +12,7 @@ use std::path::Path;
 
 pub mod client;
 pub mod discovery;
+pub mod git_refs;
 pub mod handshake;
 pub mod registry_catalog;
 pub mod registry_docs;
@@ -94,6 +95,9 @@ pub enum ProtocolError {
 
     #[error("failed to parse registry response: {0}")]
     RegistryParse(String),
+
+    #[error("git ref resolution error: {0}")]
+    GitRef(String),
 }
 
 /// Schema-fetch progress callback: called with

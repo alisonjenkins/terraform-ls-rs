@@ -2963,6 +2963,7 @@ dependencies = [
 name = "tfls-provider-protocol"
 version = "0.7.1"
 dependencies = [
+ "async-trait",
  "base64",
  "dirs",
  "futures",

@@ -605,6 +605,27 @@ pub fn compute_diagnostics_with_lookup(
             tfls_diag::module_shallow_clone_diagnostics(body, &doc.rope),
         ));
         out.extend(tag(
+            "terraform_module_mutable_ref",
+            tfls_diag::module_mutable_ref_diagnostics(body, &doc.rope),
+        ));
+        // Mismatch + outdated read the git-refs cache the prefetch job warms
+        // (offline; cold cache ⇒ no diagnostic).
+        out.extend(tag(
+            "terraform_module_ref_tag_mismatch",
+            tfls_diag::module_ref_tag_mismatch_diagnostics(body, &doc.rope, &|src, tag| {
+                tfls_provider_protocol::git_refs::read_cached_repo_tags(src).and_then(|t| {
+                    tfls_provider_protocol::git_refs::tag_to_sha(&t, tag).map(str::to_string)
+                })
+            }),
+        ));
+        out.extend(tag(
+            "terraform_module_outdated",
+            tfls_diag::module_outdated_diagnostics(body, &doc.rope, &|src| {
+                tfls_provider_protocol::git_refs::read_cached_repo_tags(src)
+                    .map(|t| tfls_provider_protocol::git_refs::tag_names(&t))
+            }),
+        ));
+        out.extend(tag(
             "terraform_workspace_remote",
             tfls_diag::workspace_remote_diagnostics(body, &doc.rope),
         ));
