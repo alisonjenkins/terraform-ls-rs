@@ -235,11 +235,10 @@ fn membership_apply_time_inner(
         }
         // Set/map builder wrappers: `toset([...])`, `tomap({...})`,
         // `setunion(...)`, `concat(...)`, etc. Recurse into the arguments.
-        Expression::FuncCall(call) if is_collection_builder(call.name.name.as_str()) => {
-            call.args
-                .iter()
-                .any(|arg| membership_apply_time_inner(arg, kind, ctx, binds, visited))
-        }
+        Expression::FuncCall(call) if is_collection_builder(call.name.name.as_str()) => call
+            .args
+            .iter()
+            .any(|arg| membership_apply_time_inner(arg, kind, ctx, binds, visited)),
         // A literal array of set elements — each element is a key.
         Expression::Array(arr) => arr
             .iter()
@@ -324,8 +323,13 @@ fn references_apply_time(
                     (call.args.get(0), call.args.get(1))
                 {
                     if let Some(bind) = binds.get(var.as_str()) {
-                        let hit =
-                            bind_apply_time(*bind, Some(field.value().as_str()), ctx, binds, visited);
+                        let hit = bind_apply_time(
+                            *bind,
+                            Some(field.value().as_str()),
+                            ctx,
+                            binds,
+                            visited,
+                        );
                         // The default (3rd arg) is also part of the value, but
                         // does not affect membership unless it is apply-time.
                         return hit
@@ -360,9 +364,7 @@ fn references_apply_time(
                     .is_some_and(|c| references_apply_time(&c.expr, ctx, &inner, visited))
         }
         // Templates: interpolations / directives carry expressions.
-        Expression::StringTemplate(tpl) => {
-            template_apply_time(tpl.iter(), ctx, binds, visited)
-        }
+        Expression::StringTemplate(tpl) => template_apply_time(tpl.iter(), ctx, binds, visited),
         Expression::HeredocTemplate(h) => {
             template_apply_time(h.template.iter(), ctx, binds, visited)
         }
@@ -381,9 +383,7 @@ where
     use hcl_edit::template::{Directive, Element};
     elements.into_iter().any(|element| match element {
         Element::Literal(_) => false,
-        Element::Interpolation(interp) => {
-            references_apply_time(&interp.expr, ctx, binds, visited)
-        }
+        Element::Interpolation(interp) => references_apply_time(&interp.expr, ctx, binds, visited),
         Element::Directive(directive) => match directive.as_ref() {
             Directive::If(i) => {
                 references_apply_time(&i.if_expr.cond_expr, ctx, binds, visited)
@@ -853,7 +853,10 @@ resource "null_resource" "broken" {
         );
         // Module-aware path resolves it and flags.
         let d = for_each_unknown_keys_diagnostics_with_locals(&body, &rope, &module_locals);
-        assert!(!d.is_empty(), "sibling-file local should resolve; got: {d:?}");
+        assert!(
+            !d.is_empty(),
+            "sibling-file local should resolve; got: {d:?}"
+        );
     }
 
     #[test]
