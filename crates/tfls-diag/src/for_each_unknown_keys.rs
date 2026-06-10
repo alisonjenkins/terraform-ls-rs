@@ -60,8 +60,26 @@ const SAFE_ROOTS: &[&str] = &[
     "local", // handled explicitly (resolved), listed for clarity
 ];
 
+/// Single-body entry point: resolves `local.*` only within `body`. Kept for
+/// tests and callers without module context.
 pub fn for_each_unknown_keys_diagnostics(body: &Body, rope: &Rope) -> Vec<Diagnostic> {
-    let locals = collect_locals(body);
+    for_each_unknown_keys_diagnostics_with_locals(body, rope, &HashMap::new())
+}
+
+/// Module-aware entry point: `module_locals` carries the `local.*` definitions
+/// aggregated across every `.tf` file in the active module's directory (a
+/// `locals` block typically lives in a different file from the `for_each` that
+/// reads it). `body`'s own locals are overlaid on top so they always resolve
+/// even if `body` is not yet present in the aggregated set.
+pub fn for_each_unknown_keys_diagnostics_with_locals(
+    body: &Body,
+    rope: &Rope,
+    module_locals: &HashMap<String, Expression>,
+) -> Vec<Diagnostic> {
+    let mut locals = module_locals.clone();
+    for (name, def) in collect_locals(body) {
+        locals.insert(name, def);
+    }
     let ctx = Ctx { locals: &locals };
     let mut out = Vec::new();
     for structure in body.iter() {
@@ -77,7 +95,7 @@ pub fn for_each_unknown_keys_diagnostics(body: &Body, rope: &Rope) -> Vec<Diagno
 }
 
 struct Ctx<'a> {
-    locals: &'a HashMap<String, &'a Expression>,
+    locals: &'a HashMap<String, Expression>,
 }
 
 /// How a loop variable is bound to its collection.
@@ -92,7 +110,10 @@ enum Bind<'a> {
 
 type Binds<'a> = HashMap<String, Bind<'a>>;
 
-fn collect_locals(body: &Body) -> HashMap<String, &Expression> {
+/// Collect the `local.*` definitions declared in `body`, cloning each value so
+/// the map is owned (definitions from sibling files must outlive the borrowed
+/// body they came from when aggregated across a module).
+pub fn collect_locals(body: &Body) -> HashMap<String, Expression> {
     let mut map = HashMap::new();
     for structure in body.iter() {
         let Some(block) = structure.as_block() else {
@@ -105,7 +126,7 @@ fn collect_locals(body: &Body) -> HashMap<String, &Expression> {
             if let Some(attr) = entry.as_attribute() {
                 // First definition wins (a duplicate is a separate error).
                 map.entry(attr.key.as_str().to_string())
-                    .or_insert(&attr.value);
+                    .or_insert_with(|| attr.value.clone());
             }
         }
     }
@@ -545,7 +566,7 @@ fn resolve_local_def<'a>(
     if visited.contains(name) {
         return None; // cycle
     }
-    let def = ctx.locals.get(name).copied()?;
+    let def = ctx.locals.get(name)?;
     let mut v = visited.clone();
     v.insert(name.to_string());
     Some((def, v))
@@ -796,6 +817,43 @@ resource "null_resource" "x" {
 }
 "#;
         assert!(flagged(src));
+    }
+
+    #[test]
+    fn resolves_locals_from_sibling_file() {
+        // The `locals` block and the resource it embeds live in a *different*
+        // file than the `for_each` that reads them — the single-body path
+        // can't see this; the module-aware path must.
+        let sibling = r#"
+resource "aws_iam_role" "r" {
+  name               = "x"
+  assume_role_policy = "{}"
+}
+locals {
+  items = {
+    "a" = { policy = aws_iam_role.r.arn }
+    "b" = {}
+  }
+}
+"#;
+        let main = r#"
+resource "null_resource" "broken" {
+  for_each = { for k, v in local.items : k => v if lookup(v, "policy", "") != "" }
+}
+"#;
+        let sibling_body = parse_source(sibling).body.expect("parses");
+        let module_locals = collect_locals(&sibling_body);
+        let rope = Rope::from_str(main);
+        let body = parse_source(main).body.expect("parses");
+
+        // Single-body path is blind to the sibling local — no diagnostic.
+        assert!(
+            for_each_unknown_keys_diagnostics(&body, &rope).is_empty(),
+            "single-body path should not resolve a sibling local"
+        );
+        // Module-aware path resolves it and flags.
+        let d = for_each_unknown_keys_diagnostics_with_locals(&body, &rope, &module_locals);
+        assert!(!d.is_empty(), "sibling-file local should resolve; got: {d:?}");
     }
 
     #[test]
