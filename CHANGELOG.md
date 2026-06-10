@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.9.0](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.8.0...v0.9.0) (2026-06-10)
+
+
+### Features
+
+* **diag:** flag for_each/count keyed on apply-time-unknown values ([d151244](https://github.com/alisonjenkins/terraform-ls-rs/commit/d15124494b33400e74b44ae52cddc461fa5fef89))
+* **diag:** resolve for_each unknown-key locals module-wide ([47bf2ad](https://github.com/alisonjenkins/terraform-ls-rs/commit/47bf2ad733845ce98efd6096ba3063e9d41eb5ae))
+
+
+### Bug Fixes
+
+* **state:** track in-flight jobs so JobQueue can report true idleness ([7b38bbf](https://github.com/alisonjenkins/terraform-ls-rs/commit/7b38bbf0ed9980aa00654efc7128b0884d40bf45))
+
 ## [0.8.0](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.7.1...v0.8.0) (2026-06-08)
 
 
