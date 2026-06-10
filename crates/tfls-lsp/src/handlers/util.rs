@@ -101,6 +101,40 @@ pub(crate) fn module_sensitive_variables(
     out
 }
 
+/// Aggregate every `local.*` definition declared across the `.tf` files in the
+/// active module's directory. The `terraform_for_each_unknown_keys` rule needs
+/// the *expression* a local resolves to — and a `locals` block usually lives in
+/// a different file (`locals.tf`) than the `for_each` that reads it, so a
+/// single-file view would miss the resource attribute embedded in the local.
+///
+/// Later siblings do not overwrite earlier definitions of the same name (a
+/// duplicate `local` is its own error); the active body's own locals are
+/// overlaid by the diagnostic itself.
+pub(crate) fn module_for_each_locals(
+    state: &StateStore,
+    primary_uri: &Url,
+) -> std::collections::HashMap<String, hcl_edit::expr::Expression> {
+    let mut out = std::collections::HashMap::new();
+    let Some(target_dir) = parent_dir(primary_uri) else {
+        return out;
+    };
+    for entry in state.documents.iter() {
+        let uri = entry.key();
+        let Ok(path) = uri.to_file_path() else {
+            continue;
+        };
+        if path.parent() != Some(&target_dir) {
+            continue;
+        }
+        if let Some(body) = entry.value().parsed.body.as_ref() {
+            for (name, def) in tfls_diag::for_each_unknown_keys::collect_locals(body) {
+                out.entry(name).or_insert(def);
+            }
+        }
+    }
+    out
+}
+
 pub(crate) fn module_constraint_for_provider(
     state: &StateStore,
     primary_uri: &Url,

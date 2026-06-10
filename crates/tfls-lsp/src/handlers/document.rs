@@ -759,9 +759,16 @@ pub fn compute_diagnostics_with_lookup(
         ));
         // for_each/count whose key set depends on an apply-time value — a
         // plan-time error Terraform only surfaces during `terraform plan`.
+        // `local.*` is resolved module-wide: a `locals` block usually lives in
+        // a different file than the `for_each` reading it.
+        let for_each_locals = crate::handlers::util::module_for_each_locals(state, uri);
         out.extend(tag(
             "terraform_for_each_unknown_keys",
-            tfls_diag::for_each_unknown_keys_diagnostics(body, &doc.rope),
+            tfls_diag::for_each_unknown_keys_diagnostics_with_locals(
+                body,
+                &doc.rope,
+                &for_each_locals,
+            ),
         ));
         // Dependency cycles among `local` values (a hard Terraform error).
         out.extend(tag(
