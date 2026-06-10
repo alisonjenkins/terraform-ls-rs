@@ -21,6 +21,7 @@ pub mod duplicate_definition;
 pub mod empty_list_equality;
 pub mod error;
 pub mod expr_walk;
+pub mod for_each_unknown_keys;
 pub mod git_source;
 pub mod map_duplicate_keys;
 pub mod meta_arguments;
@@ -91,6 +92,7 @@ pub use documented_variables::documented_variables_diagnostics;
 pub use duplicate_definition::duplicate_definition_diagnostics;
 pub use empty_list_equality::empty_list_equality_diagnostics;
 pub use error::DiagError;
+pub use for_each_unknown_keys::for_each_unknown_keys_diagnostics;
 pub use git_source::{
     extract_ref, has_trailing_comment, is_git_source, ref_value_span, trailing_comment_tag,
 };
