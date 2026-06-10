@@ -757,6 +757,12 @@ pub fn compute_diagnostics_with_lookup(
             "terraform_meta_argument",
             tfls_diag::meta_argument_diagnostics(body, &doc.rope),
         ));
+        // for_each/count whose key set depends on an apply-time value — a
+        // plan-time error Terraform only surfaces during `terraform plan`.
+        out.extend(tag(
+            "terraform_for_each_unknown_keys",
+            tfls_diag::for_each_unknown_keys_diagnostics(body, &doc.rope),
+        ));
         // Dependency cycles among `local` values (a hard Terraform error).
         out.extend(tag(
             "terraform_cyclic_locals",
