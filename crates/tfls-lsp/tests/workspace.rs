@@ -44,12 +44,16 @@ async fn indexer_resolves_definition_in_another_file() {
     let worker = indexer::spawn_worker(Arc::clone(&state), Arc::clone(&jobs), None);
     indexer::enqueue_workspace_scan(&state, &jobs, &dir);
 
-    // Give the worker time to drain.
+    // Wait until the worker is genuinely idle — not merely until the queue
+    // is empty. A job is removed from the queue the instant it's dequeued,
+    // but its index writes land only when processing finishes; polling
+    // `is_empty` raced ahead of those writes. `is_idle` accounts for the
+    // in-flight job.
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    while !jobs.is_empty() && std::time::Instant::now() < deadline {
+    while !jobs.is_idle() && std::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert_eq!(jobs.len(), 0, "worker should have drained all jobs");
+    assert!(jobs.is_idle(), "worker should have finished all jobs");
 
     // Variable defined in vars.tf should be indexed globally.
     let key = SymbolKey::new(tfls_core::SymbolKind::Variable, "region");
@@ -96,7 +100,7 @@ async fn parse_file_job_skips_open_documents() {
     indexer::enqueue_workspace_scan(&state, &jobs, &dir);
 
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while !jobs.is_empty() && std::time::Instant::now() < deadline {
+    while !jobs.is_idle() && std::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
@@ -125,10 +129,10 @@ async fn schema_fetch_job_reports_failure_when_cli_missing() {
 
     // Wait briefly. Even on failure, the job should be dequeued.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while !jobs.is_empty() && std::time::Instant::now() < deadline {
+    while !jobs.is_idle() && std::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert_eq!(jobs.len(), 0);
+    assert!(jobs.is_idle());
     // No schemas should have been installed.
     assert_eq!(state.schemas.len(), 0);
 
