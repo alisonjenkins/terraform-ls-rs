@@ -86,6 +86,12 @@ struct Inner {
     heap: BinaryHeap<Entry>,
     /// Pending jobs, used for deduplication.
     pending: HashSet<Job>,
+    /// Jobs dequeued but not yet marked [`JobQueue::complete`]. Tracked
+    /// so the queue can distinguish "no jobs queued" from "no work left":
+    /// a job is removed from the heap the instant it's popped, but the
+    /// worker is still processing it (and may not have committed its
+    /// results to the store yet). [`JobQueue::is_idle`] accounts for both.
+    in_flight: usize,
     seq: u64,
 }
 
@@ -114,7 +120,10 @@ impl JobQueue {
         }
     }
 
-    /// Take the next job if one is available, without waiting.
+    /// Take the next job if one is available, without waiting. The returned
+    /// job counts as **in-flight** until [`complete`](Self::complete) is
+    /// called for it, so the queue can report whether work is genuinely
+    /// finished rather than merely dequeued.
     pub fn try_next(&self) -> Option<Job> {
         let mut guard = match self.inner.lock() {
             Ok(g) => g,
@@ -122,7 +131,19 @@ impl JobQueue {
         };
         let entry = guard.heap.pop()?;
         guard.pending.remove(&entry.job);
+        guard.in_flight += 1;
         Some(entry.job)
+    }
+
+    /// Mark one previously-dequeued job as fully processed. The consumer
+    /// calls this after a job's side effects have been committed, so that
+    /// [`is_idle`](Self::is_idle) only reports `true` once no work remains.
+    pub fn complete(&self) {
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.in_flight = guard.in_flight.saturating_sub(1);
     }
 
     /// Await the next job, blocking until one is available.
@@ -135,7 +156,7 @@ impl JobQueue {
         }
     }
 
-    /// Number of jobs queued right now.
+    /// Number of jobs queued right now (excludes in-flight jobs).
     pub fn len(&self) -> usize {
         match self.inner.lock() {
             Ok(g) => g.heap.len(),
@@ -145,6 +166,20 @@ impl JobQueue {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// True when there is no queued **and** no in-flight work. Unlike
+    /// [`is_empty`](Self::is_empty), this stays `false` while the consumer
+    /// is still processing a dequeued job, so a waiter observing `is_idle`
+    /// knows every job's side effects are committed.
+    pub fn is_idle(&self) -> bool {
+        match self.inner.lock() {
+            Ok(g) => g.heap.is_empty() && g.in_flight == 0,
+            Err(poisoned) => {
+                let g = poisoned.into_inner();
+                g.heap.is_empty() && g.in_flight == 0
+            }
+        }
     }
 }
 
@@ -204,6 +239,45 @@ mod tests {
         assert_eq!(q.try_next().unwrap(), j);
         q.enqueue(j.clone(), Priority::Normal);
         assert_eq!(q.try_next().unwrap(), j);
+    }
+
+    #[test]
+    fn in_flight_job_is_not_idle_until_completed() {
+        let q = JobQueue::new();
+        q.enqueue(doc_job("file:///a.tf"), Priority::Normal);
+        assert!(!q.is_idle(), "queued job is not idle");
+
+        let job = q.try_next().expect("job");
+        // Heap is now empty, but the job is in-flight — NOT idle. This is the
+        // window the old `is_empty`-based wait raced into.
+        assert!(q.is_empty(), "heap drained");
+        assert!(!q.is_idle(), "in-flight job must keep the queue non-idle");
+
+        q.complete();
+        assert!(q.is_idle(), "idle once the job completes");
+        let _ = job;
+    }
+
+    #[test]
+    fn re_enqueue_while_in_flight_keeps_non_idle() {
+        let q = JobQueue::new();
+        q.enqueue(doc_job("file:///a.tf"), Priority::Normal);
+        let _a = q.try_next().expect("a");
+        // A second job enqueued while the first is still processing.
+        q.enqueue(doc_job("file:///b.tf"), Priority::Normal);
+        q.complete(); // first job done, but `b` still queued
+        assert!(!q.is_idle(), "still has a queued job");
+        let _b = q.try_next().expect("b");
+        q.complete();
+        assert!(q.is_idle());
+    }
+
+    #[test]
+    fn complete_without_inflight_does_not_underflow() {
+        let q = JobQueue::new();
+        // Defensive: an unbalanced `complete` must not panic / wrap around.
+        q.complete();
+        assert!(q.is_idle());
     }
 
     #[tokio::test]

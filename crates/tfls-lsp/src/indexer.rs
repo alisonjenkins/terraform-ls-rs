@@ -52,6 +52,11 @@ pub fn spawn_worker(
             if let Err(e) = handle_job(Arc::clone(&state), &queue, client.as_ref(), job).await {
                 tracing::warn!(error = %e, "background job failed");
             }
+            // Balances the in-flight increment in `try_next` (via `next`).
+            // Must run on both the Ok and Err paths so the queue can ever
+            // report idle. Side effects are committed by the time
+            // `handle_job` returns (the bulk scan awaits its publishes).
+            queue.complete();
         }
     })
 }
