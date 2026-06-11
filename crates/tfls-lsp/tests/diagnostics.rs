@@ -1210,3 +1210,232 @@ fn lock_invalidate_with_canonical_path_clears_cache_keyed_under_non_canonical() 
         "invalidate via canonical path must clear cache keyed under non-canonical; got: {after:?}"
     );
 }
+
+// --- Unknown-until-apply rule family ---------------------------------
+//
+// End-to-end pins for `terraform_for_each_unknown_keys` (module-aware
+// resolution of locals / data / resource configs), the ACM allowlist,
+// `terraform_import_unknown_id`, and `terraform_lifecycle_literal` —
+// all through the same `compute_diagnostics` path as didOpen.
+
+fn diags_with_code(backend: &Backend, target: &Url, code: &str) -> Vec<String> {
+    compute_diagnostics(&backend.state, target)
+        .into_iter()
+        .filter(|d| {
+            matches!(
+                &d.code,
+                Some(lsp_types::NumberOrString::String(c)) if c == code
+            )
+        })
+        .map(|d| d.message)
+        .collect()
+}
+
+#[test]
+fn acm_validation_pattern_is_silent_across_files() {
+    // The canonical ACM DNS-validation pattern with the certificate in a
+    // sibling file: plan-valid, must not flag.
+    let b = backend();
+    let cert_uri = uri("file:///project/acm.tf");
+    let dns_uri = uri("file:///project/dns.tf");
+    insert(
+        &b,
+        &cert_uri,
+        r#"
+resource "aws_acm_certificate" "cert" {
+  domain_name       = "example.com"
+  validation_method = "DNS"
+}
+"#,
+    );
+    insert(
+        &b,
+        &dns_uri,
+        r#"
+resource "aws_route53_record" "validation" {
+  for_each = {
+    for dvo in aws_acm_certificate.cert.domain_validation_options : dvo.domain_name => {
+      name   = dvo.resource_record_name
+      record = dvo.resource_record_value
+      type   = dvo.resource_record_type
+    }
+  }
+  zone_id = var.zone_id
+}
+"#,
+    );
+    let hits = diags_with_code(&b, &dns_uri, "terraform_for_each_unknown_keys");
+    assert!(hits.is_empty(), "ACM pattern flagged: {hits:?}");
+}
+
+#[test]
+fn sibling_data_source_config_decides_for_each_flag() {
+    // Data source declared in a sibling file with a static config: the
+    // for_each over its attributes is plan-known → silent. Adding a
+    // depends_on on a managed resource defers the read → flagged.
+    let static_data = r#"
+data "aws_subnets" "all" {
+  filter {
+    name   = "vpc-id"
+    values = [var.vpc_id]
+  }
+}
+"#;
+    let deferred_data = r#"
+data "aws_subnets" "all" {
+  depends_on = [aws_vpc.main]
+  filter {
+    name   = "vpc-id"
+    values = [var.vpc_id]
+  }
+}
+"#;
+    let main_src = r#"
+resource "null_resource" "x" {
+  for_each = toset(data.aws_subnets.all.ids)
+}
+"#;
+    for (data_src, expect_flag) in [(static_data, false), (deferred_data, true)] {
+        let b = backend();
+        let data_uri = uri("file:///project/data.tf");
+        let main_uri = uri("file:///project/main.tf");
+        insert(&b, &data_uri, data_src);
+        insert(&b, &main_uri, main_src);
+        let hits = diags_with_code(&b, &main_uri, "terraform_for_each_unknown_keys");
+        assert_eq!(
+            !hits.is_empty(),
+            expect_flag,
+            "expected flag={expect_flag}; got: {hits:?}"
+        );
+    }
+}
+
+#[test]
+fn sibling_resource_config_set_attr_is_silent() {
+    let b = backend();
+    let res_uri = uri("file:///project/buckets.tf");
+    let main_uri = uri("file:///project/main.tf");
+    insert(
+        &b,
+        &res_uri,
+        r#"
+resource "aws_s3_bucket" "b" {
+  bucket = var.bucket_name
+}
+"#,
+    );
+    insert(
+        &b,
+        &main_uri,
+        r#"
+resource "null_resource" "x" {
+  for_each = toset([aws_s3_bucket.b.bucket])
+}
+"#,
+    );
+    let hits = diags_with_code(&b, &main_uri, "terraform_for_each_unknown_keys");
+    assert!(hits.is_empty(), "config-set attr flagged: {hits:?}");
+}
+
+#[test]
+fn installed_schema_silences_non_computed_attr() {
+    // No block in view, but the installed provider schema marks the
+    // attribute non-computed — plan-known, silent.
+    let b = backend();
+    let schemas: tfls_schema::ProviderSchemas = sonic_rs::from_str(
+        r#"{
+        "format_version": "1.0",
+        "provider_schemas": {
+            "registry.terraform.io/hashicorp/aws": {
+                "provider": { "version": 0, "block": {} },
+                "resource_schemas": {
+                    "aws_s3_bucket": {
+                        "version": 1,
+                        "block": {
+                            "attributes": {
+                                "bucket": { "type": "string", "optional": true },
+                                "arn":    { "type": "string", "computed": true }
+                            }
+                        }
+                    }
+                },
+                "data_source_schemas": {}
+            }
+        }
+    }"#,
+    )
+    .expect("schemas parse");
+    b.state.install_schemas(schemas);
+
+    let main_uri = uri("file:///project/main.tf");
+    insert(
+        &b,
+        &main_uri,
+        r#"
+resource "null_resource" "x" {
+  for_each = toset([aws_s3_bucket.unseen.bucket])
+}
+resource "null_resource" "y" {
+  for_each = toset([aws_s3_bucket.unseen.arn])
+}
+"#,
+    );
+    let hits = diags_with_code(&b, &main_uri, "terraform_for_each_unknown_keys");
+    assert_eq!(
+        hits.len(),
+        1,
+        "only the computed-attr for_each should flag; got: {hits:?}"
+    );
+}
+
+#[test]
+fn import_unknown_id_flags_end_to_end() {
+    let b = backend();
+    let main_uri = uri("file:///project/main.tf");
+    insert(
+        &b,
+        &main_uri,
+        r#"
+import {
+  to = aws_s3_bucket.b
+  id = aws_instance.web.id
+}
+import {
+  to = aws_s3_bucket.c
+  id = var.bucket_name
+}
+"#,
+    );
+    let hits = diags_with_code(&b, &main_uri, "terraform_import_unknown_id");
+    assert_eq!(hits.len(), 1, "got: {hits:?}");
+    assert!(hits[0].contains("known at plan time"));
+}
+
+#[test]
+fn lifecycle_literal_flags_and_suppresses_via_rule_config() {
+    let b = backend();
+    let main_uri = uri("file:///project/main.tf");
+    insert(
+        &b,
+        &main_uri,
+        r#"
+resource "aws_s3_bucket" "b" {
+  bucket = "x"
+  lifecycle {
+    prevent_destroy = var.protect
+  }
+}
+"#,
+    );
+    let hits = diags_with_code(&b, &main_uri, "terraform_lifecycle_literal");
+    assert_eq!(hits.len(), 1, "got: {hits:?}");
+
+    // Per-rule kill switch drops it.
+    let cfg: sonic_rs::Value = sonic_rs::from_str(
+        r#"{ "terraform-ls-rs": { "rules": { "terraform_lifecycle_literal": "off" } } }"#,
+    )
+    .expect("config parses");
+    b.state.config.update_from_json(&cfg);
+    let hits = diags_with_code(&b, &main_uri, "terraform_lifecycle_literal");
+    assert!(hits.is_empty(), "rule off but still flagged: {hits:?}");
+}
