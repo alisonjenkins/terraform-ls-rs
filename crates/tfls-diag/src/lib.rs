@@ -23,6 +23,7 @@ pub mod error;
 pub mod expr_walk;
 pub mod for_each_unknown_keys;
 pub mod git_source;
+pub mod import_unknown_id;
 pub mod map_duplicate_keys;
 pub mod meta_arguments;
 pub mod module_graph;
@@ -99,6 +100,9 @@ pub use for_each_unknown_keys::{
 };
 pub use git_source::{
     extract_ref, has_trailing_comment, is_git_source, ref_value_span, trailing_comment_tag,
+};
+pub use import_unknown_id::{
+    import_unknown_id_diagnostics, import_unknown_id_diagnostics_with_ctx,
 };
 pub use map_duplicate_keys::map_duplicate_keys_diagnostics;
 pub use meta_arguments::meta_argument_diagnostics;

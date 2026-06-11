@@ -772,6 +772,18 @@ pub fn compute_diagnostics_with_lookup(
                 Some(&lookup),
             ),
         ));
+        // import-block id / for_each requiring plan-known values (Terraform
+        // 1.5+ config-driven import). Same unknown-value analysis and
+        // module-wide inputs as the for_each rule.
+        out.extend(tag(
+            "terraform_import_unknown_id",
+            tfls_diag::import_unknown_id_diagnostics_with_ctx(
+                body,
+                &doc.rope,
+                &unknown_inputs,
+                Some(&lookup),
+            ),
+        ));
         // Dependency cycles among `local` values (a hard Terraform error).
         out.extend(tag(
             "terraform_cyclic_locals",
