@@ -630,23 +630,34 @@ fn resource_reference_apply_time(
     if visited.contains(&key) {
         return true; // cycle — keep the conservative default
     }
-    let Some(config) = ctx
+    if let Some(expr) = ctx
         .resource_configs
         .get(&(rtype.to_string(), name.to_string()))
-    else {
-        return true; // unresolvable block — keep the conservative default
-    };
-    let Some(expr) = config.attrs.get(attr) else {
-        return true; // not set in config → computed → unknown
-    };
-    if index_operators_apply_time(t, ctx, binds, visited) {
-        return true;
+        .and_then(|config| config.attrs.get(attr))
+    {
+        if index_operators_apply_time(t, ctx, binds, visited) {
+            return true;
+        }
+        let mut v2 = visited.clone();
+        v2.insert(key);
+        // Config expressions are evaluated in the resource block's own scope.
+        let no_binds = Binds::new();
+        return references_apply_time(expr, ctx, &no_binds, &v2);
     }
-    let mut v2 = visited.clone();
-    v2.insert(key);
-    // Config expressions are evaluated in the resource block's own scope.
-    let no_binds = Binds::new();
-    references_apply_time(expr, ctx, &no_binds, &v2)
+    // Not set in config (or block unseen): a *non-computed* attribute per the
+    // provider schema can only hold a config value or null — never a
+    // provider-populated unknown — so it is plan-known. Computed attributes,
+    // unknown attributes, and absent schemas keep the conservative default.
+    if let Some(lookup) = ctx.schema {
+        if let Some(schema) = lookup.resource(rtype) {
+            if let Some(attr_schema) = schema.block.attributes.get(attr) {
+                if !attr_schema.computed {
+                    return index_operators_apply_time(t, ctx, binds, visited);
+                }
+            }
+        }
+    }
+    true
 }
 
 /// Whether a `data.<type>.<name>...` reference is apply-time: the data

@@ -392,6 +392,89 @@ resource "null_resource" "x" {
         assert!(flagged(src));
     }
 
+    /// Mock schema: `aws_s3_bucket` with `bucket` non-computed and `arn`
+    /// computed.
+    struct MockSchemas;
+
+    impl crate::schema_validation::SchemaLookup for MockSchemas {
+        fn resource(&self, type_name: &str) -> Option<tfls_schema::Schema> {
+            if type_name != "aws_s3_bucket" {
+                return None;
+            }
+            let mut block = tfls_schema::BlockSchema::default();
+            block.attributes.insert(
+                "bucket".to_string(),
+                tfls_schema::AttributeSchema {
+                    optional: true,
+                    ..Default::default()
+                },
+            );
+            block.attributes.insert(
+                "arn".to_string(),
+                tfls_schema::AttributeSchema {
+                    computed: true,
+                    ..Default::default()
+                },
+            );
+            Some(tfls_schema::Schema { version: 0, block })
+        }
+        fn data_source(&self, _type_name: &str) -> Option<tfls_schema::Schema> {
+            None
+        }
+    }
+
+    fn diags_with_schema(src: &str) -> Vec<Diagnostic> {
+        let rope = Rope::from_str(src);
+        let body = parse_source(src).body.expect("parses");
+        for_each_unknown_keys_diagnostics_with_ctx(
+            &body,
+            &rope,
+            &ModuleUnknownInputs::default(),
+            Some(&MockSchemas),
+        )
+    }
+
+    #[test]
+    fn schema_silences_non_computed_attr_of_unseen_block() {
+        // No declared block in view, but the schema says `bucket` is not
+        // computed — its value can only come from config (or null), so it is
+        // plan-known.
+        let src = r#"
+resource "null_resource" "x" {
+  for_each = toset([aws_s3_bucket.unseen.bucket])
+}
+"#;
+        assert!(flagged(src), "without schema: conservative default");
+        let d = diags_with_schema(src);
+        assert!(d.is_empty(), "with schema: non-computed is plan-known; got: {d:?}");
+    }
+
+    #[test]
+    fn schema_keeps_flagging_computed_attr() {
+        let src = r#"
+resource "null_resource" "x" {
+  for_each = toset([aws_s3_bucket.unseen.arn])
+}
+"#;
+        assert!(!diags_with_schema(src).is_empty());
+    }
+
+    #[test]
+    fn schema_config_set_apply_time_attr_still_flags() {
+        // The attr is non-computed per schema, but config sets it to an
+        // apply-time expression — the config resolution must win over the
+        // schema shortcut.
+        let src = r#"
+resource "aws_s3_bucket" "b" {
+  bucket = aws_vpc.main.id
+}
+resource "null_resource" "x" {
+  for_each = toset([aws_s3_bucket.b.bucket])
+}
+"#;
+        assert!(!diags_with_schema(src).is_empty());
+    }
+
     #[test]
     fn resource_reference_cycle_terminates() {
         // Mutually-referencing resource configs (invalid Terraform, but must

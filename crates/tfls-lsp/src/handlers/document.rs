@@ -769,7 +769,7 @@ pub fn compute_diagnostics_with_lookup(
                 body,
                 &doc.rope,
                 &unknown_inputs,
-                None,
+                Some(&lookup),
             ),
         ));
         // Dependency cycles among `local` values (a hard Terraform error).
