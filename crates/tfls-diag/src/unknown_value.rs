@@ -53,6 +53,61 @@ const SAFE_ROOTS: &[&str] = &[
     "local", // handled explicitly (resolved), listed for clarity
 ];
 
+/// Computed collections that providers populate at *plan* time (via
+/// `CustomizeDiff`) even though their schema marks them computed. Tuple:
+/// `(resource_type, attribute, element fields plan-known)`. For these,
+/// collection *membership* (element count / set identity derived from the
+/// listed fields) is plan-known; fields NOT listed stay apply-time.
+///
+/// The canonical case: `aws_acm_certificate.domain_validation_options` —
+/// the AWS provider derives one element per (config-known) domain name at
+/// plan, with `domain_name` known and `resource_record_*` unknown. Keying a
+/// `for_each` on `dvo.domain_name` is therefore plan-valid.
+const PLAN_KNOWN_COMPUTED_COLLECTIONS: &[(&str, &str, &[&str])] = &[(
+    "aws_acm_certificate",
+    "domain_validation_options",
+    &["domain_name"],
+)];
+
+/// An allowlisted plan-known computed collection reference.
+struct AllowlistedUse {
+    known_fields: &'static [&'static str],
+    /// `Some(unknown)` when the traversal selects element field(s) beyond the
+    /// collection attribute (e.g. `...[*].domain_name`): `unknown` is true if
+    /// any selected field is not plan-known. `None` for a bare collection
+    /// reference.
+    tail: Option<bool>,
+}
+
+/// Match a traversal against [`PLAN_KNOWN_COMPUTED_COLLECTIONS`]:
+/// `<type>.<name>.<attr>` with optional trailing splat / index / field
+/// operators.
+fn allowlisted_traversal(t: &hcl_edit::expr::Traversal) -> Option<AllowlistedUse> {
+    let Expression::Variable(head) = &t.expr else {
+        return None;
+    };
+    let head = head.as_str();
+    if head == "data" || SAFE_ROOTS.contains(&head) {
+        return None;
+    }
+    let mut get_attrs = t.operators.iter().filter_map(|op| match op.value() {
+        TraversalOperator::GetAttr(ident) => Some(ident.as_str()),
+        _ => None,
+    });
+    let _name = get_attrs.next()?;
+    let attr = get_attrs.next()?;
+    let known_fields = PLAN_KNOWN_COMPUTED_COLLECTIONS
+        .iter()
+        .find(|(rtype, rattr, _)| *rtype == head && *rattr == attr)
+        .map(|(_, _, fields)| *fields)?;
+    let mut tail = None;
+    for field in get_attrs {
+        let unknown = !known_fields.contains(&field);
+        tail = Some(tail.unwrap_or(false) || unknown);
+    }
+    Some(AllowlistedUse { known_fields, tail })
+}
+
 /// The plan-relevant configuration of a single `resource` / `data` block,
 /// collected so references to it can be resolved transitively.
 #[derive(Debug, Clone, Default)]
@@ -271,6 +326,14 @@ fn membership_apply_time_inner(
         {
             match call.args.get(0) {
                 Some(arg) => {
+                    // Cardinality-only use: an allowlisted plan-known computed
+                    // collection has a plan-known *length* even though its
+                    // element values are unknown.
+                    if let Expression::Traversal(t) = arg {
+                        if matches!(allowlisted_traversal(t), Some(a) if a.tail.is_none()) {
+                            return false;
+                        }
+                    }
                     membership_apply_time_inner(arg, MetaKind::ForEach, ctx, binds, visited)
                 }
                 None => false,
@@ -498,6 +561,19 @@ fn traversal_apply_time(
     if SAFE_ROOTS.contains(&head) {
         return index_operators_apply_time(t, ctx, binds, visited);
     }
+    // An allowlisted plan-known computed collection with an explicit field
+    // selection (e.g. `...domain_validation_options[*].domain_name`): the
+    // provider populates the listed fields at plan time. A *bare* collection
+    // reference stays apply-time here — its membership may be plan-known
+    // (handled in the membership / length contexts) but its element values
+    // are not.
+    if let Some(AllowlistedUse {
+        tail: Some(unknown),
+        ..
+    }) = allowlisted_traversal(t)
+    {
+        return unknown || index_operators_apply_time(t, ctx, binds, visited);
+    }
     // Anything else is a managed-resource reference: `<type>.<name>.<attr>`.
     true
 }
@@ -551,7 +627,22 @@ fn element_value_apply_time(
         Expression::Array(arr) => arr
             .iter()
             .any(|el| element_field_apply_time(el, field, ctx, binds, &v2)),
-        other => references_apply_time(other, ctx, binds, &v2),
+        other => {
+            // Allowlisted plan-known computed collection: element fields the
+            // provider populates at plan are known; everything else isn't.
+            if let Expression::Traversal(t) = other {
+                if let Some(a) = allowlisted_traversal(t) {
+                    if a.tail.is_none() {
+                        return match field {
+                            Some(f) => !a.known_fields.contains(&f),
+                            // Whole-element use carries apply-time fields.
+                            None => true,
+                        };
+                    }
+                }
+            }
+            references_apply_time(other, ctx, binds, &v2)
+        }
     }
 }
 

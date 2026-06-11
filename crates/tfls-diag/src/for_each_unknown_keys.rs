@@ -373,6 +373,112 @@ resource "null_resource" "broken" {
         );
     }
 
+    const ACM_CANONICAL: &str = r#"
+resource "aws_acm_certificate" "cert" {
+  domain_name       = "example.com"
+  validation_method = "DNS"
+}
+
+resource "aws_route53_record" "validation" {
+  for_each = {
+    for dvo in aws_acm_certificate.cert.domain_validation_options : dvo.domain_name => {
+      name   = dvo.resource_record_name
+      record = dvo.resource_record_value
+      type   = dvo.resource_record_type
+    }
+  }
+
+  name    = each.value.name
+  records = [each.value.record]
+  type    = each.value.type
+  zone_id = var.zone_id
+  ttl     = 60
+}
+"#;
+
+    #[test]
+    fn silent_for_acm_canonical_validation_pattern() {
+        // The documented ACM DNS-validation pattern: the AWS provider
+        // populates domain_validation_options at plan time (CustomizeDiff),
+        // keyed fields (domain_name) are config-derived. Values stay unknown
+        // — which is fine; only the keys must be plan-known.
+        let d = diags(ACM_CANONICAL);
+        assert!(d.is_empty(), "canonical ACM pattern is plan-valid; got: {d:?}");
+    }
+
+    #[test]
+    fn flags_acm_keyed_on_record_name() {
+        // Same collection, but keyed on an apply-time field — Terraform
+        // rejects this at plan.
+        let src = r#"
+resource "aws_route53_record" "validation" {
+  for_each = {
+    for dvo in aws_acm_certificate.cert.domain_validation_options : dvo.resource_record_name => dvo
+  }
+}
+"#;
+        assert!(flagged(src));
+    }
+
+    #[test]
+    fn silent_for_acm_count_length() {
+        // length(<plan-known-membership collection>) is plan-known even
+        // though element values are not.
+        let src = r#"
+resource "null_resource" "x" {
+  count = length(aws_acm_certificate.cert.domain_validation_options)
+}
+"#;
+        assert!(!flagged(src), "got: {:?}", diags(src));
+    }
+
+    #[test]
+    fn silent_for_acm_splat_known_field() {
+        let src = r#"
+resource "null_resource" "x" {
+  for_each = toset(aws_acm_certificate.cert.domain_validation_options[*].domain_name)
+}
+"#;
+        assert!(!flagged(src), "got: {:?}", diags(src));
+    }
+
+    #[test]
+    fn flags_acm_splat_unknown_field() {
+        let src = r#"
+resource "null_resource" "x" {
+  for_each = toset(aws_acm_certificate.cert.domain_validation_options[*].resource_record_value)
+}
+"#;
+        assert!(flagged(src));
+    }
+
+    #[test]
+    fn flags_acm_bare_collection_for_each() {
+        // Directly iterating the collection: the set elements are whole
+        // objects carrying apply-time fields, so the key set is unknown
+        // (and a set of objects is not a valid for_each anyway).
+        let src = r#"
+resource "null_resource" "x" {
+  for_each = aws_acm_certificate.cert.domain_validation_options
+}
+"#;
+        assert!(flagged(src));
+    }
+
+    #[test]
+    fn silent_for_acm_known_field_in_filter() {
+        // Filter reads a plan-known field of the allowlisted collection.
+        let src = r#"
+resource "aws_route53_record" "validation" {
+  for_each = {
+    for dvo in aws_acm_certificate.cert.domain_validation_options :
+      dvo.domain_name => dvo if dvo.domain_name != "ignored.example.com"
+  }
+}
+"#;
+        assert!(!flagged(src), "got: {:?}", diags(src));
+    }
+
     #[test]
     fn only_resource_data_module_blocks() {
         // A `for_each` in some other top-level block kind is ignored.
