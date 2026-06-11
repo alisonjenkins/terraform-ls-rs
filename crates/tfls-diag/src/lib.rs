@@ -41,6 +41,7 @@ pub mod sensitive_output;
 pub mod standard_module_structure;
 pub mod syntax;
 pub mod typed_variables;
+pub mod unknown_value;
 pub mod unused_declarations;
 pub mod unused_required_providers;
 pub mod variable_default_type;
@@ -94,6 +95,7 @@ pub use empty_list_equality::empty_list_equality_diagnostics;
 pub use error::DiagError;
 pub use for_each_unknown_keys::{
     for_each_unknown_keys_diagnostics, for_each_unknown_keys_diagnostics_with_locals,
+    for_each_unknown_keys_diagnostics_with_ctx,
 };
 pub use git_source::{
     extract_ref, has_trailing_comment, is_git_source, ref_value_span, trailing_comment_tag,
@@ -118,6 +120,7 @@ pub use sensitive_output::{sensitive_output_diagnostics, sensitive_variable_name
 pub use standard_module_structure::standard_module_structure_diagnostics;
 pub use syntax::diagnostics_for_parse_errors;
 pub use typed_variables::typed_variables_diagnostics;
+pub use unknown_value::{collect_module_inputs, ModuleUnknownInputs};
 pub use unused_declarations::unused_declarations_diagnostics;
 pub use unused_required_providers::unused_required_providers_diagnostics;
 pub use variable_default_type::variable_default_type_diagnostics;

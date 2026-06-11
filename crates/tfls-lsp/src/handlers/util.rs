@@ -101,20 +101,21 @@ pub(crate) fn module_sensitive_variables(
     out
 }
 
-/// Aggregate every `local.*` definition declared across the `.tf` files in the
+/// Aggregate the unknown-value-analysis inputs (`local.*` definitions plus
+/// `resource` / `data` block configs) declared across the `.tf` files in the
 /// active module's directory. The `terraform_for_each_unknown_keys` rule needs
-/// the *expression* a local resolves to — and a `locals` block usually lives in
-/// a different file (`locals.tf`) than the `for_each` that reads it, so a
-/// single-file view would miss the resource attribute embedded in the local.
+/// the *expression* a reference resolves to — and a `locals` block (or the
+/// data source a `for_each` keys on) usually lives in a different file than
+/// the expression that reads it, so a single-file view would miss it.
 ///
 /// Later siblings do not overwrite earlier definitions of the same name (a
-/// duplicate `local` is its own error); the active body's own locals are
+/// duplicate is its own error); the active body's own definitions are
 /// overlaid by the diagnostic itself.
-pub(crate) fn module_for_each_locals(
+pub(crate) fn module_unknown_inputs(
     state: &StateStore,
     primary_uri: &Url,
-) -> std::collections::HashMap<String, hcl_edit::expr::Expression> {
-    let mut out = std::collections::HashMap::new();
+) -> tfls_diag::ModuleUnknownInputs {
+    let mut out = tfls_diag::ModuleUnknownInputs::default();
     let Some(target_dir) = parent_dir(primary_uri) else {
         return out;
     };
@@ -127,9 +128,7 @@ pub(crate) fn module_for_each_locals(
             continue;
         }
         if let Some(body) = entry.value().parsed.body.as_ref() {
-            for (name, def) in tfls_diag::for_each_unknown_keys::collect_locals(body) {
-                out.entry(name).or_insert(def);
-            }
+            out.merge_missing(tfls_diag::collect_module_inputs(body));
         }
     }
     out
