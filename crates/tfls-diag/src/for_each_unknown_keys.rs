@@ -348,6 +348,69 @@ resource "null_resource" "x" {
     }
 
     #[test]
+    fn silent_for_resource_attr_set_in_config() {
+        // The referenced attribute is set explicitly in the resource's
+        // config to a plan-known expression — its value is plan-known.
+        let src = r#"
+resource "aws_s3_bucket" "b" {
+  bucket = var.bucket_name
+}
+resource "null_resource" "x" {
+  for_each = toset([aws_s3_bucket.b.bucket])
+}
+"#;
+        assert!(!flagged(src), "got: {:?}", diags(src));
+    }
+
+    #[test]
+    fn flags_resource_attr_set_to_apply_time_config() {
+        // Set in config, but to another resource's computed attribute —
+        // unknownness propagates through the chain.
+        let src = r#"
+resource "aws_s3_bucket" "b" {
+  bucket = aws_vpc.main.id
+}
+resource "null_resource" "x" {
+  for_each = toset([aws_s3_bucket.b.bucket])
+}
+"#;
+        assert!(flagged(src));
+    }
+
+    #[test]
+    fn flags_resource_attr_not_in_config() {
+        // Declared block, but the referenced attribute is absent from config
+        // — computed, unknown until apply. Pins the status quo.
+        let src = r#"
+resource "aws_s3_bucket" "b" {
+  bucket = var.bucket_name
+}
+resource "null_resource" "x" {
+  for_each = toset([aws_s3_bucket.b.arn])
+}
+"#;
+        assert!(flagged(src));
+    }
+
+    #[test]
+    fn resource_reference_cycle_terminates() {
+        // Mutually-referencing resource configs (invalid Terraform, but must
+        // not hang). Cycle keeps the conservative default (flag).
+        let src = r#"
+resource "null_resource" "a" {
+  triggers = { v = null_resource.b.triggers.v }
+}
+resource "null_resource" "b" {
+  triggers = { v = null_resource.a.triggers.v }
+}
+resource "null_resource" "x" {
+  for_each = toset([null_resource.a.triggers.v])
+}
+"#;
+        let _ = diags(src);
+    }
+
+    #[test]
     fn data_reference_cycle_terminates() {
         // Mutually-referencing data sources (invalid config, but must not
         // hang). Cycle resolves to plan-known.

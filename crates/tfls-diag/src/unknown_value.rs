@@ -17,11 +17,11 @@
 //!
 //! ## What counts as apply-time
 //!
-//! - A managed-resource attribute (`<type>.<name>.<attr>`) — these are
-//!   unknown when computed and the resource has pending changes. Conservative:
-//!   we flag them outright (refinements: config-set attrs, schema
-//!   non-computed attrs, and the [`PLAN_KNOWN_COMPUTED_COLLECTIONS`]
-//!   allowlist arrive in later passes).
+//! - A managed-resource attribute (`<type>.<name>.<attr>`) — unknown when
+//!   computed and the resource has pending changes. An attribute set
+//!   explicitly in the resource's config resolves transitively to the config
+//!   expression; computed collections in [`PLAN_KNOWN_COMPUTED_COLLECTIONS`]
+//!   are plan-known per their listed fields. Everything else flags.
 //! - `data.<...>` — only when the data source's *own* configuration is
 //!   apply-time or it carries a `depends_on` on a managed resource (a data
 //!   read is otherwise performed during plan and its attributes are known).
@@ -599,7 +599,54 @@ fn traversal_apply_time(
         return unknown || index_operators_apply_time(t, ctx, binds, visited);
     }
     // Anything else is a managed-resource reference: `<type>.<name>.<attr>`.
-    true
+    resource_reference_apply_time(t, head, ctx, binds, visited)
+}
+
+/// Whether a managed-resource reference `<type>.<name>.<attr>` is apply-time.
+/// An attribute set explicitly in the resource's config takes the config
+/// expression's value — plan-known iff that expression is. An attribute NOT
+/// in config is computed (unknown while the resource has pending changes),
+/// and a block we cannot resolve keeps the conservative default: flag.
+///
+/// `visited` carries `res:<type>.<name>` keys to break reference cycles
+/// (shared with the `local.*` / `data:` keys — the shapes cannot collide).
+/// A cycle keeps the conservative default.
+fn resource_reference_apply_time(
+    t: &hcl_edit::expr::Traversal,
+    rtype: &str,
+    ctx: &UnknownCtx,
+    binds: &Binds,
+    visited: &HashSet<String>,
+) -> bool {
+    let mut get_attrs = t.operators.iter().filter_map(|op| match op.value() {
+        TraversalOperator::GetAttr(ident) => Some(ident.as_str()),
+        _ => None,
+    });
+    let (Some(name), Some(attr)) = (get_attrs.next(), get_attrs.next()) else {
+        // Whole-resource reference — the object carries computed attrs.
+        return true;
+    };
+    let key = format!("res:{rtype}.{name}");
+    if visited.contains(&key) {
+        return true; // cycle — keep the conservative default
+    }
+    let Some(config) = ctx
+        .resource_configs
+        .get(&(rtype.to_string(), name.to_string()))
+    else {
+        return true; // unresolvable block — keep the conservative default
+    };
+    let Some(expr) = config.attrs.get(attr) else {
+        return true; // not set in config → computed → unknown
+    };
+    if index_operators_apply_time(t, ctx, binds, visited) {
+        return true;
+    }
+    let mut v2 = visited.clone();
+    v2.insert(key);
+    // Config expressions are evaluated in the resource block's own scope.
+    let no_binds = Binds::new();
+    references_apply_time(expr, ctx, &no_binds, &v2)
 }
 
 /// Whether a `data.<type>.<name>...` reference is apply-time: the data
