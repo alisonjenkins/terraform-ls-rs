@@ -115,6 +115,10 @@ pub struct BlockConfig {
     /// Top-level attribute expressions, keyed by attribute name. Meta-args
     /// (`count`, `for_each`, `depends_on`, `provider`, `lifecycle`) excluded.
     pub attrs: HashMap<String, Expression>,
+    /// Attribute expressions from nested blocks (e.g. a data source's
+    /// `filter { ... }`), flattened — only "does any config expression
+    /// reference an apply-time value" questions are asked of these.
+    pub nested_exprs: Vec<Expression>,
     /// Whether the block has a non-empty `depends_on` naming a managed
     /// resource — for a data source this defers the read to apply.
     pub has_depends_on: bool,
@@ -187,6 +191,12 @@ pub fn collect_module_inputs(body: &Body) -> ModuleUnknownInputs {
                 };
                 let mut config = BlockConfig::default();
                 for entry in block.body.iter() {
+                    if let Some(nested) = entry.as_block() {
+                        if nested.ident.as_str() != "lifecycle" {
+                            collect_nested_exprs(&nested.body, &mut config.nested_exprs);
+                        }
+                        continue;
+                    }
                     let Some(attr) = entry.as_attribute() else {
                         continue;
                     };
@@ -222,6 +232,18 @@ pub fn collect_module_inputs(body: &Body) -> ModuleUnknownInputs {
 /// locals.
 pub fn collect_locals(body: &Body) -> HashMap<String, Expression> {
     collect_module_inputs(body).locals
+}
+
+/// Flatten every attribute expression under `body` (recursing into nested
+/// blocks) into `out`.
+fn collect_nested_exprs(body: &Body, out: &mut Vec<Expression>) {
+    for entry in body.iter() {
+        if let Some(attr) = entry.as_attribute() {
+            out.push(attr.value.clone());
+        } else if let Some(block) = entry.as_block() {
+            collect_nested_exprs(&block.body, out);
+        }
+    }
 }
 
 /// Whether a `depends_on` expression names at least one managed resource
@@ -548,9 +570,11 @@ fn traversal_apply_time(
             None => false,
         };
     }
-    // `data.<...>` is the apply-time class we flag explicitly.
+    // `data.<type>.<name>.<attr>` — a data source is read *during* plan (its
+    // attributes are plan-known) unless its own config is apply-time or a
+    // `depends_on` on a managed resource defers the read to apply.
     if head == "data" {
-        return true;
+        return data_reference_apply_time(t, ctx, binds, visited);
     }
     // A loop variable with a field access — resolve field-sensitively.
     if let Some(bind) = binds.get(head) {
@@ -576,6 +600,57 @@ fn traversal_apply_time(
     }
     // Anything else is a managed-resource reference: `<type>.<name>.<attr>`.
     true
+}
+
+/// Whether a `data.<type>.<name>...` reference is apply-time: the data
+/// source's read is deferred (and its attributes unknown) iff it has a
+/// `depends_on` on a managed resource or any of its own config expressions
+/// transitively references an apply-time value. A block we cannot resolve in
+/// the module is treated as plan-known — prefer false negatives.
+///
+/// `visited` (shared with `local.*` resolution) carries `data:<type>.<name>`
+/// keys to break reference cycles; the key shape cannot collide with local
+/// names. A cycle resolves to plan-known (stay silent).
+fn data_reference_apply_time(
+    t: &hcl_edit::expr::Traversal,
+    ctx: &UnknownCtx,
+    binds: &Binds,
+    visited: &HashSet<String>,
+) -> bool {
+    let mut get_attrs = t.operators.iter().filter_map(|op| match op.value() {
+        TraversalOperator::GetAttr(ident) => Some(ident.as_str()),
+        _ => None,
+    });
+    let (Some(dtype), Some(name)) = (get_attrs.next(), get_attrs.next()) else {
+        // Bare `data` / `data.<type>` — not a concrete reference.
+        return index_operators_apply_time(t, ctx, binds, visited);
+    };
+    if index_operators_apply_time(t, ctx, binds, visited) {
+        return true;
+    }
+    let key = format!("data:{dtype}.{name}");
+    if visited.contains(&key) {
+        return false; // cycle — assume plan-known
+    }
+    let Some(config) = ctx
+        .data_configs
+        .get(&(dtype.to_string(), name.to_string()))
+    else {
+        return false; // unresolvable block — stay silent
+    };
+    if config.has_depends_on {
+        return true;
+    }
+    let mut v2 = visited.clone();
+    v2.insert(key);
+    // Config expressions are evaluated in the data block's own scope — no
+    // comprehension loop variables from the referencing context apply.
+    let no_binds = Binds::new();
+    config
+        .attrs
+        .values()
+        .chain(config.nested_exprs.iter())
+        .any(|e| references_apply_time(e, ctx, &no_binds, &v2))
 }
 
 fn index_operators_apply_time(

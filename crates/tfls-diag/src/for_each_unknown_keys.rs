@@ -245,13 +245,124 @@ resource "null_resource" "x" {
     }
 
     #[test]
-    fn flags_data_source_in_filter() {
+    fn silent_for_unresolved_data_source_in_filter() {
+        // A data source is read during plan — its attributes are plan-known
+        // in the normal case. With the block unresolvable (not declared in
+        // this module view) we stay silent rather than guess.
         let src = r#"
 resource "null_resource" "x" {
   for_each = { for k, v in var.items : k => v if data.aws_iam_role.r.arn != "" }
 }
 "#;
+        assert!(!flagged(src), "got: {:?}", diags(src));
+    }
+
+    #[test]
+    fn silent_for_data_source_with_static_config() {
+        let src = r#"
+data "aws_subnets" "all" {
+  filter {
+    name   = "vpc-id"
+    values = [var.vpc_id]
+  }
+}
+resource "null_resource" "x" {
+  for_each = toset(data.aws_subnets.all.ids)
+}
+"#;
+        assert!(!flagged(src), "got: {:?}", diags(src));
+    }
+
+    #[test]
+    fn flags_data_source_with_depends_on() {
+        // depends_on on a managed resource defers the data read to apply —
+        // its attributes become unknown at plan.
+        let src = r#"
+data "aws_subnets" "all" {
+  depends_on = [aws_vpc.main]
+  filter {
+    name   = "vpc-id"
+    values = [var.vpc_id]
+  }
+}
+resource "null_resource" "x" {
+  for_each = toset(data.aws_subnets.all.ids)
+}
+"#;
         assert!(flagged(src));
+    }
+
+    #[test]
+    fn silent_for_data_source_with_data_depends_on() {
+        // depends_on on another data source / module does not defer the read
+        // the way a managed-resource target does.
+        let src = r#"
+data "aws_subnets" "all" {
+  depends_on = [data.aws_vpc.main]
+}
+resource "null_resource" "x" {
+  for_each = toset(data.aws_subnets.all.ids)
+}
+"#;
+        assert!(!flagged(src), "got: {:?}", diags(src));
+    }
+
+    #[test]
+    fn flags_data_source_with_apply_time_config() {
+        // The data source's own config references a managed-resource
+        // attribute — read deferred, attributes unknown. The reference here
+        // sits in a nested filter block.
+        let src = r#"
+data "aws_subnets" "all" {
+  filter {
+    name   = "vpc-id"
+    values = [aws_vpc.main.id]
+  }
+}
+resource "null_resource" "x" {
+  for_each = toset(data.aws_subnets.all.ids)
+}
+"#;
+        assert!(flagged(src));
+    }
+
+    #[test]
+    fn flags_data_chain_through_deferred_data() {
+        // data.b is plan-known on its own, but reads data.a which is
+        // deferred — the unknownness propagates through the chain.
+        let src = r#"
+data "aws_vpc" "a" {
+  depends_on = [aws_internet_gateway.gw]
+}
+data "aws_subnets" "b" {
+  filter {
+    name   = "vpc-id"
+    values = [data.aws_vpc.a.id]
+  }
+}
+resource "null_resource" "x" {
+  for_each = toset(data.aws_subnets.b.ids)
+}
+"#;
+        assert!(flagged(src));
+    }
+
+    #[test]
+    fn data_reference_cycle_terminates() {
+        // Mutually-referencing data sources (invalid config, but must not
+        // hang). Cycle resolves to plan-known.
+        let src = r#"
+data "aws_vpc" "a" {
+  id = data.aws_vpc.b.id
+}
+data "aws_vpc" "b" {
+  id = data.aws_vpc.a.id
+}
+resource "null_resource" "x" {
+  for_each = toset([data.aws_vpc.a.id])
+}
+"#;
+        let _ = diags(src);
     }
 
     #[test]
