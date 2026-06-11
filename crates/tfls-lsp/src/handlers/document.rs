@@ -784,6 +784,12 @@ pub fn compute_diagnostics_with_lookup(
                 Some(&lookup),
             ),
         ));
+        // Non-literal lifecycle arguments (a hard `terraform validate`
+        // error: "Variables may not be used here").
+        out.extend(tag(
+            "terraform_lifecycle_literal",
+            tfls_diag::lifecycle_literal_diagnostics(body, &doc.rope),
+        ));
         // Dependency cycles among `local` values (a hard Terraform error).
         out.extend(tag(
             "terraform_cyclic_locals",
