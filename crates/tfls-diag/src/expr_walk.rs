@@ -24,6 +24,15 @@ where
     visit_body(body, &mut visit);
 }
 
+/// Expression-rooted form of [`for_each_expression`]: visit `expr` and every
+/// expression nested inside it.
+pub fn for_each_expression_in<F>(expr: &Expression, mut visit: F)
+where
+    F: FnMut(&Expression),
+{
+    visit_expr(expr, &mut visit);
+}
+
 fn visit_body<F>(body: &Body, visit: &mut F)
 where
     F: FnMut(&Expression),

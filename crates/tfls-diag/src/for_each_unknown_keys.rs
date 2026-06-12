@@ -104,11 +104,17 @@ fn check_block(block: &Block, rope: &Rope, ctx: &UnknownCtx, out: &mut Vec<Diagn
         };
         if membership_apply_time(&attr.value, kind, ctx) {
             let range = expr_range(&attr.value, rope);
+            let mut message = message(kind).to_string();
+            // When the unknownness comes from a caller-passed variable,
+            // name the caller — the fix usually lives in the other module.
+            if let Some(reason) = crate::unknown_value::unknown_var_reason(&attr.value, ctx) {
+                message = format!("{message} ({reason}.)");
+            }
             out.push(Diagnostic {
                 range,
                 severity: Some(DiagnosticSeverity::WARNING),
                 source: Some("terraform-ls-rs".to_string()),
-                message: message(kind).to_string(),
+                message,
                 ..Default::default()
             });
         }
@@ -822,6 +828,99 @@ resource "aws_route53_record" "validation" {
 }
 "#;
         assert!(!flagged(src), "got: {:?}", diags(src));
+    }
+
+    fn diags_with_unknown_var(src: &str, name: &str, membership: bool, value: bool) -> Vec<Diagnostic> {
+        use crate::unknown_value::UnknownVarInfo;
+        let rope = Rope::from_str(src);
+        let body = parse_source(src).body.expect("parses");
+        let mut inputs = ModuleUnknownInputs::default();
+        inputs.unknown_variables.insert(
+            name.to_string(),
+            UnknownVarInfo {
+                membership,
+                value,
+                reason: "caller module \"net\" in /project passes an apply-time value"
+                    .to_string(),
+            },
+        );
+        for_each_unknown_keys_diagnostics_with_ctx(&body, &rope, &inputs, None, None)
+    }
+
+    const VAR_FOR_EACH: &str = r#"
+resource "null_resource" "x" {
+  for_each = var.subnets
+}
+"#;
+
+    #[test]
+    fn flags_caller_unknown_var_membership() {
+        let d = diags_with_unknown_var(VAR_FOR_EACH, "subnets", true, true);
+        assert_eq!(d.len(), 1, "got: {d:?}");
+        assert!(
+            d[0].message.contains("caller module \"net\""),
+            "message names the caller; got: {}",
+            d[0].message
+        );
+    }
+
+    #[test]
+    fn silent_for_unknown_values_with_known_keys() {
+        // Caller passes a map with static keys but apply-time values —
+        // valid for_each, must stay silent.
+        let d = diags_with_unknown_var(VAR_FOR_EACH, "subnets", false, true);
+        assert!(d.is_empty(), "got: {d:?}");
+    }
+
+    #[test]
+    fn silent_for_var_not_in_unknown_map() {
+        let d = diags_with_unknown_var(VAR_FOR_EACH, "other_var", true, true);
+        assert!(d.is_empty(), "got: {d:?}");
+    }
+
+    #[test]
+    fn flags_count_length_of_caller_unknown_var() {
+        let src = r#"
+resource "null_resource" "x" {
+  count = length(var.subnets)
+}
+"#;
+        assert_eq!(diags_with_unknown_var(src, "subnets", true, true).len(), 1);
+    }
+
+    #[test]
+    fn flags_toset_of_caller_unknown_var() {
+        let src = r#"
+resource "null_resource" "x" {
+  for_each = toset(var.subnets)
+}
+"#;
+        assert_eq!(diags_with_unknown_var(src, "subnets", true, true).len(), 1);
+    }
+
+    #[test]
+    fn flags_value_bit_in_filter_condition() {
+        // The var is used in the `if` predicate — a VALUE position deciding
+        // membership.
+        let src = r#"
+resource "null_resource" "x" {
+  for_each = { for k, v in var.items : k => v if var.flag }
+}
+"#;
+        assert_eq!(diags_with_unknown_var(src, "flag", false, true).len(), 1);
+    }
+
+    #[test]
+    fn flags_keys_of_caller_unknown_map() {
+        // `for k, v in var.m : k => v` — keys come from the passed map's
+        // membership.
+        let src = r#"
+resource "null_resource" "x" {
+  for_each = { for k, v in var.m : k => v }
+}
+"#;
+        assert_eq!(diags_with_unknown_var(src, "m", true, false).len(), 1);
+        assert!(diags_with_unknown_var(src, "m", false, true).is_empty());
     }
 
     #[test]

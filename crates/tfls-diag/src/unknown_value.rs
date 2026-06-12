@@ -43,12 +43,12 @@ use tfls_parser::hcl_span_to_lsp_range;
 /// not the resource/data apply-time class we flag). Everything else with a
 /// `<head>.<...>` shape is a managed-resource reference.
 const SAFE_ROOTS: &[&str] = &[
-    "var",
     "path",
     "terraform",
     "self",
     "each",
     "count",
+    "var",   // handled explicitly (caller-passed unknownness), listed for clarity
     "local", // handled explicitly (resolved), listed for clarity
 ];
 
@@ -135,6 +135,20 @@ pub struct BlockConfig {
     pub has_depends_on: bool,
 }
 
+/// What a caller passes into a module variable, as far as plan-time
+/// knownness goes. Both bits matter independently: a caller-passed map with
+/// statically-known keys but apply-time *values* is still a valid `for_each`.
+#[derive(Debug, Clone, Default)]
+pub struct UnknownVarInfo {
+    /// The membership (map keys / set elements / length) of the passed value
+    /// is apply-time.
+    pub membership: bool,
+    /// The passed value itself is apply-time.
+    pub value: bool,
+    /// Human-readable origin (names the caller), appended to rule messages.
+    pub reason: String,
+}
+
 /// Module-wide inputs the unknown-value analysis resolves through: `local.*`
 /// definitions plus `resource` / `data` block configurations, aggregated
 /// across every `.tf` file in the active module's directory (the definitions
@@ -147,6 +161,10 @@ pub struct ModuleUnknownInputs {
     pub data_configs: HashMap<(String, String), BlockConfig>,
     /// `(resource_type, name)` → config of that `resource` block.
     pub resource_configs: HashMap<(String, String), BlockConfig>,
+    /// `var.<name>` entries a CALLER passes an apply-time value into.
+    /// Empty unless the LSP layer fills it (`collect_module_inputs` cannot
+    /// see callers). Absence of a name means plan-known.
+    pub unknown_variables: HashMap<String, UnknownVarInfo>,
 }
 
 impl ModuleUnknownInputs {
@@ -162,6 +180,9 @@ impl ModuleUnknownInputs {
         for (k, v) in other.resource_configs {
             self.resource_configs.entry(k).or_insert(v);
         }
+        for (k, v) in other.unknown_variables {
+            self.unknown_variables.entry(k).or_insert(v);
+        }
     }
 
     /// Merge `other` in, letting `other` override on collision (used to
@@ -171,6 +192,7 @@ impl ModuleUnknownInputs {
         self.locals.extend(other.locals);
         self.data_configs.extend(other.data_configs);
         self.resource_configs.extend(other.resource_configs);
+        self.unknown_variables.extend(other.unknown_variables);
     }
 }
 
@@ -283,6 +305,7 @@ pub struct UnknownCtx<'a> {
     pub locals: &'a HashMap<String, Expression>,
     pub data_configs: &'a HashMap<(String, String), BlockConfig>,
     pub resource_configs: &'a HashMap<(String, String), BlockConfig>,
+    pub unknown_variables: &'a HashMap<String, UnknownVarInfo>,
     pub schema: Option<&'a dyn crate::schema_validation::SchemaLookup>,
     pub module_outputs: Option<&'a dyn ModuleOutputLookup>,
 }
@@ -296,6 +319,7 @@ impl<'a> UnknownCtx<'a> {
             locals: &inputs.locals,
             data_configs: &inputs.data_configs,
             resource_configs: &inputs.resource_configs,
+            unknown_variables: &inputs.unknown_variables,
             schema,
             module_outputs: None,
         }
@@ -436,6 +460,12 @@ fn membership_apply_time_inner(
                 None => false,
             }
         }
+        // A bare `var.X` used as the collection — its membership is what
+        // matters (a caller-passed map with static keys and apply-time
+        // VALUES is a valid for_each).
+        Expression::Traversal(_) if var_name(value).is_some() => var_name(value)
+            .and_then(|name| ctx.unknown_variables.get(name))
+            .is_some_and(|info| info.membership),
         // Any other shape (a direct reference, conditional, etc.): the whole
         // value's key set is apply-time iff the value references an apply-time
         // attribute.
@@ -612,6 +642,14 @@ fn traversal_apply_time(
     // `depends_on` on a managed resource defers the read to apply.
     if head == "data" {
         return data_reference_apply_time(t, ctx, binds, visited);
+    }
+    // `var.<name>[...]` — plan-known unless a caller is known to pass an
+    // apply-time value (LSP-filled `unknown_variables`).
+    if head == "var" {
+        let hit = first_attr(t)
+            .and_then(|name| ctx.unknown_variables.get(name))
+            .is_some_and(|info| info.value);
+        return hit || index_operators_apply_time(t, ctx, binds, visited);
     }
     // `module.<label>.<output>[...]` — resolve the output's defining
     // expression in the child module when a lookup is wired. Unresolvable
@@ -871,7 +909,16 @@ fn key_set_apply_time(
         Expression::Array(arr) => arr
             .iter()
             .any(|el| references_apply_time(el, ctx, binds, &v2)),
-        other => references_apply_time(other, ctx, binds, &v2),
+        other => {
+            // Keys of a caller-passed collection: membership bit only.
+            if let Some(name) = var_name(other) {
+                return ctx
+                    .unknown_variables
+                    .get(name)
+                    .is_some_and(|info| info.membership);
+            }
+            references_apply_time(other, ctx, binds, &v2)
+        }
     }
 }
 
@@ -918,16 +965,56 @@ fn resolve_local_def<'a>(
 
 /// If `expr` is a `local.<name>` traversal, return `<name>`.
 fn local_name(expr: &Expression) -> Option<&str> {
+    head_name(expr, "local")
+}
+
+/// If `expr` is a bare `var.<name>` traversal (no operators beyond the name),
+/// return `<name>`.
+fn var_name(expr: &Expression) -> Option<&str> {
+    let Expression::Traversal(t) = expr else {
+        return None;
+    };
+    if t.operators.len() != 1 {
+        return None;
+    }
+    head_name(expr, "var")
+}
+
+fn head_name<'e>(expr: &'e Expression, expected_head: &str) -> Option<&'e str> {
     let Expression::Traversal(t) = expr else {
         return None;
     };
     let Expression::Variable(head) = &t.expr else {
         return None;
     };
-    if head.as_str() != "local" {
+    if head.as_str() != expected_head {
         return None;
     }
     first_attr(t)
+}
+
+/// First `var.<name>` reference anywhere inside `expr` that has an
+/// [`UnknownVarInfo`] entry — rule drivers use this to append the
+/// caller-origin reason to a fired diagnostic's message.
+pub fn unknown_var_reason<'a>(expr: &Expression, ctx: &UnknownCtx<'a>) -> Option<&'a str> {
+    let mut found: Option<&'a str> = None;
+    crate::expr_walk::for_each_expression_in(expr, |e| {
+        if found.is_some() {
+            return;
+        }
+        if let Expression::Traversal(t) = e {
+            if let Expression::Variable(head) = &t.expr {
+                if head.as_str() == "var" {
+                    if let Some(info) = first_attr(t).and_then(|n| ctx.unknown_variables.get(n)) {
+                        if info.membership || info.value {
+                            found = Some(info.reason.as_str());
+                        }
+                    }
+                }
+            }
+        }
+    });
+    found
 }
 
 /// The first `.attr` of a traversal (`local.items.a` → `"items"`).

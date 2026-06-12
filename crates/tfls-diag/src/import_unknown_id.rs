@@ -69,11 +69,17 @@ pub fn import_unknown_id_diagnostics_with_ctx(
                 _ => None,
             };
             if let Some(message) = hit {
+                let mut message = message.to_string();
+                if let Some(reason) =
+                    crate::unknown_value::unknown_var_reason(&attr.value, &ctx)
+                {
+                    message = format!("{message} ({reason}.)");
+                }
                 out.push(Diagnostic {
                     range: expr_range(&attr.value, rope),
                     severity: Some(DiagnosticSeverity::WARNING),
                     source: Some("terraform-ls-rs".to_string()),
-                    message: message.to_string(),
+                    message,
                     ..Default::default()
                 });
             }
