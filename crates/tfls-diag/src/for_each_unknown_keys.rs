@@ -923,6 +923,50 @@ resource "null_resource" "x" {
         assert!(diags_with_unknown_var(src, "m", false, true).is_empty());
     }
 
+    fn diags_with_extra_allowlist(src: &str) -> Vec<Diagnostic> {
+        let rope = Rope::from_str(src);
+        let body = parse_source(src).body.expect("parses");
+        let mut inputs = ModuleUnknownInputs::default();
+        inputs.extra_plan_known.insert(
+            ("custom_cert".to_string(), "validation_options".to_string()),
+            vec!["domain".to_string()],
+        );
+        for_each_unknown_keys_diagnostics_with_ctx(&body, &rope, &inputs, None, None)
+    }
+
+    #[test]
+    fn extra_allowlist_silences_known_field_key() {
+        let src = r#"
+resource "null_resource" "x" {
+  for_each = { for v in custom_cert.c.validation_options : v.domain => v }
+}
+"#;
+        let d = diags_with_extra_allowlist(src);
+        assert!(d.is_empty(), "got: {d:?}");
+        // Without the extra entry the same source flags.
+        assert!(flagged(src));
+    }
+
+    #[test]
+    fn extra_allowlist_still_flags_unlisted_field() {
+        let src = r#"
+resource "null_resource" "x" {
+  for_each = { for v in custom_cert.c.validation_options : v.record => v }
+}
+"#;
+        assert!(!diags_with_extra_allowlist(src).is_empty());
+    }
+
+    #[test]
+    fn extra_allowlist_length_is_plan_known() {
+        let src = r#"
+resource "null_resource" "x" {
+  count = length(custom_cert.c.validation_options)
+}
+"#;
+        assert!(diags_with_extra_allowlist(src).is_empty());
+    }
+
     #[test]
     fn only_resource_data_module_blocks() {
         // A `for_each` in some other top-level block kind is ignored.

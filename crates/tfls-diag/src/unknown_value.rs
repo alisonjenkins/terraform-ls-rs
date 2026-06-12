@@ -80,9 +80,25 @@ const PLAN_KNOWN_COMPUTED_COLLECTIONS: &[(&str, &str, &[&str])] = &[(
     &["domain_name"],
 )];
 
+/// Element fields plan-known for an allowlisted collection — borrowed from
+/// the built-in table or from user config.
+enum KnownFields<'a> {
+    Static(&'static [&'static str]),
+    Dynamic(&'a [String]),
+}
+
+impl KnownFields<'_> {
+    fn contains(&self, field: &str) -> bool {
+        match self {
+            KnownFields::Static(fields) => fields.contains(&field),
+            KnownFields::Dynamic(fields) => fields.iter().any(|f| f == field),
+        }
+    }
+}
+
 /// An allowlisted plan-known computed collection reference.
-struct AllowlistedUse {
-    known_fields: &'static [&'static str],
+struct AllowlistedUse<'a> {
+    known_fields: KnownFields<'a>,
     /// `Some(unknown)` when the traversal selects element field(s) beyond the
     /// collection attribute (e.g. `...[*].domain_name`): `unknown` is true if
     /// any selected field is not plan-known. `None` for a bare collection
@@ -90,10 +106,13 @@ struct AllowlistedUse {
     tail: Option<bool>,
 }
 
-/// Match a traversal against [`PLAN_KNOWN_COMPUTED_COLLECTIONS`]:
-/// `<type>.<name>.<attr>` with optional trailing splat / index / field
-/// operators.
-fn allowlisted_traversal(t: &hcl_edit::expr::Traversal) -> Option<AllowlistedUse> {
+/// Match a traversal against [`PLAN_KNOWN_COMPUTED_COLLECTIONS`] plus the
+/// user-configured `extra_plan_known` map: `<type>.<name>.<attr>` with
+/// optional trailing splat / index / field operators.
+fn allowlisted_traversal<'a>(
+    t: &hcl_edit::expr::Traversal,
+    ctx: &UnknownCtx<'a>,
+) -> Option<AllowlistedUse<'a>> {
     let Expression::Variable(head) = &t.expr else {
         return None;
     };
@@ -110,10 +129,15 @@ fn allowlisted_traversal(t: &hcl_edit::expr::Traversal) -> Option<AllowlistedUse
     let known_fields = PLAN_KNOWN_COMPUTED_COLLECTIONS
         .iter()
         .find(|(rtype, rattr, _)| *rtype == head && *rattr == attr)
-        .map(|(_, _, fields)| *fields)?;
+        .map(|(_, _, fields)| KnownFields::Static(fields))
+        .or_else(|| {
+            ctx.extra_plan_known
+                .get(&(head.to_string(), attr.to_string()))
+                .map(|fields| KnownFields::Dynamic(fields.as_slice()))
+        })?;
     let mut tail = None;
     for field in get_attrs {
-        let unknown = !known_fields.contains(&field);
+        let unknown = !known_fields.contains(field);
         tail = Some(tail.unwrap_or(false) || unknown);
     }
     Some(AllowlistedUse { known_fields, tail })
@@ -165,6 +189,10 @@ pub struct ModuleUnknownInputs {
     /// Empty unless the LSP layer fills it (`collect_module_inputs` cannot
     /// see callers). Absence of a name means plan-known.
     pub unknown_variables: HashMap<String, UnknownVarInfo>,
+    /// User-configured additions to [`PLAN_KNOWN_COMPUTED_COLLECTIONS`]:
+    /// `(resource_type, attribute)` → plan-known element fields. Filled by
+    /// the LSP layer from the `planKnownComputedCollections` config.
+    pub extra_plan_known: HashMap<(String, String), Vec<String>>,
 }
 
 impl ModuleUnknownInputs {
@@ -183,6 +211,9 @@ impl ModuleUnknownInputs {
         for (k, v) in other.unknown_variables {
             self.unknown_variables.entry(k).or_insert(v);
         }
+        for (k, v) in other.extra_plan_known {
+            self.extra_plan_known.entry(k).or_insert(v);
+        }
     }
 
     /// Merge `other` in, letting `other` override on collision (used to
@@ -193,6 +224,7 @@ impl ModuleUnknownInputs {
         self.data_configs.extend(other.data_configs);
         self.resource_configs.extend(other.resource_configs);
         self.unknown_variables.extend(other.unknown_variables);
+        self.extra_plan_known.extend(other.extra_plan_known);
     }
 }
 
@@ -306,6 +338,7 @@ pub struct UnknownCtx<'a> {
     pub data_configs: &'a HashMap<(String, String), BlockConfig>,
     pub resource_configs: &'a HashMap<(String, String), BlockConfig>,
     pub unknown_variables: &'a HashMap<String, UnknownVarInfo>,
+    pub extra_plan_known: &'a HashMap<(String, String), Vec<String>>,
     pub schema: Option<&'a dyn crate::schema_validation::SchemaLookup>,
     pub module_outputs: Option<&'a dyn ModuleOutputLookup>,
 }
@@ -320,6 +353,7 @@ impl<'a> UnknownCtx<'a> {
             data_configs: &inputs.data_configs,
             resource_configs: &inputs.resource_configs,
             unknown_variables: &inputs.unknown_variables,
+            extra_plan_known: &inputs.extra_plan_known,
             schema,
             module_outputs: None,
         }
@@ -413,7 +447,7 @@ fn membership_apply_time_inner(
                     // collection has a plan-known *length* even though its
                     // element values are unknown.
                     if let Expression::Traversal(t) = arg {
-                        if matches!(allowlisted_traversal(t), Some(a) if a.tail.is_none()) {
+                        if matches!(allowlisted_traversal(t, ctx), Some(a) if a.tail.is_none()) {
                             return false;
                         }
                     }
@@ -694,7 +728,7 @@ fn traversal_apply_time(
     if let Some(AllowlistedUse {
         tail: Some(unknown),
         ..
-    }) = allowlisted_traversal(t)
+    }) = allowlisted_traversal(t, ctx)
     {
         return unknown || index_operators_apply_time(t, ctx, binds, visited);
     }
@@ -864,10 +898,10 @@ fn element_value_apply_time(
             // Allowlisted plan-known computed collection: element fields the
             // provider populates at plan are known; everything else isn't.
             if let Expression::Traversal(t) = other {
-                if let Some(a) = allowlisted_traversal(t) {
+                if let Some(a) = allowlisted_traversal(t, ctx) {
                     if a.tail.is_none() {
                         return match field {
-                            Some(f) => !a.known_fields.contains(&f),
+                            Some(f) => !a.known_fields.contains(f),
                             // Whole-element use carries apply-time fields.
                             None => true,
                         };

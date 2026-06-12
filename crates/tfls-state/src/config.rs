@@ -98,6 +98,15 @@ pub struct Config {
     /// object. `Arc` so a `snapshot()` clone stays cheap. Empty by
     /// default — every rule keeps its built-in severity.
     pub rule_overrides: std::sync::Arc<std::collections::HashMap<String, RuleSeverity>>,
+    /// User-extensible allowlist of computed collections that are plan-known
+    /// (provider populates them at plan via CustomizeDiff). Keyed by
+    /// `(resource_type, attribute)` → element fields that are plan-known.
+    /// Set via the `planKnownComputedCollections` config object:
+    /// `{ "aws_acm_certificate.domain_validation_options": ["domain_name"] }`.
+    /// Consulted by the unknown-value diagnostics IN ADDITION to the
+    /// built-in table. Replaced wholesale per update.
+    pub plan_known_collections:
+        std::sync::Arc<std::collections::HashMap<(String, String), Vec<String>>>,
 }
 
 impl Default for Config {
@@ -111,6 +120,7 @@ impl Default for Config {
             style_rules: false,
             format_style: FormatStyle::default(),
             rule_overrides: std::sync::Arc::new(std::collections::HashMap::new()),
+            plan_known_collections: std::sync::Arc::new(std::collections::HashMap::new()),
         }
     }
 }
@@ -190,6 +200,39 @@ impl ConfigCell {
             }
             guard.rule_overrides = std::sync::Arc::new(map);
         }
+        // Plan-known computed collections:
+        // `{ "planKnownComputedCollections": { "<type>.<attr>": ["field"] } }`.
+        // Replaces the whole map so removing a key restores the default.
+        if let Some(entries) = obj
+            .get("planKnownComputedCollections")
+            .cloned()
+            .and_then(|v| v.into_object())
+        {
+            let mut map = std::collections::HashMap::new();
+            for (key, val) in entries.iter() {
+                // Resource types never contain dots — split on the first.
+                let Some((rtype, attr)) = key.split_once('.') else {
+                    tracing::warn!(
+                        key,
+                        "planKnownComputedCollections key must be <resource_type>.<attribute> — ignoring"
+                    );
+                    continue;
+                };
+                let Some(arr) = val.clone().into_array() else {
+                    tracing::warn!(
+                        key,
+                        "planKnownComputedCollections value must be a list of field names — ignoring"
+                    );
+                    continue;
+                };
+                let fields: Vec<String> = arr
+                    .iter()
+                    .filter_map(|f| f.as_str().map(str::to_string))
+                    .collect();
+                map.insert((rtype.to_string(), attr.to_string()), fields);
+            }
+            guard.plan_known_collections = std::sync::Arc::new(map);
+        }
     }
 }
 
@@ -250,6 +293,38 @@ mod tests {
         );
         // Invalid severity value is ignored, not stored.
         assert!(!snap.rule_overrides.contains_key("bogus_rule"));
+    }
+
+    #[test]
+    fn update_parses_plan_known_collections() {
+        let cell = ConfigCell::default();
+        let value: sonic_rs::Value = sonic_rs::from_str(
+            r#"{"terraform-ls-rs": { "planKnownComputedCollections": {
+                "aws_acm_certificate.domain_validation_options": ["domain_name"],
+                "nodots": ["x"],
+                "custom_thing.items": "not-a-list"
+            }}}"#,
+        )
+        .expect("parse");
+        cell.update_from_json(&value);
+        let snap = cell.snapshot();
+        assert_eq!(
+            snap.plan_known_collections.get(&(
+                "aws_acm_certificate".to_string(),
+                "domain_validation_options".to_string()
+            )),
+            Some(&vec!["domain_name".to_string()])
+        );
+        // Malformed entries are skipped, not stored.
+        assert_eq!(snap.plan_known_collections.len(), 1);
+
+        // A later update replaces the map wholesale — dropping a key
+        // restores the built-in default.
+        let value: sonic_rs::Value =
+            sonic_rs::from_str(r#"{"terraform-ls-rs": { "planKnownComputedCollections": {} }}"#)
+                .expect("parse");
+        cell.update_from_json(&value);
+        assert!(cell.snapshot().plan_known_collections.is_empty());
     }
 
     #[test]

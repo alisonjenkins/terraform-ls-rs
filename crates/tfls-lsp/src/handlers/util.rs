@@ -268,7 +268,17 @@ pub(crate) fn module_unknown_inputs_for_dir(
     state: &StateStore,
     target_dir: &Path,
 ) -> tfls_diag::ModuleUnknownInputs {
-    let mut out = tfls_diag::ModuleUnknownInputs::default();
+    // User-configured plan-known computed collections apply everywhere the
+    // analysis runs (active doc, child-module contexts, caller rebuilds).
+    let mut out = tfls_diag::ModuleUnknownInputs {
+        extra_plan_known: state
+            .config
+            .snapshot()
+            .plan_known_collections
+            .as_ref()
+            .clone(),
+        ..Default::default()
+    };
     for entry in state.documents.iter() {
         let uri = entry.key();
         let Ok(path) = uri.to_file_path() else {

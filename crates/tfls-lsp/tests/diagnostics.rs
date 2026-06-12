@@ -1756,3 +1756,41 @@ fn flags_parent_for_each_on_output_of_caller_unknown_var() {
     );
     assert_eq!(hits.len(), 1, "output passthrough of unknown var must flag; got: {hits:?}");
 }
+
+#[test]
+fn plan_known_collections_config_live_toggle() {
+    let b = backend();
+    let main_uri = uri("file:///project/main.tf");
+    insert(
+        &b,
+        &main_uri,
+        r#"
+resource "null_resource" "x" {
+  for_each = { for v in custom_cert.c.validation_options : v.domain => v }
+}
+"#,
+    );
+    // Default: unknown collection → flagged.
+    let hits = diags_with_code(&b, &main_uri, "terraform_for_each_unknown_keys");
+    assert_eq!(hits.len(), 1, "got: {hits:?}");
+
+    // Config allowlists the collection with `domain` plan-known → silent.
+    let cfg: sonic_rs::Value = sonic_rs::from_str(
+        r#"{ "terraform-ls-rs": { "planKnownComputedCollections": {
+            "custom_cert.validation_options": ["domain"]
+        } } }"#,
+    )
+    .expect("config parses");
+    b.state.config.update_from_json(&cfg);
+    let hits = diags_with_code(&b, &main_uri, "terraform_for_each_unknown_keys");
+    assert!(hits.is_empty(), "allowlisted collection flagged: {hits:?}");
+
+    // Emptying the map restores the default.
+    let cfg: sonic_rs::Value = sonic_rs::from_str(
+        r#"{ "terraform-ls-rs": { "planKnownComputedCollections": {} } }"#,
+    )
+    .expect("config parses");
+    b.state.config.update_from_json(&cfg);
+    let hits = diags_with_code(&b, &main_uri, "terraform_for_each_unknown_keys");
+    assert_eq!(hits.len(), 1, "default must restore: {hits:?}");
+}
