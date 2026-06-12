@@ -1219,6 +1219,16 @@ fn lock_invalidate_with_canonical_path_clears_cache_keyed_under_non_canonical() 
 // all through the same `compute_diagnostics` path as didOpen.
 
 fn diags_with_code(backend: &Backend, target: &Url, code: &str) -> Vec<String> {
+    // The unknown-value rules are gated on the module dir's scan being
+    // complete; tests drive compute_diagnostics directly without the
+    // indexer, so mark the target's dir ready.
+    if let Some(dir) = target
+        .to_file_path()
+        .ok()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+    {
+        backend.state.mark_scan_completed(dir);
+    }
     compute_diagnostics(&backend.state, target)
         .into_iter()
         .filter(|d| {
@@ -1229,6 +1239,45 @@ fn diags_with_code(backend: &Backend, target: &Url, code: &str) -> Vec<String> {
         })
         .map(|d| d.message)
         .collect()
+}
+
+#[test]
+fn unknown_rules_gated_on_scan_completion() {
+    // Until the module dir's scan completes, the for_each/import rules are
+    // suppressed (a sibling file may not be loaded yet); completion (which
+    // triggers a diagnostics refresh in the real server) unlocks them.
+    let b = backend();
+    let main_uri = uri("file:///gated/main.tf");
+    insert(
+        &b,
+        &main_uri,
+        r#"
+resource "null_resource" "x" {
+  for_each = { for s in aws_subnet.all : s.id => s }
+}
+"#,
+    );
+    let before: Vec<String> = compute_diagnostics(&b.state, &main_uri)
+        .into_iter()
+        .filter(|d| {
+            matches!(&d.code,
+                Some(lsp_types::NumberOrString::String(c)) if c == "terraform_for_each_unknown_keys")
+        })
+        .map(|d| d.message)
+        .collect();
+    assert!(before.is_empty(), "rule must be gated pre-scan; got: {before:?}");
+
+    b.state
+        .mark_scan_completed(std::path::PathBuf::from("/gated"));
+    let after: Vec<String> = compute_diagnostics(&b.state, &main_uri)
+        .into_iter()
+        .filter(|d| {
+            matches!(&d.code,
+                Some(lsp_types::NumberOrString::String(c)) if c == "terraform_for_each_unknown_keys")
+        })
+        .map(|d| d.message)
+        .collect();
+    assert_eq!(after.len(), 1, "rule must fire post-scan; got: {after:?}");
 }
 
 #[test]

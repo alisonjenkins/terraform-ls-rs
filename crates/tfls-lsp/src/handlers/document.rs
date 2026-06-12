@@ -762,6 +762,14 @@ pub fn compute_diagnostics_with_lookup(
         // `local.*` and resource/data configs are resolved module-wide: the
         // definitions usually live in a different file than the `for_each`
         // reading them.
+        // Both unknown-value rules conservative-flag unresolved resource
+        // references; while the module dir's scan is pending, a sibling file
+        // may simply not be loaded yet — a transient false positive. Gate on
+        // scan completion: mark_scan_completed triggers a diagnostics
+        // refresh, so the rules appear moments later with full context.
+        let unknown_rules_ready = module_dir
+            .as_deref()
+            .is_some_and(|dir| state.is_scan_completed(dir));
         let mut unknown_inputs = crate::handlers::util::module_unknown_inputs(state, uri);
         // Variables a CALLER passes apply-time values into (rebuilt by the
         // indexer after directory scans) — makes the child's
@@ -783,29 +791,31 @@ pub fn compute_diagnostics_with_lookup(
         let module_outputs = module_output_resolver
             .as_ref()
             .map(|r| r as &dyn tfls_diag::unknown_value::ModuleOutputLookup);
-        out.extend(tag(
-            "terraform_for_each_unknown_keys",
-            tfls_diag::for_each_unknown_keys_diagnostics_with_ctx(
-                body,
-                &doc.rope,
-                &unknown_inputs,
-                Some(&lookup),
-                module_outputs,
-            ),
-        ));
-        // import-block id / for_each requiring plan-known values (Terraform
-        // 1.5+ config-driven import). Same unknown-value analysis and
-        // module-wide inputs as the for_each rule.
-        out.extend(tag(
-            "terraform_import_unknown_id",
-            tfls_diag::import_unknown_id_diagnostics_with_ctx(
-                body,
-                &doc.rope,
-                &unknown_inputs,
-                Some(&lookup),
-                module_outputs,
-            ),
-        ));
+        if unknown_rules_ready {
+            out.extend(tag(
+                "terraform_for_each_unknown_keys",
+                tfls_diag::for_each_unknown_keys_diagnostics_with_ctx(
+                    body,
+                    &doc.rope,
+                    &unknown_inputs,
+                    Some(&lookup),
+                    module_outputs,
+                ),
+            ));
+            // import-block id / for_each requiring plan-known values
+            // (Terraform 1.5+ config-driven import). Same unknown-value
+            // analysis and module-wide inputs as the for_each rule.
+            out.extend(tag(
+                "terraform_import_unknown_id",
+                tfls_diag::import_unknown_id_diagnostics_with_ctx(
+                    body,
+                    &doc.rope,
+                    &unknown_inputs,
+                    Some(&lookup),
+                    module_outputs,
+                ),
+            ));
+        }
         // Non-literal lifecycle arguments (a hard `terraform validate`
         // error: "Variables may not be used here").
         out.extend(tag(
