@@ -770,6 +770,7 @@ pub fn compute_diagnostics_with_lookup(
                 &doc.rope,
                 &unknown_inputs,
                 Some(&lookup),
+                None,
             ),
         ));
         // import-block id / for_each requiring plan-known values (Terraform
@@ -782,6 +783,7 @@ pub fn compute_diagnostics_with_lookup(
                 &doc.rope,
                 &unknown_inputs,
                 Some(&lookup),
+                None,
             ),
         ));
         // Non-literal lifecycle arguments (a hard `terraform validate`

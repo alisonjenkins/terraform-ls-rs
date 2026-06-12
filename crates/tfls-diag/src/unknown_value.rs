@@ -49,9 +49,20 @@ const SAFE_ROOTS: &[&str] = &[
     "self",
     "each",
     "count",
-    "module",
     "local", // handled explicitly (resolved), listed for clarity
 ];
+
+/// Resolve whether a `module.<label>.<output>` reference is apply-time by
+/// analysing the output's defining expression in the child module. Injected
+/// by the LSP layer (it owns module-source resolution and the document
+/// store); rules without one treat every module output as plan-known
+/// (the pre-existing behaviour).
+pub trait ModuleOutputLookup {
+    /// `rest` is the GetAttr path after the output name
+    /// (`module.m.out.field` → `["field"]`) for field-sensitive resolution
+    /// of object-literal outputs. `None` = unresolvable → stay silent.
+    fn output_apply_time(&self, module_label: &str, output: &str, rest: &[&str]) -> Option<bool>;
+}
 
 /// Computed collections that providers populate at *plan* time (via
 /// `CustomizeDiff`) even though their schema marks them computed. Tuple:
@@ -273,6 +284,7 @@ pub struct UnknownCtx<'a> {
     pub data_configs: &'a HashMap<(String, String), BlockConfig>,
     pub resource_configs: &'a HashMap<(String, String), BlockConfig>,
     pub schema: Option<&'a dyn crate::schema_validation::SchemaLookup>,
+    pub module_outputs: Option<&'a dyn ModuleOutputLookup>,
 }
 
 impl<'a> UnknownCtx<'a> {
@@ -285,7 +297,13 @@ impl<'a> UnknownCtx<'a> {
             data_configs: &inputs.data_configs,
             resource_configs: &inputs.resource_configs,
             schema,
+            module_outputs: None,
         }
+    }
+
+    pub fn with_module_outputs(mut self, lookup: Option<&'a dyn ModuleOutputLookup>) -> Self {
+        self.module_outputs = lookup;
+        self
     }
 }
 
@@ -575,6 +593,25 @@ fn traversal_apply_time(
     // `depends_on` on a managed resource defers the read to apply.
     if head == "data" {
         return data_reference_apply_time(t, ctx, binds, visited);
+    }
+    // `module.<label>.<output>[...]` — resolve the output's defining
+    // expression in the child module when a lookup is wired. Unresolvable
+    // (no lookup / unknown module / missing output) → silent.
+    if head == "module" {
+        let mut get_attrs = t.operators.iter().filter_map(|op| match op.value() {
+            TraversalOperator::GetAttr(ident) => Some(ident.as_str()),
+            _ => None,
+        });
+        let (Some(label), Some(output)) = (get_attrs.next(), get_attrs.next()) else {
+            // Bare `module` / `module.<label>` — not a concrete output ref.
+            return index_operators_apply_time(t, ctx, binds, visited);
+        };
+        let rest: Vec<&str> = get_attrs.collect();
+        let verdict = ctx
+            .module_outputs
+            .and_then(|lookup| lookup.output_apply_time(label, output, &rest))
+            .unwrap_or(false);
+        return verdict || index_operators_apply_time(t, ctx, binds, visited);
     }
     // A loop variable with a field access — resolve field-sensitively.
     if let Some(bind) = binds.get(head) {

@@ -35,8 +35,8 @@ use ropey::Rope;
 
 use crate::schema_validation::SchemaLookup;
 use crate::unknown_value::{
-    collect_module_inputs, expr_range, membership_apply_time, MetaKind, ModuleUnknownInputs,
-    UnknownCtx,
+    collect_module_inputs, expr_range, membership_apply_time, MetaKind, ModuleOutputLookup,
+    ModuleUnknownInputs, UnknownCtx,
 };
 
 pub use crate::unknown_value::collect_locals;
@@ -59,7 +59,7 @@ pub fn for_each_unknown_keys_diagnostics_with_locals(
         locals: module_locals.clone(),
         ..Default::default()
     };
-    for_each_unknown_keys_diagnostics_with_ctx(body, rope, &inputs, None)
+    for_each_unknown_keys_diagnostics_with_ctx(body, rope, &inputs, None, None)
 }
 
 /// Primary module-aware entry point: `module_inputs` carries the `local.*`
@@ -74,10 +74,11 @@ pub fn for_each_unknown_keys_diagnostics_with_ctx(
     rope: &Rope,
     module_inputs: &ModuleUnknownInputs,
     schema: Option<&dyn SchemaLookup>,
+    module_outputs: Option<&dyn ModuleOutputLookup>,
 ) -> Vec<Diagnostic> {
     let mut inputs = module_inputs.clone();
     inputs.merge_override(collect_module_inputs(body));
-    let ctx = UnknownCtx::new(&inputs, schema);
+    let ctx = UnknownCtx::new(&inputs, schema).with_module_outputs(module_outputs);
     let mut out = Vec::new();
     for structure in body.iter() {
         let Some(block) = structure.as_block() else {
@@ -431,7 +432,94 @@ resource "null_resource" "x" {
             &rope,
             &ModuleUnknownInputs::default(),
             Some(&MockSchemas),
+            None,
         )
+    }
+
+    /// Mock module-output lookup: `module.net.subnet_ids` apply-time,
+    /// `module.net.cidr` plan-known, everything else unresolvable.
+    struct MockOutputs;
+
+    impl ModuleOutputLookup for MockOutputs {
+        fn output_apply_time(
+            &self,
+            module_label: &str,
+            output: &str,
+            _rest: &[&str],
+        ) -> Option<bool> {
+            match (module_label, output) {
+                ("net", "subnet_ids") => Some(true),
+                ("net", "cidr") => Some(false),
+                _ => None,
+            }
+        }
+    }
+
+    fn diags_with_outputs(src: &str) -> Vec<Diagnostic> {
+        let rope = Rope::from_str(src);
+        let body = parse_source(src).body.expect("parses");
+        for_each_unknown_keys_diagnostics_with_ctx(
+            &body,
+            &rope,
+            &ModuleUnknownInputs::default(),
+            None,
+            Some(&MockOutputs),
+        )
+    }
+
+    #[test]
+    fn flags_apply_time_module_output() {
+        let src = r#"
+resource "null_resource" "x" {
+  for_each = toset(module.net.subnet_ids)
+}
+"#;
+        assert!(!diags_with_outputs(src).is_empty());
+    }
+
+    #[test]
+    fn silent_for_plan_known_module_output() {
+        let src = r#"
+resource "null_resource" "x" {
+  for_each = toset([module.net.cidr])
+}
+"#;
+        let d = diags_with_outputs(src);
+        assert!(d.is_empty(), "got: {d:?}");
+    }
+
+    #[test]
+    fn silent_for_unresolvable_module_output() {
+        let src = r#"
+resource "null_resource" "x" {
+  for_each = toset(module.unknown.ids)
+}
+"#;
+        let d = diags_with_outputs(src);
+        assert!(d.is_empty(), "got: {d:?}");
+    }
+
+    #[test]
+    fn silent_for_module_output_without_lookup() {
+        // No lookup wired (non-LSP callers): every module output is treated
+        // plan-known — pins the pre-existing behaviour.
+        let src = r#"
+resource "null_resource" "x" {
+  for_each = toset(module.net.subnet_ids)
+}
+"#;
+        assert!(!flagged(src), "got: {:?}", diags(src));
+    }
+
+    #[test]
+    fn silent_for_bare_module_reference() {
+        let src = r#"
+resource "null_resource" "x" {
+  for_each = module.net
+}
+"#;
+        let d = diags_with_outputs(src);
+        assert!(d.is_empty(), "got: {d:?}");
     }
 
     #[test]

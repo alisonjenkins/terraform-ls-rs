@@ -20,12 +20,12 @@ use ropey::Rope;
 use crate::schema_validation::SchemaLookup;
 use crate::unknown_value::{
     collect_module_inputs, expr_range, membership_apply_time, value_apply_time, MetaKind,
-    ModuleUnknownInputs, UnknownCtx,
+    ModuleOutputLookup, ModuleUnknownInputs, UnknownCtx,
 };
 
 /// Single-body entry point: resolves module inputs only within `body`.
 pub fn import_unknown_id_diagnostics(body: &Body, rope: &Rope) -> Vec<Diagnostic> {
-    import_unknown_id_diagnostics_with_ctx(body, rope, &ModuleUnknownInputs::default(), None)
+    import_unknown_id_diagnostics_with_ctx(body, rope, &ModuleUnknownInputs::default(), None, None)
 }
 
 /// Module-aware entry point; see
@@ -36,10 +36,11 @@ pub fn import_unknown_id_diagnostics_with_ctx(
     rope: &Rope,
     module_inputs: &ModuleUnknownInputs,
     schema: Option<&dyn SchemaLookup>,
+    module_outputs: Option<&dyn ModuleOutputLookup>,
 ) -> Vec<Diagnostic> {
     let mut inputs = module_inputs.clone();
     inputs.merge_override(collect_module_inputs(body));
-    let ctx = UnknownCtx::new(&inputs, schema);
+    let ctx = UnknownCtx::new(&inputs, schema).with_module_outputs(module_outputs);
     let mut out = Vec::new();
     for structure in body.iter() {
         let Some(block) = structure.as_block() else {
