@@ -110,7 +110,30 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // 4. Run diagnostics per file, grouped and sorted.
+    // 4. Mirror the indexer's post-scan bookkeeping: mark every loaded dir
+    //    scan-complete (the unknown-value rules are gated on it) and rebuild
+    //    the cross-module maps (assigned variable types, caller-passed
+    //    unknown variables) the same way `scan_dir_into_state` does.
+    let dirs: std::collections::BTreeSet<std::path::PathBuf> = state
+        .documents
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .key()
+                .to_file_path()
+                .ok()
+                .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+        })
+        .collect();
+    for d in &dirs {
+        state.mark_scan_completed(d.clone());
+    }
+    for d in &dirs {
+        tfls_lsp::indexer::rebuild_assigned_variable_types_for_dir(&state, d);
+        tfls_lsp::indexer::rebuild_unknown_module_vars_for_dir(&state, d);
+    }
+
+    // 5. Run diagnostics per file, grouped and sorted.
     let mut by_file: BTreeMap<String, Vec<lsp_types::Diagnostic>> = BTreeMap::new();
     let mut total = 0usize;
     for entry in state.documents.iter() {
