@@ -600,6 +600,7 @@ async fn bulk_workspace_scan(
     // `default`.
     for dir in dirs {
         rebuild_assigned_variable_types_for_dir(state, &dir);
+        rebuild_unknown_module_vars_for_dir(state, &dir);
         state.mark_scan_completed(dir);
     }
 
@@ -926,6 +927,7 @@ async fn scan_dir_into_state(
             scan_files_parallel(state, client, files, /* with_progress */ false).await;
             state.mark_scan_completed(dir.to_path_buf());
             rebuild_assigned_variable_types_for_dir(state, dir);
+            rebuild_unknown_module_vars_for_dir(state, dir);
             enqueue_child_module_scans(state, queue, dir);
             // Cross-file symbols just changed — any open buffer in
             // this directory (or referencing this directory via a
@@ -1597,6 +1599,106 @@ pub fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
     for (target_dir, assignments) in staged {
         state.replace_assigned_variable_types(target_dir, assignments);
     }
+}
+
+/// Recompute the caller-passed unknown-variable map contributed by module
+/// calls authored in `dir`. For each module-block argument, decide whether
+/// its membership and/or value is apply-time in the CALLER's context; stage
+/// per child dir and replace this caller's contribution wholesale (see
+/// [`StateStore::replace_unknown_module_vars_from_caller`]).
+///
+/// The caller's context unions its OWN cached caller-unknownness, so
+/// multi-hop chains (grandparent → parent → child) converge over the
+/// successive scan rebuilds that already follow directory scans — no
+/// recursion, no cycles.
+pub fn rebuild_unknown_module_vars_for_dir(state: &StateStore, dir: &Path) {
+    use std::collections::HashMap;
+    use tfls_diag::unknown_value::{
+        membership_apply_time, value_apply_time, MetaKind, UnknownCtx,
+    };
+    use tfls_state::UnknownVarBits;
+
+    fn is_meta_attr(name: &str) -> bool {
+        matches!(
+            name,
+            "source" | "version" | "providers" | "count" | "for_each" | "depends_on"
+        )
+    }
+
+    let mut caller_inputs = crate::handlers::util::module_unknown_inputs_for_dir(state, dir);
+    crate::handlers::util::fill_unknown_variables(state, dir, &mut caller_inputs);
+    let schema_lookup = crate::handlers::document::StateStoreSchemaLookup { state };
+    let output_cache = crate::handlers::util::ModuleOutputCache::default();
+    let resolver = crate::handlers::util::ModuleOutputResolver {
+        state,
+        caller_dir: dir.to_path_buf(),
+        cache: &output_cache,
+    };
+    let ctx = UnknownCtx::new(&caller_inputs, Some(&schema_lookup))
+        .with_module_outputs(Some(&resolver));
+
+    let mut staged: HashMap<PathBuf, HashMap<String, UnknownVarBits>> = HashMap::new();
+    for entry in state.documents.iter() {
+        let Ok(doc_path) = entry.key().to_file_path() else {
+            continue;
+        };
+        let Some(parent) = doc_path.parent() else {
+            continue;
+        };
+        if !crate::handlers::util::dir_paths_match(parent, dir) {
+            continue;
+        }
+        let Some(body) = entry.value().parsed.body.as_ref() else {
+            continue;
+        };
+        for structure in body.iter() {
+            let Some(block) = structure.as_block() else {
+                continue;
+            };
+            if block.ident.as_str() != "module" {
+                continue;
+            }
+            let Some(label) = block.labels.first().map(|l| match l {
+                hcl_edit::structure::BlockLabel::String(s) => s.value().to_string(),
+                hcl_edit::structure::BlockLabel::Ident(i) => i.as_str().to_string(),
+            }) else {
+                continue;
+            };
+            let Some(source) = entry.value().symbols.module_sources.get(&label).cloned() else {
+                continue;
+            };
+            let Some(child_dir) =
+                crate::handlers::util::resolve_module_source(dir, &label, &source)
+            else {
+                continue;
+            };
+            for body_struct in block.body.iter() {
+                let Some(attr) = body_struct.as_attribute() else {
+                    continue;
+                };
+                let attr_name = attr.key.as_str();
+                if is_meta_attr(attr_name) {
+                    continue;
+                }
+                let membership = membership_apply_time(&attr.value, MetaKind::ForEach, &ctx);
+                let value = value_apply_time(&attr.value, &ctx);
+                if membership || value {
+                    staged.entry(child_dir.clone()).or_default().insert(
+                        attr_name.to_string(),
+                        UnknownVarBits {
+                            membership,
+                            value,
+                            reason: format!(
+                                "caller module \"{label}\" in {} passes an apply-time value",
+                                dir.display()
+                            ),
+                        },
+                    );
+                }
+            }
+        }
+    }
+    state.replace_unknown_module_vars_from_caller(dir.to_path_buf(), staged);
 }
 
 /// After a directory's `.tf` files have been parsed into the store,

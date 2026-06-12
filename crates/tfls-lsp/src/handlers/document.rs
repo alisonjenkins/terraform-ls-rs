@@ -762,7 +762,13 @@ pub fn compute_diagnostics_with_lookup(
         // `local.*` and resource/data configs are resolved module-wide: the
         // definitions usually live in a different file than the `for_each`
         // reading them.
-        let unknown_inputs = crate::handlers::util::module_unknown_inputs(state, uri);
+        let mut unknown_inputs = crate::handlers::util::module_unknown_inputs(state, uri);
+        // Variables a CALLER passes apply-time values into (rebuilt by the
+        // indexer after directory scans) — makes the child's
+        // `for_each = var.x` flag with a caller-naming message.
+        if let Some(dir) = module_dir.as_deref() {
+            crate::handlers::util::fill_unknown_variables(state, dir, &mut unknown_inputs);
+        }
         // module.<label>.<output> references resolve into the child module's
         // directory; the per-call cache bounds the cost to the number of
         // distinct referenced modules.

@@ -159,8 +159,11 @@ impl tfls_diag::unknown_value::ModuleOutputLookup for ModuleOutputResolver<'_> {
             match cache.get(&child_dir) {
                 Some(inputs) => inputs.clone(),
                 None => {
-                    let built =
-                        std::sync::Arc::new(module_unknown_inputs_for_dir(self.state, &child_dir));
+                    let mut inputs = module_unknown_inputs_for_dir(self.state, &child_dir);
+                    // An output like `value = var.x` is apply-time when a
+                    // caller passes an apply-time value into `x`.
+                    fill_unknown_variables(self.state, &child_dir, &mut inputs);
+                    let built = std::sync::Arc::new(inputs);
                     cache.insert(child_dir.clone(), built.clone());
                     built
                 }
@@ -179,6 +182,39 @@ impl tfls_diag::unknown_value::ModuleOutputLookup for ModuleOutputResolver<'_> {
         let verdict = tfls_diag::unknown_value::output_expr_apply_time(&expr, rest, &ctx);
         self.cache.visiting.borrow_mut().remove(&child_dir);
         Some(verdict)
+    }
+}
+
+/// Union the cached caller-passed unknownness for `dir`'s variables into
+/// `inputs` (OR-join across caller sub-maps; first reason wins). Tries the
+/// raw dir and its canonicalised form — `unknown_module_vars` is keyed by
+/// the canonicalised child dir `resolve_module_source` produced.
+pub(crate) fn fill_unknown_variables(
+    state: &StateStore,
+    dir: &Path,
+    inputs: &mut tfls_diag::ModuleUnknownInputs,
+) {
+    let entry = state.unknown_module_vars.get(dir).or_else(|| {
+        dir.canonicalize()
+            .ok()
+            .and_then(|canon| state.unknown_module_vars.get(&canon))
+    });
+    let Some(entry) = entry else {
+        return;
+    };
+    for caller_map in entry.value().values() {
+        for (name, bits) in caller_map {
+            let info = inputs
+                .unknown_variables
+                .entry(name.clone())
+                .or_insert_with(|| tfls_diag::UnknownVarInfo {
+                    membership: false,
+                    value: false,
+                    reason: bits.reason.clone(),
+                });
+            info.membership |= bits.membership;
+            info.value |= bits.value;
+        }
     }
 }
 

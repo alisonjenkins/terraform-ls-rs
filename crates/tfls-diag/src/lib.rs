@@ -126,7 +126,7 @@ pub use sensitive_output::{sensitive_output_diagnostics, sensitive_variable_name
 pub use standard_module_structure::standard_module_structure_diagnostics;
 pub use syntax::diagnostics_for_parse_errors;
 pub use typed_variables::typed_variables_diagnostics;
-pub use unknown_value::{collect_module_inputs, ModuleUnknownInputs};
+pub use unknown_value::{collect_module_inputs, ModuleUnknownInputs, UnknownVarInfo};
 pub use unused_declarations::unused_declarations_diagnostics;
 pub use unused_required_providers::unused_required_providers_diagnostics;
 pub use variable_default_type::variable_default_type_diagnostics;

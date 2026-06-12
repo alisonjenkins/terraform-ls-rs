@@ -453,6 +453,12 @@ fn membership_apply_time_inner(
         Expression::Array(arr) => arr
             .iter()
             .any(|el| references_apply_time(el, ctx, binds, visited)),
+        // A literal map — only the KEYS are membership; values may be
+        // unknown.
+        Expression::Object(obj) => obj.iter().any(|(key, _val)| {
+            matches!(key, ObjectKey::Expression(k)
+                if references_apply_time(k, ctx, binds, visited))
+        }),
         // A bare `local.X` reference — resolve and re-analyse its definition.
         Expression::Traversal(_) if local_name(value).is_some() => {
             match resolve_local_def(local_name(value), ctx, visited) {

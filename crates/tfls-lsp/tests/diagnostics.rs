@@ -1593,3 +1593,166 @@ fn module_reference_cycle_stays_silent() {
     );
     assert!(hits.is_empty(), "cycle must stay silent; got: {hits:?}");
 }
+
+// --- caller→child variable unknownness ---------------------------------
+
+use tfls_lsp::indexer::rebuild_unknown_module_vars_for_dir;
+
+const CHILD_FOR_EACH_VAR: &str =
+    "variable \"subnets\" { type = set(string) }\n\
+     resource \"null_resource\" \"x\" {\n  for_each = var.subnets\n}\n";
+
+#[test]
+fn flags_child_for_each_when_caller_passes_apply_time() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let b = backend_with_tree(
+        &dir,
+        &[
+            (
+                "main.tf",
+                "module \"net\" {\n  source  = \"./modules/net\"\n  subnets = aws_subnet.all[*].id\n}\n",
+            ),
+            ("modules/net/main.tf", CHILD_FOR_EACH_VAR),
+        ],
+    );
+    rebuild_unknown_module_vars_for_dir(&b.state, &dir);
+    let hits = diags_with_code(
+        &b,
+        &file_uri(&dir.join("modules/net/main.tf")),
+        "terraform_for_each_unknown_keys",
+    );
+    assert_eq!(hits.len(), 1, "child for_each must flag; got: {hits:?}");
+    assert!(
+        hits[0].contains("caller module \"net\""),
+        "message names the caller; got: {}",
+        hits[0]
+    );
+}
+
+#[test]
+fn silent_child_for_each_when_caller_passes_static() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let b = backend_with_tree(
+        &dir,
+        &[
+            (
+                "main.tf",
+                "module \"net\" {\n  source  = \"./modules/net\"\n  subnets = var.subnet_ids\n}\n",
+            ),
+            ("modules/net/main.tf", CHILD_FOR_EACH_VAR),
+        ],
+    );
+    rebuild_unknown_module_vars_for_dir(&b.state, &dir);
+    let hits = diags_with_code(
+        &b,
+        &file_uri(&dir.join("modules/net/main.tf")),
+        "terraform_for_each_unknown_keys",
+    );
+    assert!(hits.is_empty(), "static caller arg must stay silent; got: {hits:?}");
+}
+
+#[test]
+fn caller_rebuilds_do_not_clobber_each_other() {
+    // Two caller dirs feed the same child. The static caller's rebuild
+    // must not erase the unknown caller's contribution.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let b = backend_with_tree(
+        &dir,
+        &[
+            (
+                "envs/prod/main.tf",
+                "module \"net\" {\n  source  = \"../../modules/net\"\n  subnets = aws_subnet.all[*].id\n}\n",
+            ),
+            (
+                "envs/dev/main.tf",
+                "module \"net\" {\n  source  = \"../../modules/net\"\n  subnets = var.subnet_ids\n}\n",
+            ),
+            ("modules/net/main.tf", CHILD_FOR_EACH_VAR),
+        ],
+    );
+    rebuild_unknown_module_vars_for_dir(&b.state, &dir.join("envs/prod"));
+    rebuild_unknown_module_vars_for_dir(&b.state, &dir.join("envs/dev"));
+    let hits = diags_with_code(
+        &b,
+        &file_uri(&dir.join("modules/net/main.tf")),
+        "terraform_for_each_unknown_keys",
+    );
+    assert_eq!(
+        hits.len(),
+        1,
+        "prod's apply-time arg must survive dev's rebuild; got: {hits:?}"
+    );
+
+    // Fixing the prod caller clears the flag on its next rebuild.
+    let fixed = "module \"net\" {\n  source  = \"../../modules/net\"\n  subnets = var.subnet_ids\n}\n";
+    fs::write(dir.join("envs/prod/main.tf"), fixed).unwrap();
+    insert(&b, &file_uri(&dir.join("envs/prod/main.tf")), fixed);
+    rebuild_unknown_module_vars_for_dir(&b.state, &dir.join("envs/prod"));
+    let hits = diags_with_code(
+        &b,
+        &file_uri(&dir.join("modules/net/main.tf")),
+        "terraform_for_each_unknown_keys",
+    );
+    assert!(hits.is_empty(), "fixed caller must clear the flag; got: {hits:?}");
+}
+
+#[test]
+fn known_keys_unknown_values_map_stays_silent_in_child() {
+    // Caller passes a map literal with static keys and apply-time VALUES —
+    // a valid for_each in the child.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let b = backend_with_tree(
+        &dir,
+        &[
+            (
+                "main.tf",
+                "module \"net\" {\n  source  = \"./modules/net\"\n  subnets = { a = aws_subnet.a.id, b = aws_subnet.b.id }\n}\n",
+            ),
+            (
+                "modules/net/main.tf",
+                "variable \"subnets\" { type = map(string) }\n\
+                 resource \"null_resource\" \"x\" {\n  for_each = var.subnets\n}\n",
+            ),
+        ],
+    );
+    rebuild_unknown_module_vars_for_dir(&b.state, &dir);
+    let hits = diags_with_code(
+        &b,
+        &file_uri(&dir.join("modules/net/main.tf")),
+        "terraform_for_each_unknown_keys",
+    );
+    assert!(hits.is_empty(), "static-key map is a valid for_each; got: {hits:?}");
+}
+
+#[test]
+fn flags_parent_for_each_on_output_of_caller_unknown_var() {
+    // G1×G2: parent keys on module.net.ids; the child output is var.input
+    // and the PARENT passes an apply-time value into input.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let b = backend_with_tree(
+        &dir,
+        &[
+            (
+                "main.tf",
+                "module \"net\" {\n  source = \"./modules/net\"\n  input  = aws_subnet.all[*].id\n}\n\
+                 resource \"null_resource\" \"x\" {\n  for_each = toset(module.net.ids)\n}\n",
+            ),
+            (
+                "modules/net/main.tf",
+                "variable \"input\" { type = set(string) }\noutput \"ids\" { value = var.input }\n",
+            ),
+        ],
+    );
+    rebuild_unknown_module_vars_for_dir(&b.state, &dir);
+    let hits = diags_with_code(
+        &b,
+        &file_uri(&dir.join("main.tf")),
+        "terraform_for_each_unknown_keys",
+    );
+    assert_eq!(hits.len(), 1, "output passthrough of unknown var must flag; got: {hits:?}");
+}

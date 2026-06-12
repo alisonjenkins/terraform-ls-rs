@@ -49,6 +49,20 @@ impl SymbolKey {
     }
 }
 
+/// Plan-time unknownness a caller passes into a child-module variable.
+/// Mirror of `tfls-diag`'s `UnknownVarInfo` kept here so `tfls-state`
+/// stays independent of the diagnostics crate.
+#[derive(Debug, Clone, Default)]
+pub struct UnknownVarBits {
+    /// Membership (map keys / set elements / length) of the passed value
+    /// is apply-time.
+    pub membership: bool,
+    /// The passed value itself is apply-time.
+    pub value: bool,
+    /// Human-readable origin (names the caller module + dir).
+    pub reason: String,
+}
+
 /// Lifecycle state for a workspace directory tracked by the
 /// background indexer. Used by [`StateStore::dir_scans`] to
 /// distinguish "scan enqueued but not run yet" from "scan finished;
@@ -157,6 +171,21 @@ pub struct StateStore {
     pub assigned_variable_types: FxDashMap<
         std::path::PathBuf,
         std::collections::HashMap<String, Vec<tfls_core::variable_type::VariableType>>,
+    >,
+
+    /// Plan-time unknownness callers pass into child-module variables:
+    /// `child_dir → (caller_dir → (var_name → bits))`. Rebuilt per CALLER
+    /// dir by the indexer (next to `assigned_variable_types`); keying the
+    /// inner map by caller dir lets each rebuild replace only its own
+    /// contribution when several caller dirs feed one shared child.
+    /// Consumed by the unknown-value diagnostics when computing a child
+    /// dir's documents.
+    pub unknown_module_vars: FxDashMap<
+        std::path::PathBuf,
+        std::collections::HashMap<
+            std::path::PathBuf,
+            std::collections::HashMap<String, UnknownVarBits>,
+        >,
     >,
 
     /// Per-module-dir cache of the parsed `.terraform.lock.hcl`
@@ -282,6 +311,42 @@ impl StateStore {
             None
         } else {
             Some(merged)
+        }
+    }
+
+    /// Replace `caller_dir`'s contribution to [`Self::unknown_module_vars`]:
+    /// `staged` maps each child dir this caller passes apply-time values
+    /// into → (var name → bits). Children the caller no longer references
+    /// have their `caller_dir` sub-entry removed (empty outer entries are
+    /// dropped), so a fixed call site stops flagging on the next rebuild.
+    pub fn replace_unknown_module_vars_from_caller(
+        &self,
+        caller_dir: std::path::PathBuf,
+        staged: std::collections::HashMap<
+            std::path::PathBuf,
+            std::collections::HashMap<String, UnknownVarBits>,
+        >,
+    ) {
+        // Drop this caller's stale sub-entries first.
+        let mut emptied: Vec<std::path::PathBuf> = Vec::new();
+        for mut entry in self.unknown_module_vars.iter_mut() {
+            if staged.contains_key(entry.key()) {
+                continue;
+            }
+            entry.value_mut().remove(&caller_dir);
+            if entry.value().is_empty() {
+                emptied.push(entry.key().clone());
+            }
+        }
+        for child in emptied {
+            self.unknown_module_vars
+                .remove_if(&child, |_, v| v.is_empty());
+        }
+        for (child_dir, vars) in staged {
+            self.unknown_module_vars
+                .entry(child_dir)
+                .or_default()
+                .insert(caller_dir.clone(), vars);
         }
     }
 
