@@ -763,6 +763,20 @@ pub fn compute_diagnostics_with_lookup(
         // definitions usually live in a different file than the `for_each`
         // reading them.
         let unknown_inputs = crate::handlers::util::module_unknown_inputs(state, uri);
+        // module.<label>.<output> references resolve into the child module's
+        // directory; the per-call cache bounds the cost to the number of
+        // distinct referenced modules.
+        let module_output_cache = crate::handlers::util::ModuleOutputCache::default();
+        let module_output_resolver = module_dir
+            .as_deref()
+            .map(|dir| crate::handlers::util::ModuleOutputResolver {
+                state,
+                caller_dir: dir.to_path_buf(),
+                cache: &module_output_cache,
+            });
+        let module_outputs = module_output_resolver
+            .as_ref()
+            .map(|r| r as &dyn tfls_diag::unknown_value::ModuleOutputLookup);
         out.extend(tag(
             "terraform_for_each_unknown_keys",
             tfls_diag::for_each_unknown_keys_diagnostics_with_ctx(
@@ -770,7 +784,7 @@ pub fn compute_diagnostics_with_lookup(
                 &doc.rope,
                 &unknown_inputs,
                 Some(&lookup),
-                None,
+                module_outputs,
             ),
         ));
         // import-block id / for_each requiring plan-known values (Terraform
@@ -783,7 +797,7 @@ pub fn compute_diagnostics_with_lookup(
                 &doc.rope,
                 &unknown_inputs,
                 Some(&lookup),
-                None,
+                module_outputs,
             ),
         ));
         // Non-literal lifecycle arguments (a hard `terraform validate`
@@ -1290,8 +1304,8 @@ fn is_defined_in_module(
 
 /// Adapter so `tfls-diag` can query [`StateStore`]-installed schemas
 /// via its [`tfls_diag::schema_validation::SchemaLookup`] trait.
-struct StateStoreSchemaLookup<'a> {
-    state: &'a StateStore,
+pub(crate) struct StateStoreSchemaLookup<'a> {
+    pub(crate) state: &'a StateStore,
 }
 
 impl tfls_diag::schema_validation::SchemaLookup for StateStoreSchemaLookup<'_> {

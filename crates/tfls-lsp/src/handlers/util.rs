@@ -121,6 +121,110 @@ pub(crate) fn module_unknown_inputs(
     }
 }
 
+/// Per-`compute_diagnostics`-call state for [`ModuleOutputResolver`]: child
+/// module inputs are built once per referenced directory, and `visiting`
+/// breaks module-reference cycles (path-scoped: inserted before analysing a
+/// child's output, removed after).
+#[derive(Default)]
+pub(crate) struct ModuleOutputCache {
+    inputs: std::cell::RefCell<
+        rustc_hash::FxHashMap<PathBuf, std::sync::Arc<tfls_diag::ModuleUnknownInputs>>,
+    >,
+    visiting: std::cell::RefCell<rustc_hash::FxHashSet<PathBuf>>,
+}
+
+/// LSP-side [`tfls_diag::unknown_value::ModuleOutputLookup`]: resolves
+/// `module.<label>.<output>` to the output's defining expression in the child
+/// module's directory and analyses it in the CHILD's context. Every
+/// resolution failure returns `None` (the rule stays silent).
+///
+/// Runs on the single blocking compute thread — `RefCell` interior
+/// mutability is safe here.
+pub(crate) struct ModuleOutputResolver<'a> {
+    pub(crate) state: &'a StateStore,
+    pub(crate) caller_dir: PathBuf,
+    pub(crate) cache: &'a ModuleOutputCache,
+}
+
+impl tfls_diag::unknown_value::ModuleOutputLookup for ModuleOutputResolver<'_> {
+    fn output_apply_time(&self, module_label: &str, output: &str, rest: &[&str]) -> Option<bool> {
+        let source = module_source_in_dir(self.state, &self.caller_dir, module_label)?;
+        let child_dir = resolve_module_source(&self.caller_dir, module_label, &source)?;
+        if self.cache.visiting.borrow().contains(&child_dir) {
+            return None; // module-reference cycle — stay silent
+        }
+        let expr = find_output_expr(self.state, &child_dir, output)?;
+        let child_inputs = {
+            let mut cache = self.cache.inputs.borrow_mut();
+            match cache.get(&child_dir) {
+                Some(inputs) => inputs.clone(),
+                None => {
+                    let built =
+                        std::sync::Arc::new(module_unknown_inputs_for_dir(self.state, &child_dir));
+                    cache.insert(child_dir.clone(), built.clone());
+                    built
+                }
+            }
+        };
+        self.cache.visiting.borrow_mut().insert(child_dir.clone());
+        let child_resolver = ModuleOutputResolver {
+            state: self.state,
+            caller_dir: child_dir.clone(),
+            cache: self.cache,
+        };
+        let schema_lookup =
+            crate::handlers::document::StateStoreSchemaLookup { state: self.state };
+        let ctx = tfls_diag::unknown_value::UnknownCtx::new(&child_inputs, Some(&schema_lookup))
+            .with_module_outputs(Some(&child_resolver));
+        let verdict = tfls_diag::unknown_value::output_expr_apply_time(&expr, rest, &ctx);
+        self.cache.visiting.borrow_mut().remove(&child_dir);
+        Some(verdict)
+    }
+}
+
+/// Find `output "<name>" { value = … }` in any `.tf` doc under `child_dir`,
+/// returning a clone of the value expression.
+fn find_output_expr(
+    state: &StateStore,
+    child_dir: &Path,
+    output: &str,
+) -> Option<hcl_edit::expr::Expression> {
+    for entry in state.documents.iter() {
+        let Ok(doc_path) = entry.key().to_file_path() else {
+            continue;
+        };
+        let Some(parent) = doc_path.parent() else {
+            continue;
+        };
+        if !dir_paths_match(parent, child_dir) {
+            continue;
+        }
+        let Some(body) = entry.value().parsed.body.as_ref() else {
+            continue;
+        };
+        for structure in body.iter() {
+            let Some(block) = structure.as_block() else {
+                continue;
+            };
+            if block.ident.as_str() != "output" {
+                continue;
+            }
+            let labels: Vec<&str> = block.labels.iter().map(|l| l.as_str()).collect();
+            if labels.as_slice() != [output] {
+                continue;
+            }
+            for entry in block.body.iter() {
+                if let Some(attr) = entry.as_attribute() {
+                    if attr.key.as_str() == "value" {
+                        return Some(attr.value.clone());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Directory-addressed form of [`module_unknown_inputs`] — used directly when
 /// resolving a *different* module's inputs (e.g. a `module.<name>.<output>`
 /// reference into a child module's directory).

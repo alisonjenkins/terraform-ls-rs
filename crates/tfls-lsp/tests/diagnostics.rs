@@ -1439,3 +1439,157 @@ resource "aws_s3_bucket" "b" {
     let hits = diags_with_code(&b, &main_uri, "terraform_lifecycle_literal");
     assert!(hits.is_empty(), "rule off but still flagged: {hits:?}");
 }
+
+// --- module.<name>.<output> resolution --------------------------------
+//
+// Real tempdirs: resolve_module_source checks the filesystem for local
+// sources, so fake file:/// paths can't exercise these.
+
+fn file_uri(path: &std::path::Path) -> Url {
+    Url::from_file_path(path).expect("file uri")
+}
+
+/// Write files, insert them all into the store, return the backend.
+fn backend_with_tree(dir: &std::path::Path, files: &[(&str, &str)]) -> Backend {
+    let b = backend();
+    write_files(dir, files);
+    for (name, body) in files {
+        insert(&b, &file_uri(&dir.join(name)), body);
+    }
+    b
+}
+
+#[test]
+fn flags_for_each_on_apply_time_child_module_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let b = backend_with_tree(
+        &dir,
+        &[
+            (
+                "main.tf",
+                "module \"net\" { source = \"./modules/net\" }\n\
+                 resource \"null_resource\" \"x\" {\n  for_each = toset(module.net.subnet_ids)\n}\n",
+            ),
+            (
+                "modules/net/outputs.tf",
+                "output \"subnet_ids\" { value = aws_subnet.all[*].id }\n",
+            ),
+        ],
+    );
+    let hits = diags_with_code(
+        &b,
+        &file_uri(&dir.join("main.tf")),
+        "terraform_for_each_unknown_keys",
+    );
+    assert_eq!(hits.len(), 1, "computed child output must flag; got: {hits:?}");
+}
+
+#[test]
+fn silent_for_plan_known_child_module_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let b = backend_with_tree(
+        &dir,
+        &[
+            (
+                "main.tf",
+                "module \"net\" { source = \"./modules/net\" }\n\
+                 resource \"null_resource\" \"x\" {\n  for_each = toset(module.net.cidrs)\n}\n",
+            ),
+            (
+                "modules/net/outputs.tf",
+                "variable \"cidrs\" { type = list(string) }\n\
+                 output \"cidrs\" { value = var.cidrs }\n",
+            ),
+        ],
+    );
+    let hits = diags_with_code(
+        &b,
+        &file_uri(&dir.join("main.tf")),
+        "terraform_for_each_unknown_keys",
+    );
+    assert!(hits.is_empty(), "var-derived child output is plan-known; got: {hits:?}");
+}
+
+#[test]
+fn silent_for_unresolvable_module_source() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let b = backend_with_tree(
+        &dir,
+        &[(
+            "main.tf",
+            "module \"net\" { source = \"./modules/missing\" }\n\
+             resource \"null_resource\" \"x\" {\n  for_each = toset(module.net.subnet_ids)\n}\n",
+        )],
+    );
+    let hits = diags_with_code(
+        &b,
+        &file_uri(&dir.join("main.tf")),
+        "terraform_for_each_unknown_keys",
+    );
+    assert!(hits.is_empty(), "unresolvable source must stay silent; got: {hits:?}");
+}
+
+#[test]
+fn flags_through_grandchild_module_chain() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let b = backend_with_tree(
+        &dir,
+        &[
+            (
+                "main.tf",
+                "module \"outer\" { source = \"./modules/outer\" }\n\
+                 resource \"null_resource\" \"x\" {\n  for_each = toset(module.outer.ids)\n}\n",
+            ),
+            (
+                "modules/outer/main.tf",
+                "module \"inner\" { source = \"./inner\" }\n\
+                 output \"ids\" { value = module.inner.ids }\n",
+            ),
+            (
+                "modules/outer/inner/main.tf",
+                "output \"ids\" { value = aws_subnet.all[*].id }\n",
+            ),
+        ],
+    );
+    let hits = diags_with_code(
+        &b,
+        &file_uri(&dir.join("main.tf")),
+        "terraform_for_each_unknown_keys",
+    );
+    assert_eq!(hits.len(), 1, "grandchild computed output must flag; got: {hits:?}");
+}
+
+#[test]
+fn module_reference_cycle_stays_silent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let b = backend_with_tree(
+        &dir,
+        &[
+            (
+                "main.tf",
+                "module \"a\" { source = \"./modules/a\" }\n\
+                 resource \"null_resource\" \"x\" {\n  for_each = toset(module.a.v)\n}\n",
+            ),
+            (
+                "modules/a/main.tf",
+                "module \"b\" { source = \"../b\" }\noutput \"v\" { value = module.b.v }\n",
+            ),
+            (
+                "modules/b/main.tf",
+                "module \"a\" { source = \"../a\" }\noutput \"v\" { value = module.a.v }\n",
+            ),
+        ],
+    );
+    // Must terminate and stay silent (cycle is its own config error).
+    let hits = diags_with_code(
+        &b,
+        &file_uri(&dir.join("main.tf")),
+        "terraform_for_each_unknown_keys",
+    );
+    assert!(hits.is_empty(), "cycle must stay silent; got: {hits:?}");
+}

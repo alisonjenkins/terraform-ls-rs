@@ -351,6 +351,25 @@ pub fn value_apply_time(value: &Expression, ctx: &UnknownCtx) -> bool {
     references_apply_time(value, ctx, &binds, &visited)
 }
 
+/// Verdict for a module output's defining expression with a trailing GetAttr
+/// path (`module.m.out.field` → `rest = ["field"]`): walk object literals
+/// field-sensitively, fall back to the whole-value verdict otherwise. Used by
+/// [`ModuleOutputLookup`] implementations; `ctx` must be the CHILD module's
+/// context.
+pub fn output_expr_apply_time(expr: &Expression, rest: &[&str], ctx: &UnknownCtx) -> bool {
+    match rest.split_first() {
+        None => value_apply_time(expr, ctx),
+        Some((field, remaining)) => match expr {
+            Expression::Object(obj) => match object_get(obj, field) {
+                Some(field_expr) => output_expr_apply_time(field_expr, remaining, ctx),
+                // Absent field — contributes nothing.
+                None => false,
+            },
+            _ => value_apply_time(expr, ctx),
+        },
+    }
+}
+
 fn membership_apply_time_inner(
     value: &Expression,
     kind: MetaKind,
