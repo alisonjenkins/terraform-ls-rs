@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.10.0](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.9.0...v0.10.0) (2026-06-12)
+
+
+### Features
+
+* **config:** user-extensible planKnownComputedCollections allowlist ([6afc2b6](https://github.com/alisonjenkins/terraform-ls-rs/commit/6afc2b6ae0d2cf7a886fdbc158f0caff355df48a))
+* **diag:** add terraform_import_unknown_id rule ([10561b6](https://github.com/alisonjenkins/terraform-ls-rs/commit/10561b6ed5d39dfa63ebe88970eb9562e92d0880))
+* **diag:** add terraform_lifecycle_literal rule ([2c271b1](https://github.com/alisonjenkins/terraform-ls-rs/commit/2c271b1b114e20719eabcbab45157030cf07e290))
+* **diag:** model caller-passed variable unknownness (UnknownVarInfo) ([cee3c77](https://github.com/alisonjenkins/terraform-ls-rs/commit/cee3c77ad1d612fc4cb1477223ee749ab3cb22e0))
+* **diag:** ModuleOutputLookup resolves module output apply-timeness ([196136d](https://github.com/alisonjenkins/terraform-ls-rs/commit/196136d401128d782b22bb38e9a6b9401623dbd4))
+* **diag:** schema-aware refinement for unknown-value analysis ([db0f3ad](https://github.com/alisonjenkins/terraform-ls-rs/commit/db0f3add58d437d113d128cabaafc36a4c331820))
+* **diag:** validate replace_triggered_by in terraform_lifecycle_literal ([89319d5](https://github.com/alisonjenkins/terraform-ls-rs/commit/89319d5a43e6c4f98582fcd0cc946ca2fcc7800d))
+* **lsp:** propagate caller-passed unknownness into child modules ([a5f70e3](https://github.com/alisonjenkins/terraform-ls-rs/commit/a5f70e331b1f67280a1c922c8a5b61a32eca0591))
+* **lsp:** wire module-output resolution into unknown-value rules ([b598730](https://github.com/alisonjenkins/terraform-ls-rs/commit/b5987307e6c8e3ed06597e6ac70dc7fe8dc1ed23))
+
+
+### Bug Fixes
+
+* **cli:** mirror indexer post-scan bookkeeping in tfls-diag-dump ([33abcff](https://github.com/alisonjenkins/terraform-ls-rs/commit/33abcffab1498c21b0f152c41d6d9076ddc6fdd1))
+* **diag:** resolve config-set resource attributes before flagging ([67d3361](https://github.com/alisonjenkins/terraform-ls-rs/commit/67d336165812cfc63db6bb20dec0f4d59d026d4d))
+* **diag:** resolve data sources transitively instead of blanket-flagging ([bc8e504](https://github.com/alisonjenkins/terraform-ls-rs/commit/bc8e504134bf51b06edcd78c6a3212e58d913532))
+* **diag:** stop flagging plan-known computed collections (ACM pattern) ([e4bfc4f](https://github.com/alisonjenkins/terraform-ls-rs/commit/e4bfc4fad419d41e211b0eb5c245a02991a3d087))
+* **lsp:** gate unknown-value rules on module-dir scan completion ([e5c1101](https://github.com/alisonjenkins/terraform-ls-rs/commit/e5c11018f1a92ec3157f8be4a55aff1594d9a7db))
+
 ## [0.9.0](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.8.0...v0.9.0) (2026-06-10)
 
 
