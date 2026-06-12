@@ -12,9 +12,14 @@
 //! - `ignore_changes`: the keyword `all`, or a list of static attribute
 //!   references (`tags`, `tags["Name"]`, `metadata[0].annotations`). No
 //!   variables, no quoted strings, no expressions.
+//! - `replace_triggered_by`: a list of managed-resource instance references
+//!   only ("Only managed resource instances can be used in
+//!   replace_triggered_by"). Index operators may be literals or the
+//!   enclosing resource's own `count.index` / `each.key` / `each.value`.
+//!   `terraform_data.x.output` is the documented escape hatch for arbitrary
+//!   values.
 //!
-//! `replace_triggered_by` and `precondition` / `postcondition` accept
-//! expressions / references and are not checked here.
+//! `precondition` / `postcondition` accept expressions and are not checked.
 
 use hcl_edit::expr::{Expression, TraversalOperator};
 use hcl_edit::structure::Body;
@@ -46,6 +51,19 @@ pub fn lifecycle_literal_diagnostics(body: &Body, rope: &Rope) -> Vec<Diagnostic
         if block.ident.as_str() != "resource" {
             continue;
         }
+        // `[count.index]` / `[each.key]` indexes in replace_triggered_by are
+        // only legal when the enclosing resource has that meta-argument.
+        let mut has_count = false;
+        let mut has_for_each = false;
+        for entry in block.body.iter() {
+            if let Some(attr) = entry.as_attribute() {
+                match attr.key.as_str() {
+                    "count" => has_count = true,
+                    "for_each" => has_for_each = true,
+                    _ => {}
+                }
+            }
+        }
         for entry in block.body.iter() {
             let Some(lifecycle) = entry.as_block() else {
                 continue;
@@ -53,13 +71,19 @@ pub fn lifecycle_literal_diagnostics(body: &Body, rope: &Rope) -> Vec<Diagnostic
             if lifecycle.ident.as_str() != "lifecycle" {
                 continue;
             }
-            check_lifecycle(&lifecycle.body, rope, &mut out);
+            check_lifecycle(&lifecycle.body, rope, has_count, has_for_each, &mut out);
         }
     }
     out
 }
 
-fn check_lifecycle(body: &Body, rope: &Rope, out: &mut Vec<Diagnostic>) {
+fn check_lifecycle(
+    body: &Body,
+    rope: &Rope,
+    has_count: bool,
+    has_for_each: bool,
+    out: &mut Vec<Diagnostic>,
+) {
     for entry in body.iter() {
         let Some(attr) = entry.as_attribute() else {
             continue;
@@ -86,6 +110,17 @@ fn check_lifecycle(body: &Body, rope: &Rope, out: &mut Vec<Diagnostic>) {
                  expressions here."
                     .to_string()
             }
+            "replace_triggered_by" => {
+                if replace_triggered_by_is_legal(&attr.value, has_count, has_for_each) {
+                    continue;
+                }
+                "`replace_triggered_by` only accepts managed resource instance references \
+                 (e.g. `aws_instance.web` or `aws_instance.web.id`) — \"Only managed \
+                 resource instances can be used in replace_triggered_by\". To trigger on \
+                 an arbitrary value, route it through a `terraform_data` resource \
+                 (`input = …`) and reference `terraform_data.x.output`."
+                    .to_string()
+            }
             _ => continue,
         };
         out.push(Diagnostic {
@@ -95,6 +130,68 @@ fn check_lifecycle(body: &Body, rope: &Rope, out: &mut Vec<Diagnostic>) {
             message,
             ..Default::default()
         });
+    }
+}
+
+fn replace_triggered_by_is_legal(value: &Expression, has_count: bool, has_for_each: bool) -> bool {
+    let Expression::Array(arr) = value else {
+        return false;
+    };
+    arr.iter()
+        .all(|el| is_managed_resource_ref(el, has_count, has_for_each))
+}
+
+/// A managed-resource instance reference: `<type>.<name>`, optionally with
+/// deeper `.attr` segments, and index operators that are literals or the
+/// enclosing resource's own `count.index` / `each.key` / `each.value`.
+fn is_managed_resource_ref(expr: &Expression, has_count: bool, has_for_each: bool) -> bool {
+    let Expression::Traversal(t) = expr else {
+        return false;
+    };
+    let Expression::Variable(head) = &t.expr else {
+        return false;
+    };
+    if RESERVED_ROOTS.contains(&head.as_str()) {
+        return false;
+    }
+    let mut get_attrs = 0usize;
+    for op in t.operators.iter() {
+        match op.value() {
+            TraversalOperator::GetAttr(_) => get_attrs += 1,
+            TraversalOperator::Index(idx) => {
+                if !replace_index_is_legal(idx, has_count, has_for_each) {
+                    return false;
+                }
+            }
+            _ => return false, // splat etc.
+        }
+    }
+    // Need at least `<type>.<name>`.
+    get_attrs >= 1
+}
+
+fn replace_index_is_legal(idx: &Expression, has_count: bool, has_for_each: bool) -> bool {
+    match idx {
+        Expression::String(_) | Expression::Number(_) => true,
+        Expression::Traversal(t) => {
+            let Expression::Variable(head) = &t.expr else {
+                return false;
+            };
+            let attrs: Vec<&str> = t
+                .operators
+                .iter()
+                .filter_map(|op| match op.value() {
+                    TraversalOperator::GetAttr(i) => Some(i.as_str()),
+                    _ => None,
+                })
+                .collect();
+            match (head.as_str(), attrs.as_slice()) {
+                ("count", ["index"]) => has_count,
+                ("each", ["key" | "value"]) => has_for_each,
+                _ => false,
+            }
+        }
+        _ => false,
     }
 }
 
@@ -246,10 +343,93 @@ data "aws_ami" "a" {
     }
 
     #[test]
-    fn ignores_replace_triggered_by_and_conditions() {
+    fn silent_for_legal_replace_triggered_by() {
         let src = resource_with_lifecycle(
-            "    replace_triggered_by = [aws_instance.web.id]\n    prevent_destroy = true",
+            "    replace_triggered_by = [aws_instance.web, aws_instance.web.id, \
+             aws_instance.web[0].id, terraform_data.rev.output]\n    prevent_destroy = true",
         );
         assert!(!flagged(&src), "got: {:?}", diags(&src));
+    }
+
+    #[test]
+    fn silent_for_count_index_with_count() {
+        let src = r#"
+resource "aws_s3_bucket" "b" {
+  count = 2
+  lifecycle {
+    replace_triggered_by = [aws_instance.web[count.index]]
+  }
+}
+"#;
+        assert!(!flagged(src), "got: {:?}", diags(src));
+    }
+
+    #[test]
+    fn silent_for_each_key_with_for_each() {
+        let src = r#"
+resource "aws_s3_bucket" "b" {
+  for_each = var.buckets
+  lifecycle {
+    replace_triggered_by = [aws_instance.web[each.key].id]
+  }
+}
+"#;
+        assert!(!flagged(src), "got: {:?}", diags(src));
+    }
+
+    #[test]
+    fn flags_count_index_without_count() {
+        let src = resource_with_lifecycle(
+            "    replace_triggered_by = [aws_instance.web[count.index]]",
+        );
+        assert!(flagged(&src));
+    }
+
+    #[test]
+    fn flags_each_key_without_for_each() {
+        let src =
+            resource_with_lifecycle("    replace_triggered_by = [aws_instance.web[each.key]]");
+        assert!(flagged(&src));
+    }
+
+    #[test]
+    fn flags_var_in_replace_triggered_by() {
+        let src = resource_with_lifecycle("    replace_triggered_by = [var.revision]");
+        let d = diags(&src);
+        assert_eq!(d.len(), 1, "got: {d:?}");
+        assert!(d[0].message.contains("terraform_data"));
+    }
+
+    #[test]
+    fn flags_local_and_data_in_replace_triggered_by() {
+        for entry in ["local.rev", "data.aws_ami.a.id"] {
+            let src = resource_with_lifecycle(&format!(
+                "    replace_triggered_by = [{entry}]"
+            ));
+            assert!(flagged(&src), "{entry} should be illegal");
+        }
+    }
+
+    #[test]
+    fn flags_function_and_literal_entries() {
+        for entry in ["timestamp()", "\"web\"", "aws_instance.web[*].id"] {
+            let src = resource_with_lifecycle(&format!(
+                "    replace_triggered_by = [{entry}]"
+            ));
+            assert!(flagged(&src), "{entry} should be illegal");
+        }
+    }
+
+    #[test]
+    fn flags_non_array_replace_triggered_by() {
+        let src = resource_with_lifecycle("    replace_triggered_by = var.list");
+        assert!(flagged(&src));
+    }
+
+    #[test]
+    fn flags_bare_type_only_reference() {
+        // A bare identifier is not a `<type>.<name>` instance reference.
+        let src = resource_with_lifecycle("    replace_triggered_by = [aws_instance]");
+        assert!(flagged(&src));
     }
 }
