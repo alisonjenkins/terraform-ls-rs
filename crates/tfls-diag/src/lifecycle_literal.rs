@@ -219,10 +219,9 @@ fn is_static_attribute_path(expr: &Expression) -> bool {
             }
             t.operators.iter().all(|op| match op.value() {
                 TraversalOperator::GetAttr(_) => true,
-                TraversalOperator::Index(idx) => matches!(
-                    idx,
-                    Expression::String(_) | Expression::Number(_)
-                ),
+                TraversalOperator::Index(idx) => {
+                    matches!(idx, Expression::String(_) | Expression::Number(_))
+                }
                 _ => false,
             })
         }
@@ -379,9 +378,8 @@ resource "aws_s3_bucket" "b" {
 
     #[test]
     fn flags_count_index_without_count() {
-        let src = resource_with_lifecycle(
-            "    replace_triggered_by = [aws_instance.web[count.index]]",
-        );
+        let src =
+            resource_with_lifecycle("    replace_triggered_by = [aws_instance.web[count.index]]");
         assert!(flagged(&src));
     }
 
@@ -403,9 +401,7 @@ resource "aws_s3_bucket" "b" {
     #[test]
     fn flags_local_and_data_in_replace_triggered_by() {
         for entry in ["local.rev", "data.aws_ami.a.id"] {
-            let src = resource_with_lifecycle(&format!(
-                "    replace_triggered_by = [{entry}]"
-            ));
+            let src = resource_with_lifecycle(&format!("    replace_triggered_by = [{entry}]"));
             assert!(flagged(&src), "{entry} should be illegal");
         }
     }
@@ -413,9 +409,7 @@ resource "aws_s3_bucket" "b" {
     #[test]
     fn flags_function_and_literal_entries() {
         for entry in ["timestamp()", "\"web\"", "aws_instance.web[*].id"] {
-            let src = resource_with_lifecycle(&format!(
-                "    replace_triggered_by = [{entry}]"
-            ));
+            let src = resource_with_lifecycle(&format!("    replace_triggered_by = [{entry}]"));
             assert!(flagged(&src), "{entry} should be illegal");
         }
     }

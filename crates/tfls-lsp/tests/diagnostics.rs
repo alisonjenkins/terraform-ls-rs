@@ -1265,7 +1265,10 @@ resource "null_resource" "x" {
         })
         .map(|d| d.message)
         .collect();
-    assert!(before.is_empty(), "rule must be gated pre-scan; got: {before:?}");
+    assert!(
+        before.is_empty(),
+        "rule must be gated pre-scan; got: {before:?}"
+    );
 
     b.state
         .mark_scan_completed(std::path::PathBuf::from("/gated"));
@@ -1531,7 +1534,11 @@ fn flags_for_each_on_apply_time_child_module_output() {
         &file_uri(&dir.join("main.tf")),
         "terraform_for_each_unknown_keys",
     );
-    assert_eq!(hits.len(), 1, "computed child output must flag; got: {hits:?}");
+    assert_eq!(
+        hits.len(),
+        1,
+        "computed child output must flag; got: {hits:?}"
+    );
 }
 
 #[test]
@@ -1558,7 +1565,10 @@ fn silent_for_plan_known_child_module_output() {
         &file_uri(&dir.join("main.tf")),
         "terraform_for_each_unknown_keys",
     );
-    assert!(hits.is_empty(), "var-derived child output is plan-known; got: {hits:?}");
+    assert!(
+        hits.is_empty(),
+        "var-derived child output is plan-known; got: {hits:?}"
+    );
 }
 
 #[test]
@@ -1578,7 +1588,10 @@ fn silent_for_unresolvable_module_source() {
         &file_uri(&dir.join("main.tf")),
         "terraform_for_each_unknown_keys",
     );
-    assert!(hits.is_empty(), "unresolvable source must stay silent; got: {hits:?}");
+    assert!(
+        hits.is_empty(),
+        "unresolvable source must stay silent; got: {hits:?}"
+    );
 }
 
 #[test]
@@ -1609,7 +1622,11 @@ fn flags_through_grandchild_module_chain() {
         &file_uri(&dir.join("main.tf")),
         "terraform_for_each_unknown_keys",
     );
-    assert_eq!(hits.len(), 1, "grandchild computed output must flag; got: {hits:?}");
+    assert_eq!(
+        hits.len(),
+        1,
+        "grandchild computed output must flag; got: {hits:?}"
+    );
 }
 
 #[test]
@@ -1647,8 +1664,7 @@ fn module_reference_cycle_stays_silent() {
 
 use tfls_lsp::indexer::rebuild_unknown_module_vars_for_dir;
 
-const CHILD_FOR_EACH_VAR: &str =
-    "variable \"subnets\" { type = set(string) }\n\
+const CHILD_FOR_EACH_VAR: &str = "variable \"subnets\" { type = set(string) }\n\
      resource \"null_resource\" \"x\" {\n  for_each = var.subnets\n}\n";
 
 #[test]
@@ -1699,7 +1715,10 @@ fn silent_child_for_each_when_caller_passes_static() {
         &file_uri(&dir.join("modules/net/main.tf")),
         "terraform_for_each_unknown_keys",
     );
-    assert!(hits.is_empty(), "static caller arg must stay silent; got: {hits:?}");
+    assert!(
+        hits.is_empty(),
+        "static caller arg must stay silent; got: {hits:?}"
+    );
 }
 
 #[test]
@@ -1736,7 +1755,8 @@ fn caller_rebuilds_do_not_clobber_each_other() {
     );
 
     // Fixing the prod caller clears the flag on its next rebuild.
-    let fixed = "module \"net\" {\n  source  = \"../../modules/net\"\n  subnets = var.subnet_ids\n}\n";
+    let fixed =
+        "module \"net\" {\n  source  = \"../../modules/net\"\n  subnets = var.subnet_ids\n}\n";
     fs::write(dir.join("envs/prod/main.tf"), fixed).unwrap();
     insert(&b, &file_uri(&dir.join("envs/prod/main.tf")), fixed);
     rebuild_unknown_module_vars_for_dir(&b.state, &dir.join("envs/prod"));
@@ -1745,7 +1765,10 @@ fn caller_rebuilds_do_not_clobber_each_other() {
         &file_uri(&dir.join("modules/net/main.tf")),
         "terraform_for_each_unknown_keys",
     );
-    assert!(hits.is_empty(), "fixed caller must clear the flag; got: {hits:?}");
+    assert!(
+        hits.is_empty(),
+        "fixed caller must clear the flag; got: {hits:?}"
+    );
 }
 
 #[test]
@@ -1774,7 +1797,10 @@ fn known_keys_unknown_values_map_stays_silent_in_child() {
         &file_uri(&dir.join("modules/net/main.tf")),
         "terraform_for_each_unknown_keys",
     );
-    assert!(hits.is_empty(), "static-key map is a valid for_each; got: {hits:?}");
+    assert!(
+        hits.is_empty(),
+        "static-key map is a valid for_each; got: {hits:?}"
+    );
 }
 
 #[test]
@@ -1803,7 +1829,11 @@ fn flags_parent_for_each_on_output_of_caller_unknown_var() {
         &file_uri(&dir.join("main.tf")),
         "terraform_for_each_unknown_keys",
     );
-    assert_eq!(hits.len(), 1, "output passthrough of unknown var must flag; got: {hits:?}");
+    assert_eq!(
+        hits.len(),
+        1,
+        "output passthrough of unknown var must flag; got: {hits:?}"
+    );
 }
 
 #[test]
@@ -1835,10 +1865,9 @@ resource "null_resource" "x" {
     assert!(hits.is_empty(), "allowlisted collection flagged: {hits:?}");
 
     // Emptying the map restores the default.
-    let cfg: sonic_rs::Value = sonic_rs::from_str(
-        r#"{ "terraform-ls-rs": { "planKnownComputedCollections": {} } }"#,
-    )
-    .expect("config parses");
+    let cfg: sonic_rs::Value =
+        sonic_rs::from_str(r#"{ "terraform-ls-rs": { "planKnownComputedCollections": {} } }"#)
+            .expect("config parses");
     b.state.config.update_from_json(&cfg);
     let hits = diags_with_code(&b, &main_uri, "terraform_for_each_unknown_keys");
     assert_eq!(hits.len(), 1, "default must restore: {hits:?}");

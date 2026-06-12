@@ -540,7 +540,10 @@ resource "null_resource" "x" {
 "#;
         assert!(flagged(src), "without schema: conservative default");
         let d = diags_with_schema(src);
-        assert!(d.is_empty(), "with schema: non-computed is plan-known; got: {d:?}");
+        assert!(
+            d.is_empty(),
+            "with schema: non-computed is plan-known; got: {d:?}"
+        );
     }
 
     #[test]
@@ -754,7 +757,10 @@ resource "aws_route53_record" "validation" {
         // keyed fields (domain_name) are config-derived. Values stay unknown
         // — which is fine; only the keys must be plan-known.
         let d = diags(ACM_CANONICAL);
-        assert!(d.is_empty(), "canonical ACM pattern is plan-valid; got: {d:?}");
+        assert!(
+            d.is_empty(),
+            "canonical ACM pattern is plan-valid; got: {d:?}"
+        );
     }
 
     #[test]
@@ -830,7 +836,12 @@ resource "aws_route53_record" "validation" {
         assert!(!flagged(src), "got: {:?}", diags(src));
     }
 
-    fn diags_with_unknown_var(src: &str, name: &str, membership: bool, value: bool) -> Vec<Diagnostic> {
+    fn diags_with_unknown_var(
+        src: &str,
+        name: &str,
+        membership: bool,
+        value: bool,
+    ) -> Vec<Diagnostic> {
         use crate::unknown_value::UnknownVarInfo;
         let rope = Rope::from_str(src);
         let body = parse_source(src).body.expect("parses");
@@ -840,8 +851,7 @@ resource "aws_route53_record" "validation" {
             UnknownVarInfo {
                 membership,
                 value,
-                reason: "caller module \"net\" in /project passes an apply-time value"
-                    .to_string(),
+                reason: "caller module \"net\" in /project passes an apply-time value".to_string(),
             },
         );
         for_each_unknown_keys_diagnostics_with_ctx(&body, &rope, &inputs, None, None)

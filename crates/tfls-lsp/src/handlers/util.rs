@@ -175,8 +175,7 @@ impl tfls_diag::unknown_value::ModuleOutputLookup for ModuleOutputResolver<'_> {
             caller_dir: child_dir.clone(),
             cache: self.cache,
         };
-        let schema_lookup =
-            crate::handlers::document::StateStoreSchemaLookup { state: self.state };
+        let schema_lookup = crate::handlers::document::StateStoreSchemaLookup { state: self.state };
         let ctx = tfls_diag::unknown_value::UnknownCtx::new(&child_inputs, Some(&schema_lookup))
             .with_module_outputs(Some(&child_resolver));
         let verdict = tfls_diag::unknown_value::output_expr_apply_time(&expr, rest, &ctx);

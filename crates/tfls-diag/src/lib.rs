@@ -96,8 +96,8 @@ pub use duplicate_definition::duplicate_definition_diagnostics;
 pub use empty_list_equality::empty_list_equality_diagnostics;
 pub use error::DiagError;
 pub use for_each_unknown_keys::{
-    for_each_unknown_keys_diagnostics, for_each_unknown_keys_diagnostics_with_locals,
-    for_each_unknown_keys_diagnostics_with_ctx,
+    for_each_unknown_keys_diagnostics, for_each_unknown_keys_diagnostics_with_ctx,
+    for_each_unknown_keys_diagnostics_with_locals,
 };
 pub use git_source::{
     extract_ref, has_trailing_comment, is_git_source, ref_value_span, trailing_comment_tag,

@@ -1613,9 +1613,7 @@ pub fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
 /// recursion, no cycles.
 pub fn rebuild_unknown_module_vars_for_dir(state: &StateStore, dir: &Path) {
     use std::collections::HashMap;
-    use tfls_diag::unknown_value::{
-        membership_apply_time, value_apply_time, MetaKind, UnknownCtx,
-    };
+    use tfls_diag::unknown_value::{membership_apply_time, value_apply_time, MetaKind, UnknownCtx};
     use tfls_state::UnknownVarBits;
 
     fn is_meta_attr(name: &str) -> bool {
@@ -1634,8 +1632,8 @@ pub fn rebuild_unknown_module_vars_for_dir(state: &StateStore, dir: &Path) {
         caller_dir: dir.to_path_buf(),
         cache: &output_cache,
     };
-    let ctx = UnknownCtx::new(&caller_inputs, Some(&schema_lookup))
-        .with_module_outputs(Some(&resolver));
+    let ctx =
+        UnknownCtx::new(&caller_inputs, Some(&schema_lookup)).with_module_outputs(Some(&resolver));
 
     let mut staged: HashMap<PathBuf, HashMap<String, UnknownVarBits>> = HashMap::new();
     for entry in state.documents.iter() {

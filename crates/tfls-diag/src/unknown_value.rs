@@ -824,10 +824,7 @@ fn data_reference_apply_time(
     if visited.contains(&key) {
         return false; // cycle — assume plan-known
     }
-    let Some(config) = ctx
-        .data_configs
-        .get(&(dtype.to_string(), name.to_string()))
-    else {
+    let Some(config) = ctx.data_configs.get(&(dtype.to_string(), name.to_string())) else {
         return false; // unresolvable block — stay silent
     };
     if config.has_depends_on {

@@ -70,9 +70,7 @@ pub fn import_unknown_id_diagnostics_with_ctx(
             };
             if let Some(message) = hit {
                 let mut message = message.to_string();
-                if let Some(reason) =
-                    crate::unknown_value::unknown_var_reason(&attr.value, &ctx)
-                {
+                if let Some(reason) = crate::unknown_value::unknown_var_reason(&attr.value, &ctx) {
                     message = format!("{message} ({reason}.)");
                 }
                 out.push(Diagnostic {

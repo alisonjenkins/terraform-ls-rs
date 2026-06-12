@@ -781,13 +781,14 @@ pub fn compute_diagnostics_with_lookup(
         // directory; the per-call cache bounds the cost to the number of
         // distinct referenced modules.
         let module_output_cache = crate::handlers::util::ModuleOutputCache::default();
-        let module_output_resolver = module_dir
-            .as_deref()
-            .map(|dir| crate::handlers::util::ModuleOutputResolver {
-                state,
-                caller_dir: dir.to_path_buf(),
-                cache: &module_output_cache,
-            });
+        let module_output_resolver =
+            module_dir
+                .as_deref()
+                .map(|dir| crate::handlers::util::ModuleOutputResolver {
+                    state,
+                    caller_dir: dir.to_path_buf(),
+                    cache: &module_output_cache,
+                });
         let module_outputs = module_output_resolver
             .as_ref()
             .map(|r| r as &dyn tfls_diag::unknown_value::ModuleOutputLookup);
