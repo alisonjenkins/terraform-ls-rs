@@ -115,16 +115,29 @@ pub(crate) fn module_unknown_inputs(
     state: &StateStore,
     primary_uri: &Url,
 ) -> tfls_diag::ModuleUnknownInputs {
+    match parent_dir(primary_uri) {
+        Some(target_dir) => module_unknown_inputs_for_dir(state, &target_dir),
+        None => tfls_diag::ModuleUnknownInputs::default(),
+    }
+}
+
+/// Directory-addressed form of [`module_unknown_inputs`] — used directly when
+/// resolving a *different* module's inputs (e.g. a `module.<name>.<output>`
+/// reference into a child module's directory).
+pub(crate) fn module_unknown_inputs_for_dir(
+    state: &StateStore,
+    target_dir: &Path,
+) -> tfls_diag::ModuleUnknownInputs {
     let mut out = tfls_diag::ModuleUnknownInputs::default();
-    let Some(target_dir) = parent_dir(primary_uri) else {
-        return out;
-    };
     for entry in state.documents.iter() {
         let uri = entry.key();
         let Ok(path) = uri.to_file_path() else {
             continue;
         };
-        if path.parent() != Some(&target_dir) {
+        let Some(parent) = path.parent() else {
+            continue;
+        };
+        if !dir_paths_match(parent, target_dir) {
             continue;
         }
         if let Some(body) = entry.value().parsed.body.as_ref() {
