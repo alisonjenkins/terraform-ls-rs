@@ -553,6 +553,26 @@ pub fn compute_diagnostics_with_lookup(
         diagnostics_for_parse_errors(&doc.parsed.errors),
     );
 
+    // Desync diagnostic aid: when the live parse failed, dump the server's
+    // view of the buffer (version, byte length, full text). A "stuck syntax
+    // error" report is almost always the server's rope having drifted from
+    // the editor's buffer — out-of-order incremental edits (see
+    // `DocumentState::apply_versioned_changes`) or a dropped edit. Compare
+    // this dump against the editor's on-screen text to confirm: if they
+    // differ, it's a desync; if they match, the syntax error is real.
+    // Gated to TRACE so it's free in normal operation; enable with
+    // `RUST_LOG=tfls_lsp::handlers::document=trace`.
+    if !doc.parsed.errors.is_empty() && tracing::enabled!(tracing::Level::TRACE) {
+        let text = doc.rope.to_string();
+        tracing::trace!(
+            uri = %uri,
+            version = doc.version,
+            bytes = text.len(),
+            errors = ?doc.parsed.errors,
+            "syntax-error rope dump (compare against editor buffer to spot desync):\n{text}"
+        );
+    }
+
     // Unformatted-file check against the active style. Body-independent
     // (reuses the cached format scan); a no-op when already formatted or
     // when the formatter can't parse the file.
