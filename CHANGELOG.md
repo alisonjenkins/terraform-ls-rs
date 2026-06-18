@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.4](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.11.3...v0.11.4) (2026-06-18)
+
+
+### Bug Fixes
+
+* **deps:** bump tf-format to v0.4.9 ([13ae01e](https://github.com/alisonjenkins/terraform-ls-rs/commit/13ae01ea1d74297373b0a80a9d8e9fd18e59f89d))
+
 ## [0.11.3](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.11.2...v0.11.3) (2026-06-18)
 
 
