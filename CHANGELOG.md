@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.2](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.11.1...v0.11.2) (2026-06-18)
+
+
+### Bug Fixes
+
+* **parser:** count refs used as computed object keys ([843754f](https://github.com/alisonjenkins/terraform-ls-rs/commit/843754fbd74ecd3ae3b13d2be46f1027fd83185a))
+
 ## [0.11.1](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.11.0...v0.11.1) (2026-06-18)
 
 
