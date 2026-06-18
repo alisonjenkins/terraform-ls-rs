@@ -2,7 +2,7 @@
 //! `aws_instance.web.id`) from expressions in an hcl-edit AST, with
 //! their LSP ranges for navigation.
 
-use hcl_edit::expr::{Expression, Traversal, TraversalOperator};
+use hcl_edit::expr::{Expression, ObjectKey, Traversal, TraversalOperator};
 use hcl_edit::repr::Span;
 use hcl_edit::structure::{Block, Body};
 use hcl_edit::template::{Directive, Element, Template};
@@ -77,7 +77,14 @@ fn visit_expression(expr: &Expression, uri: &Url, rope: &Rope, out: &mut Vec<Ref
             }
         }
         Expression::Object(object) => {
-            for (_k, v) in object.iter() {
+            for (k, v) in object.iter() {
+                // Computed object keys carry expressions too:
+                // `{ (local.k) = v }`, `{ "${var.env}" = v }`. A ref
+                // used ONLY as a key would otherwise vanish from the
+                // index and be falsely flagged "declared but not used".
+                if let ObjectKey::Expression(key_expr) = k {
+                    visit_expression(key_expr, uri, rope, out);
+                }
                 visit_expression(v.expr(), uri, rope, out);
             }
         }
@@ -331,6 +338,36 @@ mod tests {
                 ReferenceKind::Variable { name } if name == "payload"
             )),
             "expected var.payload from if-body: {refs:?}"
+        );
+    }
+
+    #[test]
+    fn finds_reference_inside_parenthesised_object_key() {
+        // `{ (local.k) = v }` — a computed object key. The old
+        // visit_expression Object arm only descended into VALUES,
+        // so a local/var/data ref used solely as an object key was
+        // never counted — falsely flagging it "declared but not
+        // used".
+        let refs = refs(r#"resource "azurerm_x" "y" { tags = { (local.tag_key) = "v" } }"#);
+        assert!(
+            refs.iter().any(|r| matches!(
+                &r.kind,
+                ReferenceKind::Local { name } if name == "tag_key"
+            )),
+            "expected local.tag_key from object key; got {refs:?}"
+        );
+    }
+
+    #[test]
+    fn finds_reference_inside_interpolated_object_key() {
+        // `{ "${local.k}" = v }` — an interpolated string key.
+        let refs = refs(r#"output "x" { value = { "${local.target_subnet_name}" = 1 } }"#);
+        assert!(
+            refs.iter().any(|r| matches!(
+                &r.kind,
+                ReferenceKind::Local { name } if name == "target_subnet_name"
+            )),
+            "expected local.target_subnet_name from interpolated key; got {refs:?}"
         );
     }
 

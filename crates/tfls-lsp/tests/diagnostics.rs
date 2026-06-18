@@ -261,6 +261,42 @@ fn unused_data_source_cleared_when_reference_in_peer_file() {
 }
 
 #[test]
+fn local_used_only_as_object_key_is_not_flagged_unused() {
+    // Regression: a `local` referenced solely as a computed object
+    // key — `{ (local.x) = v }` or `{ "${local.x}" = v }` — was
+    // falsely flagged "declared but not used". The AST reference
+    // extractor descended into object VALUES but not KEYS.
+    let b = backend();
+    let locals_file = uri("file:///stack/locals.tf");
+    let main_file = uri("file:///stack/main.tf");
+
+    // A `provider` block makes the dir an applyable root so the
+    // unused rule is in scope.
+    insert(
+        &b,
+        &locals_file,
+        "provider \"azurerm\" { features {} }\nlocals {\n  target_subnet_name = \"sub\"\n  tag_key = \"env\"\n}\n",
+    );
+    insert(
+        &b,
+        &main_file,
+        "resource \"azurerm_x\" \"y\" {\n  tags = {\n    (local.tag_key) = \"v\"\n    \"${local.target_subnet_name}\" = \"v2\"\n  }\n}\n",
+    );
+
+    let msgs = messages(&b, &locals_file);
+    assert!(
+        msgs.iter()
+            .all(|m| !(m.contains("declared but not used") && m.contains("tag_key"))),
+        "local used as parenthesised object key flagged unused: {msgs:?}"
+    );
+    assert!(
+        msgs.iter()
+            .all(|m| !(m.contains("declared but not used") && m.contains("target_subnet_name"))),
+        "local used in interpolated object key flagged unused: {msgs:?}"
+    );
+}
+
+#[test]
 fn malformed_version_diagnostic_clears_after_simulated_edit() {
     // Regression for the reported "LSP is stuck on a stale
     // `malformed version `c`` warning after I corrected the
