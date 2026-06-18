@@ -59,6 +59,96 @@ resource "aws_instance" "web" {
     assert_eq!(folds[0].start_line, 0);
 }
 
+async fn folds_for(src: &str) -> Vec<lsp_types::FoldingRange> {
+    let backend = backend_with(src);
+    tfls_lsp::handlers::folding::folding_range(
+        &backend,
+        FoldingRangeParams {
+            text_document: TextDocumentIdentifier {
+                uri: tfls_core::uri::url_to_uri(&uri()),
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        },
+    )
+    .await
+    .expect("ok")
+    .unwrap_or_default()
+}
+
+fn has_fold_starting_at(folds: &[lsp_types::FoldingRange], line: u32) -> bool {
+    folds
+        .iter()
+        .any(|f| f.start_line == line && f.end_line > f.start_line)
+}
+
+#[tokio::test]
+async fn folding_folds_object_in_locals() {
+    // locals block (line 0), object value starts line 1.
+    let folds = folds_for("locals {\n  tags = {\n    a = 1\n    b = 2\n  }\n}\n").await;
+    assert!(has_fold_starting_at(&folds, 0), "locals block fold missing");
+    assert!(
+        has_fold_starting_at(&folds, 1),
+        "object value fold missing: {folds:?}"
+    );
+}
+
+#[tokio::test]
+async fn folding_folds_list_in_locals() {
+    let folds = folds_for("locals {\n  names = [\n    \"a\",\n    \"b\",\n  ]\n}\n").await;
+    assert!(
+        has_fold_starting_at(&folds, 1),
+        "list value fold missing: {folds:?}"
+    );
+}
+
+#[tokio::test]
+async fn folding_folds_nested_object_in_list() {
+    // list starts line 1, inner object starts line 2.
+    let src = "locals {\n  items = [\n    {\n      k = 1\n    },\n  ]\n}\n";
+    let folds = folds_for(src).await;
+    assert!(
+        has_fold_starting_at(&folds, 1),
+        "outer list fold missing: {folds:?}"
+    );
+    assert!(
+        has_fold_starting_at(&folds, 2),
+        "inner object fold missing: {folds:?}"
+    );
+}
+
+#[tokio::test]
+async fn folding_folds_heredoc() {
+    let src = "resource \"x\" \"y\" {\n  user_data = <<-EOT\n    line1\n    line2\n  EOT\n}\n";
+    let folds = folds_for(src).await;
+    assert!(
+        has_fold_starting_at(&folds, 1),
+        "heredoc fold missing: {folds:?}"
+    );
+}
+
+#[tokio::test]
+async fn folding_folds_funccall_args() {
+    let src = "locals {\n  merged = merge(\n    var.a,\n    var.b,\n  )\n}\n";
+    let folds = folds_for(src).await;
+    assert!(
+        has_fold_starting_at(&folds, 1),
+        "func-call args fold missing: {folds:?}"
+    );
+}
+
+#[tokio::test]
+async fn folding_skips_single_line_object() {
+    // Object value entirely on one line — no expression fold; only the
+    // multi-line locals block itself folds.
+    let folds = folds_for("locals {\n  tags = { a = 1, b = 2 }\n}\n").await;
+    assert!(has_fold_starting_at(&folds, 0), "locals block fold missing");
+    assert!(
+        !has_fold_starting_at(&folds, 1),
+        "single-line object should not fold: {folds:?}"
+    );
+}
+
 #[tokio::test]
 async fn folding_skips_single_line_blocks() {
     let backend = backend_with("variable \"x\" {}\nvariable \"y\" {}\n");

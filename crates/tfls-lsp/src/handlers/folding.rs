@@ -4,6 +4,7 @@
 //! `textDocument/selectionRange` — given cursor positions, walk the
 //! AST outward and return the chain of enclosing ranges.
 
+use hcl_edit::expr::Expression;
 use hcl_edit::repr::Span;
 use hcl_edit::structure::{Block, Body};
 use lsp_types::{
@@ -11,6 +12,7 @@ use lsp_types::{
     SelectionRangeParams,
 };
 use ropey::Rope;
+use tfls_diag::expr_walk::for_each_expression_in;
 use tfls_parser::hcl_span_to_lsp_range;
 use tower_lsp_server::jsonrpc;
 
@@ -41,27 +43,59 @@ pub async fn folding_range(
 
 fn collect_block_folds(body: &Body, rope: &Rope, out: &mut Vec<FoldingRange>) {
     for structure in body.iter() {
-        let Some(block) = structure.as_block() else {
-            continue;
-        };
-        if let Some(range) = block
-            .span()
-            .and_then(|s| hcl_span_to_lsp_range(rope, s).ok())
-        {
-            // Only fold multi-line blocks; a single-line block has
-            // nothing to hide.
-            if range.end.line > range.start.line {
-                out.push(FoldingRange {
-                    start_line: range.start.line,
-                    start_character: Some(range.start.character),
-                    end_line: range.end.line,
-                    end_character: Some(range.end.character),
-                    kind: Some(FoldingRangeKind::Region),
-                    collapsed_text: None,
-                });
-            }
+        if let Some(block) = structure.as_block() {
+            push_multiline_fold(block.span(), rope, out);
+            collect_block_folds(&block.body, rope, out);
+        } else if let Some(attr) = structure.as_attribute() {
+            // Attribute values can hold multi-line containers (objects,
+            // lists, heredocs, func-call args, …) that deserve their own
+            // folds — including those inside a `locals` block, whose
+            // entries are attributes rather than blocks.
+            collect_expr_folds(&attr.value, rope, out);
         }
-        collect_block_folds(&block.body, rope, out);
+    }
+}
+
+/// Emit a fold for every multi-line container expression nested inside
+/// `expr`. Scalar leaves (numbers, strings, idents, traversals, operators)
+/// are skipped — only forms that visually enclose multiple lines fold.
+fn collect_expr_folds(expr: &Expression, rope: &Rope, out: &mut Vec<FoldingRange>) {
+    for_each_expression_in(expr, |e| {
+        let is_container = matches!(
+            e,
+            Expression::Array(_)
+                | Expression::Object(_)
+                | Expression::HeredocTemplate(_)
+                | Expression::StringTemplate(_)
+                | Expression::Parenthesis(_)
+                | Expression::FuncCall(_)
+                | Expression::Conditional(_)
+                | Expression::ForExpr(_)
+        );
+        if is_container {
+            push_multiline_fold(e.span(), rope, out);
+        }
+    });
+}
+
+/// Push a `Region` fold for `span` when it covers more than one line.
+fn push_multiline_fold(
+    span: Option<std::ops::Range<usize>>,
+    rope: &Rope,
+    out: &mut Vec<FoldingRange>,
+) {
+    if let Some(range) = span.and_then(|s| hcl_span_to_lsp_range(rope, s).ok()) {
+        // Only fold multi-line spans; a single-line span has nothing to hide.
+        if range.end.line > range.start.line {
+            out.push(FoldingRange {
+                start_line: range.start.line,
+                start_character: Some(range.start.character),
+                end_line: range.end.line,
+                end_character: Some(range.end.character),
+                kind: Some(FoldingRangeKind::Region),
+                collapsed_text: None,
+            });
+        }
     }
 }
 
