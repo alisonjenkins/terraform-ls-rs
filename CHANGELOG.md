@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.1](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.11.0...v0.11.1) (2026-06-18)
+
+
+### Bug Fixes
+
+* **lsp:** fold nested objects, lists, and multi-line expressions ([8c0dc01](https://github.com/alisonjenkins/terraform-ls-rs/commit/8c0dc010b8e9cb2fbfa1f3bd2e42c75ec96d0cb9))
+
 ## [0.11.0](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.10.0...v0.11.0) (2026-06-12)
 
 
