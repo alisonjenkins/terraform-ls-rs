@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.11.5](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.11.4...v0.11.5) (2026-06-18)
+
+
+### Bug Fixes
+
+* **diag:** accept dynamic blocks over block-like attributes ([c19fad5](https://github.com/alisonjenkins/terraform-ls-rs/commit/c19fad53a05b68d27815ac94cf6df84310bb9a5b))
+* **lsp:** dedupe overlapping folds and never fold trailing blanks ([e6249fa](https://github.com/alisonjenkins/terraform-ls-rs/commit/e6249fa68ca4cb28b65df75cc7dc32775e78a263))
+
 ## [0.11.4](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.11.3...v0.11.4) (2026-06-18)
 
 
