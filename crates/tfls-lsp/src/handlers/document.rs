@@ -243,7 +243,15 @@ pub async fn did_change(backend: &Backend, params: DidChangeTextDocumentParams) 
         .get(&uri)
         .map(|d| cross_file_fingerprint(&d));
 
-    let apply_err = {
+    // Apply through the version-ordered path: tower-lsp-server pumps
+    // did_change futures through `buffer_unordered`, so this handler's
+    // synchronous apply segment can run out of `version` order relative to
+    // sibling did_change handlers for the same buffer. Incremental edits
+    // carry ranges relative to the prior version's text, so applying them
+    // out of order corrupts the rope (or drops an edit referencing a
+    // not-yet-created line) — desyncing the server from the editor until a
+    // did_open restart. `apply_versioned_changes` buffers and reorders.
+    let applied = {
         let mut entry = match backend.state.documents.get_mut(&uri) {
             Some(e) => e,
             None => {
@@ -251,24 +259,25 @@ pub async fn did_change(backend: &Backend, params: DidChangeTextDocumentParams) 
                 return;
             }
         };
-        entry.version = version;
-        let mut err = None;
-        for change in params.content_changes {
-            if let Err(e) = entry.apply_change(change) {
-                err = Some(e);
-                break;
-            }
-        }
-        err
+        entry.apply_versioned_changes(version, params.content_changes)
     };
-
-    if let Some(e) = apply_err {
-        backend
-            .client
-            .log_message(MessageType::ERROR, format!("edit apply failed: {e}"))
-            .await;
-        return;
-    }
+    let applied = match applied {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            // Buffered behind an out-of-order gap, or a stale replay — the
+            // rope is unchanged, and the sibling handler that fills the gap
+            // will reparse + publish the up-to-date result.
+            tracing::debug!(uri = %uri, version, "did_change: buffered/stale, rope unchanged");
+            return;
+        }
+        Err(e) => {
+            backend
+                .client
+                .log_message(MessageType::ERROR, format!("edit apply failed: {e}"))
+                .await;
+            return;
+        }
+    };
 
     // Reparse + diagnostic compute are both CPU-heavy; hand
     // them to a blocking thread so the tokio runtime stays
@@ -290,13 +299,13 @@ pub async fn did_change(backend: &Backend, params: DidChangeTextDocumentParams) 
         .state
         .documents
         .get(&uri)
-        .is_some_and(|d| d.version != version);
+        .is_some_and(|d| d.version != applied);
     if superseded {
-        tracing::debug!(uri = %uri, version, "did_change: superseded by a newer edit, skipping");
+        tracing::debug!(uri = %uri, applied, "did_change: superseded by a newer edit, skipping");
         return;
     }
 
-    publish_current_diagnostics(backend, &uri, Some(version)).await;
+    publish_current_diagnostics(backend, &uri, Some(applied)).await;
     // Re-run the version-cache prefetch in case this edit
     // introduced a new constraint target (typed `required_version`
     // for the first time, added a new provider, swapped a module
@@ -306,7 +315,7 @@ pub async fn did_change(backend: &Backend, params: DidChangeTextDocumentParams) 
     // file see completion / inlay-hints / no-match diagnostics
     // immediately after the first relevant keystroke instead of
     // waiting for the next did_save.
-    crate::handlers::version_prefetch::spawn(backend, uri.clone(), Some(version));
+    crate::handlers::version_prefetch::spawn(backend, uri.clone(), Some(applied));
     // Changes to THIS file can invalidate diagnostics in OTHER
     // open buffers in the same module. Push fresh diagnostics
     // directly to each such open peer; this is the reliable
