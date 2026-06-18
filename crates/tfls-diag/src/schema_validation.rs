@@ -724,25 +724,47 @@ fn validate_dynamic_block(
     };
     let label_owned = label.to_string();
 
-    // 1. Resolve the target nested block type in the parent schema.
-    //    Unknown → error on the label span; bail, since we can't
-    //    validate required attrs against a schema we don't have.
-    let Some(nb) = parent_schema.block_types.get(&label_owned) else {
-        if let Some(first) = block.labels.first() {
-            if let Some(span) = first.span() {
-                let range = hcl_span_to_lsp_range(rope, span).unwrap_or_default();
-                out.push(Diagnostic {
-                    range,
-                    severity: Some(DiagnosticSeverity::ERROR),
-                    source: Some("terraform-ls-rs".to_string()),
-                    message: format!("unknown nested block `{label_owned}` on this resource/data"),
-                    ..Default::default()
-                });
+    // 1. Resolve the target the dynamic block generates instances of.
+    //    Two valid schema representations:
+    //      a. a real nested block (`block_types`) — gives us a BlockSchema
+    //         to check `content {}` required attrs against; or
+    //      b. an attribute whose cty type is object / collection-of-object
+    //         (plugin-framework or SDKv2 `ConfigMode=Attr`, e.g.
+    //         azurerm_site_recovery_replicated_vm.managed_disk =
+    //         set(object(...))). Terraform also lets authors write these
+    //         with block / `dynamic` syntax, but we have no per-field
+    //         BlockSchema to descend into.
+    //    Neither → genuinely unknown; error on the label span and bail.
+    let target: Option<&BlockSchema> = match parent_schema.block_types.get(&label_owned) {
+        Some(nb) => Some(&nb.block),
+        None => {
+            if parent_schema
+                .attributes
+                .get(&label_owned)
+                .is_some_and(|a| a.is_block_like())
+            {
+                // Known block-like attribute — valid dynamic target, but no
+                // nested BlockSchema. Validate only `for_each` below.
+                None
+            } else {
+                if let Some(first) = block.labels.first() {
+                    if let Some(span) = first.span() {
+                        let range = hcl_span_to_lsp_range(rope, span).unwrap_or_default();
+                        out.push(Diagnostic {
+                            range,
+                            severity: Some(DiagnosticSeverity::ERROR),
+                            source: Some("terraform-ls-rs".to_string()),
+                            message: format!(
+                                "unknown nested block `{label_owned}` on this resource/data"
+                            ),
+                            ..Default::default()
+                        });
+                    }
+                }
+                return;
             }
         }
-        return;
     };
-    let target = &nb.block;
 
     // 2. Scan the dynamic body: record for_each presence and find
     //    the content { } child (if any).
@@ -777,7 +799,12 @@ fn validate_dynamic_block(
     //    `content { }`. No content block? The language requires it
     //    but that's a parser-level concern — we still report missing
     //    required attrs with the dynamic header as the anchor so the
-    //    user sees which attrs are outstanding.
+    //    user sees which attrs are outstanding. Skipped for block-like
+    //    attributes (target = None): the cty object type carries no
+    //    per-field required/optional flags, so there's nothing to check.
+    let Some(target) = target else {
+        return;
+    };
     let content_ident_range = match &content_block {
         Some(c) => c
             .ident
@@ -1875,6 +1902,93 @@ mod tests {
             })
             .expect("unknown-label diagnostic");
         assert_eq!(hit.severity, Some(DiagnosticSeverity::ERROR));
+    }
+
+    // A provider that migrated to the plugin framework (or used SDKv2
+    // ConfigMode=Attr) exposes what authors write as nested blocks as
+    // ATTRIBUTES whose cty type is a collection-of-object — e.g.
+    // azurerm_site_recovery_replicated_vm.managed_disk is set(object(...)).
+    // Terraform accepts block / `dynamic` syntax for these, so a dynamic
+    // over such an attribute must NOT be flagged "unknown nested block".
+    fn schemas_with_block_like_attr() -> ProviderSchemas {
+        sonic_rs::from_str(
+            r#"{
+                "format_version": "1.0",
+                "provider_schemas": {
+                    "registry.terraform.io/hashicorp/azurerm": {
+                        "provider": { "version": 0, "block": {} },
+                        "resource_schemas": {
+                            "azurerm_thing": {
+                                "version": 1,
+                                "block": {
+                                    "attributes": {
+                                        "managed_disk": {
+                                            "type": ["set", ["object", { "disk_id": "string" }]],
+                                            "optional": true
+                                        },
+                                        "name": { "type": "string", "optional": true }
+                                    },
+                                    "block_types": {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("parse")
+    }
+
+    #[test]
+    fn dynamic_over_block_like_attribute_is_not_flagged_unknown() {
+        let schemas = schemas_with_block_like_attr();
+        let src = r#"resource "azurerm_thing" "x" {
+              dynamic "managed_disk" {
+                for_each = var.disks
+                content {
+                  disk_id = each.value.id
+                }
+              }
+            }"#;
+        let d = diags_with(&schemas, src);
+        assert!(
+            d.iter().all(|diag| !diag.message.contains("unknown nested block")),
+            "dynamic over a set(object) attribute must not be flagged unknown: {d:?}"
+        );
+    }
+
+    #[test]
+    fn dynamic_over_block_like_attribute_still_requires_for_each() {
+        let schemas = schemas_with_block_like_attr();
+        let src = r#"resource "azurerm_thing" "x" {
+              dynamic "managed_disk" {
+                content { disk_id = "d" }
+              }
+            }"#;
+        let d = diags_with(&schemas, src);
+        assert!(
+            d.iter().any(|diag| diag.message.contains("missing required `for_each`")),
+            "for_each is mandatory for any dynamic block: {d:?}"
+        );
+    }
+
+    #[test]
+    fn dynamic_over_scalar_attribute_is_still_flagged_unknown() {
+        // `name` is a plain string attribute — block/dynamic syntax is
+        // invalid, so this must keep flagging "unknown nested block".
+        let schemas = schemas_with_block_like_attr();
+        let src = r#"resource "azurerm_thing" "x" {
+              dynamic "name" {
+                for_each = []
+                content {}
+              }
+            }"#;
+        let d = diags_with(&schemas, src);
+        assert!(
+            d.iter().any(|diag| diag.message.contains("unknown nested block")
+                && diag.message.contains("name")),
+            "dynamic over a scalar attribute should still be unknown: {d:?}"
+        );
     }
 
     #[test]

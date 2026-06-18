@@ -149,6 +149,33 @@ impl AttributeSchema {
             _ => None,
         }
     }
+
+    /// Whether this attribute's cty type is shaped like a nested block —
+    /// an `object(...)` or a `set`/`list`/`map` of `object(...)`.
+    ///
+    /// Providers that moved to the plugin framework (or used SDKv2
+    /// `ConfigMode=Attr`) expose what authors write as nested blocks as
+    /// attributes of this shape — e.g.
+    /// `azurerm_site_recovery_replicated_vm.managed_disk` is
+    /// `set(object(...))`. Terraform accepts both attribute-assignment and
+    /// block / `dynamic` syntax for them, so schema validation must treat
+    /// such an attribute as a valid block / `dynamic` target rather than an
+    /// "unknown nested block".
+    pub fn is_block_like(&self) -> bool {
+        use sonic_rs::JsonValueTrait;
+        let Some(t) = self.r#type.as_ref() else {
+            return false;
+        };
+        match t.get(0).and_then(|v| v.as_str()) {
+            Some("object") => true,
+            // Collection: element type lives at index 1, itself a cty type
+            // array like `["object", {...}]`.
+            Some("set" | "list" | "map") => {
+                t.get(1).and_then(|e| e.get(0)).and_then(|v| v.as_str()) == Some("object")
+            }
+            _ => false,
+        }
+    }
 }
 
 impl ProviderSchemas {
