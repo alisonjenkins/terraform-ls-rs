@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.3](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.11.2...v0.11.3) (2026-06-18)
+
+
+### Bug Fixes
+
+* **lsp:** apply did_change edits in version order ([d840080](https://github.com/alisonjenkins/terraform-ls-rs/commit/d840080a5572978e79961de54d7dcd670ea7bc12))
+
 ## [0.11.2](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.11.1...v0.11.2) (2026-06-18)
 
 
