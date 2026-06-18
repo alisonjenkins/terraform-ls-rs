@@ -34,6 +34,15 @@ pub async fn folding_range(
 
     let mut out = Vec::new();
     collect_block_folds(body, &doc.rope, &mut out);
+
+    // Collapse folds that cover the same line range. `type = object({…})`
+    // parses as a FuncCall wrapping an Object; both span identical lines, so
+    // the walker emits two identical folds. Duplicate/overlapping ranges
+    // confuse clients' nested-fold engines (nvim's foldexpr counts a level
+    // per covering range), so keep one fold per `(start_line, end_line)`.
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|f| seen.insert((f.start_line, f.end_line)));
+
     if out.is_empty() {
         Ok(None)
     } else {
@@ -85,18 +94,43 @@ fn push_multiline_fold(
     out: &mut Vec<FoldingRange>,
 ) {
     if let Some(range) = span.and_then(|s| hcl_span_to_lsp_range(rope, s).ok()) {
+        // Defensively pull the fold end back off any trailing
+        // whitespace-only lines the span happens to cover (trailing decor,
+        // CRLF, blank lines before the next structure). A fold must never
+        // hide the blank separator after a block, or folded blocks render
+        // flush with no visible gap between them.
+        let end_line = last_content_line(rope, range.start.line, range.end.line);
+
         // Only fold multi-line spans; a single-line span has nothing to hide.
-        if range.end.line > range.start.line {
+        if end_line > range.start.line {
             out.push(FoldingRange {
                 start_line: range.start.line,
                 start_character: Some(range.start.character),
-                end_line: range.end.line,
-                end_character: Some(range.end.character),
+                end_line,
+                end_character: None,
                 kind: Some(FoldingRangeKind::Region),
                 collapsed_text: None,
             });
         }
     }
+}
+
+/// Walk `end_line` back toward `start_line` past any whitespace-only lines,
+/// returning the last line that carries real content. Clamps at
+/// `start_line`.
+fn last_content_line(rope: &Rope, start_line: u32, end_line: u32) -> u32 {
+    let total = rope.len_lines() as u32;
+    let mut e = end_line.min(total.saturating_sub(1));
+    while e > start_line {
+        let has_content = rope
+            .get_line(e as usize)
+            .is_some_and(|l| l.chars().any(|c| !c.is_whitespace()));
+        if has_content {
+            break;
+        }
+        e -= 1;
+    }
+    e
 }
 
 pub async fn selection_range(

@@ -138,7 +138,41 @@ async fn folding_folds_funccall_args() {
 }
 
 #[tokio::test]
+async fn folding_does_not_swallow_blank_line_between_blocks() {
+    // Two blocks separated by ONE blank line (line 3). The first fold must
+    // end on the closing-brace line (2), never extend into the blank
+    // separator — otherwise folded blocks render flush with no gap.
+    let src = "variable \"a\" {\n  type = string\n}\n\nvariable \"b\" {\n  type = string\n}\n";
+    let folds = folds_for(src).await;
+    let first = folds
+        .iter()
+        .find(|f| f.start_line == 0)
+        .expect("first block fold");
+    assert_eq!(first.end_line, 2, "fold swallowed the blank line: {folds:?}");
+}
+
+#[tokio::test]
+async fn folding_does_not_emit_duplicate_overlapping_folds() {
+    // `type = object({...})` parses as a FuncCall wrapping an Object; both
+    // span the same lines. Emitting two identical folds confuses clients'
+    // nested-fold engines — collapse them to one per line range.
+    let src = "variable \"ad\" {\n  type = object({\n    u = string\n    p = string\n  })\n}\n";
+    let folds = folds_for(src).await;
+    let mut seen = std::collections::HashSet::new();
+    for f in &folds {
+        assert!(
+            seen.insert((f.start_line, f.end_line)),
+            "duplicate fold for lines {}..{}: {folds:?}",
+            f.start_line,
+            f.end_line
+        );
+    }
+}
+
+#[tokio::test]
 async fn folding_skips_single_line_object() {
+    // Object value entirely on one line — no expression fold; only the
+    // multi-line locals block itself folds.
     // Object value entirely on one line — no expression fold; only the
     // multi-line locals block itself folds.
     let folds = folds_for("locals {\n  tags = { a = 1, b = 2 }\n}\n").await;
