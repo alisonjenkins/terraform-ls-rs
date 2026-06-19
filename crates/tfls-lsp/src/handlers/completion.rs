@@ -1524,12 +1524,45 @@ fn resource_body_items(
     // actually governs the cursor's surrounding block. An unknown
     // nested name (user typo, provider mismatch) yields no suggestions
     // rather than leaking the outer resource's attributes.
+    //
+    // A step may also name a "block-like" attribute — a cty
+    // object / collection-of-object that a provider exposes as an
+    // attribute but Terraform lets authors write with block / `dynamic`
+    // syntax (e.g. azurerm managed_disk = set(object(...))). Once we step
+    // into one, completion comes from the cty object's fields, not a
+    // `BlockSchema`.
     let mut block_schema = &schema.block;
+    let mut object_node: Option<&sonic_rs::Value> = None;
     for step in nested_path {
+        if let Some(node) = object_node {
+            // Already inside a cty object: the next step must be a field
+            // whose own type is object / collection-of-object.
+            match field_type_in_object(node, step).and_then(block_like_object_node) {
+                Some(inner) => object_node = Some(inner),
+                None => return Vec::new(),
+            }
+            continue;
+        }
         match block_schema.block_types.get(step) {
             Some(nb) => block_schema = &nb.block,
-            None => return Vec::new(),
+            None => {
+                match block_schema
+                    .attributes
+                    .get(step)
+                    .filter(|a| a.is_block_like())
+                    .and_then(|a| a.r#type.as_ref())
+                    .and_then(block_like_object_node)
+                {
+                    Some(node) => object_node = Some(node),
+                    None => return Vec::new(),
+                }
+            }
         }
+    }
+
+    // Landed inside a block-like attribute: offer its object fields.
+    if let Some(node) = object_node {
+        return object_field_items(node, filter);
     }
 
     let mut items: Vec<CompletionItem> = block_schema
@@ -1643,6 +1676,68 @@ fn resource_body_items(
             item.sort_text = Some(format!("3_{}", item.label));
         }
     }
+    items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
+    items
+}
+
+/// Peel collection wrappers off a cty type and return its underlying
+/// `["object", {fields}, [optional]?]` node, or `None` if the type isn't
+/// an object / collection-of-object.
+fn block_like_object_node(t: &sonic_rs::Value) -> Option<&sonic_rs::Value> {
+    use sonic_rs::JsonValueTrait;
+    match t.get(0).and_then(|v| v.as_str())? {
+        "object" => Some(t),
+        "set" | "list" | "map" => block_like_object_node(t.get(1)?),
+        _ => None,
+    }
+}
+
+/// The cty type of field `name` inside an object node
+/// (`["object", {fields}, …]`).
+fn field_type_in_object<'a>(node: &'a sonic_rs::Value, name: &str) -> Option<&'a sonic_rs::Value> {
+    use sonic_rs::JsonValueTrait;
+    node.get(1).and_then(|m| m.get(name))
+}
+
+/// Completion items for the fields of a cty object node. Fields not listed
+/// in the object's optional set (3rd element) are required and sort first.
+fn object_field_items(node: &sonic_rs::Value, filter: &BodyFilter) -> Vec<CompletionItem> {
+    use sonic_rs::{JsonContainerTrait, JsonValueTrait};
+    let Some(map) = node.get(1).and_then(|m| m.as_object()) else {
+        return Vec::new();
+    };
+    let optionals: HashSet<&str> = node
+        .get(2)
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    let mut items: Vec<CompletionItem> = map
+        .iter()
+        .filter(|(name, _)| !filter.present_attrs.contains(*name))
+        .map(|(name, _ty)| {
+            let required = !optionals.contains(name);
+            CompletionItem {
+                label: name.to_string(),
+                kind: Some(if required {
+                    CompletionItemKind::FIELD
+                } else {
+                    CompletionItemKind::PROPERTY
+                }),
+                sort_text: Some(format!("{}_{name}", u8::from(!required))),
+                detail: Some(
+                    if required {
+                        "attribute (required)"
+                    } else {
+                        "attribute"
+                    }
+                    .to_string(),
+                ),
+                insert_text: Some(format!("{name} = ")),
+                insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+                ..Default::default()
+            }
+        })
+        .collect();
     items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
     items
 }

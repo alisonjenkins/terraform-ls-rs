@@ -3252,3 +3252,79 @@ async fn provider_function_name_lists_only_that_providers_functions() {
         "leaked kubernetes func into aws list: {ls:?}"
     );
 }
+
+// ── Exploratory: dynamic blocks over plugin-framework "block-like"
+// attributes (cty set/list/object), e.g. azurerm
+// site_recovery_replicated_vm.managed_disk. These are written with block /
+// dynamic syntax but live in `attributes`, not `block_types`.
+
+fn install_blocklike_schema(backend: &Backend) {
+    // `managed_disk` = set(object({disk_id, staging_storage_account_id})),
+    // an OPTIONAL block-like attribute. `ebs_block_device` is a real
+    // block_type control. `required_md` is a REQUIRED block-like attribute.
+    let schema: ProviderSchemas = sonic_rs::from_str(
+        r#"{
+        "format_version": "1.0",
+        "provider_schemas": {
+            "registry.terraform.io/hashicorp/azurerm": {
+                "provider": { "version": 0, "block": {} },
+                "resource_schemas": {
+                    "azurerm_thing": {
+                        "version": 1,
+                        "block": {
+                            "attributes": {
+                                "name": { "type": "string", "required": true },
+                                "managed_disk": {
+                                    "type": ["set", ["object", { "disk_id": "string", "staging_storage_account_id": "string" }]],
+                                    "optional": true
+                                }
+                            },
+                            "block_types": {
+                                "real_block": {
+                                    "nesting_mode": "list",
+                                    "block": { "attributes": { "rb_attr": { "type": "string", "required": true } } }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }"#,
+    )
+    .expect("parse schema");
+    backend.state.install_schemas(schema);
+}
+
+#[tokio::test]
+async fn completion_inside_dynamic_over_block_like_attr() {
+    let u = uri("file:///bl.tf");
+    let src = "resource \"azurerm_thing\" \"x\" {\n  dynamic \"managed_disk\" {\n    for_each = var.d\n    content {\n      \n    }\n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    install_blocklike_schema(&backend);
+    // Cursor on the blank indented line inside `content {}` (line 4, col 6).
+    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(4, 6)))
+        .await
+        .expect("ok");
+    let ls = resp.map(labels).unwrap_or_default();
+    assert!(
+        ls.iter().any(|l| l == "disk_id"),
+        "EXPECTED object-field completions (disk_id, staging_storage_account_id) inside dynamic over a block-like attribute; got: {ls:?}"
+    );
+}
+
+#[tokio::test]
+async fn completion_inside_dynamic_over_real_block_control() {
+    let u = uri("file:///bl2.tf");
+    let src = "resource \"azurerm_thing\" \"x\" {\n  dynamic \"real_block\" {\n    for_each = var.d\n    content {\n      \n    }\n  }\n}\n";
+    let backend = fresh_backend(src, &u);
+    install_blocklike_schema(&backend);
+    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(4, 6)))
+        .await
+        .expect("ok");
+    let ls = resp.map(labels).unwrap_or_default();
+    assert!(
+        ls.iter().any(|l| l == "rb_attr"),
+        "control: real block_type dynamic content must offer rb_attr; got: {ls:?}"
+    );
+}

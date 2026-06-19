@@ -794,3 +794,44 @@ async fn hover_on_dynamic_for_each_shows_meta_arg_description() {
         "must NOT route to schema-missing; got: {md}"
     );
 }
+
+// ── Exploratory: hover on an attribute inside `dynamic "<block-like attr>"`.
+#[tokio::test]
+async fn hover_inside_dynamic_over_block_like_attr() {
+    let u = uri("file:///bl.tf");
+    let src = "resource \"azurerm_thing\" \"x\" {\n  dynamic \"managed_disk\" {\n    for_each = var.d\n    content {\n      disk_id = each.value\n    }\n  }\n}\n";
+    let b = backend_with(src, &u);
+    let schema: ProviderSchemas = sonic_rs::from_str(
+        r#"{
+        "format_version": "1.0",
+        "provider_schemas": {
+            "registry.terraform.io/hashicorp/azurerm": {
+                "provider": { "version": 0, "block": {} },
+                "resource_schemas": {
+                    "azurerm_thing": {
+                        "version": 1,
+                        "block": {
+                            "attributes": {
+                                "managed_disk": {
+                                    "type": ["set", ["object", { "disk_id": "string" }]],
+                                    "optional": true,
+                                    "description": "Managed disk replication settings."
+                                }
+                            },
+                            "block_types": {}
+                        }
+                    }
+                }
+            }
+        }
+    }"#,
+    )
+    .expect("parse");
+    b.state.install_schemas(schema);
+    // Cursor on `disk_id` (line 4, col 6).
+    let md = hover_markdown(&b, &u, Position::new(4, 8)).await;
+    assert!(
+        md.is_some(),
+        "EXPLORE: hover on a field inside dynamic over a block-like attribute returned None"
+    );
+}
