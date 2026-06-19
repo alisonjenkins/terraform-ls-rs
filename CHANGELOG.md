@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.12.3](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.12.2...v0.12.3) (2026-06-19)
+
+
+### Bug Fixes
+
+* **lsp:** compute folds from the live rope ([75edcd1](https://github.com/alisonjenkins/terraform-ls-rs/commit/75edcd1c0cc259aff5999c44c6a5ebd71d640b93))
+* **lsp:** recompute peers when a superseded edit changed cross-file state ([62ded9c](https://github.com/alisonjenkins/terraform-ls-rs/commit/62ded9c6f513f431bfb89aaec3f70059b14236fe))
+* **lsp:** use FULL document text sync ([2cd0dc1](https://github.com/alisonjenkins/terraform-ls-rs/commit/2cd0dc1f1f3cb78043bd9c338c814f2f7167146b))
+
 ## [0.12.2](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.12.1...v0.12.2) (2026-06-19)
 
 
