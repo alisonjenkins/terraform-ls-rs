@@ -68,16 +68,12 @@ fn init_tracing(verbosity: u8) {
     // `TFLS_LOG_FILE=…`. Critical because tfls runs under `lspmux`
     // daemon mode where stderr is detached to `/dev/null` and
     // journald never sees the trace stream.
-    let log_path = std::env::var("TFLS_LOG_FILE").unwrap_or_else(|_| {
-        if let Ok(rt) = std::env::var("XDG_RUNTIME_DIR") {
-            format!("{rt}/tfls.log")
-        } else {
-            std::env::temp_dir()
-                .join("tfls.log")
-                .to_string_lossy()
-                .into_owned()
-        }
-    });
+    let log_path = resolve_log_path(
+        std::env::var_os("TFLS_LOG_FILE"),
+        std::env::var_os("XDG_RUNTIME_DIR"),
+        std::env::temp_dir(),
+        std::process::id(),
+    );
     if let Ok(file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -97,4 +93,78 @@ fn init_tracing(verbosity: u8) {
         .with_writer(std::io::stderr)
         .with_ansi(false)
         .try_init();
+}
+
+/// Resolve the trace-log file path, cross-platform.
+///
+/// Precedence:
+/// 1. `TFLS_LOG_FILE` — explicit override, used verbatim.
+/// 2. `$XDG_RUNTIME_DIR/tfls.log` — the user-private runtime dir (unix,
+///    mode `0700`); a stable name there keeps the log easy to find.
+/// 3. `<temp_dir>/tfls-<pid>.log` — the platform temp dir (`%TEMP%` on
+///    Windows, `/tmp` on unix). That dir can be shared between users, so
+///    the pid in the filename avoids colliding with — or being
+///    pre-created / symlinked by — another process or user.
+///
+/// Paths are built with `Path::join` rather than string formatting so the
+/// correct separator is used on every platform.
+fn resolve_log_path(
+    explicit: Option<std::ffi::OsString>,
+    xdg_runtime_dir: Option<std::ffi::OsString>,
+    temp_dir: std::path::PathBuf,
+    pid: u32,
+) -> std::path::PathBuf {
+    use std::path::PathBuf;
+    if let Some(explicit) = explicit {
+        return PathBuf::from(explicit);
+    }
+    if let Some(rt) = xdg_runtime_dir.filter(|s| !s.is_empty()) {
+        return PathBuf::from(rt).join("tfls.log");
+    }
+    temp_dir.join(format!("tfls-{pid}.log"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_log_path;
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn explicit_override_used_verbatim() {
+        let got = resolve_log_path(
+            Some(OsString::from("/custom/tfls.log")),
+            Some(OsString::from("/run/user/1000")),
+            PathBuf::from("/tmp"),
+            42,
+        );
+        assert_eq!(got, Path::new("/custom/tfls.log"));
+    }
+
+    #[test]
+    fn prefers_xdg_runtime_dir_with_stable_name() {
+        let got = resolve_log_path(
+            None,
+            Some(OsString::from("/run/user/1000")),
+            PathBuf::from("/tmp"),
+            42,
+        );
+        assert_eq!(got, Path::new("/run/user/1000").join("tfls.log"));
+    }
+
+    #[test]
+    fn falls_back_to_temp_dir_with_pid_when_no_xdg() {
+        // Windows hits this branch (no XDG_RUNTIME_DIR); the pid keeps the
+        // name unique in the shared temp dir, and `join` yields the right
+        // separator on each platform.
+        let temp = PathBuf::from("/tmp");
+        let got = resolve_log_path(None, None, temp.clone(), 4242);
+        assert_eq!(got, temp.join("tfls-4242.log"));
+    }
+
+    #[test]
+    fn empty_xdg_runtime_dir_falls_back_to_temp() {
+        let got = resolve_log_path(None, Some(OsString::new()), PathBuf::from("/tmp"), 7);
+        assert_eq!(got, Path::new("/tmp").join("tfls-7.log"));
+    }
 }
