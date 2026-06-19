@@ -2842,7 +2842,6 @@ dependencies = [
  "tfls-schema",
  "tfls-state",
  "tfls-walker",
- "thiserror 2.0.18",
  "tokio",
  "tower-lsp-server",
  "tracing",
@@ -2897,7 +2896,6 @@ dependencies = [
 name = "tfls-lsp"
 version = "0.11.5"
 dependencies = [
- "async-trait",
  "criterion",
  "dashmap",
  "futures",
@@ -2987,7 +2985,6 @@ dependencies = [
  "serde",
  "sha2",
  "sonic-rs",
- "tfls-core",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3023,8 +3020,6 @@ dependencies = [
  "notify",
  "notify-debouncer-full",
  "tempfile",
- "tfls-core",
- "tfls-state",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

@@ -10,8 +10,6 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-tfls-core.workspace = true
-tfls-state.workspace = true
 thiserror.workspace = true
 notify.workspace = true
 notify-debouncer-full.workspace = true

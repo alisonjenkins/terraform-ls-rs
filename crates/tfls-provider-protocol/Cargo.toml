@@ -7,6 +7,13 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+# prost / prost-types / tonic-prost are referenced only by the code
+# `tonic::include_proto!` generates from the vendored tfplugin protos, which
+# cargo-machete's static scan can't see — verified required by build (removing
+# any of them fails compilation). Suppress the false positives.
+[package.metadata.cargo-machete]
+ignored = ["prost", "prost-types", "tonic-prost"]
+
 [lib]
 doctest = false
 
