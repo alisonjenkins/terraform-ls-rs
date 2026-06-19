@@ -228,3 +228,47 @@ async fn undefined_local_clears_when_def_completed_same_file() {
         "undefined-local must clear after the definition is completed; final: {final_diags:?}"
     );
 }
+
+// ── Repro: peer (variable) file passes through a syntax-error state while
+// being typed; the consumer's undefined-var must still clear once the
+// variable is valid.
+#[tokio::test]
+async fn consumer_clears_after_peer_var_typed_through_syntax_error() {
+    let mut client = TestClient::new();
+    client.initialize(None).await;
+    let main_uri = "file:///mod/main.tf";
+    let vars_uri = "file:///mod/variables.tf";
+
+    client
+        .did_open(main_uri, "output \"o\" { value = var.recovery_services_vault_keyvault.x }\n")
+        .await;
+    client.did_open(vars_uri, "").await;
+    client.settle(150).await;
+    let baseline = client.last_diagnostics(main_uri).await;
+    assert!(
+        any_message_contains(&baseline, "recovery_services_vault_keyvault"),
+        "baseline: undefined var on main; got {baseline:?}"
+    );
+
+    // Type the variable, passing through an incomplete (syntax-error) state.
+    client
+        .did_change_full(vars_uri, 2, "variable \"recovery_services_vault_keyvault\" {\n  type = object({\n")
+        .await;
+    client.settle(120).await;
+    // Finish it: valid object-typed variable.
+    client
+        .did_change_full(
+            vars_uri,
+            3,
+            "variable \"recovery_services_vault_keyvault\" {\n  type = object({ x = bool })\n}\n",
+        )
+        .await;
+    client.settle(250).await;
+
+    let pushes = client.publishes_for(main_uri).await;
+    let final_diags = pushes.last().cloned().unwrap_or_default();
+    assert!(
+        !any_message_contains(&final_diags, "recovery_services_vault_keyvault"),
+        "consumer must clear after peer var is valid; pushes for main: {pushes:?}"
+    );
+}

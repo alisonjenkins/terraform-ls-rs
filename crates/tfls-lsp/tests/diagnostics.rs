@@ -2042,3 +2042,39 @@ resource "null_resource" "y" {
     let undef: Vec<_> = msgs.iter().filter(|m| m.contains("undefined")).collect();
     assert!(undef.is_empty(), "special refs must not be flagged undefined: {undef:?}");
 }
+
+#[test]
+fn cross_file_var_with_validation_object_type_resolves() {
+    let b = backend();
+    let vars = uri("file:///mod/variables.tf");
+    let main = uri("file:///mod/main.tf");
+    insert(
+        &b,
+        &vars,
+        r#"
+variable "recovery_services_vault_keyvault" {
+  description = "The options for the ASR recovery services keyvault"
+  default = {
+    purge_protection_enabled   = true
+    soft_delete_retention_days = 90
+  }
+  type = object({
+    purge_protection_enabled   = bool
+    soft_delete_retention_days = number
+  })
+  validation {
+    condition     = var.recovery_services_vault_keyvault.soft_delete_retention_days >= 7
+    error_message = "must be >= 7"
+  }
+}
+"#,
+    );
+    insert(
+        &b,
+        &main,
+        "output \"o\" { value = var.recovery_services_vault_keyvault.purge_protection_enabled }\n",
+    );
+    let msgs = messages(&b, &main);
+    let undef: Vec<_> = msgs.iter().filter(|m| m.contains("undefined")).collect();
+    assert!(undef.is_empty(), "cross-file var with validation/object must resolve: {undef:?}");
+}

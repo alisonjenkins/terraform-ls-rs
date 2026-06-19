@@ -289,19 +289,38 @@ pub async fn did_change(backend: &Backend, params: DidChangeTextDocumentParams) 
     })
     .await;
 
+    // Did THIS edit change the doc's cross-file-relevant state (declared /
+    // referenced names, the `terraform {}` block)? Computed before the
+    // coalescing check because BOTH paths below need it.
+    let new_fingerprint = backend
+        .state
+        .documents
+        .get(&uri)
+        .map(|d| cross_file_fingerprint(&d));
+    let cross_file_changed = match (old_fingerprint, new_fingerprint) {
+        (Some(a), Some(b)) => a != b,
+        _ => true,
+    };
+
     // In-flight coalescing: tower-lsp runs notification handlers
     // concurrently, so fast typing can overlap several did_change tasks
-    // for the same buffer. If a newer edit has already landed, this one
-    // is stale — skip its compute, publish, and peer pass entirely; the
-    // newer handler will produce the up-to-date result. Avoids redundant
-    // O(module) work per superseded keystroke.
+    // for the same buffer. If a newer edit has already landed, this one is
+    // stale — skip its OWN-file compute/publish; the newer handler produces
+    // the up-to-date result. But we must NOT skip the peer pass when this
+    // edit changed cross-file state: the newer handler captured its
+    // `old_fingerprint` AFTER our edit applied, so it can't see our change
+    // and would skip its own peer pass — leaving a consumer file stuck with
+    // a stale undefined-reference for a symbol this edit just declared.
     let superseded = backend
         .state
         .documents
         .get(&uri)
         .is_some_and(|d| d.version != applied);
     if superseded {
-        tracing::debug!(uri = %uri, applied, "did_change: superseded by a newer edit, skipping");
+        tracing::debug!(uri = %uri, applied, "did_change: superseded by a newer edit");
+        if cross_file_changed {
+            publish_peer_diagnostics(backend, &uri).await;
+        }
         return;
     }
 
@@ -333,17 +352,7 @@ pub async fn did_change(backend: &Backend, params: DidChangeTextDocumentParams) 
     //
     // Skip the (O(open peers) × full-module-compute) pass when this edit
     // left the doc's cross-file state untouched — a value, comment, or
-    // whitespace change can't affect any peer's diagnostics. If the
-    // pre-edit state couldn't be fingerprinted, recompute to be safe.
-    let new_fingerprint = backend
-        .state
-        .documents
-        .get(&uri)
-        .map(|d| cross_file_fingerprint(&d));
-    let cross_file_changed = match (old_fingerprint, new_fingerprint) {
-        (Some(a), Some(b)) => a != b,
-        _ => true,
-    };
+    // whitespace change can't affect any peer's diagnostics.
     if cross_file_changed {
         publish_peer_diagnostics(backend, &uri).await;
     } else {
