@@ -270,7 +270,8 @@ mod recovery_tests {
     fn recovered_spans_keep_original_offsets() {
         // The good block sits AFTER the broken line; blanking must not shift
         // its byte offsets (we overwrite with spaces, never resize).
-        let src = "resource \"x\" \"bad\" {\n  a = @@@\n}\nresource \"x\" \"good\" {\n  ami = \"v\"\n}\n";
+        let src =
+            "resource \"x\" \"bad\" {\n  a = @@@\n}\nresource \"x\" \"good\" {\n  ami = \"v\"\n}\n";
         let parsed = parse_source_recovering(src);
         let body = parsed.body.as_ref().expect("recovered body");
         let good = body
@@ -303,4 +304,3 @@ mod recovery_tests {
         let _ = parsed.body;
     }
 }
-

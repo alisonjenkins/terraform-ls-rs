@@ -148,7 +148,10 @@ async fn folding_does_not_swallow_blank_line_between_blocks() {
         .iter()
         .find(|f| f.start_line == 0)
         .expect("first block fold");
-    assert_eq!(first.end_line, 2, "fold swallowed the blank line: {folds:?}");
+    assert_eq!(
+        first.end_line, 2,
+        "fold swallowed the blank line: {folds:?}"
+    );
 }
 
 #[tokio::test]

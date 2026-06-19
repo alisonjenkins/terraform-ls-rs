@@ -3303,9 +3303,10 @@ async fn completion_inside_dynamic_over_block_like_attr() {
     let backend = fresh_backend(src, &u);
     install_blocklike_schema(&backend);
     // Cursor on the blank indented line inside `content {}` (line 4, col 6).
-    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(4, 6)))
-        .await
-        .expect("ok");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(4, 6)))
+            .await
+            .expect("ok");
     let ls = resp.map(labels).unwrap_or_default();
     assert!(
         ls.iter().any(|l| l == "disk_id"),
@@ -3319,9 +3320,10 @@ async fn completion_inside_dynamic_over_real_block_control() {
     let src = "resource \"azurerm_thing\" \"x\" {\n  dynamic \"real_block\" {\n    for_each = var.d\n    content {\n      \n    }\n  }\n}\n";
     let backend = fresh_backend(src, &u);
     install_blocklike_schema(&backend);
-    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(4, 6)))
-        .await
-        .expect("ok");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(4, 6)))
+            .await
+            .expect("ok");
     let ls = resp.map(labels).unwrap_or_default();
     assert!(
         ls.iter().any(|l| l == "rb_attr"),
@@ -3339,9 +3341,10 @@ async fn completion_works_despite_syntax_error_in_another_block() {
     let backend = fresh_backend(src, &u);
     install_aws_schema(&backend);
     // Cursor on the blank indented line inside the VALID block (line 1, col 2).
-    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 2)))
-        .await
-        .expect("ok");
+    let resp =
+        tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 2)))
+            .await
+            .expect("ok");
     let ls = resp.map(labels).unwrap_or_default();
     assert!(
         ls.iter().any(|l| l == "ami"),

@@ -2108,7 +2108,9 @@ mod tests {
             }"#;
         let d = diags_with(&schemas, src);
         assert!(
-            d.iter().any(|x| x.message.contains("unknown nested block") && x.message.contains("nonsense")),
+            d.iter()
+                .any(|x| x.message.contains("unknown nested block")
+                    && x.message.contains("nonsense")),
             "nested dynamic with bogus label must be flagged: {d:?}"
         );
     }
@@ -2129,7 +2131,8 @@ mod tests {
             }"#;
         let d = diags_with(&schemas, src);
         assert!(
-            d.iter().all(|x| !x.message.contains("unknown nested block")),
+            d.iter()
+                .all(|x| !x.message.contains("unknown nested block")),
             "valid nested dynamic must not be flagged: {d:?}"
         );
     }
@@ -2147,7 +2150,8 @@ mod tests {
             }"#;
         let d = diags_with(&schemas, src);
         assert!(
-            d.iter().all(|diag| !diag.message.contains("unknown nested block")),
+            d.iter()
+                .all(|diag| !diag.message.contains("unknown nested block")),
             "dynamic over a set(object) attribute must not be flagged unknown: {d:?}"
         );
     }
@@ -2162,7 +2166,8 @@ mod tests {
             }"#;
         let d = diags_with(&schemas, src);
         assert!(
-            d.iter().any(|diag| diag.message.contains("missing required `for_each`")),
+            d.iter()
+                .any(|diag| diag.message.contains("missing required `for_each`")),
             "for_each is mandatory for any dynamic block: {d:?}"
         );
     }
@@ -2180,8 +2185,9 @@ mod tests {
             }"#;
         let d = diags_with(&schemas, src);
         assert!(
-            d.iter().any(|diag| diag.message.contains("unknown nested block")
-                && diag.message.contains("name")),
+            d.iter()
+                .any(|diag| diag.message.contains("unknown nested block")
+                    && diag.message.contains("name")),
             "dynamic over a scalar attribute should still be unknown: {d:?}"
         );
     }
