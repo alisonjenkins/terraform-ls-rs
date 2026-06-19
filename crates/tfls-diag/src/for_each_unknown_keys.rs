@@ -978,6 +978,74 @@ resource "null_resource" "x" {
     }
 
     #[test]
+    fn silent_for_nonsensitive_local_map_static_keys() {
+        // local map: static keys, apply-time VALUES. for_each membership =
+        // the keys, which are plan-known. nonsensitive() is identity. Must
+        // be SILENT. (Reported false positive.)
+        let src = r#"
+locals {
+  vm_config = {
+    "a" = { id = aws_instance.x.id }
+    "b" = { id = aws_instance.y.id }
+  }
+}
+resource "null_resource" "x" {
+  for_each = nonsensitive(local.vm_config)
+}
+"#;
+        assert!(!flagged(src), "nonsensitive(local.map) with static keys must be silent; got: {:?}", diags(src));
+    }
+
+    #[test]
+    fn silent_for_bare_local_map_static_keys() {
+        // Same WITHOUT nonsensitive — already correct (control).
+        let src = r#"
+locals {
+  vm_config = {
+    "a" = { id = aws_instance.x.id }
+    "b" = { id = aws_instance.y.id }
+  }
+}
+resource "null_resource" "x" {
+  for_each = local.vm_config
+}
+"#;
+        assert!(!flagged(src), "bare local.map control must be silent; got: {:?}", diags(src));
+    }
+
+    #[test]
+    fn nonsensitive_of_apply_time_membership_still_flags() {
+        // Wrapper around a collection whose KEYS are apply-time (resource
+        // ids) must STILL flag — the passthrough unwrap must not hide it.
+        let src = r#"
+resource "null_resource" "x" {
+  for_each = nonsensitive(toset([for s in aws_subnet.all : s.id]))
+}
+"#;
+        assert!(flagged(src), "nonsensitive() of apply-time keys must still flag");
+    }
+
+    #[test]
+    fn try_of_apply_time_membership_still_flags() {
+        let src = r#"
+resource "null_resource" "x" {
+  for_each = try(aws_subnet.all, {})
+}
+"#;
+        assert!(flagged(src), "try() whose first arg has apply-time membership must flag");
+    }
+
+    #[test]
+    fn for_over_nonsensitive_keyed_on_apply_time_still_flags() {
+        let src = r#"
+resource "null_resource" "x" {
+  for_each = { for s in nonsensitive(aws_subnet.all) : s.id => s }
+}
+"#;
+        assert!(flagged(src), "for-over-nonsensitive keyed on resource id must flag");
+    }
+
+    #[test]
     fn only_resource_data_module_blocks() {
         // A `for_each` in some other top-level block kind is ignored.
         let src = r#"

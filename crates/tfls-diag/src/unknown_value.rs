@@ -477,12 +477,20 @@ fn membership_apply_time_inner(
             }
             false
         }
-        // Set/map builder wrappers: `toset([...])`, `tomap({...})`,
-        // `setunion(...)`, `concat(...)`, etc. Recurse into the arguments.
-        Expression::FuncCall(call) if is_collection_builder(call.name.name.as_str()) => call
-            .args
-            .iter()
-            .any(|arg| membership_apply_time_inner(arg, kind, ctx, binds, visited)),
+        // Set/map builder wrappers (`toset([...])`, `tomap({...})`,
+        // `concat(...)`, …) AND membership-preserving passthroughs
+        // (`nonsensitive(x)` / `sensitive(x)` are identity; `try(a, b)`
+        // returns whichever argument succeeds). All preserve the argument's
+        // key set, so membership is apply-time iff some argument's is —
+        // crucially NOT iff a value inside the collection is apply-time.
+        Expression::FuncCall(call)
+            if is_collection_builder(call.name.name.as_str())
+                || is_membership_passthrough(call.name.name.as_str()) =>
+        {
+            call.args
+                .iter()
+                .any(|arg| membership_apply_time_inner(arg, kind, ctx, binds, visited))
+        }
         // A literal array of set elements — each element is a key.
         Expression::Array(arr) => arr
             .iter()
@@ -531,6 +539,34 @@ fn is_collection_builder(name: &str) -> bool {
             | "compact"
             | "sort"
     )
+}
+
+/// Pure single-argument identity functions: they return their argument's
+/// collection completely unchanged (same keys, same elements), differing
+/// only in the sensitivity mark. Membership/key-set analysis sees straight
+/// through them.
+fn is_identity_passthrough(name: &str) -> bool {
+    matches!(name, "nonsensitive" | "sensitive")
+}
+
+/// Functions whose result preserves the membership of an argument: the pure
+/// identities plus `try(a, b, …)`, which yields whichever argument first
+/// evaluates without error. For membership, recurse into the argument(s).
+fn is_membership_passthrough(name: &str) -> bool {
+    is_identity_passthrough(name) || name == "try"
+}
+
+/// If `expr` is a pure identity passthrough call (`nonsensitive(x)` /
+/// `sensitive(x)`), return its inner argument `x`.
+fn identity_passthrough_arg(expr: &Expression) -> Option<&Expression> {
+    let Expression::FuncCall(call) = expr else {
+        return None;
+    };
+    if is_identity_passthrough(call.name.name.as_str()) {
+        call.args.get(0)
+    } else {
+        None
+    }
 }
 
 /// Whether `expr` transitively references an apply-time (resource / data)
@@ -970,14 +1006,26 @@ fn resolve_through_locals<'a>(
 ) -> (&'a Expression, HashSet<String>) {
     let mut cur = expr;
     let mut v = visited.clone();
-    while let Some(name) = local_name(cur) {
-        if !v.insert(name.to_string()) {
-            break; // cycle
+    loop {
+        if let Some(name) = local_name(cur) {
+            if !v.insert(name.to_string()) {
+                break; // cycle
+            }
+            match ctx.locals.get(name) {
+                Some(def) => {
+                    cur = def;
+                    continue;
+                }
+                None => break,
+            }
         }
-        match ctx.locals.get(name) {
-            Some(def) => cur = def,
-            None => break,
+        // Peel pure identity passthroughs (`nonsensitive(local.x)` →
+        // `local.x`) so key-set analysis sees the underlying collection.
+        if let Some(inner) = identity_passthrough_arg(cur) {
+            cur = inner;
+            continue;
         }
+        break;
     }
     (cur, v)
 }
