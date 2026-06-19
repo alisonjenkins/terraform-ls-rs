@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.4](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.12.3...v0.12.4) (2026-06-19)
+
+
+### Bug Fixes
+
+* **lsp:** refresh open peers on did_open ([5555b76](https://github.com/alisonjenkins/terraform-ls-rs/commit/5555b76b2721185d0ce98657d10e3e113bb6ebe8))
+
 ## [0.12.3](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.12.2...v0.12.3) (2026-06-19)
 
 
