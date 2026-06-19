@@ -18,7 +18,10 @@ pub use error::ParseError;
 pub use fallback_references::extract_references_fallback;
 pub use fallback_symbols::extract_symbols_fallback;
 pub use json::parse_json_source;
-pub use parse::{parse_source, parse_source_for_uri, ParsedFile};
+pub use parse::{
+    parse_source, parse_source_for_uri, parse_source_recovering, parse_source_recovering_for_uri,
+    ParsedFile,
+};
 pub use position::{
     byte_offset_to_lsp_position, hcl_span_to_lsp_range, lsp_position_to_byte_offset,
 };
