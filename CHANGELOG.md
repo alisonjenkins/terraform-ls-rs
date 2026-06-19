@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.12.2](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.12.1...v0.12.2) (2026-06-19)
+
+
+### Bug Fixes
+
+* **diag:** see through passthrough wrappers in for_each membership ([3720bf5](https://github.com/alisonjenkins/terraform-ls-rs/commit/3720bf530c1993696fffeadf783ba63dc0ae604e))
+* **lsp:** suppress undefined-reference while a file has a syntax error ([d270bcc](https://github.com/alisonjenkins/terraform-ls-rs/commit/d270bcc818572964a0564411ac49618e6d470511))
+
 ## [0.12.1](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.12.0...v0.12.1) (2026-06-19)
 
 
