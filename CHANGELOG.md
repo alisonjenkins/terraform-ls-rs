@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.6](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.11.5...v0.11.6) (2026-06-19)
+
+
+### Bug Fixes
+
+* **cli:** cross-platform, collision-resistant log path ([247ffd6](https://github.com/alisonjenkins/terraform-ls-rs/commit/247ffd647d24984be7a6fabea33711ac98a90be1))
+
 ## [0.11.5](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.11.4...v0.11.5) (2026-06-18)
 
 
