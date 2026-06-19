@@ -100,6 +100,16 @@ pub async fn did_open(backend: &Backend, params: DidOpenTextDocumentParams) {
         }
     }
 
+    // A freshly-opened file can DEFINE symbols (variables, locals, outputs,
+    // resources, …) that other already-open files in the same module
+    // reference. Those consumers were computed before this file's
+    // definitions entered the index, so they may be showing a stale
+    // `undefined …` for a symbol this file provides. Refresh open peers now.
+    // (did_change already does this for edits; did_open didn't, so opening
+    // the file that defines a referenced variable never cleared the
+    // consumer until the consumer itself was edited.)
+    publish_peer_diagnostics(backend, &uri).await;
+
     // Kick off background version-cache prefetch so inlay-hint
     // freshness annotations (and the semantic no-match diagnostic)
     // light up without the user having to trigger completion first.

@@ -293,3 +293,32 @@ async fn server_advertises_full_text_sync() {
     assert_eq!(kind, Some(1), "textDocumentSync must be FULL (1); got {sync}");
     client.shutdown().await;
 }
+
+#[tokio::test]
+async fn consumer_clears_when_definition_file_is_opened() {
+    // Open a consumer referencing var.foo BEFORE the file defining it is
+    // opened. Opening variables.tf must refresh the already-open consumer.
+    let mut client = TestClient::new();
+    client.initialize(None).await;
+    let main_uri = "file:///mod/main.tf";
+    let vars_uri = "file:///mod/variables.tf";
+
+    client.did_open(main_uri, "output \"o\" { value = var.foo }\n").await;
+    client.settle(150).await;
+    let baseline = client.last_diagnostics(main_uri).await;
+    assert!(
+        contains_undefined_var(&baseline, "foo"),
+        "baseline: undefined foo; got {baseline:?}"
+    );
+
+    // Now open the file that defines `foo` (no edit to main.tf).
+    client.did_open(vars_uri, "variable \"foo\" {}\n").await;
+    client.settle(250).await;
+
+    let pushes = client.publishes_for(main_uri).await;
+    let final_diags = pushes.last().cloned().unwrap_or_default();
+    assert!(
+        !contains_undefined_var(&final_diags, "foo"),
+        "opening the defining file must clear the consumer's undefined-var; pushes: {pushes:?}"
+    );
+}

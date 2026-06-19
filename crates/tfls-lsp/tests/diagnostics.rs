@@ -2078,3 +2078,29 @@ variable "recovery_services_vault_keyvault" {
     let undef: Vec<_> = msgs.iter().filter(|m| m.contains("undefined")).collect();
     assert!(undef.is_empty(), "cross-file var with validation/object must resolve: {undef:?}");
 }
+
+#[test]
+fn cross_file_var_used_in_count_conditional_resolves() {
+    let b = backend();
+    let vars = uri("file:///mod/variables.tf");
+    let main = uri("file:///mod/main.tf");
+    insert(&b, &vars, r#"
+variable "recovery_services_vault" {
+  description = "The options for the ASR recovery services vault."
+  default = {
+    encrypt                    = false
+    immutability               = "Unlocked"
+    immutability_lock_i_am_sure = false
+  }
+  type = object({
+    encrypt                    = bool
+    immutability               = string
+    immutability_lock_i_am_sure = bool
+  })
+}
+"#);
+    insert(&b, &main, "resource \"azurerm_key_vault_key\" \"k\" {\n  count = var.recovery_services_vault.encrypt ? 1 : 0\n}\n");
+    let msgs = messages(&b, &main);
+    let undef: Vec<_> = msgs.iter().filter(|m| m.contains("undefined")).collect();
+    assert!(undef.is_empty(), "cross-file var used in a count conditional must resolve: {undef:?}");
+}
