@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.12.0](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.11.6...v0.12.0) (2026-06-19)
+
+
+### Features
+
+* **lsp:** complete fields inside dynamic over block-like attributes ([9e6af87](https://github.com/alisonjenkins/terraform-ls-rs/commit/9e6af87980cb3ca214e72d8c9b2a528c62374255))
+* **lsp:** keep hover/completion working through syntax errors ([2bbc8b3](https://github.com/alisonjenkins/terraform-ls-rs/commit/2bbc8b34a93096227dbcf6ecf9ed494180e22645))
+* **parser:** best-effort recovery for syntax errors ([9c7cb4c](https://github.com/alisonjenkins/terraform-ls-rs/commit/9c7cb4c8306e8ffd2ae8dc1f88a1a6b7841367ea))
+
+
+### Bug Fixes
+
+* **diag:** block-like attributes and nested dynamics in validation ([da20218](https://github.com/alisonjenkins/terraform-ls-rs/commit/da20218539f603a069df9184769ed480dfbfcc1f))
+
 ## [0.11.6](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.11.5...v0.11.6) (2026-06-19)
 
 
