@@ -28,7 +28,18 @@ pub async fn folding_range(
     let Some(doc) = backend.state.documents.get(&uri) else {
         return Ok(None);
     };
-    let Some(body) = doc.parsed.body.as_ref() else {
+
+    // Parse the CURRENT rope rather than the stored `parsed.body`. A
+    // did_change updates the rope before its separate, blocking reparse
+    // lands, so the stored body can momentarily belong to a different text;
+    // mapping its spans onto the newer rope yields folds whose ends miss the
+    // closing `]`/`}` (the reported "dangling delimiter" folds). Parsing the
+    // rope here guarantees every fold range matches the buffer the client is
+    // folding. Fold requests are debounced per edit, so the extra parse is
+    // cheap relative to the per-keystroke reparse that already runs.
+    let text = doc.rope.to_string();
+    let parsed = tfls_parser::parse_source_recovering_for_uri(&text, uri.as_str());
+    let Some(body) = parsed.body.as_ref() else {
         return Ok(None);
     };
 
