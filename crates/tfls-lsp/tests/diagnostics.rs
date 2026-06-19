@@ -1941,14 +1941,19 @@ fn recovered_body_does_not_emit_false_schema_diagnostics() {
 
     let u = uri("file:///project/main.tf");
     // `ami` value is a stray token → syntax error on that line.
-    insert(&b, &u, "resource \"aws_instance\" \"web\" {\n  ami = @@@\n}\n");
+    insert(
+        &b,
+        &u,
+        "resource \"aws_instance\" \"web\" {\n  ami = @@@\n}\n",
+    );
     let msgs = messages(&b, &u);
     assert!(
         msgs.iter().any(|m| m.contains("syntax error")),
         "syntax error must still be reported: {msgs:?}"
     );
     assert!(
-        msgs.iter().all(|m| !m.contains("missing required attribute")),
+        msgs.iter()
+            .all(|m| !m.contains("missing required attribute")),
         "recovered body must NOT emit a false missing-required diagnostic: {msgs:?}"
     );
 }
