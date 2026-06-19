@@ -414,15 +414,41 @@ fn validate_block<H: UpgradeHintLookup>(
                 // Allowed; inner body is too variable to validate here.
             }
             _ => {
-                // Provider-defined nested blocks or unknown blocks —
-                // leave untouched for now.
+                // Provider-defined nested block: descend to validate any
+                // `dynamic` blocks nested inside it against the nested
+                // schema. Unknown names have no schema, so nothing happens.
+                if let Some(nb) = schema.block.block_types.get(name) {
+                    validate_nested_dynamics(&inner.body, &nb.block, rope, out);
+                }
+            }
+        }
+    }
+
+    // Names present as nested blocks or `dynamic "<name>"` blocks. A
+    // block-like attribute (cty object / collection-of-object, e.g.
+    // azurerm managed_disk = set(object(...))) can be written with block
+    // or `dynamic` syntax, so it satisfies its own `required` flag that
+    // way — not via a `name = …` attribute assignment.
+    let mut present_block_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for structure in block.body.iter() {
+        if let Some(inner) = structure.as_block() {
+            if inner.ident.as_str() == "dynamic" {
+                if let Some(label) = inner.labels.first().and_then(block_label_str) {
+                    present_block_names.insert(label);
+                }
+            } else {
+                present_block_names.insert(inner.ident.as_str());
             }
         }
     }
 
     // Missing required.
     for (name, attr) in &schema.block.attributes {
-        if attr.required && !present_attrs.iter().any(|(n, _)| *n == name.as_str()) {
+        let present_as_attr = present_attrs.iter().any(|(n, _)| *n == name.as_str());
+        // A required block-like attribute counts as satisfied when written
+        // as a nested block or `dynamic "<name>"`.
+        let present_as_block = attr.is_block_like() && present_block_names.contains(name.as_str());
+        if attr.required && !present_as_attr && !present_as_block {
             out.push(Diagnostic {
                 range: header_range,
                 severity: Some(DiagnosticSeverity::ERROR),
@@ -840,6 +866,38 @@ fn validate_dynamic_block(
             ),
             ..Default::default()
         });
+    }
+
+    // 5. Recurse: a `dynamic` may itself contain `dynamic` blocks inside
+    //    its `content {}` (generating the target's own nested blocks), e.g.
+    //    dynamic "X" { content { dynamic "Y" { … } } } where Y is a nested
+    //    block of X. Validate those against the target's schema.
+    if let Some(content) = content_block {
+        validate_nested_dynamics(&content.body, target, rope, out);
+    }
+}
+
+/// Recursively validate `dynamic` blocks nested anywhere inside `body`,
+/// resolving each against `schema` — the block schema that governs `body`.
+/// Descends through `content {}` wrappers (via [`validate_dynamic_block`]'s
+/// own recursion) and through provider-defined nested blocks at arbitrary
+/// depth. Non-`dynamic` blocks with no schema entry are ignored.
+fn validate_nested_dynamics(
+    body: &Body,
+    schema: &BlockSchema,
+    rope: &Rope,
+    out: &mut Vec<Diagnostic>,
+) {
+    for structure in body.iter() {
+        let Some(inner) = structure.as_block() else {
+            continue;
+        };
+        let name = inner.ident.as_str();
+        if name == "dynamic" {
+            validate_dynamic_block(inner, schema, rope, out);
+        } else if let Some(nb) = schema.block_types.get(name) {
+            validate_nested_dynamics(&inner.body, &nb.block, rope, out);
+        }
     }
 }
 
@@ -1937,6 +1995,143 @@ mod tests {
             }"#,
         )
         .expect("parse")
+    }
+
+    fn schemas_with_required_blocklike_attr() -> ProviderSchemas {
+        // `managed_disk` is a REQUIRED block-like attribute (set(object)).
+        sonic_rs::from_str(
+            r#"{
+                "format_version": "1.0",
+                "provider_schemas": {
+                    "registry.terraform.io/hashicorp/azurerm": {
+                        "provider": { "version": 0, "block": {} },
+                        "resource_schemas": {
+                            "azurerm_req": {
+                                "version": 1,
+                                "block": {
+                                    "attributes": {
+                                        "managed_disk": {
+                                            "type": ["set", ["object", { "disk_id": "string" }]],
+                                            "required": true
+                                        }
+                                    },
+                                    "block_types": {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("parse")
+    }
+
+    #[test]
+    fn required_blocklike_satisfied_by_dynamic_no_false_missing() {
+        let schemas = schemas_with_required_blocklike_attr();
+        let src = r#"resource "azurerm_req" "x" {
+              dynamic "managed_disk" {
+                for_each = var.d
+                content { disk_id = each.value }
+              }
+            }"#;
+        let d = diags_with(&schemas, src);
+        assert!(
+            d.iter().all(|x| !x.message.contains("missing required attribute `managed_disk`")),
+            "EXPLORE: required block-like attr satisfied by dynamic must not be flagged missing: {d:?}"
+        );
+    }
+
+    #[test]
+    fn required_blocklike_satisfied_by_plain_block_no_false_missing() {
+        let schemas = schemas_with_required_blocklike_attr();
+        let src = r#"resource "azurerm_req" "x" {
+              managed_disk { disk_id = "d" }
+            }"#;
+        let d = diags_with(&schemas, src);
+        assert!(
+            d.iter().all(|x| !x.message.contains("missing required attribute `managed_disk`")),
+            "EXPLORE: required block-like attr satisfied by plain block must not be flagged missing: {d:?}"
+        );
+    }
+
+    fn schemas_with_nested_block_for_dynamic() -> ProviderSchemas {
+        // outer block_type `real_block` has its own nested block_type `inner`.
+        sonic_rs::from_str(
+            r#"{
+                "format_version": "1.0",
+                "provider_schemas": {
+                    "registry.terraform.io/hashicorp/aws": {
+                        "provider": { "version": 0, "block": {} },
+                        "resource_schemas": {
+                            "aws_nest": {
+                                "version": 1,
+                                "block": {
+                                    "attributes": {},
+                                    "block_types": {
+                                        "real_block": {
+                                            "nesting_mode": "list",
+                                            "block": {
+                                                "attributes": {},
+                                                "block_types": {
+                                                    "inner": {
+                                                        "nesting_mode": "list",
+                                                        "block": { "attributes": { "iv": { "type": "string", "required": true } } }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("parse")
+    }
+
+    #[test]
+    fn nested_dynamic_inside_content_unknown_label_is_flagged() {
+        let schemas = schemas_with_nested_block_for_dynamic();
+        let src = r#"resource "aws_nest" "x" {
+              dynamic "real_block" {
+                for_each = var.a
+                content {
+                  dynamic "nonsense" {
+                    for_each = []
+                    content {}
+                  }
+                }
+              }
+            }"#;
+        let d = diags_with(&schemas, src);
+        assert!(
+            d.iter().any(|x| x.message.contains("unknown nested block") && x.message.contains("nonsense")),
+            "nested dynamic with bogus label must be flagged: {d:?}"
+        );
+    }
+
+    #[test]
+    fn nested_dynamic_inside_content_valid_label_is_ok() {
+        let schemas = schemas_with_nested_block_for_dynamic();
+        let src = r#"resource "aws_nest" "x" {
+              dynamic "real_block" {
+                for_each = var.a
+                content {
+                  dynamic "inner" {
+                    for_each = var.b
+                    content { iv = each.value }
+                  }
+                }
+              }
+            }"#;
+        let d = diags_with(&schemas, src);
+        assert!(
+            d.iter().all(|x| !x.message.contains("unknown nested block")),
+            "valid nested dynamic must not be flagged: {d:?}"
+        );
     }
 
     #[test]
