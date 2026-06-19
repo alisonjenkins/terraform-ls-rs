@@ -14,8 +14,16 @@ use crate::handlers::semantic_tokens::SEMANTIC_TOKEN_TYPES;
 
 pub fn server_capabilities() -> ServerCapabilities {
     ServerCapabilities {
+        // FULL document sync (not INCREMENTAL): every did_change carries the
+        // whole document text, so the server's rope is always exactly the
+        // editor's buffer. Trades a marginally larger per-keystroke payload
+        // (negligible for Terraform files) for robustness — it eliminates the
+        // incremental-edit failure modes (out-of-order application corrupting
+        // the rope, a skipped version freezing it) that produced a class of
+        // "stuck / stale" bugs under tower-lsp's concurrent handlers and
+        // lspmux multiplexing.
         text_document_sync: Some(TextDocumentSyncCapability::Kind(
-            TextDocumentSyncKind::INCREMENTAL,
+            TextDocumentSyncKind::FULL,
         )),
         definition_provider: Some(OneOf::Left(true)),
         declaration_provider: Some(DeclarationCapability::Simple(true)),

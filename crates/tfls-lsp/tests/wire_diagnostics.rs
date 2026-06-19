@@ -272,3 +272,24 @@ async fn consumer_clears_after_peer_var_typed_through_syntax_error() {
         "consumer must clear after peer var is valid; pushes for main: {pushes:?}"
     );
 }
+
+#[tokio::test]
+async fn server_advertises_full_text_sync() {
+    // FULL (=1), not INCREMENTAL (=2). Incremental sync was the root of a
+    // class of rope desync / freeze "stuck" bugs under concurrent handlers +
+    // lspmux; FULL keeps the server's rope exactly the editor's buffer. This
+    // fails loudly if a future change reverts to incremental without
+    // rethinking that.
+    let mut client = TestClient::new();
+    let body = client
+        .request(
+            "initialize",
+            json!({ "processId": null, "rootUri": null, "capabilities": {} }),
+        )
+        .await;
+    let sync = &body["result"]["capabilities"]["textDocumentSync"];
+    // Either a bare kind `1` or `{ "change": 1, ... }`.
+    let kind = sync.as_i64().or_else(|| sync["change"].as_i64());
+    assert_eq!(kind, Some(1), "textDocumentSync must be FULL (1); got {sync}");
+    client.shutdown().await;
+}

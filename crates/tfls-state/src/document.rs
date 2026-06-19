@@ -1,7 +1,6 @@
 //! Per-document state: rope buffer, parsed AST, version, diagnostics,
 //! symbol table, references.
 
-use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use lsp_types::{TextDocumentContentChangeEvent, TextEdit};
@@ -57,16 +56,6 @@ pub struct DocumentState {
     /// inside: `None` = never computed, `Some(entry)` = match
     /// against `entry.content_hash` + `entry.style_marker`.
     pub format_cache: Mutex<Option<FormatCacheEntry>>,
-    /// Incremental edits that arrived ahead of their turn, keyed by LSP
-    /// `version`. tower-lsp-server pumps `did_change` handler futures through
-    /// `buffer_unordered`, so their synchronous apply segments can run in an
-    /// order that doesn't match the client's monotonic `version`. Each
-    /// incremental change carries ranges relative to the PRIOR version's
-    /// text, so applying them out of order corrupts the rope (or drops an
-    /// edit whose range references a not-yet-created line), desyncing the
-    /// server from the editor until a full `did_open` resync. Edits land
-    /// here until the gap before them fills; see [`Self::apply_versioned_changes`].
-    pending_edits: BTreeMap<i32, Vec<TextDocumentContentChangeEvent>>,
 }
 
 impl DocumentState {
@@ -82,7 +71,6 @@ impl DocumentState {
             symbols,
             references,
             format_cache: Mutex::new(None),
-            pending_edits: BTreeMap::new(),
         }
     }
 
@@ -117,7 +105,6 @@ impl DocumentState {
             symbols,
             references,
             format_cache: Mutex::new(None),
-            pending_edits: BTreeMap::new(),
         }
     }
 
@@ -157,67 +144,41 @@ impl DocumentState {
         Ok(())
     }
 
-    /// Apply a versioned batch of content changes, tolerating out-of-order
-    /// delivery.
+    /// Apply a versioned `did_change` batch, tolerating the out-of-order
+    /// delivery that tower-lsp-server's `buffer_unordered` pump (and lspmux's
+    /// multiplexing) can produce.
     ///
-    /// tower-lsp-server drives `did_change` handler futures through
-    /// `buffer_unordered`; their synchronous apply segments therefore run in
-    /// an order that need not match the client's monotonically increasing
-    /// `version`. Incremental edits carry ranges relative to the prior
-    /// version's text, so naively applying them in arrival order corrupts the
-    /// rope — or drops an edit whose range references a not-yet-created line —
-    /// desyncing the server's buffer from the editor until a `did_open`
-    /// restart.
-    ///
-    /// Edits are buffered by `version` and applied only in contiguous
-    /// ascending order starting from the last applied version. Returns
-    /// `Ok(Some(v))` with the highest version actually applied (the live rope
-    /// advanced to `v`), or `Ok(None)` when the batch was buffered behind a
-    /// gap or was a stale/duplicate replay (rope unchanged).
+    /// Because the server advertises FULL document sync, each batch is the
+    /// complete document text at `version`. A newer version therefore
+    /// supersedes any older one wholesale: apply it and advance. An
+    /// older-or-equal `version` is a stale/duplicate replay and is dropped so
+    /// it can't overwrite newer text. Returns `Ok(Some(version))` when the
+    /// rope advanced, or `Ok(None)` for a dropped stale batch.
     pub fn apply_versioned_changes(
         &mut self,
         version: i32,
         changes: Vec<TextDocumentContentChangeEvent>,
     ) -> Result<Option<i32>, StateError> {
-        // Already applied (or an older reordered replay) — dropping it keeps
-        // the rope monotonic. A genuine new edit always carries a higher
-        // version than the last one we applied.
+        // The server advertises FULL document sync (see
+        // `tfls_lsp::capabilities`): every did_change carries the COMPLETE
+        // document text at `version`, so a newer version supersedes any older
+        // one outright. Drop a stale or duplicate (older-or-equal) version;
+        // otherwise apply and advance.
+        //
+        // This keeps the rope correct under tower-lsp's concurrent
+        // notification handling (and lspmux's multiplexing): out-of-order
+        // delivery just means a newer full-text edit may land first and the
+        // older one is harmlessly dropped — there are no incremental ranges
+        // to misapply, and no version-gap buffering that could freeze the
+        // rope (the root of a class of "stuck / stale" bugs).
         if version <= self.version {
             return Ok(None);
         }
-        self.pending_edits.insert(version, changes);
-
-        // Safety valve: a client that doesn't bump `version` by exactly 1
-        // could otherwise wedge a permanent gap and leak buffered edits.
-        // Mainstream clients all step by 1, so this only trips on broken
-        // ones — flush in version order rather than stall forever.
-        if self.pending_edits.len() > 64 {
-            tracing::warn!(
-                uri = %self.uri,
-                pending = self.pending_edits.len(),
-                "did_change: pending-edit backlog exceeded; force-flushing in version order"
-            );
-            let mut highest = None;
-            for (v, batch) in std::mem::take(&mut self.pending_edits) {
-                for change in batch {
-                    self.apply_change(change)?;
-                }
-                self.version = v;
-                highest = Some(v);
-            }
-            return Ok(highest);
+        for change in changes {
+            self.apply_change(change)?;
         }
-
-        let mut highest = None;
-        while let Some(batch) = self.pending_edits.remove(&(self.version + 1)) {
-            let next = self.version + 1;
-            for change in batch {
-                self.apply_change(change)?;
-            }
-            self.version = next;
-            highest = Some(next);
-        }
-        Ok(highest)
+        self.version = version;
+        Ok(Some(version))
     }
 
     /// Re-parse and re-analyse the document's current rope content.
@@ -355,41 +316,36 @@ mod tests {
         assert!(matches!(err, Err(StateError::EditApplication { .. })));
     }
 
-    fn insert_at(line: u32, character: u32, text: &str) -> TextDocumentContentChangeEvent {
+    /// A FULL-document-sync change: `range: None`, whole new text.
+    fn full(text: &str) -> TextDocumentContentChangeEvent {
         TextDocumentContentChangeEvent {
-            range: Some(Range {
-                start: Position::new(line, character),
-                end: Position::new(line, character),
-            }),
+            range: None,
             range_length: None,
             text: text.to_string(),
         }
     }
 
-    // Regression: tower-lsp-server pumps did_change handler futures through
-    // `buffer_unordered`, so their synchronous apply segments can run out of
-    // `version` order. An incremental edit references ranges relative to the
-    // PRIOR version's text — applying v3 before v2 here references line 1,
-    // which doesn't exist until v2 lands, so naive apply would error and drop
-    // the edit, desyncing the rope until restart.
+    // Under FULL sync each batch is the complete document, so an
+    // out-of-order delivery just means a newer version may land first; the
+    // older one must then be dropped rather than overwrite the newer text.
     #[test]
-    fn versioned_changes_applied_out_of_order_reorder_correctly() {
+    fn versioned_changes_newer_full_text_wins_when_delivered_out_of_order() {
         let mut doc = DocumentState::new(test_uri(), "", 1);
 
-        // v3 arrives first — references line 1, not yet created. Must buffer.
+        // v3 (the newer full document) lands first.
         let applied = doc
-            .apply_versioned_changes(3, vec![insert_at(1, 0, "world\n")])
-            .expect("buffering must not error");
-        assert_eq!(applied, None, "v3 with a gap must buffer, not apply");
-        assert_eq!(doc.text(), "", "rope unchanged while buffered");
-        assert_eq!(doc.version, 1);
-
-        // v2 fills the gap, then v3 drains on top of it.
-        let applied = doc
-            .apply_versioned_changes(2, vec![insert_at(0, 0, "hello\n")])
-            .expect("apply must succeed");
-        assert_eq!(applied, Some(3), "draining must report the highest version");
+            .apply_versioned_changes(3, vec![full("hello\nworld\n")])
+            .expect("apply");
+        assert_eq!(applied, Some(3));
         assert_eq!(doc.text(), "hello\nworld\n");
+        assert_eq!(doc.version, 3);
+
+        // v2 (an older full document) arrives late — dropped, rope unchanged.
+        let applied = doc
+            .apply_versioned_changes(2, vec![full("STALE\n")])
+            .expect("stale must not error");
+        assert_eq!(applied, None);
+        assert_eq!(doc.text(), "hello\nworld\n", "older version must not win");
         assert_eq!(doc.version, 3);
     }
 
@@ -397,12 +353,12 @@ mod tests {
     fn versioned_changes_in_order_apply_immediately() {
         let mut doc = DocumentState::new(test_uri(), "", 1);
         assert_eq!(
-            doc.apply_versioned_changes(2, vec![insert_at(0, 0, "a\n")])
+            doc.apply_versioned_changes(2, vec![full("a\n")])
                 .expect("apply"),
             Some(2)
         );
         assert_eq!(
-            doc.apply_versioned_changes(3, vec![insert_at(1, 0, "b\n")])
+            doc.apply_versioned_changes(3, vec![full("a\nb\n")])
                 .expect("apply"),
             Some(3)
         );
@@ -413,11 +369,11 @@ mod tests {
     #[test]
     fn versioned_changes_stale_or_duplicate_ignored() {
         let mut doc = DocumentState::new(test_uri(), "", 1);
-        doc.apply_versioned_changes(2, vec![insert_at(0, 0, "x\n")])
+        doc.apply_versioned_changes(2, vec![full("x\n")])
             .expect("apply");
-        // A reordered duplicate of an already-applied version is a no-op.
+        // A duplicate of an already-applied version is a no-op.
         let applied = doc
-            .apply_versioned_changes(2, vec![insert_at(0, 0, "DUP")])
+            .apply_versioned_changes(2, vec![full("DUP")])
             .expect("stale must not error");
         assert_eq!(applied, None);
         assert_eq!(doc.text(), "x\n", "stale edit must not mutate the rope");
