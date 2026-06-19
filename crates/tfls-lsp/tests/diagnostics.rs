@@ -1957,3 +1957,88 @@ fn recovered_body_does_not_emit_false_schema_diagnostics() {
         "recovered body must NOT emit a false missing-required diagnostic: {msgs:?}"
     );
 }
+
+#[test]
+fn no_undefined_reference_while_file_has_syntax_error() {
+    // The reported "flagged a half-typed name and it stuck" bug: while the
+    // file has a syntax error, references come from the lenient text
+    // fallback, which can pick up a partial `local.region_short_na`. No
+    // reference-based diagnostic should fire during a syntax error — only
+    // the syntax error itself. (The control below proves it still fires on
+    // a clean parse.)
+    let b = backend();
+    let u = uri("file:///mod/main.tf");
+    insert(
+        &b,
+        &u,
+        "output \"o\" { value = local.region_short_na }\nresource \"x\" \"y\" {\n  z = @@@\n}\n",
+    );
+    let msgs = messages(&b, &u);
+    assert!(
+        msgs.iter().any(|m| m.contains("syntax error")),
+        "syntax error must still report: {msgs:?}"
+    );
+    assert!(
+        msgs.iter().all(|m| !m.contains("undefined")),
+        "no undefined-reference while the file has a syntax error: {msgs:?}"
+    );
+}
+
+#[test]
+fn undefined_reference_still_fires_on_clean_parse() {
+    // Control: same undefined ref, no syntax error — must still be flagged.
+    let b = backend();
+    let u = uri("file:///mod/main.tf");
+    insert(&b, &u, "output \"o\" { value = local.region_short_na }\n");
+    let msgs = messages(&b, &u);
+    assert!(
+        msgs.iter().any(|m| m.contains("undefined") && m.contains("region_short_na")),
+        "undefined ref must fire on a clean parse: {msgs:?}"
+    );
+}
+
+#[test]
+fn local_used_only_by_sibling_local_in_same_block_not_unused() {
+    // `region_short_name` is referenced only inside another local's value in
+    // the SAME locals block. It must count as used (not falsely "unused").
+    let b = backend();
+    let u = uri("file:///mod/main.tf");
+    insert(
+        &b,
+        &u,
+        "locals {\n  region_short_name = \"x\"\n  source_vm_name = \"vm-${local.region_short_name}-end\"\n}\n",
+    );
+    let msgs = messages(&b, &u);
+    assert!(
+        msgs.iter().all(|m| !(m.contains("region_short_name") && m.contains("declared but not used"))),
+        "a local used by a sibling local must not be flagged unused: {msgs:?}"
+    );
+}
+
+#[test]
+fn special_refs_not_flagged_undefined() {
+    let b = backend();
+    let u = uri("file:///mod/main.tf");
+    insert(
+        &b,
+        &u,
+        r#"
+resource "null_resource" "x" {
+  for_each = toset(["a"])
+  triggers = {
+    k        = each.key
+    v        = each.value
+    module   = path.module
+    ws       = terraform.workspace
+  }
+}
+resource "null_resource" "y" {
+  count = 2
+  triggers = { i = count.index }
+}
+"#,
+    );
+    let msgs = messages(&b, &u);
+    let undef: Vec<_> = msgs.iter().filter(|m| m.contains("undefined")).collect();
+    assert!(undef.is_empty(), "special refs must not be flagged undefined: {undef:?}");
+}

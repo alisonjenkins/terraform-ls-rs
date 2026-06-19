@@ -15,7 +15,7 @@
 mod support;
 
 use serde_json::json;
-use support::{contains_undefined_var, TestClient};
+use support::{any_message_contains, contains_undefined_var, TestClient};
 
 #[tokio::test]
 async fn peer_file_undefined_variable_clears_after_declaration_added() {
@@ -187,4 +187,44 @@ async fn code_action_envtype_inference_via_wire() {
 
     client.shutdown().await;
     fs::remove_dir_all(&workspace).ok();
+}
+
+// ── Repro: undefined-local diagnostic must refresh after the definition
+// is completed via did_change (the "typed the name, never rechecked" bug).
+#[tokio::test]
+async fn undefined_local_clears_when_def_completed_same_file() {
+    let mut client = TestClient::new();
+    client.initialize(None).await;
+    let u = "file:///mod/main.tf";
+
+    // Mid-edit: the definition name is still partial (`region_short_na`),
+    // while the reference is already complete (`region_short_name`).
+    client
+        .did_open(
+            u,
+            "locals {\n  region_short_na = \"x\"\n}\noutput \"o\" { value = local.region_short_name }\n",
+        )
+        .await;
+    client.settle(150).await;
+    let baseline = client.last_diagnostics(u).await;
+    assert!(
+        any_message_contains(&baseline, "region_short_name"),
+        "baseline: mid-edit state flags the unresolved reference; got {baseline:?}"
+    );
+
+    // Finish typing the definition name → now it's defined.
+    client
+        .did_change_full(
+            u,
+            2,
+            "locals {\n  region_short_name = \"x\"\n}\noutput \"o\" { value = local.region_short_name }\n",
+        )
+        .await;
+    client.settle(250).await;
+    let pushes = client.publishes_for(u).await;
+    let final_diags = pushes.last().cloned().unwrap_or_default();
+    assert!(
+        !any_message_contains(&final_diags, "region_short_name"),
+        "undefined-local must clear after the definition is completed; final: {final_diags:?}"
+    );
 }

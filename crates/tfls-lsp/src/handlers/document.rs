@@ -582,12 +582,23 @@ pub fn compute_diagnostics_with_lookup(
     }
 
     let module_dir = crate::handlers::util::parent_dir(uri);
-    out.extend(tag(
-        "terraform_undefined_reference",
-        undefined_reference_diagnostics(&doc.references, |kind| {
-            is_defined_in_module(state, module_dir.as_deref(), kind)
-        }),
-    ));
+    // Undefined-reference only on a CLEAN parse. While the file has a syntax
+    // error its references come from the lenient text fallback, which happily
+    // picks up a half-typed `local.region_short_na` and flags it as
+    // undefined — a transient false positive that, if it gets published and
+    // the next recompute is missed, sticks. Recovery also blanks broken
+    // lines, so a real declaration can momentarily vanish and make a valid
+    // reference look undefined. Suppress until the file parses cleanly (the
+    // syntax-error diagnostic still fires); this mirrors the gating that
+    // `unused_declarations` and schema validation already use.
+    if !doc.parsed.has_errors() {
+        out.extend(tag(
+            "terraform_undefined_reference",
+            undefined_reference_diagnostics(&doc.references, |kind| {
+                is_defined_in_module(state, module_dir.as_deref(), kind)
+            }),
+        ));
+    }
 
     // Body-based diagnostics run only on a CLEAN parse. When the parse
     // carried a syntax error the stored body is a best-effort recovery (its
