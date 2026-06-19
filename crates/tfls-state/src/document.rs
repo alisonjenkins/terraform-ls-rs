@@ -9,7 +9,7 @@ use ropey::Rope;
 use tfls_core::SymbolTable;
 use tfls_parser::{
     extract_references, extract_references_fallback, extract_symbols, extract_symbols_fallback,
-    lsp_position_to_byte_offset, parse_source_for_uri, ParsedFile, Reference,
+    lsp_position_to_byte_offset, parse_source_recovering_for_uri, ParsedFile, Reference,
 };
 use url::Url;
 
@@ -72,7 +72,7 @@ pub struct DocumentState {
 impl DocumentState {
     pub fn new(uri: Url, text: &str, version: i32) -> Self {
         let rope = Rope::from_str(text);
-        let parsed = parse_source_for_uri(text, uri.as_str());
+        let parsed = parse_source_recovering_for_uri(text, uri.as_str());
         let (symbols, references) = compute_analysis(&parsed, &uri, &rope);
         Self {
             uri,
@@ -226,7 +226,12 @@ impl DocumentState {
     /// keeps working while the user is mid-edit.
     pub fn reparse(&mut self) {
         let text = self.rope.to_string();
-        self.parsed = parse_source_for_uri(&text, self.uri.as_str());
+        self.parsed = parse_source_recovering_for_uri(&text, self.uri.as_str());
+        // Refresh symbols/references whenever we have *any* body — including a
+        // partially-recovered one. `compute_analysis` falls back to the
+        // lenient text scan when the parse carried errors, so a transient
+        // syntax error never drops declarations (which would cascade into
+        // spurious "undefined variable" warnings on every reference).
         if self.parsed.body.is_some() {
             let (symbols, references) = compute_analysis(&self.parsed, &self.uri, &self.rope);
             self.symbols = symbols;
@@ -241,12 +246,17 @@ impl DocumentState {
 
 fn compute_analysis(parsed: &ParsedFile, uri: &Url, rope: &Rope) -> (SymbolTable, Vec<Reference>) {
     match &parsed.body {
-        Some(body) => {
+        // Structured extraction only on a CLEAN parse. A partially-recovered
+        // body (errors present) has had its broken lines blanked out, so
+        // structured extraction would miss any declaration/reference that
+        // lived on a blanked line — exactly the cascade the text fallback
+        // exists to prevent. Use the fallback whenever the parse wasn't clean.
+        Some(body) if !parsed.has_errors() => {
             let symbols = extract_symbols(body, uri, rope);
             let references = extract_references(body, uri, rope);
             (symbols, references)
         }
-        None => {
+        _ => {
             // HCL parser bailed entirely — run the text-based
             // fallbacks so `variable "x" {}` declarations AND
             // `var.X` / `local.X` / `module.X` references around

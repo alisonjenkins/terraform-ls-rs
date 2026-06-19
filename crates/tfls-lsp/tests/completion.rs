@@ -3328,3 +3328,23 @@ async fn completion_inside_dynamic_over_real_block_control() {
         "control: real block_type dynamic content must offer rb_attr; got: {ls:?}"
     );
 }
+
+// ── Resilience: completion must work in a valid block while ANOTHER block
+// in the same file has a syntax error.
+#[tokio::test]
+async fn completion_works_despite_syntax_error_in_another_block() {
+    let u = uri("file:///resil.tf");
+    // Block 1 valid (cursor will complete here); block 2 is broken.
+    let src = "resource \"aws_instance\" \"web\" {\n  \n}\nresource \"aws_instance\" \"bad\" {\n  x = @@@\n}\n";
+    let backend = fresh_backend(src, &u);
+    install_aws_schema(&backend);
+    // Cursor on the blank indented line inside the VALID block (line 1, col 2).
+    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&u, Position::new(1, 2)))
+        .await
+        .expect("ok");
+    let ls = resp.map(labels).unwrap_or_default();
+    assert!(
+        ls.iter().any(|l| l == "ami"),
+        "completion must work in a valid block despite a syntax error elsewhere; got: {ls:?}"
+    );
+}

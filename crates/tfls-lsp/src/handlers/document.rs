@@ -589,7 +589,18 @@ pub fn compute_diagnostics_with_lookup(
         }),
     ));
 
-    if let Some(body) = doc.parsed.body.as_ref() {
+    // Body-based diagnostics run only on a CLEAN parse. When the parse
+    // carried a syntax error the stored body is a best-effort recovery (its
+    // broken lines blanked out by `parse_source_recovering`); validating it
+    // would mistake a blanked-out `ami = …` for a missing required attribute.
+    // Hover/completion still use the recovered body — that's the point — but
+    // diagnostics stay exactly as they were before recovery existed.
+    if let Some(body) = doc
+        .parsed
+        .body
+        .as_ref()
+        .filter(|_| !doc.parsed.has_errors())
+    {
         let lookup = StateStoreSchemaLookup { state };
         let hints = RegistryDocsHints { state };
         out.extend(tag(

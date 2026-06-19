@@ -835,3 +835,41 @@ async fn hover_inside_dynamic_over_block_like_attr() {
         "EXPLORE: hover on a field inside dynamic over a block-like attribute returned None"
     );
 }
+
+// ── Resilience: a syntax error elsewhere in the file must not stop hover
+// from working on the still-valid blocks (so the user can read docs while
+// fixing the error).
+#[tokio::test]
+async fn hover_works_despite_syntax_error_in_another_block() {
+    let u = uri("file:///resil.tf");
+    // First block valid; second block has a stray-token syntax error.
+    let src = "resource \"aws_instance\" \"web\" {\n  ami = \"x\"\n}\n\nresource \"aws_instance\" \"bad\" {\n  instance_type = @@@\n}\n";
+    let b = backend_with(src, &u);
+    let schema: ProviderSchemas = sonic_rs::from_str(
+        r#"{
+        "format_version": "1.0",
+        "provider_schemas": {
+            "registry.terraform.io/hashicorp/aws": {
+                "provider": { "version": 0, "block": {} },
+                "resource_schemas": {
+                    "aws_instance": {
+                        "version": 1,
+                        "block": { "attributes": {
+                            "ami": { "type": "string", "required": true, "description": "The AMI to launch." }
+                        } }
+                    }
+                }
+            }
+        }
+    }"#,
+    )
+    .expect("parse schema");
+    b.state.install_schemas(schema);
+    // Hover on `ami` in the VALID block (line 1).
+    let md = hover_markdown(&b, &u, Position::new(1, 3)).await;
+    let md = md.expect("hover should still work despite a syntax error elsewhere");
+    assert!(
+        md.contains("The AMI to launch") || md.contains("ami"),
+        "expected real attribute docs from the recovered body, got: {md}"
+    );
+}

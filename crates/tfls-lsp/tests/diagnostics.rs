@@ -1908,3 +1908,47 @@ resource "null_resource" "x" {
     let hits = diags_with_code(&b, &main_uri, "terraform_for_each_unknown_keys");
     assert_eq!(hits.len(), 1, "default must restore: {hits:?}");
 }
+
+#[test]
+fn recovered_body_does_not_emit_false_schema_diagnostics() {
+    // A required attribute (`ami`) sits on a line that has a syntax error.
+    // The recovered body blanks that line, so the block parses WITHOUT ami —
+    // but schema validation must NOT run on a recovered (error-carrying)
+    // body, otherwise it would falsely report `missing required attribute
+    // ami`. The syntax error itself must still be reported.
+    let b = backend();
+    let schemas: tfls_schema::ProviderSchemas = sonic_rs::from_str(
+        r#"{
+        "format_version": "1.0",
+        "provider_schemas": {
+            "registry.terraform.io/hashicorp/aws": {
+                "provider": { "version": 0, "block": {} },
+                "resource_schemas": {
+                    "aws_instance": {
+                        "version": 1,
+                        "block": { "attributes": {
+                            "ami": { "type": "string", "required": true }
+                        } }
+                    }
+                },
+                "data_source_schemas": {}
+            }
+        }
+    }"#,
+    )
+    .expect("schemas parse");
+    b.state.install_schemas(schemas);
+
+    let u = uri("file:///project/main.tf");
+    // `ami` value is a stray token → syntax error on that line.
+    insert(&b, &u, "resource \"aws_instance\" \"web\" {\n  ami = @@@\n}\n");
+    let msgs = messages(&b, &u);
+    assert!(
+        msgs.iter().any(|m| m.contains("syntax error")),
+        "syntax error must still be reported: {msgs:?}"
+    );
+    assert!(
+        msgs.iter().all(|m| !m.contains("missing required attribute")),
+        "recovered body must NOT emit a false missing-required diagnostic: {msgs:?}"
+    );
+}
