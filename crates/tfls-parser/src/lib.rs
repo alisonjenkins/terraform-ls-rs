@@ -28,4 +28,4 @@ pub use position::{
 pub use references::{extract_references, Reference, ReferenceKind};
 pub use safe::{parse_body, BodyParseError, ParsePanic};
 pub use tfvars::parse_tfvars;
-pub use traversal::extract_symbols;
+pub use traversal::{extract_symbols, extract_test_symbols};

@@ -134,7 +134,8 @@ pub fn discover_terraform_files_in_dir(dir: &Path) -> Result<Vec<PathBuf>, Walke
 /// Covers:
 /// - `.tf`, `.tf.json` — Terraform config
 /// - `.tofu`, `.tofu.json` — OpenTofu config
-/// - `.tftest.hcl`, `.tofutest.hcl` — Terraform/OpenTofu test files
+/// - `.tftest.hcl`, `.tftest.json`, `.tofutest.hcl`, `.tofutest.json` —
+///   Terraform/OpenTofu test files
 ///
 /// Bare `.hcl` is intentionally excluded: Packer, Nomad, Consul and other
 /// HashiCorp tools also use it, so a naive match produces false positives.
@@ -148,7 +149,9 @@ pub fn is_terraform_file(path: &Path) -> bool {
         || name.ends_with(".tofu")
         || name.ends_with(".tofu.json")
         || name.ends_with(".tftest.hcl")
+        || name.ends_with(".tftest.json")
         || name.ends_with(".tofutest.hcl")
+        || name.ends_with(".tofutest.json")
 }
 
 /// Does this path look like a Terraform variable-values file?

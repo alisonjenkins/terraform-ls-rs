@@ -54,7 +54,7 @@ pub fn parse_source(source: &str) -> ParsedFile {
 /// the URI extension. `.tf.json` files go through the JSON parser;
 /// everything else uses the HCL parser.
 pub fn parse_source_for_uri(source: &str, uri_or_path: &str) -> ParsedFile {
-    if uri_or_path.ends_with(".tf.json") {
+    if uri_or_path.ends_with(".tf.json") || tfls_core::uri::is_tftest_json(uri_or_path) {
         crate::json::parse_json_source(source)
     } else {
         parse_source(source)
@@ -104,7 +104,7 @@ pub fn parse_source_recovering(source: &str) -> ParsedFile {
 /// recovery path yet (the structured `tf.json` parser is all-or-nothing),
 /// so JSON files fall back to the strict parser.
 pub fn parse_source_recovering_for_uri(source: &str, uri_or_path: &str) -> ParsedFile {
-    if uri_or_path.ends_with(".tf.json") {
+    if uri_or_path.ends_with(".tf.json") || tfls_core::uri::is_tftest_json(uri_or_path) {
         crate::json::parse_json_source(source)
     } else {
         parse_source_recovering(source)

@@ -123,6 +123,37 @@ pub fn extract_symbols(body: &Body, uri: &Url, rope: &Rope) -> SymbolTable {
     table
 }
 
+/// Extract `run "<label>"` blocks from a test file (`.tftest.hcl`) as
+/// outline symbols. These live OUTSIDE the module [`SymbolTable`] — a test
+/// file contributes no module symbols (see `compute_analysis`) — so they
+/// get their own list, consumed by document-outline and `run.<label>`
+/// navigation. `kind` is set to [`SymbolKind::Module`] as a placeholder;
+/// the LSP layer renders test runs with its own `SymbolKind`.
+pub fn extract_test_symbols(body: &Body, uri: &Url, rope: &Rope) -> Vec<Symbol> {
+    let mut runs = Vec::new();
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
+        if block.ident.as_str() != "run" {
+            continue;
+        }
+        let Some(label) = block.labels.first() else {
+            continue;
+        };
+        let Some(name_range) = label_range(label, rope) else {
+            continue;
+        };
+        let name = label_str(label).to_string();
+        if let Some(sym) =
+            build_symbol(&name, SymbolKind::Module, block, uri, rope, name_range, None, None)
+        {
+            runs.push(sym);
+        }
+    }
+    runs
+}
+
 fn label_str(label: &BlockLabel) -> &str {
     match label {
         BlockLabel::String(s) => s.value().as_str(),
