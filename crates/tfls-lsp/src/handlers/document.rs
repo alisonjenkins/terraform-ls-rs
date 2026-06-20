@@ -431,33 +431,15 @@ pub async fn did_close(backend: &Backend, params: DidCloseTextDocumentParams) {
 /// `changed_uri` itself — `publish_current_diagnostics` covers
 /// that) get the push.
 pub(crate) async fn publish_peer_diagnostics(backend: &Backend, changed_uri: &Url) {
-    let Some(module_dir) = crate::handlers::util::parent_dir(changed_uri) else {
-        return;
-    };
-
-    let peers: Vec<Url> = backend
-        .state
-        .documents
-        .iter()
-        .filter_map(|entry| {
-            let uri = entry.key();
-            if uri == changed_uri {
-                return None;
-            }
-            if !backend.state.is_open(uri) {
-                return None;
-            }
-            let parent = crate::handlers::util::parent_dir(uri)?;
-            if parent != module_dir {
-                return None;
-            }
-            Some(uri.clone())
-        })
-        .collect();
+    // Peers share `changed_uri`'s MODULE SCOPE, not just its parent dir: a
+    // `.tftest.hcl` in `tests/` resolves its `var.X` / `output.X` against
+    // the module one dir up, so editing that module's `.tf` must refresh
+    // the open test file (and vice-versa). `open_peers_in_scope` pairs them
+    // via `module_scope_dir`.
+    let peers: Vec<Url> = crate::handlers::util::open_peers_in_scope(&backend.state, changed_uri);
 
     tracing::info!(
         changed = %changed_uri,
-        module_dir = %module_dir.display(),
         peer_count = peers.len(),
         "publish_peer_diagnostics: selected peers"
     );
