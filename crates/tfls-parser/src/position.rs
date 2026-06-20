@@ -1,15 +1,66 @@
 //! Position conversions between LSP coordinates and byte offsets.
 //!
 //! LSP uses 0-indexed (line, character) positions where `character` is a
-//! UTF-16 code-unit offset. We convert via `ropey`, which tracks UTF-8 and
-//! line breaks efficiently. For now we treat `character` as a UTF-8 byte
-//! offset within the line; a follow-up will handle UTF-16 properly once
-//! LSP clients request it via `positionEncodings`.
+//! UTF-16 code-unit offset. We track UTF-8 / UTF-16 via `ropey`, but we
+//! compute *line boundaries ourselves* by scanning for `\n` only.
+//!
+//! Why not lean on `rope.line()` / `rope.len_lines()`? `ropey` is pulled
+//! with its default `unicode_lines` feature, under which it treats U+000B
+//! (VT), U+000C (FF), U+0085 (NEL), U+2028 (LS), U+2029 (PS) and a lone
+//! U+000D (CR) as line breaks. LSP clients (VS Code, Neovim, …) split lines
+//! on `\n` / `\r\n` / `\r` only. So if an earlier line contains one of the
+//! extra Unicode break characters — e.g. inside a string literal — ropey's
+//! line index runs *ahead* of the client's, and every subsequent position
+//! maps to the wrong line (wrong byte offset for hover / goto-def /
+//! references / rename, and an off-by-N line in the reverse direction).
+//!
+//! To stay client-compatible regardless of ropey's feature flags, the line
+//! model here is `\n`-only: a line break is a single `\n`, and a preceding
+//! `\r` (the `\r\n` case) is folded into that same break. Note this is
+//! slightly stricter than the LSP "`\n` / `\r\n` / `\r`" set — a *lone* `\r`
+//! is not treated as a break — but lone-CR line endings are vanishingly
+//! rare in `.tf` sources, and crucially this never runs *ahead* of the
+//! client the way the Unicode-break set does, so cursor positions on later
+//! lines stay correct.
 
 use lsp_types::{Position, Range};
 use ropey::Rope;
 
 use crate::error::ParseError;
+
+/// `\n`-only line boundaries for the rope, as absolute byte offsets.
+///
+/// Returns the start byte of every line. The first entry is always `0`;
+/// each subsequent entry is the byte immediately after a `\n`. The number
+/// of lines is `line_starts.len()` (a trailing `\n` produces a final empty
+/// line, matching how LSP clients count lines).
+fn line_start_bytes(rope: &Rope) -> Vec<usize> {
+    let mut starts = vec![0usize];
+    // Iterate the underlying chunks to find `\n` bytes without paying a
+    // full `to_string()` allocation. Chunk boundaries never split a
+    // codepoint, and `\n` is a single byte, so a byte scan per chunk is
+    // sufficient and correct.
+    let mut byte_pos = 0usize;
+    for chunk in rope.chunks() {
+        for &b in chunk.as_bytes() {
+            byte_pos += 1;
+            if b == b'\n' {
+                starts.push(byte_pos);
+            }
+        }
+    }
+    starts
+}
+
+/// Byte range `[start, end)` of the line at `line_idx` in the `\n`-only
+/// model, given precomputed `line_starts`. `end` excludes nothing — it is
+/// the start of the next line (or the document end for the last line), so
+/// the slice includes any trailing `\n` / `\r\n`.
+fn line_byte_range(line_starts: &[usize], line_idx: usize, total_bytes: usize) -> (usize, usize) {
+    let start = line_starts[line_idx];
+    let end = line_starts.get(line_idx + 1).copied().unwrap_or(total_bytes);
+    (start, end)
+}
 
 /// Convert an LSP `Position` to an absolute byte offset in the rope.
 ///
@@ -22,7 +73,8 @@ use crate::error::ParseError;
 /// and dropping those as errors produces silent empty completion.
 pub fn lsp_position_to_byte_offset(rope: &Rope, pos: Position) -> Result<usize, ParseError> {
     let line_idx = pos.line as usize;
-    let total_lines = rope.len_lines();
+    let line_starts = line_start_bytes(rope);
+    let total_lines = line_starts.len();
     if line_idx >= total_lines {
         return Err(ParseError::LineOutOfBounds {
             line: pos.line,
@@ -30,8 +82,11 @@ pub fn lsp_position_to_byte_offset(rope: &Rope, pos: Position) -> Result<usize, 
         });
     }
 
-    let line_start_byte = rope.line_to_byte(line_idx);
-    let line = rope.line(line_idx);
+    let total_bytes = rope.len_bytes();
+    let (line_start_byte, line_end_byte) = line_byte_range(&line_starts, line_idx, total_bytes);
+    // `\n`-only line slice — may contain interior Unicode "line breaks"
+    // (U+2028, U+0085, …) that the client treats as ordinary characters.
+    let line = rope.byte_slice(line_start_byte..line_end_byte);
 
     // LSP `Position.character` is a UTF-16 code-unit offset within the
     // line (the default encoding; we don't negotiate `positionEncoding`).
@@ -48,8 +103,6 @@ pub fn lsp_position_to_byte_offset(rope: &Rope, pos: Position) -> Result<usize, 
             if n > 0 && line.char(n - 1) == '\r' {
                 n -= 1;
             }
-        } else if n > 0 && line.char(n - 1) == '\r' {
-            n -= 1;
         }
         n
     };
@@ -70,12 +123,20 @@ pub fn byte_offset_to_lsp_position(rope: &Rope, offset: usize) -> Result<Positio
         });
     }
 
-    let line_idx = rope.byte_to_line(offset);
-    let line_start_byte = rope.line_to_byte(line_idx);
+    let line_starts = line_start_bytes(rope);
+    // Largest line index whose start byte is <= offset (the `\n`-only line
+    // containing `offset`).
+    let line_idx = match line_starts.binary_search(&offset) {
+        Ok(idx) => idx,
+        Err(idx) => idx - 1,
+    };
+    let line_start_byte = line_starts[line_idx];
+
     // Emit a UTF-16 code-unit column (LSP's default `Position.character`
     // encoding), not a byte difference — they diverge on multibyte lines.
-    let char_in_line = rope.byte_to_char(offset) - rope.byte_to_char(line_start_byte);
-    let character = rope.line(line_idx).slice(..char_in_line).len_utf16_cu();
+    let character = rope
+        .byte_slice(line_start_byte..offset)
+        .len_utf16_cu();
 
     Ok(Position {
         line: line_idx as u32,
@@ -214,6 +275,46 @@ mod tests {
         let r = rope("abc");
         let err = byte_offset_to_lsp_position(&r, 999);
         assert!(matches!(err, Err(ParseError::ByteOffsetOutOfBounds { .. })));
+    }
+
+    #[test]
+    fn unicode_line_separator_does_not_split_lines() {
+        // U+2028 (LINE SEPARATOR) inside a string literal on line 0.
+        // ropey's default `unicode_lines` feature treats U+2028 as a line
+        // break, so `rope.line()` would see an extra line and run ahead of
+        // the LSP client, which splits on `\n` only. The symbol on the
+        // (client-)second line must still map to its real byte offset.
+        let src = "a = \"x\u{2028}y\"\nfoo = 1\n";
+        let r = rope(src);
+
+        // Byte offset of `foo` in the source (after the first `\n`).
+        let foo_byte = src.find("foo").expect("foo present");
+        // In the `\n`-only / client line model, `foo` is at line 1, col 0.
+        let pos = Position::new(1, 0);
+
+        let off = lsp_position_to_byte_offset(&r, pos).expect("valid position");
+        assert_eq!(
+            off, foo_byte,
+            "U+2028 on line 0 must not shift line 1 — got byte {off}, want {foo_byte}"
+        );
+
+        // Round-trips back to the same line/character under the `\n` model.
+        let back = byte_offset_to_lsp_position(&r, off).expect("valid offset");
+        assert_eq!(back, pos, "round-trip line/char mismatch");
+    }
+
+    #[test]
+    fn unicode_nel_does_not_split_lines() {
+        // U+0085 (NEL) is also in ropey's `unicode_lines` set but not the
+        // LSP break set. Same invariant as U+2028.
+        let src = "a = \"x\u{0085}y\"\nbar = 2\n";
+        let r = rope(src);
+        let bar_byte = src.find("bar").expect("bar present");
+        let pos = Position::new(1, 0);
+        let off = lsp_position_to_byte_offset(&r, pos).expect("valid position");
+        assert_eq!(off, bar_byte, "U+0085 on line 0 must not shift line 1");
+        let back = byte_offset_to_lsp_position(&r, off).expect("valid offset");
+        assert_eq!(back, pos);
     }
 
     #[test]
