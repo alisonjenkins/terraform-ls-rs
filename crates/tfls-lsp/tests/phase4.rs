@@ -1455,6 +1455,40 @@ fn doc_change_edits(
     out
 }
 
+/// Collect per-URI edits from a `DocumentChanges::Edits` workspace
+/// edit (the versioned `TextDocumentEdit` list the format actions
+/// now emit). Also returns each edit's document version so callers
+/// can assert it is `Some(version)` — the whole point of the
+/// versioned encoding is that a stale edit gets rejected.
+fn doc_change_text_edits(
+    action: &lsp_types::CodeAction,
+) -> std::collections::HashMap<lsp_types::Uri, (Option<i32>, Vec<lsp_types::TextEdit>)> {
+    use lsp_types::{DocumentChanges, OneOf};
+    let mut out: std::collections::HashMap<
+        lsp_types::Uri,
+        (Option<i32>, Vec<lsp_types::TextEdit>),
+    > = std::collections::HashMap::new();
+    let dc = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.document_changes.as_ref())
+        .expect("documentChanges");
+    let DocumentChanges::Edits(edits) = dc else {
+        panic!("expected Edits");
+    };
+    for te in edits {
+        let entry = out
+            .entry(te.text_document.uri.clone())
+            .or_insert_with(|| (te.text_document.version, Vec::new()));
+        for e in &te.edits {
+            if let OneOf::Left(edit) = e {
+                entry.1.push(edit.clone());
+            }
+        }
+    }
+    out
+}
+
 /// True when `action` includes a `CreateFile` op for `target`.
 fn has_create_file(action: &lsp_types::CodeAction, target: &Url) -> bool {
     use lsp_types::{DocumentChangeOperation, DocumentChanges, ResourceOp};
@@ -1961,12 +1995,16 @@ async fn format_action_file_emits_when_unformatted() {
 
     let actions = all_actions_for(&backend, &u).await;
     let action = find_action(&actions, "Format file");
-    let edits = action
-        .edit
-        .as_ref()
-        .and_then(|e| e.changes.as_ref())
-        .and_then(|c| c.get(&tfls_core::uri::url_to_uri(&u)))
+    // Versioned document_changes, not the version-less `changes` map.
+    assert!(
+        action.edit.as_ref().and_then(|e| e.changes.as_ref()).is_none(),
+        "format action must not use the version-less changes map"
+    );
+    let map = doc_change_text_edits(action);
+    let (version, edits) = map
+        .get(&tfls_core::uri::url_to_uri(&u))
         .expect("file edit");
+    assert!(version.is_some(), "edit must carry a document version");
     assert_eq!(edits.len(), 1, "single whole-file TextEdit");
     assert!(
         edits[0].new_text.contains("ami           = \"a\""),
@@ -2018,11 +2056,11 @@ async fn format_action_module_covers_dirty_siblings_only() {
 
     let actions = all_actions_for(&backend, &a).await;
     let action = find_action(&actions, "Format 2 .tf files in this module");
-    let changes = action
-        .edit
-        .as_ref()
-        .and_then(|e| e.changes.as_ref())
-        .expect("changes map");
+    assert!(
+        action.edit.as_ref().and_then(|e| e.changes.as_ref()).is_none(),
+        "format action must not use the version-less changes map"
+    );
+    let changes = doc_change_text_edits(action);
     assert_eq!(changes.len(), 2, "exactly the two dirty siblings");
     assert!(
         !changes.contains_key(&tfls_core::uri::url_to_uri(&a)),
@@ -2036,6 +2074,9 @@ async fn format_action_module_covers_dirty_siblings_only() {
         changes.contains_key(&tfls_core::uri::url_to_uri(&c)),
         "dirty c.tf included"
     );
+    for (uri, (version, _)) in &changes {
+        assert!(version.is_some(), "edit for {uri:?} must carry a version");
+    }
 }
 
 #[tokio::test]
@@ -2051,13 +2092,16 @@ async fn format_action_workspace_skips_clean_files() {
 
     let actions = all_actions_for(&backend, &dirty).await;
     let action = find_action(&actions, "Format 1 .tf file in workspace");
-    let changes = action
-        .edit
-        .as_ref()
-        .and_then(|e| e.changes.as_ref())
-        .unwrap();
+    assert!(
+        action.edit.as_ref().and_then(|e| e.changes.as_ref()).is_none(),
+        "format action must not use the version-less changes map"
+    );
+    let changes = doc_change_text_edits(action);
     assert_eq!(changes.len(), 1);
-    assert!(changes.contains_key(&tfls_core::uri::url_to_uri(&dirty)));
+    let (version, _) = changes
+        .get(&tfls_core::uri::url_to_uri(&dirty))
+        .expect("dirty edit");
+    assert!(version.is_some(), "edit must carry a document version");
     assert!(!changes.contains_key(&tfls_core::uri::url_to_uri(&clean)));
 }
 
@@ -2105,12 +2149,8 @@ async fn format_action_respects_runtime_style_toggle() {
             CodeActionOrCommand::CodeAction(ca) if ca.title == "Format file" => Some(ca),
             _ => None,
         }) {
-            let edits = a
-                .edit
-                .as_ref()
-                .and_then(|e| e.changes.as_ref())
-                .and_then(|c| c.get(&tfls_core::uri::url_to_uri(&u)))
-                .unwrap();
+            let map = doc_change_text_edits(a);
+            let (_, edits) = map.get(&tfls_core::uri::url_to_uri(&u)).unwrap();
             let z_pos = edits[0].new_text.find('z').unwrap();
             let a_pos = edits[0].new_text.find("\"a\"").unwrap();
             assert!(
@@ -2131,12 +2171,8 @@ async fn format_action_respects_runtime_style_toggle() {
 
     let actions = all_actions_for(&backend, &u).await;
     let action = find_action(&actions, "Format file");
-    let edits = action
-        .edit
-        .as_ref()
-        .and_then(|e| e.changes.as_ref())
-        .and_then(|c| c.get(&tfls_core::uri::url_to_uri(&u)))
-        .unwrap();
+    let map = doc_change_text_edits(action);
+    let (_, edits) = map.get(&tfls_core::uri::url_to_uri(&u)).unwrap();
     let a_pos = edits[0].new_text.find("\"a\"").unwrap();
     let z_pos = edits[0].new_text.find("\"z\"").unwrap();
     assert!(

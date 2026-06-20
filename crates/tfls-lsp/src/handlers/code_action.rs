@@ -1037,6 +1037,9 @@ fn emit_format_actions(
 ) {
     use crate::handlers::code_action_scope::scope_kind;
     use crate::handlers::formatting::slice_text;
+    use lsp_types::{
+        DocumentChanges, OneOf, OptionalVersionedTextDocumentIdentifier, TextDocumentEdit,
+    };
 
     let style = state.config.snapshot().format_style;
 
@@ -1086,19 +1089,25 @@ fn emit_format_actions(
     let mut intra_call_cache: FxHashMap<Url, Option<TextEdit>> = FxHashMap::default();
 
     for scope in [Scope::File, Scope::Module, Scope::Workspace] {
-        let mut edits_by_uri: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        // Collect a versioned edit per file. The whole-document
+        // replace must carry the doc's version so a conforming
+        // client rejects the edit if the buffer has advanced past
+        // it (the "format reverts my edits" class). Hence
+        // `document_changes` with a `Some(version)` identifier
+        // rather than the version-less `changes` map.
+        let mut versioned_edits: Vec<(Url, i32, TextEdit)> = Vec::new();
         for_each_doc_in_scope(state, primary_uri, scope, |doc_uri, doc| {
             let cached = intra_call_cache
                 .entry(doc_uri.clone())
                 .or_insert_with(|| scan_format_cached(doc, style));
             if let Some(edit) = cached.clone() {
-                edits_by_uri.insert(doc_uri.clone(), vec![edit]);
+                versioned_edits.push((doc_uri.clone(), doc.version, edit));
             }
         });
-        if edits_by_uri.is_empty() {
+        if versioned_edits.is_empty() {
             continue;
         }
-        let count = edits_by_uri.len();
+        let count = versioned_edits.len();
         let title = match scope {
             Scope::File => "Format file".to_string(),
             Scope::Module => format!(
@@ -1113,11 +1122,21 @@ fn emit_format_actions(
             // never yields them in this loop's iteration set.
             _ => continue,
         };
+        let edits: Vec<TextDocumentEdit> = versioned_edits
+            .into_iter()
+            .map(|(uri, version, edit)| TextDocumentEdit {
+                text_document: OptionalVersionedTextDocumentIdentifier {
+                    uri: tfls_core::uri::url_to_uri(&uri),
+                    version: Some(version),
+                },
+                edits: vec![OneOf::Left(edit)],
+            })
+            .collect();
         actions.push(CodeActionOrCommand::CodeAction(CodeAction {
             title,
             kind: Some(scope_kind(scope, "format")),
             edit: Some(WorkspaceEdit {
-                changes: Some(tfls_core::uri::changes_to_uri(edits_by_uri)),
+                document_changes: Some(DocumentChanges::Edits(edits)),
                 ..Default::default()
             }),
             ..Default::default()
@@ -4271,6 +4290,8 @@ fn is_deprecated_template_file(diag: &Diagnostic) -> bool {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use tfls_state::DocumentState;
+    use url::Url;
 
     #[test]
     fn extracts_attribute_name_from_message() {
@@ -4279,5 +4300,59 @@ mod tests {
             Some("ami")
         );
         assert_eq!(missing_attr_name("no ticks here"), None);
+    }
+
+    /// Regression: File/Module/Workspace format actions must encode
+    /// their whole-document replace as a versioned `document_changes`
+    /// (so a conforming client rejects a stale edit) rather than the
+    /// version-less `changes` map — which silently overwrites buffer
+    /// text the user typed after the edit was computed.
+    #[test]
+    fn file_format_action_uses_versioned_document_changes() {
+        use lsp_types::DocumentChanges;
+
+        let uri = Url::parse("file:///fmt_test.tf").expect("url");
+        // Misaligned assignment — `terraform fmt` (minimal style)
+        // realigns the `=`, so scan_format_cached yields an edit.
+        let unformatted = "variable \"a\" {\n  type    = string\n  default = \"x\"\n  k = 1\n}\n";
+        let version = 7;
+
+        let state = StateStore::new();
+        state.upsert_document(DocumentState::new(uri.clone(), unformatted, version));
+
+        let mut actions = Vec::new();
+        emit_format_actions(&state, &uri, None, &mut actions);
+
+        let file_action = actions
+            .iter()
+            .find_map(|a| match a {
+                CodeActionOrCommand::CodeAction(ca) if ca.title == "Format file" => Some(ca),
+                _ => None,
+            })
+            .expect("expected a 'Format file' action — fixture must be unformatted");
+
+        let edit = file_action.edit.as_ref().expect("workspace edit");
+
+        // Must NOT use the version-less changes map.
+        assert!(
+            edit.changes.is_none(),
+            "format action must not use the version-less `changes` map"
+        );
+
+        // Must use document_changes carrying a Some(version) identifier.
+        let dc = edit
+            .document_changes
+            .as_ref()
+            .expect("format action must use document_changes");
+        let edits = match dc {
+            DocumentChanges::Edits(edits) => edits,
+            DocumentChanges::Operations(_) => panic!("expected Edits, got Operations"),
+        };
+        assert_eq!(edits.len(), 1, "single file edited under File scope");
+        assert_eq!(
+            edits[0].text_document.version,
+            Some(version),
+            "edit must carry the document's version so a stale edit is rejected"
+        );
     }
 }
