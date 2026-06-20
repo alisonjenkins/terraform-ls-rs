@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.13.1](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.13.0...v0.13.1) (2026-06-20)
+
+
+### Bug Fixes
+
+* **lsp:** emit versioned document_changes for format code-actions ([9d7b266](https://github.com/alisonjenkins/terraform-ls-rs/commit/9d7b266ce86340fc5804621302c4fa56531d3822))
+* **lsp:** publish on scan-complete + canonicalize dir-scan keys ([50fd31d](https://github.com/alisonjenkins/terraform-ls-rs/commit/50fd31d9a43e3f21a40796beb83be28123f0eaa2))
+* **lsp:** UTF-16 end column in whole_document_range ([3f80d12](https://github.com/alisonjenkins/terraform-ls-rs/commit/3f80d1200483bb0f9fdf47cae60bdd212ea2660f))
+* **parser:** reject pathologically deep nesting before hcl-edit ([b27db9c](https://github.com/alisonjenkins/terraform-ls-rs/commit/b27db9ca957585dc60180f76d370a5785bdf84a2))
+* **parser:** use an LSP-compatible \n-only line model for positions ([45e8394](https://github.com/alisonjenkins/terraform-ls-rs/commit/45e839414a6f5ca38fcd860bbb07f0655a91eff6))
+
 ## [0.13.0](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.12.4...v0.13.0) (2026-06-20)
 
 
