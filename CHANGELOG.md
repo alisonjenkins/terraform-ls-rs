@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.13.2](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.13.1...v0.13.2) (2026-06-20)
+
+
+### Bug Fixes
+
+* **lsp:** emit versioned document_changes for rename ([6bdc4d4](https://github.com/alisonjenkins/terraform-ls-rs/commit/6bdc4d42c7b38f406ce2a7d51e162250fccd7f92))
+* **lsp:** reject invalid identifiers in rename ([edbe5cf](https://github.com/alisonjenkins/terraform-ls-rs/commit/edbe5cf7a4ad3af2fe0ae6711bea06e943dba6a6))
+* **state:** content-hash the index cache (catch restored-stale files) ([e73fcbd](https://github.com/alisonjenkins/terraform-ls-rs/commit/e73fcbd3422ee256790010ada363ce7999c349bf))
+* **state:** open-guard index-cache hydration ([b15e21e](https://github.com/alisonjenkins/terraform-ls-rs/commit/b15e21e2ce4ca3684b193cc4a0272e04e37aea38))
+* **state:** sweep orphaned index-cache temp files on save ([b7129bb](https://github.com/alisonjenkins/terraform-ls-rs/commit/b7129bbf0df97bc987451795821343bf202b5250))
+* **state:** validate workspace_root when loading the index cache ([4a18cc3](https://github.com/alisonjenkins/terraform-ls-rs/commit/4a18cc3883a47ce589e07b1f907c0219fc8d5a65))
+
 ## [0.13.1](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.13.0...v0.13.1) (2026-06-20)
 
 
