@@ -41,3 +41,53 @@ pub fn changes_to_uri<S: std::hash::BuildHasher + Default>(
 pub fn uri_to_url(uri: &lsp_types::Uri) -> Option<Url> {
     Url::parse(uri.as_str()).ok()
 }
+
+/// Whether `uri_or_path` names a Terraform/OpenTofu TEST file
+/// (`.tftest.hcl` / `.tftest.json` / `.tofutest.hcl` / `.tofutest.json`).
+///
+/// Test files are parsed like HCL/JSON but are NOT module configuration:
+/// their `run`/`variables`/`provider` blocks must not contribute symbols to
+/// the module index, the module-only diagnostics don't apply, and their
+/// references resolve against the module UNDER TEST, not the test file's own
+/// directory. The parser, walker, diagnostics and completion all branch on
+/// this.
+pub fn is_tftest_uri(uri_or_path: &str) -> bool {
+    uri_or_path.ends_with(".tftest.hcl")
+        || uri_or_path.ends_with(".tftest.json")
+        || uri_or_path.ends_with(".tofutest.hcl")
+        || uri_or_path.ends_with(".tofutest.json")
+}
+
+/// Whether `uri_or_path` is a JSON-syntax test file (`.tftest.json` /
+/// `.tofutest.json`) — routed to the JSON parser, like `.tf.json`.
+pub fn is_tftest_json(uri_or_path: &str) -> bool {
+    uri_or_path.ends_with(".tftest.json") || uri_or_path.ends_with(".tofutest.json")
+}
+
+#[cfg(test)]
+mod tftest_kind_tests {
+    use super::{is_tftest_json, is_tftest_uri};
+
+    #[test]
+    fn recognizes_test_files() {
+        for p in [
+            "file:///m/a.tftest.hcl",
+            "file:///m/tests/a.tftest.json",
+            "/m/a.tofutest.hcl",
+            "/m/a.tofutest.json",
+        ] {
+            assert!(is_tftest_uri(p), "{p} should be a test file");
+        }
+        for p in ["file:///m/main.tf", "/m/x.tfvars", "/m/a.tf.json", "/m/a.hcl"] {
+            assert!(!is_tftest_uri(p), "{p} should NOT be a test file");
+        }
+    }
+
+    #[test]
+    fn json_variant_detection() {
+        assert!(is_tftest_json("/m/a.tftest.json"));
+        assert!(is_tftest_json("/m/a.tofutest.json"));
+        assert!(!is_tftest_json("/m/a.tftest.hcl"));
+        assert!(!is_tftest_json("/m/a.tf.json"));
+    }
+}
