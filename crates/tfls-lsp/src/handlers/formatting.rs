@@ -229,14 +229,19 @@ pub async fn on_type_formatting(
 }
 
 pub(super) fn whole_document_range(rope: &Rope) -> Range {
-    let last_line = rope.len_lines().saturating_sub(1) as u32;
-    let last_line_len = rope
-        .get_line(last_line as usize)
-        .map(|l| l.len_chars() as u32)
-        .unwrap_or(0);
+    // The end must be a UTF-16 code-unit column to match the server's default
+    // positionEncoding (every other position the server emits goes through
+    // `byte_offset_to_lsp_position`, which uses `len_utf16_cu()`). Using
+    // `len_chars()` undercounts on a non-newline-terminated final line that
+    // contains a non-BMP scalar (an emoji is 1 char but 2 UTF-16 units), so a
+    // whole-document replace would leave the trailing UTF-16 unit(s) appended
+    // after the formatted text — silent buffer corruption. Anchoring the end
+    // at the rope's last byte offset reuses the exact same conversion.
+    let end = byte_offset_to_lsp_position(rope, rope.len_bytes())
+        .unwrap_or_else(|_| Position::new(rope.len_lines().saturating_sub(1) as u32, 0));
     Range {
         start: Position::new(0, 0),
-        end: Position::new(last_line, last_line_len),
+        end,
     }
 }
 
@@ -322,6 +327,33 @@ mod tests {
             "formatted block must not end with a newline; got:\n{edit:?}"
         );
         assert!(edit.contains("type        = list(string)"));
+    }
+
+    // Regression (MED-5): the whole-document range end column must be a
+    // UTF-16 code-unit count, not a `char` count. On a final line that is NOT
+    // newline-terminated and holds a non-BMP scalar (emoji), `len_chars()`
+    // undercounts vs UTF-16 (🎉 is 1 char but 2 UTF-16 units). An undercounted
+    // end leaves trailing UTF-16 unit(s) un-replaced by a whole-document edit.
+    #[test]
+    fn whole_document_range_end_is_utf16_on_non_bmp_final_line() {
+        let src = "resource \"x\" \"y\" {}\n# 🎉 done";
+        let rope = Rope::from_str(src);
+        let range = whole_document_range(&rope);
+        assert_eq!(range.start, Position::new(0, 0));
+
+        // Final line "# 🎉 done": 8 chars, but 🎉 is 2 UTF-16 units → 9 units.
+        let last_line = rope.len_lines().saturating_sub(1);
+        let last_line_slice = rope.line(last_line);
+        let utf16_len = last_line_slice.len_utf16_cu() as u32;
+        let char_len = last_line_slice.len_chars() as u32;
+        assert_eq!(utf16_len, 9, "🎉 counts as 2 UTF-16 units");
+        assert_eq!(char_len, 8, "🎉 counts as 1 char");
+
+        assert_eq!(
+            range.end,
+            Position::new(last_line as u32, utf16_len),
+            "end column must be UTF-16 code units, not char count"
+        );
     }
 
     #[test]
