@@ -3,8 +3,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use lsp_types::{
-    Position, PrepareRenameResponse, RenameParams, TextDocumentIdentifier,
-    TextDocumentPositionParams, WorkDoneProgressParams,
+    DocumentChanges, OneOf, Position, PrepareRenameResponse, RenameParams, TextDocumentIdentifier,
+    TextDocumentPositionParams, TextEdit, WorkDoneProgressParams, WorkspaceEdit,
 };
 use tfls_lsp::Backend;
 use tfls_state::DocumentState;
@@ -13,6 +13,36 @@ use url::Url;
 
 fn uri(s: &str) -> Url {
     Url::parse(s).expect("url")
+}
+
+/// Extract the `TextEdit`s targeting `u` from a rename's VERSIONED
+/// `document_changes`, asserting each carries a version (the late-apply
+/// guard). Replaces the old `edit.changes` map reads.
+fn edits_for(edit: &WorkspaceEdit, u: &Url) -> Vec<TextEdit> {
+    let target = tfls_core::uri::url_to_uri(u);
+    let Some(DocumentChanges::Edits(tdes)) = &edit.document_changes else {
+        panic!(
+            "rename must produce document_changes::Edits, got {:?}",
+            edit.document_changes
+        );
+    };
+    assert!(edit.changes.is_none(), "rename must not use the version-less changes map");
+    let mut out = Vec::new();
+    for tde in tdes {
+        if tde.text_document.uri == target {
+            assert!(
+                tde.text_document.version.is_some(),
+                "rename edit for {u} must carry a document version"
+            );
+            for e in &tde.edits {
+                match e {
+                    OneOf::Left(te) => out.push(te.clone()),
+                    OneOf::Right(_) => panic!("unexpected annotated edit"),
+                }
+            }
+        }
+    }
+    out
 }
 
 fn backend_with_doc(u: &Url, src: &str) -> Backend {
@@ -86,10 +116,9 @@ async fn rename_variable_updates_definition_and_reference() {
     .expect("ok")
     .expect("edit");
 
-    let changes = edit.changes.expect("changes");
-    let edits = changes.get(&tfls_core::uri::url_to_uri(&u)).expect("edits");
+    let edits = edits_for(&edit, &u);
     assert_eq!(edits.len(), 2, "definition + reference");
-    for e in edits {
+    for e in &edits {
         assert_eq!(e.new_text, "where");
     }
 }
@@ -174,10 +203,9 @@ async fn rename_from_variable_definition_label_updates_both() {
     .expect("ok")
     .expect("edit");
 
-    let changes = edit.changes.expect("changes");
-    let edits = changes.get(&tfls_core::uri::url_to_uri(&u)).expect("edits");
+    let edits = edits_for(&edit, &u);
     assert_eq!(edits.len(), 2, "definition + reference both get renamed");
-    for e in edits {
+    for e in &edits {
         assert_eq!(e.new_text, "where");
     }
 }
@@ -209,11 +237,7 @@ output "c" { value = var.x }
     .expect("ok")
     .expect("edit");
 
-    let edits = edit
-        .changes
-        .unwrap()
-        .remove(&tfls_core::uri::url_to_uri(&u))
-        .unwrap();
+    let edits = edits_for(&edit, &u);
     // 1 definition + 3 references = 4.
     assert_eq!(edits.len(), 4);
 }
@@ -267,23 +291,16 @@ async fn rename_provider_local_alias_workspace_wide() {
     .expect("ok")
     .expect("edit");
 
-    let mut changes = edit.changes.expect("changes");
     // versions.tf — required_providers attribute key.
-    let versions_edits = changes
-        .remove(&tfls_core::uri::url_to_uri(&versions_u))
-        .expect("versions.tf");
+    let versions_edits = edits_for(&edit, &versions_u);
     assert_eq!(versions_edits.len(), 1);
     assert_eq!(versions_edits[0].new_text, "aws_new");
     // main.tf — call site.
-    let main_edits = changes
-        .remove(&tfls_core::uri::url_to_uri(&main_u))
-        .expect("main.tf");
+    let main_edits = edits_for(&edit, &main_u);
     assert_eq!(main_edits.len(), 1);
     assert_eq!(main_edits[0].new_text, "aws_new");
     // other.tf — call site (workspace-wide).
-    let other_edits = changes
-        .remove(&tfls_core::uri::url_to_uri(&other_u))
-        .expect("other.tf");
+    let other_edits = edits_for(&edit, &other_u);
     assert_eq!(other_edits.len(), 1);
     assert_eq!(other_edits[0].new_text, "aws_new");
 }

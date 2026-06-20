@@ -14,7 +14,8 @@
 use std::collections::HashMap;
 
 use lsp_types::{
-    PrepareRenameResponse, Range, RenameParams, TextDocumentPositionParams, TextEdit, WorkspaceEdit,
+    DocumentChanges, OneOf, OptionalVersionedTextDocumentIdentifier, PrepareRenameResponse, Range,
+    RenameParams, TextDocumentEdit, TextDocumentPositionParams, TextEdit, WorkspaceEdit,
 };
 use ropey::Rope;
 use tfls_core::{SymbolKind, SymbolLocation};
@@ -134,10 +135,34 @@ pub async fn rename(
     if edits.is_empty() {
         Ok(None)
     } else {
-        Ok(Some(WorkspaceEdit {
-            changes: Some(tfls_core::uri::changes_to_uri(edits)),
-            ..Default::default()
-        }))
+        Ok(Some(versioned_workspace_edit(&backend.state, edits)))
+    }
+}
+
+/// Build a `WorkspaceEdit` carrying VERSIONED `document_changes` rather
+/// than the version-less `changes` map. Rename edits are surgical and
+/// cross-file — their ranges are computed against each doc at its current
+/// version. If the client applied a version-less edit after a `did_change`
+/// advanced the buffer, the stale offsets would rewrite the WRONG text. A
+/// `Some(version)` identifier lets a conforming client reject the stale
+/// edit instead. Mirrors the format / move-outputs code actions.
+fn versioned_workspace_edit(state: &StateStore, edits: HashMap<Url, Vec<TextEdit>>) -> WorkspaceEdit {
+    let doc_edits: Vec<TextDocumentEdit> = edits
+        .into_iter()
+        .map(|(uri, text_edits)| {
+            let version = state.documents.get(&uri).map(|d| d.version);
+            TextDocumentEdit {
+                text_document: OptionalVersionedTextDocumentIdentifier {
+                    uri: tfls_core::uri::url_to_uri(&uri),
+                    version,
+                },
+                edits: text_edits.into_iter().map(OneOf::Left).collect(),
+            }
+        })
+        .collect();
+    WorkspaceEdit {
+        document_changes: Some(DocumentChanges::Edits(doc_edits)),
+        ..Default::default()
     }
 }
 
@@ -343,10 +368,7 @@ fn rename_provider_local(
     if edits.is_empty() {
         return None;
     }
-    Some(WorkspaceEdit {
-        changes: Some(tfls_core::uri::changes_to_uri(edits)),
-        ..Default::default()
-    })
+    Some(versioned_workspace_edit(state, edits))
 }
 
 fn push_required_providers_attr_edits(
