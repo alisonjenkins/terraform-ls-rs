@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.13.0](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.12.4...v0.13.0) (2026-06-20)
+
+
+### Features
+
+* **core:** built-in schemas for the test-file grammar ([164a37c](https://github.com/alisonjenkins/terraform-ls-rs/commit/164a37cad66e2e7fa8590062a86fdeb0b334b4f1))
+* **core:** classify Terraform test-file URIs ([d29b69d](https://github.com/alisonjenkins/terraform-ls-rs/commit/d29b69d0f5c3dddb48238eca52a5360ea71a0af7))
+* **diag:** structural validator for Terraform test files ([784ec60](https://github.com/alisonjenkins/terraform-ls-rs/commit/784ec60d72f38f4f97d5943f2f1002a1efc9bb4f))
+* **lsp:** completion for Terraform test files ([0bc10a8](https://github.com/alisonjenkins/terraform-ls-rs/commit/0bc10a8c0b814647c2e8489712e975a53ca57291))
+* **lsp:** diagnostics for test files against the module under test ([6e8afe1](https://github.com/alisonjenkins/terraform-ls-rs/commit/6e8afe14971dafa39b7557d0d9a6668d790b520b))
+* **lsp:** outline run blocks in test files ([71b693b](https://github.com/alisonjenkins/terraform-ls-rs/commit/71b693b3dba6ac840b709ea669fcaf08859d1e4c))
+* **parser:** parse test files and extract run-block symbols ([cb61055](https://github.com/alisonjenkins/terraform-ls-rs/commit/cb6105573a38457a530e1b53581b1023de92deaf))
+* **state:** keep test-file symbols out of the module index ([6fdf563](https://github.com/alisonjenkins/terraform-ls-rs/commit/6fdf563a57383abb07b7180349113007830b8d1f))
+
+
+### Bug Fixes
+
+* **lsp:** don't panic on a multibyte delimiter in tftest completion ([976551d](https://github.com/alisonjenkins/terraform-ls-rs/commit/976551d110e60f8c016601180efb5626d4d20207))
+* **lsp:** guard watcher FileRemoved + refresh open peers on disk changes ([066c44d](https://github.com/alisonjenkins/terraform-ls-rs/commit/066c44deedac0a1010b7f0b86ba3a7d27e09657e))
+* **lsp:** isolate per-file panics in the parallel workspace scan ([fa32639](https://github.com/alisonjenkins/terraform-ls-rs/commit/fa3263972654251d35f1b95e912986c9eb4e1db7))
+* **lsp:** module-scope helpers + guard module_under_test_dir at FS root ([cb5420b](https://github.com/alisonjenkins/terraform-ls-rs/commit/cb5420bb68d830f9b5940e0462bd47d35b90eeee))
+* **lsp:** refresh open test files when their module-under-test changes ([cd2d568](https://github.com/alisonjenkins/terraform-ls-rs/commit/cd2d5687860fad6985a462604f79e11e00214127))
+* **lsp:** reliability hardening — stop stuck/desync/format-revert bugs ([2810caf](https://github.com/alisonjenkins/terraform-ls-rs/commit/2810cafa269c5ac17267240cd3223956bf263c36))
+
 ## [0.12.4](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.12.3...v0.12.4) (2026-06-19)
 
 
