@@ -3316,10 +3316,15 @@ fn tftest_reference_items(
 fn tftest_reference_prefix(line_prefix: &str) -> Option<(&'static str, &str)> {
     // Walk back over the trailing identifier-ish run (letters, digits,
     // `_`, `-`, `.`) to isolate the reference token under the cursor.
+    // `rfind` returns the BYTE offset of the delimiter char's first byte;
+    // skip past the WHOLE char (it may be multibyte — an em-dash, NBSP,
+    // smart quote) so the slice lands on a UTF-8 boundary rather than
+    // mid-codepoint (which would panic the completion request).
     let token_start = line_prefix
         .rfind(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-' || c == '.'))
-        .map_or(0, |i| i + 1);
-    let token = &line_prefix[token_start..];
+        .map(|i| i + line_prefix[i..].chars().next().map_or(1, char::len_utf8))
+        .unwrap_or(0);
+    let token = line_prefix.get(token_start..).unwrap_or("");
     for root in ["var", "output", "run"] {
         if let Some(rest) = token.strip_prefix(root) {
             if let Some(partial) = rest.strip_prefix('.') {
@@ -4260,6 +4265,17 @@ mod tftest_completion_tests {
             Some(("output", "i"))
         );
         assert_eq!(tftest_reference_prefix("  x = run."), Some(("run", "")));
+    }
+
+    #[test]
+    fn reference_prefix_handles_multibyte_delimiter_without_panicking() {
+        // A multibyte non-alphanumeric char immediately before the token
+        // (em-dash, smart quote, NBSP) must not panic the byte slice.
+        assert_eq!(tftest_reference_prefix("  x = —var."), Some(("var", "")));
+        assert_eq!(tftest_reference_prefix("»output.i"), Some(("output", "i")));
+        assert_eq!(tftest_reference_prefix("\u{00a0}run."), Some(("run", "")));
+        // A multibyte char that ISN'T a delimiter boundary still must not panic.
+        assert_eq!(tftest_reference_prefix("café"), None);
     }
 
     #[test]
