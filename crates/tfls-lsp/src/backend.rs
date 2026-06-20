@@ -24,8 +24,10 @@ use lsp_types::{
     WorkspaceEdit, WorkspaceFullDocumentDiagnosticReport, WorkspaceSymbolParams,
     WorkspaceSymbolResponse,
 };
+use dashmap::DashMap;
 use tfls_state::{JobQueue, StateStore};
 use tokio::sync::Mutex;
+use url::Url;
 use tokio::task::JoinHandle;
 use tower_lsp_server::{jsonrpc, Client, LanguageServer};
 
@@ -44,6 +46,12 @@ pub struct Backend {
     pub http_client: reqwest::Client,
     /// Handles for spawned worker/watcher tasks, aborted on shutdown.
     tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    /// Per-document serialization lock. `did_change` holds it across its
+    /// atomic apply+reparse; document-reading requests that emit edits
+    /// (formatting) acquire it first, so a format never reads a rope that's
+    /// mid-apply. Entries are never evicted (tiny; eviction would race a
+    /// concurrent acquirer). See `doc_lock`.
+    doc_locks: Arc<DashMap<Url, Arc<Mutex<()>>>>,
 }
 
 /// Build the shared registry HTTP client, falling back to a default
@@ -62,6 +70,7 @@ impl Backend {
             jobs: Arc::new(JobQueue::new()),
             http_client: shared_http_client(),
             tasks: Arc::new(Mutex::new(Vec::new())),
+            doc_locks: Arc::new(DashMap::new()),
         }
     }
 
@@ -75,7 +84,16 @@ impl Backend {
             jobs,
             http_client: shared_http_client(),
             tasks: Arc::new(Mutex::new(Vec::new())),
+            doc_locks: Arc::new(DashMap::new()),
         }
+    }
+
+    /// The per-document serialization lock for `uri`, creating it on first
+    /// use. `did_change` write-style holds it across its atomic apply; edit-
+    /// emitting requests (formatting) hold it while reading, so they never
+    /// observe a half-applied rope.
+    pub(crate) fn doc_lock(&self, uri: &Url) -> Arc<Mutex<()>> {
+        self.doc_locks.entry(uri.clone()).or_default().clone()
     }
 
     async fn spawn_background(&self) {

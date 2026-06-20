@@ -296,7 +296,7 @@ async fn style_rules_toggle_republishes_open_docs() {
 /// own published diagnostics and (b) refresh open peers — deleting
 /// variables.tf re-introduces the undefined-var diagnostic in main.tf.
 #[tokio::test]
-async fn watched_file_delete_clears_and_refreshes_peers() {
+async fn watched_file_delete_ignored_for_open_buffer() {
     let mut client = TestClient::new();
     client.initialize(None).await;
 
@@ -319,27 +319,31 @@ async fn watched_file_delete_clears_and_refreshes_peers() {
         "baseline: `foo` is declared, main.tf should be clean, got {baseline:?}"
     );
 
-    // User deletes variables.tf on disk; the editor reports it watched.
+    // A watched-file DELETE arrives for variables.tf WHILE IT IS OPEN in the
+    // editor (e.g. a `git checkout` of a branch lacking the file, or a
+    // transient save/rename). The open buffer is authoritative — the editor
+    // still has it — so the server must NOT drop it; the editor's own
+    // did_close is the signal to remove an open doc. (Dropping it here used
+    // to desync: the editor kept editing a doc the server had forgotten.)
     client
         .did_change_watched_files(&[(vars_uri, 3 /* Deleted */)])
         .await;
     client.settle(250).await;
 
-    // (a) the deleted file gets an empty publish (cleared in the client).
-    let vars_last = client.last_diagnostics(vars_uri).await;
+    // `foo` is still declared by the open buffer → main.tf stays clean.
+    let main_last = client
+        .publishes_for(main_uri)
+        .await
+        .last()
+        .cloned()
+        .unwrap_or_default();
     assert!(
-        vars_last.is_empty(),
-        "deleted file's diagnostics must be cleared, got {vars_last:?}"
+        !contains_undefined_var(&main_last, "foo"),
+        "deleting an OPEN file on disk must not drop the buffer; main.tf \
+         must still resolve `var.foo`, got {main_last:?}"
     );
 
-    // (b) main.tf now references an undefined `foo` again.
-    let main_pushes = client.publishes_for(main_uri).await;
-    let main_last = main_pushes.last().cloned().unwrap_or_default();
-    assert!(
-        contains_undefined_var(&main_last, "foo"),
-        "after deleting variables.tf, main.tf must re-flag undefined \
-         `var.foo`; all main.tf pushes were {main_pushes:?}"
-    );
-
+    // The closed-file delete path (remove + clear + refresh peers) is gated
+    // on `!is_open` and remains for files that are genuinely not open.
     client.shutdown().await;
 }

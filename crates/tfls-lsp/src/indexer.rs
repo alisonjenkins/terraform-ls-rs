@@ -46,16 +46,28 @@ pub fn spawn_worker(
     queue: Arc<JobQueue>,
     client: Option<tower_lsp_server::Client>,
 ) -> tokio::task::JoinHandle<()> {
+    use futures::FutureExt as _;
     tokio::spawn(async move {
         loop {
             let job = queue.next().await;
-            if let Err(e) = handle_job(Arc::clone(&state), &queue, client.as_ref(), job).await {
-                tracing::warn!(error = %e, "background job failed");
+            // Catch panics so ONE bad job can't kill the worker task and
+            // wedge the whole queue (a dead worker means every future
+            // ParseFile/ReparseDocument/scan silently stops — a permanent
+            // "stuck" server). hcl-edit and downstream passes can panic;
+            // only parsing is otherwise panic-guarded (`tfls_parser::safe`).
+            // `AssertUnwindSafe` is justified: on panic we discard the job
+            // and continue; the store's DashMaps tolerate a partially
+            // applied index update (the next reparse rebuilds it).
+            let fut = handle_job(Arc::clone(&state), &queue, client.as_ref(), job);
+            match std::panic::AssertUnwindSafe(fut).catch_unwind().await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!(error = %e, "background job failed"),
+                Err(_) => tracing::error!("background job PANICKED; worker continues"),
             }
             // Balances the in-flight increment in `try_next` (via `next`).
-            // Must run on both the Ok and Err paths so the queue can ever
-            // report idle. Side effects are committed by the time
-            // `handle_job` returns (the bulk scan awaits its publishes).
+            // Must ALWAYS run — including after a caught panic — so the
+            // queue can ever report idle. Side effects are committed by the
+            // time `handle_job` returns (the bulk scan awaits its publishes).
             queue.complete();
         }
     })
@@ -174,12 +186,15 @@ pub fn index_module_dir_sync(state: &StateStore, dir: &Path) {
         let Some(url) = path_to_url(&path) else {
             continue;
         };
-        // Skip only if the doc is already fully parsed. Cache
+        // Never touch an OPEN doc — the editor's buffer is authoritative
+        // (overwriting from disk reverts unsaved edits + resets the
+        // version). For CLOSED docs: skip if already fully parsed; cache
         // hydration (`DocumentState::hydrated_from_cache`) leaves
-        // `parsed.body = None` — overwrite those entries with a
-        // freshly-parsed `DocumentState::new` so body-dependent
-        // passes (module-call inference, body-walking diagnostics)
-        // see the AST.
+        // `parsed.body = None`, so overwrite those with a freshly-parsed
+        // `DocumentState::new` so body-dependent passes see the AST.
+        if state.is_open(&url) {
+            continue;
+        }
         if let Some(doc) = state.documents.get(&url) {
             if doc.parsed.body.is_some() {
                 continue;
@@ -196,8 +211,9 @@ pub fn index_module_dir_sync(state: &StateStore, dir: &Path) {
                 continue;
             }
         };
-        state.upsert_document(DocumentState::new(url, &text, 0));
-        indexed += 1;
+        if state.upsert_document_unless_open(DocumentState::new(url, &text, 0)) {
+            indexed += 1;
+        }
     }
     tracing::debug!(
         dir = %dir.display(),
@@ -977,10 +993,14 @@ async fn scan_files_parallel(
         // body-walking diagnostics, etc.) need the AST. Re-parse
         // those — the cost is bounded by `cache-hydrated count`
         // and the cache still covers the symbol-side speedup.
+        // Skip open buffers (editor-authoritative) and already-fully-parsed
+        // closed docs. NOTE: this snapshot can go stale during the slow
+        // parallel parse below — a file `did_open`'d mid-scan won't be here —
+        // so the final upsert loop re-checks `is_open` to close that TOCTOU.
         let skip: std::collections::HashSet<url::Url> = state
             .documents
             .iter()
-            .filter(|e| e.value().parsed.body.is_some())
+            .filter(|e| state.is_open(e.key()) || e.value().parsed.body.is_some())
             .map(|e| e.key().clone())
             .collect();
         move || {
@@ -1017,7 +1037,11 @@ async fn scan_files_parallel(
 
     let mut uris: Vec<url::Url> = parsed.iter().map(|d| d.uri.clone()).collect();
     for doc in parsed {
-        state.upsert_document(doc);
+        // Re-check is_open at upsert time: a buffer opened DURING the
+        // parallel parse above isn't in the pre-parse `skip` snapshot, and
+        // clobbering it from disk (at version 0) would revert the user's
+        // edits and desync. `upsert_document_unless_open` is the backstop.
+        state.upsert_document_unless_open(doc);
     }
     // Also include any already-open docs that sit in the same dirs
     // we just scanned — they should be in the publish round too so
@@ -1744,13 +1768,13 @@ async fn parse_file_into_state(state: &StateStore, path: &Path) -> Result<(), In
         return Ok(());
     };
 
-    // Don't overwrite an open document — the editor is authoritative
-    // on in-memory state and the worker's disk snapshot may be stale.
-    if state.documents.contains_key(&url) {
-        return Ok(());
-    }
-
-    state.upsert_document(DocumentState::new(url, &text, 0));
+    // Never overwrite an OPEN document — the editor is authoritative and
+    // the worker's disk snapshot may be stale (overwriting it reverts the
+    // user's unsaved edits and resets the version). Gate on `is_open`, NOT
+    // `documents.contains_key`: a closed-but-indexed doc SHOULD refresh
+    // from disk when its file changes (the old `contains_key` guard wrongly
+    // skipped those too, leaving stale peer content).
+    state.upsert_document_unless_open(DocumentState::new(url, &text, 0));
     Ok(())
 }
 
@@ -2205,6 +2229,42 @@ mod tests {
             "sync index overwrote an already-indexed document"
         );
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn index_module_dir_sync_never_clobbers_open_doc_even_without_ast() {
+        // An OPEN buffer with no AST (body=None) — e.g. cache-hydrated, or a
+        // recovered/panicked parse. The OLD `body.is_some()` guard would
+        // overwrite it from disk (reverting the user's edits + resetting the
+        // version); the `is_open` guard must preserve it. This is the precise
+        // disk-clobber that caused "out of sync with disk".
+        let dir = tmp_dir("sync-open-no-ast");
+        let path = dir.join("main.tf");
+        fs::write(&path, "variable \"DISK\" {}\n").unwrap();
+
+        let store = StateStore::new();
+        let uri = Url::from_file_path(&path).unwrap();
+        store.upsert_document(tfls_state::DocumentState::hydrated_from_cache(
+            uri.clone(),
+            "variable \"BUFFER\" {}\n",
+            tfls_core::SymbolTable::default(),
+            Vec::new(),
+        ));
+        store.mark_open(uri.clone());
+        assert!(
+            store.documents.get(&uri).unwrap().parsed.body.is_none(),
+            "precondition: open doc has no AST"
+        );
+
+        index_module_dir_sync(&store, &dir);
+
+        let doc = store.documents.get(&uri).unwrap();
+        assert!(
+            doc.text().contains("BUFFER"),
+            "open buffer must survive disk reindex; got: {}",
+            doc.text()
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

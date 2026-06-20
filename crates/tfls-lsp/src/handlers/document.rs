@@ -253,51 +253,45 @@ pub async fn did_change(backend: &Backend, params: DidChangeTextDocumentParams) 
         .get(&uri)
         .map(|d| cross_file_fingerprint(&d));
 
-    // Apply through the version-ordered path: tower-lsp-server pumps
-    // did_change futures through `buffer_unordered`, so this handler's
-    // synchronous apply segment can run out of `version` order relative to
-    // sibling did_change handlers for the same buffer. Incremental edits
-    // carry ranges relative to the prior version's text, so applying them
-    // out of order corrupts the rope (or drops an edit referencing a
-    // not-yet-created line) — desyncing the server from the editor until a
-    // did_open restart. `apply_versioned_changes` buffers and reorders.
-    let applied = {
-        let mut entry = match backend.state.documents.get_mut(&uri) {
-            Some(e) => e,
-            None => {
-                tracing::warn!(uri = %uri, "didChange for unknown document");
-                return;
-            }
-        };
-        entry.apply_versioned_changes(version, params.content_changes)
+    // Apply the edit AND reparse atomically, under the per-document lock.
+    // FULL sync means each batch is the whole document; `apply_and_reparse_
+    // document` advances rope + parsed + symbols under a SINGLE store guard,
+    // so no concurrent reader (hover/completion/diagnostics) ever sees a
+    // torn new-rope/old-AST state, and a stale/duplicate version is dropped.
+    // The doc lock is held across the (CPU-heavy, blocking-threaded) work so
+    // an edit-emitting request like `textDocument/formatting` waits for the
+    // apply instead of formatting stale text and reverting the edit.
+    let lock = backend.doc_lock(&uri);
+    let result = {
+        let _guard = lock.lock().await;
+        let state = std::sync::Arc::clone(&backend.state);
+        let uri_c = uri.clone();
+        let changes = params.content_changes;
+        tokio::task::spawn_blocking(move || {
+            state.apply_and_reparse_document(&uri_c, version, changes)
+        })
+        .await
     };
-    let applied = match applied {
-        Ok(Some(v)) => v,
-        Ok(None) => {
-            // Buffered behind an out-of-order gap, or a stale replay — the
-            // rope is unchanged, and the sibling handler that fills the gap
-            // will reparse + publish the up-to-date result.
-            tracing::debug!(uri = %uri, version, "did_change: buffered/stale, rope unchanged");
+    let applied = match result {
+        Ok(Ok(Some(v))) => v,
+        Ok(Ok(None)) => {
+            // Stale/duplicate version — rope unchanged; the handler that
+            // applied the newer version publishes the up-to-date result.
+            tracing::debug!(uri = %uri, version, "did_change: stale version dropped");
             return;
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             backend
                 .client
                 .log_message(MessageType::ERROR, format!("edit apply failed: {e}"))
                 .await;
             return;
         }
+        Err(join) => {
+            tracing::error!(uri = %uri, error = %join, "did_change: apply task failed");
+            return;
+        }
     };
-
-    // Reparse + diagnostic compute are both CPU-heavy; hand
-    // them to a blocking thread so the tokio runtime stays
-    // responsive to concurrent requests on other buffers.
-    let state = std::sync::Arc::clone(&backend.state);
-    let uri_c = uri.clone();
-    let _ = tokio::task::spawn_blocking(move || {
-        state.reparse_document(&uri_c);
-    })
-    .await;
 
     // Did THIS edit change the doc's cross-file-relevant state (declared /
     // referenced names, the `terraform {}` block)? Computed before the

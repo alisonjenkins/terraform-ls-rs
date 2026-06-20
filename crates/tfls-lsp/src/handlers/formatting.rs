@@ -25,12 +25,21 @@ pub async fn formatting(
     };
     let style = backend.state.config.snapshot().format_style;
     tracing::info!(uri = %uri, ?style, "formatting: invocation");
-    let Some(doc) = backend.state.documents.get(&uri) else {
-        tracing::info!(uri = %uri, "formatting: document not in state");
-        return Ok(None);
-    };
 
-    let text = doc.rope.to_string();
+    // Serialize against any in-flight `did_change` apply for this document
+    // so we never read a rope that's mid-update (which would format stale
+    // text). See `Backend::doc_lock`.
+    let lock = backend.doc_lock(&uri);
+    let _guard = lock.lock().await;
+
+    let text = {
+        let Some(doc) = backend.state.documents.get(&uri) else {
+            tracing::info!(uri = %uri, "formatting: document not in state");
+            return Ok(None);
+        };
+        doc.rope.to_string()
+    }; // drop the DashMap read ref before the CPU-heavy format below
+
     let formatted = match format_source(&text, style) {
         Ok(s) => s,
         Err(e) => {
@@ -44,15 +53,79 @@ pub async fn formatting(
         return Ok(Some(Vec::new()));
     }
 
+    // Emit a MINIMAL line-level diff, not a whole-document replace. A
+    // whole-doc replace overwrites every line — so if the formatter ran on
+    // even slightly-stale text it clobbers the user's just-typed edits
+    // (the reported "formatting reverts my changes" bug). A minimal diff
+    // touches only the lines the formatter actually changed, so lines the
+    // formatter left alone (e.g. a freshly-edited `source = "..."`) survive.
+    let edits = minimal_text_edits(&text, &formatted);
     tracing::info!(
         in_bytes = text.len(),
         out_bytes = formatted.len(),
-        "formatting: emitting edit"
+        edits = edits.len(),
+        "formatting: emitting minimal edits"
     );
-    Ok(Some(vec![TextEdit {
-        range: whole_document_range(&doc.rope),
-        new_text: formatted,
-    }]))
+    Ok(Some(edits))
+}
+
+/// Line-level minimal diff from `old` to `new` as a set of `TextEdit`s,
+/// one per changed hunk. Unchanged lines are never touched. Ranges are
+/// whole-line spans (`line, 0`)..(`line, 0`), EOF-clamped via the rope.
+fn minimal_text_edits(old: &str, new: &str) -> Vec<TextEdit> {
+    use similar::{DiffOp, TextDiff};
+
+    let rope = Rope::from_str(old);
+    let diff = TextDiff::from_lines(old, new);
+    let new_lines: Vec<&str> = diff.iter_new_slices().collect();
+
+    let line_pos = |line: usize| -> Position {
+        let byte = if line >= rope.len_lines() {
+            rope.len_bytes()
+        } else {
+            rope.line_to_byte(line)
+        };
+        byte_offset_to_lsp_position(&rope, byte).unwrap_or_default()
+    };
+    let take_new = |start: usize, len: usize| -> String {
+        new_lines
+            .get(start..start + len)
+            .map(|s| s.concat())
+            .unwrap_or_default()
+    };
+
+    let mut edits = Vec::new();
+    for op in diff.ops() {
+        let (old_start, old_end, new_text) = match *op {
+            DiffOp::Equal { .. } => continue,
+            DiffOp::Delete {
+                old_index, old_len, ..
+            } => (old_index, old_index + old_len, String::new()),
+            DiffOp::Insert {
+                old_index,
+                new_index,
+                new_len,
+            } => (old_index, old_index, take_new(new_index, new_len)),
+            DiffOp::Replace {
+                old_index,
+                old_len,
+                new_index,
+                new_len,
+            } => (
+                old_index,
+                old_index + old_len,
+                take_new(new_index, new_len),
+            ),
+        };
+        edits.push(TextEdit {
+            range: Range {
+                start: line_pos(old_start),
+                end: line_pos(old_end),
+            },
+            new_text,
+        });
+    }
+    edits
 }
 
 /// `textDocument/rangeFormatting` — format only the given range.
@@ -67,6 +140,9 @@ pub async fn range_formatting(
     let Some(uri) = tfls_core::uri::uri_to_url(&params.text_document.uri) else {
         return Ok(None);
     };
+    // Serialize against an in-flight did_change apply (see Backend::doc_lock).
+    let lock = backend.doc_lock(&uri);
+    let _guard = lock.lock().await;
     let Some(doc) = backend.state.documents.get(&uri) else {
         return Ok(None);
     };
@@ -121,6 +197,9 @@ pub async fn on_type_formatting(
         return Ok(None);
     };
     let pos = params.text_document_position.position;
+    // Serialize against an in-flight did_change apply (see Backend::doc_lock).
+    let lock = backend.doc_lock(&uri);
+    let _guard = lock.lock().await;
     let Some(doc) = backend.state.documents.get(&uri) else {
         return Ok(None);
     };
@@ -249,5 +328,63 @@ mod tests {
     fn match_trailing_newline_respects_slice() {
         assert_eq!(match_trailing_newline("a\n".into(), "a"), "a");
         assert_eq!(match_trailing_newline("a\n".into(), "a\n"), "a\n");
+    }
+
+    fn apply_edits(text: &str, mut edits: Vec<TextEdit>) -> String {
+        let rope = Rope::from_str(text);
+        let byte_of = |p: Position| -> usize {
+            lsp_position_to_byte_offset(&rope, p).unwrap_or(rope.len_bytes())
+        };
+        // Apply in reverse document order so earlier byte offsets (computed
+        // against the original rope) stay valid as we mutate.
+        edits.sort_by(|a, b| {
+            (b.range.start.line, b.range.start.character)
+                .cmp(&(a.range.start.line, a.range.start.character))
+        });
+        let mut s = text.to_string();
+        for e in edits {
+            s.replace_range(byte_of(e.range.start)..byte_of(e.range.end), &e.new_text);
+        }
+        s
+    }
+
+    #[test]
+    fn minimal_edits_roundtrip_to_new() {
+        let old = "a\nb\nc\nd\n";
+        let new = "a\nB\nc\nD\n";
+        let edits = minimal_text_edits(old, new);
+        assert_eq!(apply_edits(old, edits), new);
+    }
+
+    #[test]
+    fn minimal_edits_leave_unchanged_lines_untouched() {
+        // Lines 0 and 2 are unchanged; only line 1 differs. No edit range may
+        // cover an unchanged line — this is what stops a stale format from
+        // reverting a line the formatter didn't touch.
+        let old = "keep_a\nchange_me\nkeep_b\n";
+        let new = "keep_a\nCHANGED\nkeep_b\n";
+        let edits = minimal_text_edits(old, new);
+        assert!(!edits.is_empty());
+        for e in &edits {
+            // No edit may start before line 1 or end after line 2.
+            assert!(
+                e.range.start.line >= 1 && e.range.end.line <= 2,
+                "edit must be confined to the changed line; got {:?}",
+                e.range
+            );
+        }
+        assert_eq!(apply_edits(old, edits), new);
+    }
+
+    #[test]
+    fn minimal_edits_preserve_a_value_the_formatter_keeps() {
+        // The reported bug shape: a `source` value the user just set. As long
+        // as it is identical in old+new (formatter preserves values), the
+        // minimal diff must not alter it.
+        let old = "module \"m\" {\n  source = \"../new-path\"\n  x = 1\n}\n";
+        let new = "module \"m\" {\n  source = \"../new-path\"\n  y = 2\n}\n";
+        let out = apply_edits(old, minimal_text_edits(old, new));
+        assert!(out.contains("\"../new-path\""), "source value preserved: {out}");
+        assert_eq!(out, new);
     }
 }

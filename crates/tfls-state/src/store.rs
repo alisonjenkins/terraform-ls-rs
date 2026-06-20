@@ -655,6 +655,50 @@ impl StateStore {
         self.documents.insert(uri, doc);
     }
 
+    /// Like [`Self::upsert_document`] but REFUSES to replace a document
+    /// that is currently open in an editor. The editor's in-memory buffer
+    /// is authoritative; a (possibly stale) disk read must never clobber
+    /// it. Returns `true` if inserted, `false` if skipped because open.
+    /// Every disk-driven indexing path must go through this rather than
+    /// [`Self::upsert_document`].
+    pub fn upsert_document_unless_open(&self, doc: DocumentState) -> bool {
+        if self.is_open(&doc.uri) {
+            return false;
+        }
+        self.upsert_document(doc);
+        true
+    }
+
+    /// Apply a versioned `did_change` batch AND reparse the document under
+    /// a SINGLE write guard, so no concurrent reader ever observes a torn
+    /// state (a new rope with stale `parsed`/`symbols`). Mirrors
+    /// [`Self::reparse_document`]'s lock ordering — `remove_from_indexes`
+    /// runs before `get_mut` (it re-reads the key), and `add_to_indexes`
+    /// runs against the live guard (no key re-lookup) — so there's no
+    /// DashMap same-key reentrancy deadlock. `add_to_indexes` always runs:
+    /// on a stale/duplicate version the symbols are unchanged, so it simply
+    /// restores the entries `remove_from_indexes` cleared. Returns the
+    /// applied version, or `None` when the batch was stale (rope unchanged).
+    pub fn apply_and_reparse_document(
+        &self,
+        uri: &Url,
+        version: i32,
+        changes: Vec<lsp_types::TextDocumentContentChangeEvent>,
+    ) -> Result<Option<i32>, crate::error::StateError> {
+        let _guard = self.lock_indexes();
+        self.remove_from_indexes(uri);
+        let mut doc = match self.documents.get_mut(uri) {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+        let applied = doc.apply_versioned_changes(version, changes)?;
+        if applied.is_some() {
+            doc.reparse();
+        }
+        self.add_to_indexes(&doc);
+        Ok(applied)
+    }
+
     /// Re-analyse an existing document in place and refresh its indexes.
     pub fn reparse_document(&self, uri: &Url) {
         let _guard = self.lock_indexes();
@@ -1186,5 +1230,102 @@ mod tests {
 
         store.mark_closed(&u);
         assert!(!store.should_skip_push_diagnostics(&u));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod reliability_tests {
+    use super::*;
+    use crate::document::DocumentState;
+
+    fn uri(s: &str) -> Url {
+        Url::parse(s).expect("valid url")
+    }
+
+    fn full(text: &str) -> lsp_types::TextDocumentContentChangeEvent {
+        lsp_types::TextDocumentContentChangeEvent {
+            range: None,
+            range_length: None,
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn upsert_unless_open_refuses_open_accepts_closed() {
+        let store = StateStore::new();
+        let u = uri("file:///a.tf");
+        store.upsert_document(DocumentState::new(u.clone(), "variable \"a\" {}\n", 5));
+
+        // Open: a disk read must NOT clobber it.
+        store.mark_open(u.clone());
+        let inserted = store.upsert_document_unless_open(DocumentState::new(
+            u.clone(),
+            "STALE DISK CONTENT\n",
+            0,
+        ));
+        assert!(!inserted, "must refuse to overwrite an open doc");
+        let doc = store.documents.get(&u).expect("doc present");
+        assert_eq!(doc.version, 5, "open doc version preserved");
+        assert!(doc.text().contains("variable"), "open doc content preserved");
+        drop(doc);
+
+        // Closed: disk read DOES refresh it.
+        store.mark_closed(&u);
+        let inserted = store.upsert_document_unless_open(DocumentState::new(
+            u.clone(),
+            "variable \"b\" {}\n",
+            0,
+        ));
+        assert!(inserted, "closed doc must accept a disk refresh");
+        assert!(store.documents.get(&u).unwrap().text().contains("\"b\""));
+    }
+
+    #[test]
+    fn apply_and_reparse_is_atomic_and_indexes_update() {
+        let store = StateStore::new();
+        let u = uri("file:///a.tf");
+        store.upsert_document(DocumentState::new(u.clone(), "variable \"old\" {}\n", 1));
+
+        let applied = store
+            .apply_and_reparse_document(&u, 2, vec![full("variable \"new\" {}\n")])
+            .expect("apply ok");
+        assert_eq!(applied, Some(2));
+
+        let doc = store.documents.get(&u).expect("doc");
+        // rope, parsed, and symbols are all the NEW version — no torn state.
+        assert!(doc.text().contains("\"new\""));
+        assert!(doc.symbols.variables.contains_key("new"));
+        assert!(!doc.symbols.variables.contains_key("old"));
+        assert_eq!(doc.version, 2);
+        drop(doc);
+
+        // Index reflects the rename.
+        assert!(store
+            .definitions_by_name
+            .contains_key(&SymbolKey::new(SymbolKind::Variable, "new")));
+        assert!(!store
+            .definitions_by_name
+            .contains_key(&SymbolKey::new(SymbolKind::Variable, "old")));
+    }
+
+    #[test]
+    fn apply_and_reparse_stale_version_is_noop_indexes_intact() {
+        let store = StateStore::new();
+        let u = uri("file:///a.tf");
+        store.upsert_document(DocumentState::new(u.clone(), "variable \"keep\" {}\n", 5));
+
+        // Older version → dropped, rope unchanged, index still has the symbol.
+        let applied = store
+            .apply_and_reparse_document(&u, 3, vec![full("variable \"stale\" {}\n")])
+            .expect("ok");
+        assert_eq!(applied, None);
+        assert!(store.documents.get(&u).unwrap().text().contains("\"keep\""));
+        assert!(
+            store
+                .definitions_by_name
+                .contains_key(&SymbolKey::new(SymbolKind::Variable, "keep")),
+            "stale apply must leave the index intact (remove+re-add)"
+        );
     }
 }

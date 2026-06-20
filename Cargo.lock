@@ -2908,6 +2908,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "similar",
  "sonic-rs",
  "tempfile",
  "tfls-core",

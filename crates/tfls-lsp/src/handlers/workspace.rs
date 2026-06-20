@@ -43,6 +43,15 @@ pub async fn did_change_watched_files(backend: &Backend, params: DidChangeWatche
                 backend.jobs.enqueue(Job::ParseFile(path), Priority::Normal);
             }
             FileChangeType::DELETED => {
+                // Don't drop an OPEN buffer: the editor still has it (a
+                // disk-side delete is often a transient save/rename or a
+                // `git checkout` of a branch lacking the file). Removing it
+                // would desync — the editor keeps editing a doc the server
+                // no longer knows about. The editor's own did_close is the
+                // authoritative signal to remove an open doc.
+                if backend.state.is_open(&file_url) {
+                    continue;
+                }
                 backend.state.remove_document(&file_url);
                 // Clear the deleted file's published diagnostics (they'd
                 // otherwise linger in the client forever), then refresh
