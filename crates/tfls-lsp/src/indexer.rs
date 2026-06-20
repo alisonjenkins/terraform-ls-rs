@@ -1031,6 +1031,33 @@ async fn scan_dir_into_state(
 /// diagnostics in parallel, and fan out publishes concurrently.
 /// Shared between [`scan_dir_into_state`] and
 /// [`bulk_workspace_scan`] so both benefit from the same speedups.
+/// Run one file's diagnostic compute, containing any panic to THIS file.
+///
+/// Without this, a panic in one file's diagnostic pass unwinds the whole
+/// rayon `par_iter` out of `bulk_workspace_scan`, skipping its
+/// `mark_scan_completed` loop and wedging EVERY discovered dir permanently
+/// in `Scheduled` for the session (no `did_open` can re-schedule a dir
+/// that's already `Scheduled`). The parse layer is panic-guarded
+/// ([`tfls_parser::safe`]); the diagnostic layer is not — so contain it
+/// here and drop just the offending file (`None`), letting the scan finish
+/// and mark every dir `Completed`.
+fn catch_file_diag<F: FnOnce() -> Vec<lsp_types::Diagnostic>>(
+    uri: &url::Url,
+    compute: F,
+) -> Option<Vec<lsp_types::Diagnostic>> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(compute)) {
+        Ok(diagnostics) => Some(diagnostics),
+        Err(_) => {
+            tracing::error!(
+                uri = %uri,
+                "scan_files_parallel: diagnostic pass PANICKED; \
+                 skipping this file so the scan still completes"
+            );
+            None
+        }
+    }
+}
+
 async fn scan_files_parallel(
     state: &StateStore,
     client: Option<&tower_lsp_server::Client>,
@@ -1218,13 +1245,15 @@ async fn scan_files_parallel(
                             .and_then(|mut it| it.next_back())
                             .unwrap_or("")
                             .to_string();
-                        let diagnostics =
+                        // Isolate per-file panics — see `catch_file_diag`.
+                        let diagnostics = catch_file_diag(uri, || {
                             crate::handlers::document::compute_diagnostics_with_lookup(
                                 state,
                                 uri,
                                 &lookup,
                                 &current_file,
-                            );
+                            )
+                        })?;
                         Some((uri.clone(), version, diagnostics))
                     })
                     .collect()
@@ -2078,7 +2107,10 @@ mod tests {
     //! output enumerates exactly what the async wrapper will do,
     //! and `SendRefresh` is the ONLY variant that can trigger
     //! client-side I/O.
-    use super::{decide_refresh, handle_disk_removal, index_module_dir_sync, RefreshDecision};
+    use super::{
+        catch_file_diag, decide_refresh, handle_disk_removal, index_module_dir_sync,
+        RefreshDecision,
+    };
     use std::fs;
     use std::path::PathBuf;
     use tfls_state::{DocumentState, StateStore};
@@ -2135,6 +2167,22 @@ mod tests {
         assert!(
             !state.documents.contains_key(&url),
             "a non-open deleted file must be removed from the store"
+        );
+    }
+
+    #[test]
+    fn catch_file_diag_contains_a_panic() {
+        // HIGH-4: a panicking diagnostic pass for ONE file must yield None
+        // (drop that file) rather than unwind and wedge the whole scan.
+        let url = u("file:///x.tf");
+        assert!(
+            catch_file_diag(&url, || panic!("boom")).is_none(),
+            "a panic must be contained, returning None"
+        );
+        assert_eq!(
+            catch_file_diag(&url, Vec::new).map(|v| v.len()),
+            Some(0),
+            "a clean compute passes its result through"
         );
     }
 
