@@ -152,6 +152,12 @@ impl IndexCache {
                 );
                 return;
             }
+            // Best-effort: clear temp files orphaned by a write that was
+            // killed between `write` and `rename`. Bounds the slow disk
+            // leak those would otherwise cause (IDX-4).
+            if let Some(base) = path.file_name().and_then(|s| s.to_str()) {
+                sweep_stale_temps(parent, base);
+            }
         }
         let data = match serde_json::to_vec(self) {
             Ok(d) => d,
@@ -315,6 +321,37 @@ fn metadata_mtime_ns(metadata: &std::fs::Metadata) -> Option<u128> {
         .map(|d| d.as_nanos())
 }
 
+/// Remove temp files (`.{base}.tmp.<pid>`) in `parent` that are clearly
+/// orphaned — left behind when a previous write was killed between the
+/// `write` and the `rename`. Only files older than 60s are touched: a real
+/// in-flight write from a concurrent process completes in milliseconds, so
+/// this never disturbs a live writer. Best-effort; ignores all errors.
+fn sweep_stale_temps(parent: &Path, base: &str) {
+    let prefix = format!(".{base}.tmp.");
+    let Ok(read_dir) = std::fs::read_dir(parent) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in read_dir.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        let orphaned = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age.as_secs() >= 60);
+        if orphaned {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Write `data` to `path` atomically: write to a sibling
 /// temp file, then rename. Prevents a half-written cache on
 /// crash/kill. On rename failure, falls back to direct write
@@ -451,6 +488,32 @@ mod tests {
             Some(v) => unsafe { std::env::set_var("XDG_CACHE_HOME", v) },
             None => unsafe { std::env::remove_var("XDG_CACHE_HOME") },
         }
+    }
+
+    #[test]
+    fn sweep_removes_only_stale_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = "abcd1234.json";
+        let stale = dir.path().join(format!(".{base}.tmp.999"));
+        let fresh = dir.path().join(format!(".{base}.tmp.1000"));
+        let real_cache = dir.path().join(base); // not a temp — must survive
+        fs::write(&stale, b"x").unwrap();
+        fs::write(&fresh, b"y").unwrap();
+        fs::write(&real_cache, b"z").unwrap();
+        // Age the stale temp two minutes.
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        sweep_stale_temps(dir.path(), base);
+
+        assert!(!stale.exists(), "stale temp must be removed");
+        assert!(fresh.exists(), "fresh temp (live write) must be kept");
+        assert!(real_cache.exists(), "the real cache file must be untouched");
     }
 
     #[test]
