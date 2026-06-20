@@ -102,6 +102,20 @@ impl IndexCache {
             );
             return None;
         }
+        // The filename is a hash of the workspace root, so finding a cache
+        // at this path normally implies the same root. Verify it anyway:
+        // the header stores the root precisely so a (vanishingly rare) hash
+        // collision can't hydrate a DIFFERENT workspace's index into this
+        // one. The data is already on hand; the check is free.
+        if cache.header.workspace_root != workspace_root {
+            tracing::warn!(
+                path = %path.display(),
+                stored = %cache.header.workspace_root.display(),
+                requested = %workspace_root.display(),
+                "index cache: workspace_root mismatch (hash collision?) — discarding"
+            );
+            return None;
+        }
         Some(cache)
     }
 
@@ -302,6 +316,11 @@ mod tests {
     use super::*;
     use std::fs;
 
+    /// Serialises tests that mutate the process-global `XDG_CACHE_HOME`
+    /// env var, which would otherwise cross-contaminate under cargo's
+    /// in-binary parallelism.
+    static XDG_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn write_tf(path: &Path, src: &str) {
         fs::write(path, src).unwrap();
     }
@@ -380,6 +399,7 @@ mod tests {
         write_tf(&var_path, "variable \"region\" {}\n");
 
         // Override cache root for the duration of this test.
+        let _g = XDG_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var_os("XDG_CACHE_HOME");
         unsafe {
             std::env::set_var("XDG_CACHE_HOME", xdg.path());
@@ -403,6 +423,41 @@ mod tests {
             Some(v) => unsafe { std::env::set_var("XDG_CACHE_HOME", v) },
             None => unsafe { std::env::remove_var("XDG_CACHE_HOME") },
         }
+    }
+
+    #[test]
+    fn load_rejects_foreign_workspace_root() {
+        // A cache file found at this workspace's path but whose header
+        // names a DIFFERENT root (a hash collision) must be discarded, not
+        // hydrated into the wrong workspace (IDX-2).
+        let xdg = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path().canonicalize().unwrap();
+
+        let _g = XDG_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var_os("XDG_CACHE_HOME");
+        unsafe {
+            std::env::set_var("XDG_CACHE_HOME", xdg.path());
+        }
+
+        let path = cache_path_for(&root).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let foreign = IndexCache {
+            header: CacheHeader {
+                version: CACHE_FORMAT_VERSION,
+                workspace_root: PathBuf::from("/some/other/workspace"),
+            },
+            entries: vec![],
+        };
+        fs::write(&path, serde_json::to_vec(&foreign).unwrap()).unwrap();
+
+        let loaded = IndexCache::load(&root);
+
+        match prev {
+            Some(v) => unsafe { std::env::set_var("XDG_CACHE_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_CACHE_HOME") },
+        }
+        assert!(loaded.is_none(), "foreign workspace_root must be rejected");
     }
 
     #[test]
