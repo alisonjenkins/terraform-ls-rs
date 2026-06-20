@@ -132,6 +132,19 @@ pub fn ensure_module_indexed(state: &StateStore, queue: &JobQueue, file_uri: &ur
     // at the cost of a one-time latency hit per buffer open.
     index_module_dir_sync(state, &dir_buf);
 
+    // Test files in a `tests/` subdir reference the PARENT module's
+    // variables / outputs / resources. Sync-index that dir too, or every
+    // `var.X` in the test file false-flags as undefined (its declaration
+    // lives one level up, not among the test file's siblings).
+    if let Some(mut_dir) = crate::handlers::util::module_under_test_dir(file_uri) {
+        if mut_dir != dir_buf {
+            index_module_dir_sync(state, &mut_dir);
+            if state.mark_scan_scheduled(mut_dir.clone()) {
+                queue.enqueue(Job::ScanDirectory(mut_dir.clone()), Priority::High);
+            }
+        }
+    }
+
     // Enqueue a sibling-dir scan only if nobody has scheduled one
     // yet. The bulk workspace scan marks dirs as `Scheduled` as
     // part of its discovery phase, so if this `did_open` fires

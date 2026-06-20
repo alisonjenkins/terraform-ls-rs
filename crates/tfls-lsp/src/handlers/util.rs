@@ -15,6 +15,21 @@ pub(crate) fn parent_dir(uri: &Url) -> Option<PathBuf> {
     uri.to_file_path().ok()?.parent().map(|p| p.to_path_buf())
 }
 
+/// The directory of the Terraform MODULE that a test file
+/// (`.tftest.hcl`/`.tftest.json`) exercises. Per Terraform: a test file in a
+/// `tests/` subdirectory tests the module ONE directory up; a test file in
+/// the module directory tests that directory. So `var.X` / `output.X` /
+/// module resources in the test resolve against this dir, not the test
+/// file's own dir. Returns `None` for non-file URIs.
+pub(crate) fn module_under_test_dir(test_uri: &Url) -> Option<PathBuf> {
+    let dir = parent_dir(test_uri)?;
+    if dir.file_name().and_then(|s| s.to_str()) == Some("tests") {
+        dir.parent().map(Path::to_path_buf)
+    } else {
+        Some(dir)
+    }
+}
+
 /// True when `a` and `b` refer to the same directory, with
 /// symlink tolerance.
 ///

@@ -594,7 +594,18 @@ pub fn compute_diagnostics_with_lookup(
         out.extend(tag("terraform_fmt", vec![fmt]));
     }
 
-    let module_dir = crate::handlers::util::parent_dir(uri);
+    // Test files (`.tftest.hcl` / `.tftest.json`) parse like HCL but are NOT
+    // module config: their references resolve against the module under test
+    // (the dir alongside, or the parent when they live in `tests/`), and the
+    // module-only ruleset below (schema validation, unused declarations,
+    // deprecations, …) does not apply to them. Only undefined-ref + the
+    // dedicated structural validator run.
+    let is_test = tfls_core::uri::is_tftest_uri(uri.as_str());
+    let module_dir = if is_test {
+        crate::handlers::util::module_under_test_dir(uri)
+    } else {
+        crate::handlers::util::parent_dir(uri)
+    };
     // Undefined-reference only on a CLEAN parse. While the file has a syntax
     // error its references come from the lenient text fallback, which happily
     // picks up a half-typed `local.region_short_na` and flags it as
@@ -619,11 +630,26 @@ pub fn compute_diagnostics_with_lookup(
     // would mistake a blanked-out `ami = …` for a missing required attribute.
     // Hover/completion still use the recovered body — that's the point — but
     // diagnostics stay exactly as they were before recovery existed.
+    // The structural validator is the ONLY body-based rule that runs on a
+    // test file; the module-only ruleset below is gated off (`&& !is_test`).
+    if is_test {
+        if let Some(body) = doc
+            .parsed
+            .body
+            .as_ref()
+            .filter(|_| !doc.parsed.has_errors())
+        {
+            out.extend(tag(
+                "terraform_tftest",
+                tfls_diag::tftest_diagnostics(body, &doc.rope),
+            ));
+        }
+    }
     if let Some(body) = doc
         .parsed
         .body
         .as_ref()
-        .filter(|_| !doc.parsed.has_errors())
+        .filter(|_| !doc.parsed.has_errors() && !is_test)
     {
         let lookup = StateStoreSchemaLookup { state };
         let hints = RegistryDocsHints { state };
