@@ -43,8 +43,19 @@ use crate::store::StateStore;
 /// `data_sources` + `for_each_shapes` + `data_source_for_each_shapes`
 /// from a JSON object (broken: `ResourceAddress` is a struct, not a
 /// string, so serde_json rejected it) to a JSON array of 2-tuples.
-/// v1 caches are discarded silently on load.
-const CACHE_FORMAT_VERSION: u32 = 2;
+/// v3 added `CacheEntry.content_hash`.
+/// Older caches are discarded silently on load.
+const CACHE_FORMAT_VERSION: u32 = 3;
+
+/// Deterministic content hash for cache identity. `FxHasher` is seedless,
+/// so the value is stable across processes/runs (unlike `RandomState`) —
+/// required for an on-disk cache to remain valid between server restarts.
+fn content_hash(text: &str) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = rustc_hash::FxHasher::default();
+    hasher.write(text.as_bytes());
+    hasher.finish()
+}
 
 /// Header of the on-disk cache file. Kept separate from
 /// `IndexCache` so a quick version check can avoid deserialising
@@ -69,6 +80,12 @@ pub struct CacheEntry {
     /// File size in bytes. Belt-and-braces against systems where
     /// mtime resolution is too coarse (e.g. some network mounts).
     pub size: u64,
+    /// Hash of the file content the cached symbols were parsed from.
+    /// Closes the gap where a file is restored (git checkout, backup)
+    /// with a matching mtime+size but DIFFERENT content — without this,
+    /// stale symbols would hydrate and produce sticky false diagnostics
+    /// surviving a restart.
+    pub content_hash: u64,
     /// Symbols declared in the file at parse time.
     pub symbols: SymbolTable,
     /// References extracted from the file at parse time.
@@ -182,6 +199,10 @@ impl IndexCache {
                 path: path.clone(),
                 mtime_ns,
                 size: metadata.len(),
+                // Hash the in-memory text these symbols were parsed from
+                // (not the disk file) so an unsaved-buffer/disk divergence
+                // is caught on hydrate too.
+                content_hash: content_hash(&doc_ref.text()),
                 symbols: doc_ref.symbols.clone(),
                 references: doc_ref.references.clone(),
             });
@@ -219,6 +240,13 @@ impl IndexCache {
             let Ok(text) = std::fs::read_to_string(&entry.path) else {
                 continue;
             };
+            // Final identity check: even with matching mtime+size, the
+            // content can differ (a file restored from git/backup with the
+            // same mtime+size). A hash mismatch means the cached symbols
+            // are stale — skip and let the bulk scan re-parse.
+            if content_hash(&text) != entry.content_hash {
+                continue;
+            }
             let Ok(uri) = Url::from_file_path(&entry.path) else {
                 continue;
             };
@@ -423,6 +451,45 @@ mod tests {
             Some(v) => unsafe { std::env::set_var("XDG_CACHE_HOME", v) },
             None => unsafe { std::env::remove_var("XDG_CACHE_HOME") },
         }
+    }
+
+    #[test]
+    fn hydrate_skips_when_content_differs_despite_matching_mtime_and_size() {
+        // Restore-from-backup / git-checkout: a file comes back with the
+        // SAME mtime+size but DIFFERENT content. The content hash must
+        // catch it so stale symbols don't hydrate (IDX-3).
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let path = root.join("variables.tf");
+        let a = "variable \"aa\" {}\n";
+        let b = "variable \"bb\" {}\n";
+        assert_eq!(a.len(), b.len(), "fixtures must be the same byte length");
+        write_tf(&path, a);
+
+        let store_a = StateStore::new();
+        let uri = Url::from_file_path(&path).unwrap();
+        store_a.upsert_document(DocumentState::new(uri.clone(), a, 1));
+        let cache = IndexCache::capture(&store_a, &root);
+        let captured_mtime = fs::metadata(&path).unwrap().modified().unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        write_tf(&path, b);
+        // Force the mtime back to the captured value.
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.set_modified(captured_mtime).unwrap();
+        drop(f);
+
+        // Sanity: mtime+size now match the cached entry; only content differs.
+        let meta = fs::metadata(&path).unwrap();
+        assert_eq!(meta.len(), cache.entries[0].size);
+        assert_eq!(metadata_mtime_ns(&meta), Some(cache.entries[0].mtime_ns));
+
+        let store_b = StateStore::new();
+        let hydrated = cache.hydrate_into_store(&store_b);
+        assert_eq!(
+            hydrated, 0,
+            "content-hash mismatch must invalidate despite matching mtime+size"
+        );
     }
 
     #[test]
