@@ -316,7 +316,7 @@ pub fn spawn_watcher(
                 }
                 WorkspaceEvent::FileRemoved(path) => {
                     if let Some(url) = path_to_url(&path) {
-                        state.remove_document(&url);
+                        handle_disk_removal(&state, client.as_ref(), &url).await;
                     }
                 }
                 WorkspaceEvent::LockFileChanged(dir) => {
@@ -407,6 +407,13 @@ async fn dispatch_job(
             let result = parse_file_into_state(&state, &path).await;
             if let Some(c) = client {
                 publish_for_path(&state, c, &path).await;
+                // A watcher-driven (external) change to this file can
+                // change cross-file symbol resolution for OPEN peers in the
+                // same module — refresh them too, or their stale
+                // undefined/unused diagnostics stick until the user types.
+                if let Some(url) = path_to_url(&path) {
+                    publish_open_peers(&state, c, &url).await;
+                }
             }
             result
         }
@@ -742,6 +749,57 @@ async fn publish_for_path(state: &StateStore, client: &tower_lsp_server::Client,
     client
         .publish_diagnostics(tfls_core::uri::url_to_uri(&uri), diagnostics, Some(version))
         .await;
+}
+
+/// Recompute + push diagnostics for every OPEN buffer that shares the
+/// changed file's module scope (excluding the changed file itself). A
+/// change arriving via the file WATCHER (external edit: `git pull`, branch
+/// switch, a formatter, another tool, or a disk delete) bypasses
+/// `did_change`/`did_save`, so without this an open peer's cross-file
+/// diagnostic (`undefined`/`unused`) never clears when the symbol it
+/// depends on appears/vanishes in a sibling on disk. Mirrors
+/// `handlers::document::publish_peer_diagnostics`: bypasses
+/// `should_skip_push_diagnostics` and sends `version = None` so even a
+/// pull-mode client (which won't reliably re-pull an invisible buffer)
+/// applies it.
+async fn publish_open_peers(
+    state: &StateStore,
+    client: &tower_lsp_server::Client,
+    changed_uri: &url::Url,
+) {
+    let peers = crate::handlers::util::open_peers_in_scope(state, changed_uri);
+    for uri in peers {
+        let diagnostics = crate::handlers::document::compute_diagnostics(state, &uri);
+        client
+            .publish_diagnostics(tfls_core::uri::url_to_uri(&uri), diagnostics, None)
+            .await;
+    }
+}
+
+/// Handle a file vanishing from disk (internal watcher `FileRemoved`).
+/// Mirrors the LSP-client DELETE arm in [`crate::handlers::workspace`]:
+/// NEVER drop an OPEN buffer — a disk-side delete is often a transient
+/// atomic-save/rename or a `git checkout` of a branch lacking the file, and
+/// the editor still owns the buffer (its `did_close` is the authoritative
+/// removal signal). Removing it here would tear the doc out of `documents`
+/// while `is_open()` stays true, and a later `did_change`'s
+/// `documents.get_mut` would return `None`, freezing the buffer until
+/// close/reopen. For a genuinely-removed NON-open file, clear its published
+/// diagnostics and refresh open peers whose resolution depended on it.
+async fn handle_disk_removal(
+    state: &StateStore,
+    client: Option<&tower_lsp_server::Client>,
+    url: &url::Url,
+) {
+    if state.is_open(url) {
+        return;
+    }
+    state.remove_document(url);
+    if let Some(c) = client {
+        c.publish_diagnostics(tfls_core::uri::url_to_uri(url), Vec::new(), None)
+            .await;
+        publish_open_peers(state, c, url).await;
+    }
 }
 
 /// Recompute and republish diagnostics for every currently-open
@@ -2020,10 +2078,10 @@ mod tests {
     //! output enumerates exactly what the async wrapper will do,
     //! and `SendRefresh` is the ONLY variant that can trigger
     //! client-side I/O.
-    use super::{decide_refresh, index_module_dir_sync, RefreshDecision};
+    use super::{decide_refresh, handle_disk_removal, index_module_dir_sync, RefreshDecision};
     use std::fs;
     use std::path::PathBuf;
-    use tfls_state::StateStore;
+    use tfls_state::{DocumentState, StateStore};
     use url::Url;
 
     fn u(s: &str) -> Url {
@@ -2043,6 +2101,41 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("create tmpdir");
         dir
+    }
+
+    #[tokio::test]
+    async fn disk_removal_keeps_an_open_buffer() {
+        // HIGH-2: a disk-side delete (atomic save / git checkout) must NOT
+        // tear an OPEN buffer out of the store — the editor still owns it.
+        let state = StateStore::new();
+        let url = u("file:///work/mod/main.tf");
+        state.upsert_document(DocumentState::new(url.clone(), "variable \"x\" {}\n", 1));
+        state.mark_open(url.clone());
+
+        handle_disk_removal(&state, /*client=*/ None, &url).await;
+
+        assert!(
+            state.documents.contains_key(&url),
+            "open buffer must survive a disk-side delete"
+        );
+        assert!(state.is_open(&url), "is_open must stay true");
+    }
+
+    #[tokio::test]
+    async fn disk_removal_drops_a_non_open_file() {
+        // A genuinely-removed file that the editor does NOT have open is
+        // removed from the store as normal.
+        let state = StateStore::new();
+        let url = u("file:///work/mod/variables.tf");
+        state.upsert_document(DocumentState::new(url.clone(), "variable \"x\" {}\n", 1));
+        // NOT marked open.
+
+        handle_disk_removal(&state, None, &url).await;
+
+        assert!(
+            !state.documents.contains_key(&url),
+            "a non-open deleted file must be removed from the store"
+        );
     }
 
     #[test]
