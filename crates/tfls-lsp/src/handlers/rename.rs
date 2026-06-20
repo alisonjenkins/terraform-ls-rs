@@ -76,6 +76,17 @@ pub async fn rename(
     };
     let new_name = params.new_name;
 
+    // Reject names that aren't valid Terraform identifiers before
+    // producing any edits — otherwise we'd emit edits that insert e.g.
+    // `1 bad` or an empty string, silently breaking every renamed site.
+    // An error (not Ok(None)) lets the client surface the reason (REN-2).
+    if !is_valid_identifier(&new_name) {
+        return Err(jsonrpc::Error::invalid_params(format!(
+            "`{new_name}` is not a valid Terraform identifier (must start with a \
+             letter or underscore and contain only letters, digits, `_` or `-`)"
+        )));
+    }
+
     // Provider local alias rename — workspace-wide. Tried BEFORE
     // the symbol-rename path so the `aws_v6` segment isn't
     // accidentally treated as a regular identifier.
@@ -280,6 +291,18 @@ fn rfind_ident(haystack: &str, name: &str) -> Option<usize> {
 
 fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// A syntactically valid Terraform identifier: starts with a letter or
+/// underscore, then letters / digits / `_` / `-`. Used to reject bad
+/// `rename` targets before emitting edits.
+fn is_valid_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 // Silence clippy for unused-but-exported helpers.
@@ -518,6 +541,19 @@ mod tests {
             start: Position::new(sl, sc),
             end: Position::new(el, ec),
         }
+    }
+
+    #[test]
+    fn valid_identifier_rejects_bad_names() {
+        assert!(is_valid_identifier("region"));
+        assert!(is_valid_identifier("_x"));
+        assert!(is_valid_identifier("aws-v6"));
+        assert!(is_valid_identifier("r2d2"));
+        assert!(!is_valid_identifier(""));
+        assert!(!is_valid_identifier("1bad"));
+        assert!(!is_valid_identifier("has space"));
+        assert!(!is_valid_identifier("dots.here"));
+        assert!(!is_valid_identifier("punct!"));
     }
 
     #[test]
