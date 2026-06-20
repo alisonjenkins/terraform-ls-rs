@@ -101,7 +101,17 @@ pub fn ensure_module_indexed(state: &StateStore, queue: &JobQueue, file_uri: &ur
     let Some(dir) = path.parent() else {
         return;
     };
-    let dir_buf = dir.to_path_buf();
+    // Canonicalize ONCE so a symlinked path and its physical target map
+    // to a SINGLE `dir_scans` key. The editor hands us a non-canonical
+    // URI (e.g. via a symlinked workspace root), but
+    // `enqueue_child_module_scans` and `bulk_workspace_scan` schedule
+    // dirs from canonicalized paths. Without this, the same physical
+    // dir would get two distinct keys → double scan, and a Completed
+    // mark under one key wouldn't satisfy `is_scan_completed` lookups
+    // under the other. Fall back to the non-canonical path when
+    // canonicalize fails (dir doesn't exist yet, permissions, etc.) so
+    // behaviour is unchanged for the common case.
+    let dir_buf = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
 
     // Also look for a parent with `.terraform/providers/` and enqueue a
     // schema fetch there. That's where provider schemas live, and it's
@@ -137,6 +147,14 @@ pub fn ensure_module_indexed(state: &StateStore, queue: &JobQueue, file_uri: &ur
     // `var.X` in the test file false-flags as undefined (its declaration
     // lives one level up, not among the test file's siblings).
     if let Some(mut_dir) = crate::handlers::util::module_under_test_dir(file_uri) {
+        // Canonicalize for the same single-key reason as `dir_buf` above:
+        // `module_under_test_dir` derives this from the (non-canonical)
+        // editor URI, so a symlinked path would otherwise schedule a
+        // second key for a dir already covered by `dir_buf` or the
+        // canonical module-under-test dir. For a NON-test `.tf` this
+        // resolves to the file's own dir, which equals `dir_buf` after
+        // canonicalization — so the `!= dir_buf` guard correctly skips it.
+        let mut_dir = mut_dir.canonicalize().unwrap_or(mut_dir);
         if mut_dir != dir_buf {
             index_module_dir_sync(state, &mut_dir);
             if state.mark_scan_scheduled(mut_dir.clone()) {
@@ -637,7 +655,7 @@ async fn bulk_workspace_scan(
     for dir in dirs {
         rebuild_assigned_variable_types_for_dir(state, &dir);
         rebuild_unknown_module_vars_for_dir(state, &dir);
-        state.mark_scan_completed(dir);
+        mark_scan_completed_and_publish(state, client, &dir).await;
     }
 
     // The bulk scan just filled the store with peer files open
@@ -908,6 +926,32 @@ async fn publish_for_dir(state: &StateStore, client: &tower_lsp_server::Client, 
     }
 }
 
+/// Mark `dir`'s scan as Completed and, for push-only clients, push
+/// fresh diagnostics for every open buffer in `dir`.
+///
+/// LOW-2: the unknown-value rules (`for_each_unknown_keys`,
+/// `import_unknown_id`) are gated in `compute_diagnostics_with_lookup`
+/// behind `is_scan_completed(dir)`. At `did_open`, `index_module_dir_sync`
+/// deliberately does NOT mark the dir Completed, so the `did_open`
+/// publish skips those rules. The dir is only marked Completed later, on
+/// this async scan-completion path. For a push-only client (nvim's
+/// default), `maybe_refresh_diagnostics` is a `NoOp` and
+/// `scan_files_parallel` EXCLUDES open buffers from its publish set — so
+/// without an explicit push here, those two diagnostics would never reach
+/// a buffer opened BEFORE its dir's scan completed until the user edited.
+/// Pushing AFTER the Completed mark (mirroring the FetchSchemas
+/// completion path) makes the now-ready diagnostics land immediately.
+async fn mark_scan_completed_and_publish(
+    state: &StateStore,
+    client: Option<&tower_lsp_server::Client>,
+    dir: &Path,
+) {
+    state.mark_scan_completed(dir.to_path_buf());
+    if let Some(c) = client {
+        publish_for_dir(state, c, dir).await;
+    }
+}
+
 /// Walk upward from `start` looking for a directory whose
 /// `.terraform/providers/` subtree exists. That directory is the
 /// terraform module root where `tofu init` was run and its schemas
@@ -1012,7 +1056,7 @@ async fn scan_dir_into_state(
             // (which actually takes visible time) reports progress
             // now; per-dir scans index silently.
             scan_files_parallel(state, client, files, /* with_progress */ false).await;
-            state.mark_scan_completed(dir.to_path_buf());
+            mark_scan_completed_and_publish(state, client, dir).await;
             rebuild_assigned_variable_types_for_dir(state, dir);
             rebuild_unknown_module_vars_for_dir(state, dir);
             enqueue_child_module_scans(state, queue, dir);
@@ -2108,8 +2152,8 @@ mod tests {
     //! and `SendRefresh` is the ONLY variant that can trigger
     //! client-side I/O.
     use super::{
-        catch_file_diag, decide_refresh, handle_disk_removal, index_module_dir_sync,
-        RefreshDecision,
+        catch_file_diag, decide_refresh, ensure_module_indexed, handle_disk_removal,
+        index_module_dir_sync, mark_scan_completed_and_publish, RefreshDecision,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -2432,6 +2476,87 @@ mod tests {
         index_module_dir_sync(&store, &dir);
         // Store should be empty and no panic.
         assert_eq!(store.documents.len(), 0);
+    }
+
+    // --- LOW-4: `ensure_module_indexed` canonicalizes its dir key ----
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_module_indexed_canonicalizes_dir_for_symlinked_path() {
+        // LOW-4: opening a file through a SYMLINKED path must schedule
+        // the SAME physical dir as opening it through the real path —
+        // otherwise the same dir gets two distinct `dir_scans` keys
+        // (double scan; a Completed mark under one key doesn't satisfy
+        // lookups under the other). `ensure_module_indexed` canonicalizes
+        // the directory once at the top, so both routes converge on the
+        // single canonical key.
+        use std::os::unix::fs::symlink;
+        use tfls_state::JobQueue;
+
+        let base = tmp_dir("ensure-canon-symlink");
+        // Physical module dir + a sibling symlink pointing at it.
+        let real_dir = base.join("real");
+        fs::create_dir_all(&real_dir).unwrap();
+        fs::write(real_dir.join("main.tf"), "variable \"x\" {}\n").unwrap();
+        let link_dir = base.join("link");
+        symlink(&real_dir, &link_dir).unwrap();
+
+        let canon = real_dir.canonicalize().unwrap();
+
+        let state = StateStore::new();
+        let queue = JobQueue::new();
+
+        // Open through the REAL path.
+        let real_uri = Url::from_file_path(real_dir.join("main.tf")).unwrap();
+        ensure_module_indexed(&state, &queue, &real_uri);
+
+        // Open through the SYMLINK alias of the very same file.
+        let link_uri = Url::from_file_path(link_dir.join("main.tf")).unwrap();
+        ensure_module_indexed(&state, &queue, &link_uri);
+
+        // Exactly one dir_scans entry, keyed by the canonical dir.
+        let scanned: Vec<PathBuf> = state.dir_scans.iter().map(|e| e.key().clone()).collect();
+        assert!(
+            state.is_scan_tracked(&canon),
+            "canonical dir must be the scheduled key; got {scanned:?}"
+        );
+        assert_eq!(
+            scanned.len(),
+            1,
+            "symlinked alias must NOT create a second dir_scans key; got {scanned:?}"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    // --- LOW-2: scan completion marks Completed AND publishes --------
+
+    #[tokio::test]
+    async fn mark_scan_completed_and_publish_marks_completed() {
+        // LOW-2 seam: the scan-completion path must transition the dir to
+        // Completed (so the unknown-value rules' `is_scan_completed` gate
+        // opens) AND, for a push-only client, publish the now-ready
+        // diagnostics for open buffers in the dir. The publish side needs
+        // a live `tower_lsp_server::Client` (not mockable here), so this
+        // test pins the mark-Completed half and the no-client no-panic
+        // path; the push wiring is covered by the call sites in
+        // `bulk_workspace_scan` / `scan_dir_into_state`.
+        let dir = tmp_dir("mark-completed-and-publish");
+        let store = StateStore::new();
+        assert!(
+            !store.is_scan_completed(&dir),
+            "precondition: dir is not yet Completed"
+        );
+
+        // client=None mirrors headless / test runs and must not panic.
+        mark_scan_completed_and_publish(&store, /*client=*/ None, &dir).await;
+
+        assert!(
+            store.is_scan_completed(&dir),
+            "scan-completion path must mark the dir Completed so the \
+             unknown-value rules' gate opens"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
