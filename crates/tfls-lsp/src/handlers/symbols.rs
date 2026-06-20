@@ -42,6 +42,9 @@ fn collect_document_symbols(doc: &DocumentState) -> Vec<DocumentSymbol> {
     }
     let mut c = Collector(Vec::new());
     doc.symbols.for_each_symbol(&mut c);
+    // Test files (`.tftest.hcl`) carry no module symbols — their outline is
+    // the list of `run "<label>"` blocks, held separately on the document.
+    c.0.extend(doc.test_runs.iter().map(to_run_document_symbol));
     let mut out = c.0;
     out.sort_by(|a, b| {
         (a.range.start.line, a.range.start.character)
@@ -63,6 +66,24 @@ fn to_document_symbol(sym: &Symbol) -> DocumentSymbol {
         // selection_range is the identifier name; we don't track it
         // separately yet, so use the full range.
         selection_range: range,
+        children: None,
+    }
+}
+
+/// Outline entry for a test-file `run "<label>"` block. Rendered with
+/// `SymbolKind::EVENT` (a test step) rather than via `lsp_symbol_kind`,
+/// since `test_runs` reuses `DomainKind::Module` only as a placeholder.
+#[allow(deprecated)]
+fn to_run_document_symbol(sym: &Symbol) -> DocumentSymbol {
+    let range = sym.location.range();
+    DocumentSymbol {
+        name: sym.name.clone(),
+        detail: Some("run".to_string()),
+        kind: SymbolKind::EVENT,
+        tags: None,
+        deprecated: None,
+        range,
+        selection_range: sym.name_range,
         children: None,
     }
 }
