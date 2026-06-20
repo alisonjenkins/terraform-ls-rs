@@ -208,9 +208,9 @@ impl IndexCache {
             let Ok(uri) = Url::from_file_path(&entry.path) else {
                 continue;
             };
-            // Skip if the editor has already upserted this doc
-            // (e.g. `did_open` fired for it before the cache
-            // load finished) — don't clobber live state.
+            // Skip if this doc is already loaded (e.g. a bulk scan or a
+            // prior entry put it there) — don't redo the work or overwrite
+            // a fresher parse.
             if state.documents.contains_key(&uri) {
                 continue;
             }
@@ -220,8 +220,15 @@ impl IndexCache {
                 entry.symbols.clone(),
                 entry.references.clone(),
             );
-            state.upsert_document(doc);
-            hydrated += 1;
+            // Cache hydration runs in the background at startup, so a
+            // `did_open` can race it: the `contains_key` check above is NOT
+            // atomic with the insert. Route through the open-guarded upsert
+            // (the store's documented contract for every disk-driven path)
+            // so a buffer opened in the gap is never clobbered with this
+            // stale version-0 cached snapshot.
+            if state.upsert_document_unless_open(doc) {
+                hydrated += 1;
+            }
         }
         hydrated
     }
@@ -396,6 +403,35 @@ mod tests {
             Some(v) => unsafe { std::env::set_var("XDG_CACHE_HOME", v) },
             None => unsafe { std::env::remove_var("XDG_CACHE_HOME") },
         }
+    }
+
+    #[test]
+    fn hydrate_does_not_clobber_an_open_buffer_marked_during_the_race() {
+        // The TOCTOU: a `did_open` calls `mark_open` then upserts. If the
+        // hydrate's `contains_key` check runs in the gap (open marked, doc
+        // not yet inserted), the OLD code would still upsert the stale
+        // cached doc. The atomic open-guard must skip it.
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let var_path = root.join("variables.tf");
+        write_tf(&var_path, "variable \"region\" {}\n");
+
+        let store_a = StateStore::new();
+        let uri = Url::from_file_path(&var_path).unwrap();
+        store_a.upsert_document(DocumentState::new(uri.clone(), "variable \"region\" {}\n", 1));
+        let cache = IndexCache::capture(&store_a, &root);
+
+        // Simulate the race: buffer marked open, doc not yet in `documents`.
+        let store_b = StateStore::new();
+        store_b.mark_open(uri.clone());
+        assert!(!store_b.documents.contains_key(&uri));
+
+        let hydrated = cache.hydrate_into_store(&store_b);
+        assert_eq!(hydrated, 0, "must not hydrate over an open buffer");
+        assert!(
+            !store_b.documents.contains_key(&uri),
+            "stale cached doc must not land in the store for an open URI"
+        );
     }
 
     #[test]
