@@ -1595,6 +1595,324 @@ pub const DATA_ROOT_SCHEMA: BuiltinSchema = BuiltinSchema {
     }],
 };
 
+// --- Terraform test files (`.tftest.hcl`) ---------------------------------
+//
+// The test grammar is closed and language-defined, mirroring the built-in
+// blocks above. These schemas drive completion inside `.tftest.hcl` /
+// `.tftest.json` files; they are kept SEPARATE from the `.tf` dispatch
+// (`resolve_nested_schema`) so `run` never leaks into config completion and
+// `resource` / `data` never appear in test files. Resolution starts at
+// [`tftest_root_schema`].
+
+/// Block names valid at the top level of a test file. Drives top-level
+/// completion and the structural validator's allow-list.
+pub const TFTEST_TOP_LEVEL_BLOCKS: &[&str] = &[
+    "test",
+    "variables",
+    "provider",
+    "run",
+    "mock_provider",
+    "override_resource",
+    "override_data",
+    "override_module",
+];
+
+/// `run "<label>" { ... }` — one test step (a plan or apply).
+pub const RUN_BLOCK: BuiltinSchema = BuiltinSchema {
+    attrs: &[
+        BuiltinAttr {
+            name: "command",
+            required: false,
+            detail: "`plan` (default) or `apply` — how far Terraform runs this step",
+        },
+        BuiltinAttr {
+            name: "parallel",
+            required: false,
+            detail: "When true, this run may execute in parallel with others (Terraform 1.12+)",
+        },
+        BuiltinAttr {
+            name: "state_key",
+            required: false,
+            detail: "Override the state key so runs share or isolate state",
+        },
+        BuiltinAttr {
+            name: "expect_failures",
+            required: false,
+            detail: "List of checkable objects expected to fail their conditions",
+        },
+        BuiltinAttr {
+            name: "providers",
+            required: false,
+            detail: "Map of provider configurations passed to this run",
+        },
+    ],
+    blocks: &[
+        BuiltinBlock {
+            name: "plan_options",
+            detail: "Tweak the plan (mode, refresh, replace, target)",
+            label_placeholder: None,
+            required_attrs: &[],
+            schema_fn: Some(plan_options_schema),
+        },
+        BuiltinBlock {
+            name: "variables",
+            detail: "Input-variable values for this run",
+            label_placeholder: None,
+            required_attrs: &[],
+            schema_fn: None,
+        },
+        BuiltinBlock {
+            name: "module",
+            detail: "Run against an alternate module (source / version)",
+            label_placeholder: None,
+            required_attrs: &[RequiredAttr {
+                name: "source",
+                quoted: true,
+            }],
+            schema_fn: Some(test_module_schema),
+        },
+        BuiltinBlock {
+            name: "assert",
+            detail: "Condition + error_message the run must satisfy",
+            label_placeholder: None,
+            required_attrs: &[
+                RequiredAttr {
+                    name: "condition",
+                    quoted: false,
+                },
+                RequiredAttr {
+                    name: "error_message",
+                    quoted: true,
+                },
+            ],
+            schema_fn: Some(assert_schema),
+        },
+        BuiltinBlock {
+            name: "override_resource",
+            detail: "Override a resource's computed values for this run",
+            label_placeholder: None,
+            required_attrs: &[RequiredAttr {
+                name: "target",
+                quoted: false,
+            }],
+            schema_fn: Some(override_resource_schema),
+        },
+        BuiltinBlock {
+            name: "override_data",
+            detail: "Override a data source's result for this run",
+            label_placeholder: None,
+            required_attrs: &[RequiredAttr {
+                name: "target",
+                quoted: false,
+            }],
+            schema_fn: Some(override_data_schema),
+        },
+        BuiltinBlock {
+            name: "override_module",
+            detail: "Override a child module's outputs for this run",
+            label_placeholder: None,
+            required_attrs: &[RequiredAttr {
+                name: "target",
+                quoted: false,
+            }],
+            schema_fn: Some(override_module_schema),
+        },
+        BuiltinBlock {
+            name: "mock_provider",
+            detail: "Mock a provider for this run",
+            label_placeholder: Some("name"),
+            required_attrs: &[],
+            schema_fn: Some(mock_provider_schema),
+        },
+    ],
+};
+
+/// `plan_options { ... }` inside a `run`.
+pub const PLAN_OPTIONS_BLOCK: BuiltinSchema = BuiltinSchema {
+    attrs: &[
+        BuiltinAttr {
+            name: "mode",
+            required: false,
+            detail: "`normal` (default) or `refresh-only`",
+        },
+        BuiltinAttr {
+            name: "refresh",
+            required: false,
+            detail: "When false, skip refreshing state before planning",
+        },
+        BuiltinAttr {
+            name: "replace",
+            required: false,
+            detail: "List of resource addresses to force-replace",
+        },
+        BuiltinAttr {
+            name: "target",
+            required: false,
+            detail: "List of resource addresses to restrict the plan to",
+        },
+    ],
+    blocks: &[],
+};
+fn plan_options_schema() -> BuiltinSchema {
+    PLAN_OPTIONS_BLOCK
+}
+
+/// `module { source = … version = … }` inside a `run`.
+pub const TEST_MODULE_BLOCK: BuiltinSchema = BuiltinSchema {
+    attrs: &[
+        BuiltinAttr {
+            name: "source",
+            required: true,
+            detail: "Module source to run this step against",
+        },
+        BuiltinAttr {
+            name: "version",
+            required: false,
+            detail: "Version constraint (registry modules only)",
+        },
+    ],
+    blocks: &[],
+};
+fn test_module_schema() -> BuiltinSchema {
+    TEST_MODULE_BLOCK
+}
+
+/// Shared body for `override_resource` / `override_data`.
+pub const OVERRIDE_RESOURCE_BLOCK: BuiltinSchema = BuiltinSchema {
+    attrs: &[
+        BuiltinAttr {
+            name: "target",
+            required: true,
+            detail: "Address of the resource / data source to override",
+        },
+        BuiltinAttr {
+            name: "values",
+            required: false,
+            detail: "Map of attribute values to force on the target",
+        },
+        BuiltinAttr {
+            name: "override_during",
+            required: false,
+            detail: "`plan` or `apply` — phase the override applies in",
+        },
+    ],
+    blocks: &[],
+};
+fn override_resource_schema() -> BuiltinSchema {
+    OVERRIDE_RESOURCE_BLOCK
+}
+pub const OVERRIDE_DATA_BLOCK: BuiltinSchema = OVERRIDE_RESOURCE_BLOCK;
+fn override_data_schema() -> BuiltinSchema {
+    OVERRIDE_DATA_BLOCK
+}
+
+/// `override_module { target = … outputs = { … } }`.
+pub const OVERRIDE_MODULE_BLOCK: BuiltinSchema = BuiltinSchema {
+    attrs: &[
+        BuiltinAttr {
+            name: "target",
+            required: true,
+            detail: "Address of the child module to override",
+        },
+        BuiltinAttr {
+            name: "outputs",
+            required: false,
+            detail: "Map of output values to force on the module",
+        },
+    ],
+    blocks: &[],
+};
+fn override_module_schema() -> BuiltinSchema {
+    OVERRIDE_MODULE_BLOCK
+}
+
+/// `mock_provider "<name>" { ... }`.
+pub const MOCK_PROVIDER_BLOCK: BuiltinSchema = BuiltinSchema {
+    attrs: &[
+        BuiltinAttr {
+            name: "alias",
+            required: false,
+            detail: "Provider alias the mock stands in for",
+        },
+        BuiltinAttr {
+            name: "source",
+            required: false,
+            detail: "Path to a directory of mock data files",
+        },
+        BuiltinAttr {
+            name: "override_during",
+            required: false,
+            detail: "`plan` or `apply` — phase the mock applies in",
+        },
+    ],
+    blocks: &[
+        BuiltinBlock {
+            name: "mock_resource",
+            detail: "Default computed values for every instance of a resource type",
+            label_placeholder: Some("type"),
+            required_attrs: &[],
+            schema_fn: Some(mock_resource_schema),
+        },
+        BuiltinBlock {
+            name: "mock_data",
+            detail: "Default values returned for every instance of a data-source type",
+            label_placeholder: Some("type"),
+            required_attrs: &[],
+            schema_fn: Some(mock_resource_schema),
+        },
+    ],
+};
+fn mock_provider_schema() -> BuiltinSchema {
+    MOCK_PROVIDER_BLOCK
+}
+
+/// `mock_resource "<type>" { ... }` / `mock_data "<type>" { ... }`.
+pub const MOCK_RESOURCE_BLOCK: BuiltinSchema = BuiltinSchema {
+    attrs: &[
+        BuiltinAttr {
+            name: "defaults",
+            required: false,
+            detail: "Map of attribute → value used when the test doesn't set one",
+        },
+        BuiltinAttr {
+            name: "override_during",
+            required: false,
+            detail: "`plan` or `apply` — phase the mock applies in",
+        },
+    ],
+    blocks: &[],
+};
+fn mock_resource_schema() -> BuiltinSchema {
+    MOCK_RESOURCE_BLOCK
+}
+
+/// Top-level `test { ... }` block (per-file options).
+pub const TEST_BLOCK: BuiltinSchema = BuiltinSchema {
+    attrs: &[BuiltinAttr {
+        name: "parallel",
+        required: false,
+        detail: "When true, runs in this file may execute in parallel (Terraform 1.12+)",
+    }],
+    blocks: &[],
+};
+
+/// Resolve a test-file top-level block keyword to its body schema. The
+/// entry point for `.tftest.hcl` completion — mirrors the `.tf`
+/// [`resolve_nested_schema`] but over the closed test grammar. `variables`
+/// and `provider` carry user-defined bodies (no static schema), so they
+/// return `None`.
+pub fn tftest_root_schema(keyword: &str) -> Option<BuiltinSchema> {
+    Some(match keyword {
+        "run" => RUN_BLOCK,
+        "mock_provider" => MOCK_PROVIDER_BLOCK,
+        "override_resource" => OVERRIDE_RESOURCE_BLOCK,
+        "override_data" => OVERRIDE_DATA_BLOCK,
+        "override_module" => OVERRIDE_MODULE_BLOCK,
+        "test" => TEST_BLOCK,
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod content_tests {
