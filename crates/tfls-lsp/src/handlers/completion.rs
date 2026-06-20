@@ -148,6 +148,19 @@ pub async fn completion(
         return Ok(Some(CompletionResponse::Array(items)));
     }
 
+    // Test files (`.tftest.hcl` / `.tftest.json`) have their own closed
+    // grammar (`run`, `mock_provider`, `override_*`, …) and reference the
+    // module under test. The block-oriented `.tf` classifier would offer
+    // `resource` / `data` here and miss `run` entirely, so route them to a
+    // dedicated completion path (mirrors the `.tfvars` early-return).
+    if tfls_core::uri::is_tftest_uri(uri.as_str()) {
+        let cur_line_start = doc.rope.line_to_byte(line_idx);
+        let line_prefix = doc.rope.byte_slice(cur_line_start..offset).to_string();
+        let items =
+            tftest_completion_items(backend, &uri, doc.parsed.body.as_ref(), &line_prefix, offset);
+        return Ok(Some(CompletionResponse::Array(items)));
+    }
+
     let text = doc.rope.byte_slice(..line_end).to_string();
     let ctx = classify_context(&text, offset);
 
@@ -3025,6 +3038,7 @@ enum SymbolField {
     Variables,
     Locals,
     Modules,
+    Outputs,
 }
 
 /// `each.<...>` namespace completion. Surfaces inside any
@@ -3150,6 +3164,246 @@ fn tfvars_completion_items(
         .collect()
 }
 
+/// Top-level block snippets for a test file. Mirrors
+/// [`TOP_LEVEL_SNIPPETS`] but over the closed `.tftest.hcl` grammar — so
+/// `resource` / `data` never appear and `run` is offered instead.
+const TFTEST_TOP_LEVEL_SNIPPETS: &[(&str, &str, &str)] = &[
+    (
+        "run",
+        "run \"${1:name}\" {\n  command = ${2:plan}\n  $0\n}",
+        "Test run (a plan or apply step)",
+    ),
+    (
+        "variables",
+        "variables {\n  $0\n}",
+        "Input-variable values shared across runs",
+    ),
+    (
+        "provider",
+        "provider \"${1:name}\" {\n  $0\n}",
+        "Provider configuration for the test",
+    ),
+    (
+        "mock_provider",
+        "mock_provider \"${1:name}\" {\n  $0\n}",
+        "Replace a provider with mock data",
+    ),
+    (
+        "override_resource",
+        "override_resource {\n  target = ${1}\n  values = {\n    $0\n  }\n}",
+        "Override a resource's computed values",
+    ),
+    (
+        "override_data",
+        "override_data {\n  target = ${1}\n  values = {\n    $0\n  }\n}",
+        "Override a data source's result",
+    ),
+    (
+        "override_module",
+        "override_module {\n  target  = ${1}\n  outputs = {\n    $0\n  }\n}",
+        "Override a child module's outputs",
+    ),
+    (
+        "test",
+        "test {\n  parallel = ${1:true}\n}",
+        "Per-file test options",
+    ),
+];
+
+/// Completion for a `.tftest.hcl` / `.tftest.json` test file. Routes by
+/// cursor context over the closed test grammar:
+///
+/// - A reference prefix (`var.`, `output.`, `run.`) → names from the
+///   module under test (variables / outputs) or this file's run labels.
+/// - Top level → the test-file block snippets (`run`, `mock_provider`, …).
+/// - Inside a recognised block → that block's attrs + nested-block
+///   snippets, via [`builtin_blocks::tftest_root_schema`].
+fn tftest_completion_items(
+    backend: &Backend,
+    uri: &Url,
+    body: Option<&Body>,
+    line_prefix: &str,
+    offset: usize,
+) -> Vec<CompletionItem> {
+    // 1. Reference-value completion (`var.` / `output.` / `run.`).
+    if let Some(items) = tftest_reference_items(backend, uri, body, line_prefix) {
+        return items;
+    }
+
+    // 2. Block / attribute completion keyed on the enclosing block path.
+    let path = body
+        .map(|b| tftest_block_path(b, offset))
+        .unwrap_or_default();
+    if path.is_empty() {
+        return tftest_top_level_items();
+    }
+    let Some(schema) = tftest_resolve_schema(&path) else {
+        // Freeform body (`variables {}`, `provider {}`, `mock_resource`
+        // `defaults`) — nothing schema-driven to offer.
+        return Vec::new();
+    };
+    let filter = compute_body_filter(body, offset);
+    builtin_body_items(schema, &filter)
+}
+
+fn tftest_top_level_items() -> Vec<CompletionItem> {
+    TFTEST_TOP_LEVEL_SNIPPETS
+        .iter()
+        .map(|(label, snippet, detail)| CompletionItem {
+            label: (*label).to_string(),
+            kind: Some(CompletionItemKind::SNIPPET),
+            detail: Some((*detail).to_string()),
+            insert_text: Some((*snippet).to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// Full enclosing-block keyword path at `offset`, INCLUDING the top-level
+/// block (unlike [`nested_block_path`], whose caller already knows the
+/// root). Reuses `collect_nested_path` for the inner descent.
+fn tftest_block_path(body: &Body, offset: usize) -> Vec<String> {
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
+        if span_contains_offset(block.span(), offset) && cursor_in_block_body(block, offset) {
+            let mut path = vec![block.ident.as_str().to_string()];
+            collect_nested_path(&block.body, offset, &mut path);
+            return path;
+        }
+    }
+    Vec::new()
+}
+
+/// Resolve a test-file block path to the [`BuiltinSchema`] of the body the
+/// cursor is in. Starts at [`builtin_blocks::tftest_root_schema`] and
+/// descends nested blocks; `None` for an unknown or freeform body.
+fn tftest_resolve_schema(path: &[String]) -> Option<builtin_blocks::BuiltinSchema> {
+    let mut iter = path.iter();
+    let root = iter.next()?;
+    let mut schema = builtin_blocks::tftest_root_schema(root)?;
+    for step in iter {
+        let block = schema.blocks.iter().find(|b| b.name == step.as_str())?;
+        schema = block.body_schema()?;
+    }
+    Some(schema)
+}
+
+/// `var.` / `output.` / `run.` reference-value completion in a test file.
+/// Returns `None` when the cursor isn't in such a reference position so
+/// the caller falls through to block/attr completion.
+fn tftest_reference_items(
+    backend: &Backend,
+    uri: &Url,
+    body: Option<&Body>,
+    line_prefix: &str,
+) -> Option<Vec<CompletionItem>> {
+    let (root, _partial) = tftest_reference_prefix(line_prefix)?;
+    let items = match root {
+        "var" => tftest_mut_symbol_items(backend, uri, SymbolField::Variables),
+        "output" => tftest_mut_symbol_items(backend, uri, SymbolField::Outputs),
+        "run" => tftest_run_label_items(body),
+        _ => return None,
+    };
+    Some(items)
+}
+
+/// If the cursor sits in a `<root>.<partial>` reference for a test-file
+/// namespace (`var` / `output` / `run`), return `(root, partial)`. The
+/// `partial` is whatever's been typed after the dot (may be empty).
+fn tftest_reference_prefix(line_prefix: &str) -> Option<(&'static str, &str)> {
+    // Walk back over the trailing identifier-ish run (letters, digits,
+    // `_`, `-`, `.`) to isolate the reference token under the cursor.
+    let token_start = line_prefix
+        .rfind(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-' || c == '.'))
+        .map_or(0, |i| i + 1);
+    let token = &line_prefix[token_start..];
+    for root in ["var", "output", "run"] {
+        if let Some(rest) = token.strip_prefix(root) {
+            if let Some(partial) = rest.strip_prefix('.') {
+                // Only a single segment after the root (no further dot) —
+                // `run.x.out` value completion isn't offered here.
+                if !partial.contains('.') {
+                    return Some((root, partial));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Variable / output names declared in the module under test.
+fn tftest_mut_symbol_items(
+    backend: &Backend,
+    uri: &Url,
+    field: SymbolField,
+) -> Vec<CompletionItem> {
+    let dir = super::util::module_under_test_dir(uri);
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    for entry in backend.state.documents.iter() {
+        if !doc_in_dir(entry.key(), dir.as_deref()) {
+            continue;
+        }
+        let table = &entry.value().symbols;
+        let keys: Box<dyn Iterator<Item = &String>> = match field {
+            SymbolField::Variables => Box::new(table.variables.keys()),
+            SymbolField::Outputs => Box::new(table.outputs.keys()),
+            _ => Box::new(std::iter::empty()),
+        };
+        for n in keys {
+            names.insert(n.clone());
+        }
+    }
+    let detail = match field {
+        SymbolField::Outputs => "module output",
+        _ => "module variable",
+    };
+    names
+        .into_iter()
+        .map(|n| CompletionItem {
+            label: n.clone(),
+            kind: Some(CompletionItemKind::VARIABLE),
+            detail: Some(detail.to_string()),
+            insert_text: Some(n),
+            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// `run "<label>"` block labels declared in this test file (the targets
+/// of `run.<label>.<output>` references).
+fn tftest_run_label_items(body: Option<&Body>) -> Vec<CompletionItem> {
+    let Some(body) = body else {
+        return Vec::new();
+    };
+    let mut labels: BTreeSet<String> = BTreeSet::new();
+    for structure in body.iter() {
+        let Some(block) = structure.as_block() else {
+            continue;
+        };
+        if block.ident.as_str() != "run" {
+            continue;
+        }
+        if let Some(label) = block.labels.first() {
+            labels.insert(block_label_text(label));
+        }
+    }
+    labels
+        .into_iter()
+        .map(|n| CompletionItem {
+            label: n.clone(),
+            kind: Some(CompletionItemKind::FIELD),
+            detail: Some("run block".to_string()),
+            insert_text: Some(n),
+            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+            ..Default::default()
+        })
+        .collect()
+}
+
 /// Sorted, de-duplicated declared `module "<name>"` block names across
 /// the current directory.
 fn module_names_in_scope(backend: &Backend, uri: &Url) -> Vec<String> {
@@ -3194,6 +3448,11 @@ fn module_symbol_items(
             }
             SymbolField::Modules => {
                 for n in doc.symbols.modules.keys() {
+                    names.insert(n.clone());
+                }
+            }
+            SymbolField::Outputs => {
+                for n in doc.symbols.outputs.keys() {
                     names.insert(n.clone());
                 }
             }
@@ -3984,5 +4243,81 @@ mod version_partial_tests {
     fn after_operator_yields_empty() {
         let slot = CursorSlot::AfterOperator(ConstraintOp::Gte);
         assert_eq!(version_partial_of(&slot), "");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tftest_completion_tests {
+    use super::*;
+    use tfls_parser::parse_source;
+
+    #[test]
+    fn reference_prefix_detects_namespaces() {
+        assert_eq!(tftest_reference_prefix("  region = var."), Some(("var", "")));
+        assert_eq!(
+            tftest_reference_prefix("  condition = output.i"),
+            Some(("output", "i"))
+        );
+        assert_eq!(tftest_reference_prefix("  x = run."), Some(("run", "")));
+    }
+
+    #[test]
+    fn reference_prefix_ignores_non_reference_and_deep_paths() {
+        assert_eq!(tftest_reference_prefix("  command = pl"), None);
+        // A second segment (`run.x.`) isn't a value-completion position here.
+        assert_eq!(tftest_reference_prefix("  x = run.x."), None);
+        // `local.` isn't a test-file namespace.
+        assert_eq!(tftest_reference_prefix("  x = local."), None);
+    }
+
+    #[test]
+    fn resolve_schema_for_run_offers_command() {
+        let schema = tftest_resolve_schema(&["run".to_string()]).expect("run schema");
+        assert!(schema.attrs.iter().any(|a| a.name == "command"));
+        assert!(schema.blocks.iter().any(|b| b.name == "assert"));
+    }
+
+    #[test]
+    fn resolve_schema_descends_into_assert() {
+        let schema =
+            tftest_resolve_schema(&["run".to_string(), "assert".to_string()]).expect("assert");
+        assert!(schema.attrs.iter().any(|a| a.name == "condition"));
+        assert!(schema.attrs.iter().any(|a| a.name == "error_message"));
+    }
+
+    #[test]
+    fn resolve_schema_rejects_resource() {
+        // `.tf` blocks never resolve through the test grammar.
+        assert!(tftest_resolve_schema(&["resource".to_string()]).is_none());
+    }
+
+    #[test]
+    fn block_path_includes_top_level() {
+        let src = "run \"x\" {\n  assert {\n    \n  }\n}\n";
+        let body = parse_source(src).body.expect("parses");
+        // Cursor on the blank line inside `assert`.
+        let offset = src.find("    \n").expect("blank line") + 4;
+        assert_eq!(tftest_block_path(&body, offset), vec!["run", "assert"]);
+    }
+
+    #[test]
+    fn top_level_items_offer_run_not_resource() {
+        let items = tftest_top_level_items();
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"run"));
+        assert!(labels.contains(&"mock_provider"));
+        assert!(!labels.contains(&"resource"));
+    }
+
+    #[test]
+    fn run_labels_collected_from_body() {
+        let src = "run \"first\" {}\nrun \"second\" {}\n";
+        let body = parse_source(src).body.expect("parses");
+        let labels: Vec<String> = tftest_run_label_items(Some(&body))
+            .into_iter()
+            .map(|i| i.label)
+            .collect();
+        assert_eq!(labels, vec!["first", "second"]);
     }
 }
