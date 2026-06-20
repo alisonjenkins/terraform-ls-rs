@@ -24,10 +24,56 @@ pub(crate) fn parent_dir(uri: &Url) -> Option<PathBuf> {
 pub(crate) fn module_under_test_dir(test_uri: &Url) -> Option<PathBuf> {
     let dir = parent_dir(test_uri)?;
     if dir.file_name().and_then(|s| s.to_str()) == Some("tests") {
-        dir.parent().map(Path::to_path_buf)
+        match dir.parent() {
+            // The parent must be a real named directory. At the filesystem
+            // root `dir.parent()` is `/` (its `file_name()` is `None`);
+            // resolving the module-under-test to `/` would make
+            // `ensure_module_indexed` synchronously `read_dir` and schedule
+            // a scan of the entire filesystem root. Fall back to the test
+            // file's own dir instead.
+            Some(parent) if parent.file_name().is_some() => Some(parent.to_path_buf()),
+            _ => Some(dir),
+        }
     } else {
         Some(dir)
     }
+}
+
+/// The module directory a document's references resolve against: the
+/// module-under-test for a `.tftest.hcl`/`.tftest.json`, otherwise the
+/// file's own parent directory. The single notion of "which module does
+/// this doc belong to" — used to decide which open buffers are peers that
+/// must refresh together (a test file in `tests/` is a peer of the `.tf`
+/// files one dir up, even though their parent dirs differ).
+pub(crate) fn module_scope_dir(uri: &Url) -> Option<PathBuf> {
+    if tfls_core::uri::is_tftest_uri(uri.as_str()) {
+        module_under_test_dir(uri)
+    } else {
+        parent_dir(uri)
+    }
+}
+
+/// Open documents that share `changed_uri`'s module scope (excluding
+/// `changed_uri` itself) — the buffers whose diagnostics may go stale when
+/// `changed_uri` is edited, deleted, or re-parsed from disk. Pairs a same-
+/// dir sibling with a `tests/` test file via [`module_scope_dir`], so an
+/// edit to `mod/variables.tf` refreshes an open `mod/tests/x.tftest.hcl`
+/// and vice-versa.
+pub(crate) fn open_peers_in_scope(state: &StateStore, changed_uri: &Url) -> Vec<Url> {
+    let Some(scope) = module_scope_dir(changed_uri) else {
+        return Vec::new();
+    };
+    state
+        .documents
+        .iter()
+        .filter_map(|entry| {
+            let uri = entry.key();
+            if uri == changed_uri || !state.is_open(uri) {
+                return None;
+            }
+            (module_scope_dir(uri).as_deref() == Some(scope.as_path())).then(|| uri.clone())
+        })
+        .collect()
 }
 
 /// True when `a` and `b` refer to the same directory, with
@@ -613,6 +659,78 @@ mod tests {
     fn returns_none_when_nothing_matches() {
         let temp = tempfile::tempdir().unwrap();
         assert!(resolve_module_source(temp.path(), "web", "hashicorp/x/aws").is_none());
+    }
+
+    // --- module_under_test_dir / module_scope_dir --------------------
+
+    #[test]
+    fn module_under_test_dir_strips_tests_subdir() {
+        let u = Url::parse("file:///work/mod/tests/a.tftest.hcl").unwrap();
+        assert_eq!(
+            module_under_test_dir(&u),
+            Some(PathBuf::from("/work/mod")),
+            "a test in tests/ resolves one dir up"
+        );
+    }
+
+    #[test]
+    fn module_under_test_dir_alongside_uses_own_dir() {
+        let u = Url::parse("file:///work/mod/a.tftest.hcl").unwrap();
+        assert_eq!(module_under_test_dir(&u), Some(PathBuf::from("/work/mod")));
+    }
+
+    #[test]
+    fn module_under_test_dir_at_root_does_not_resolve_to_filesystem_root() {
+        // `/tests/a.tftest.hcl` must NOT resolve to `/` — that would
+        // schedule a scan of the whole filesystem (LOW-3).
+        let u = Url::parse("file:///tests/a.tftest.hcl").unwrap();
+        assert_eq!(
+            module_under_test_dir(&u),
+            Some(PathBuf::from("/tests")),
+            "a tests/ dir directly under root falls back to its own dir, not /"
+        );
+    }
+
+    #[test]
+    fn module_scope_dir_distinguishes_tftest_from_tf() {
+        let tf = Url::parse("file:///work/mod/main.tf").unwrap();
+        let test = Url::parse("file:///work/mod/tests/a.tftest.hcl").unwrap();
+        // Different parent dirs, SAME module scope — they are peers.
+        assert_eq!(module_scope_dir(&tf), Some(PathBuf::from("/work/mod")));
+        assert_eq!(module_scope_dir(&test), Some(PathBuf::from("/work/mod")));
+    }
+
+    #[test]
+    fn open_peers_in_scope_pairs_tf_with_its_test_file() {
+        let state = StateStore::new();
+        let main = Url::parse("file:///work/mod/main.tf").unwrap();
+        let vars = Url::parse("file:///work/mod/variables.tf").unwrap();
+        let test = Url::parse("file:///work/mod/tests/a.tftest.hcl").unwrap();
+        let other = Url::parse("file:///work/other/x.tf").unwrap();
+        let closed_peer = Url::parse("file:///work/mod/closed.tf").unwrap();
+        for u in [&main, &vars, &test, &other, &closed_peer] {
+            state.upsert_document(DocumentState::new(u.clone(), "", 1));
+        }
+        // All open except `closed_peer`.
+        for u in [&main, &vars, &test, &other] {
+            state.mark_open(u.clone());
+        }
+        let peers = open_peers_in_scope(&state, &main);
+        // variables.tf (same dir) and the test file (module-under-test ==
+        // /work/mod) are peers; the other-module file and the closed file
+        // and `main` itself are not.
+        assert!(peers.contains(&vars), "same-dir peer missing: {peers:?}");
+        assert!(peers.contains(&test), "test-file peer missing: {peers:?}");
+        assert!(!peers.contains(&main), "must exclude the changed file");
+        assert!(!peers.contains(&other), "must exclude other-module file");
+        assert!(!peers.contains(&closed_peer), "must exclude closed peer");
+        assert_eq!(peers.len(), 2);
+
+        // Symmetry: editing the test file refreshes the module's .tf peers.
+        let from_test = open_peers_in_scope(&state, &test);
+        assert!(from_test.contains(&main));
+        assert!(from_test.contains(&vars));
+        assert!(!from_test.contains(&other));
     }
 
     // --- lookup_child_module_symbol ----------------------------------
