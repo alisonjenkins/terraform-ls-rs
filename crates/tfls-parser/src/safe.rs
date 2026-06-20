@@ -29,6 +29,29 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use hcl_edit::structure::Body;
 use thiserror::Error;
 
+/// Maximum bracket / brace / paren nesting depth we hand to hcl-edit.
+///
+/// hcl-edit's parser is recursive descent, so each level of `(`, `[`,
+/// or `{` consumes a stack frame. `catch_unwind` (the rest of this
+/// module) isolates *panics*, but a stack overflow is an uncatchable
+/// `SIGSEGV`/`SIGABRT` that would take the whole server process down —
+/// and the backend feeds untrusted document text through here on every
+/// `did_open` / `did_change`. A pathological native-HCL input
+/// (`((((…))))`, deeply nested objects/arrays) can blow the thread stack
+/// before the parser even reports an error. (The `.tf.json` path doesn't
+/// reach here for its initial parse — it goes through `serde_json`, which
+/// already enforces its own recursion limit — so this guard targets the
+/// remaining HCL vector.)
+///
+/// So we do one cheap O(n), allocation-free linear pre-scan for the
+/// maximum nesting depth and refuse anything past this bound *before*
+/// calling hcl-edit. 500 is far deeper than any hand-written HCL (real
+/// configs rarely exceed single-digit nesting) yet stays well within the
+/// stack: production parses run on tokio's `spawn_blocking` pool (default
+/// ~2 MiB stack), which tolerates depths far past this bound, so the limit
+/// never affects normal-depth inputs.
+const MAX_NESTING_DEPTH: usize = 500;
+
 /// Reported reason an hcl-edit parser entry point panicked. Carries
 /// enough context (excerpt + byte count + payload message) for a
 /// human reader of the journal log to identify the offending input
@@ -74,8 +97,52 @@ pub enum BodyParseError {
 /// hcl-edit parser. On panic: returns `Err(BodyParseError::Panicked)`
 /// and emits a structured `error!` log naming the offending input.
 pub fn parse_body(source: &str) -> Result<Body, BodyParseError> {
+    // Guard the recursive-descent parser against stack overflow on
+    // pathologically deep nesting BEFORE handing the input to hcl-edit:
+    // a stack overflow is an uncatchable SIGSEGV that `catch` below
+    // cannot intercept, so it must never reach the parser.
+    if let Some(depth) = excessive_nesting_depth(source) {
+        return Err(BodyParseError::Panicked(ParsePanic {
+            message: format!(
+                "input nesting depth {depth} exceeds the safe limit of \
+                 {MAX_NESTING_DEPTH}; refused before parsing to avoid a \
+                 recursive-descent stack overflow",
+            ),
+            source_excerpt: source_excerpt(source),
+            source_bytes: source.len(),
+        }));
+    }
     let parsed = catch(source, || source.parse::<Body>())?;
     parsed.map_err(BodyParseError::Syntax)
+}
+
+/// One linear, allocation-free pass over `source` tracking bracket /
+/// brace / paren nesting depth. Returns `Some(depth)` at the first
+/// point the running depth exceeds [`MAX_NESTING_DEPTH`] (so we bail
+/// early on huge inputs), or `None` if the whole input stays within
+/// bounds.
+///
+/// Deliberately coarse: it counts every `(`, `[`, `{` as an open and
+/// every `)`, `]`, `}` as a close, ignoring whether they sit inside a
+/// string or comment. That over-counts in rare cases, but the bound is
+/// so far above legitimate HCL depth that a few stray bracket chars in
+/// a string never matter — and the goal is purely to keep hcl-edit's
+/// recursion off the cliff edge, not to validate syntax.
+fn excessive_nesting_depth(source: &str) -> Option<usize> {
+    let mut depth: usize = 0;
+    for &b in source.as_bytes() {
+        match b {
+            b'(' | b'[' | b'{' => {
+                depth += 1;
+                if depth > MAX_NESTING_DEPTH {
+                    return Some(depth);
+                }
+            }
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Generic wrapper: run `f` against `source` under `catch_unwind`,
@@ -169,6 +236,61 @@ mod tests {
     fn catch_passes_value_through_on_no_panic() {
         let result = catch("ignored", || 42);
         assert_eq!(result.expect("no panic"), 42);
+    }
+
+    #[test]
+    fn over_depth_input_is_refused_without_crashing() {
+        // Nesting depth far past MAX_NESTING_DEPTH would risk a stack
+        // overflow inside hcl-edit's recursive-descent parser (an
+        // uncatchable SIGSEGV). The pre-scan must reject it cleanly as
+        // a parse error, never reaching hcl-edit.
+        let depth = MAX_NESTING_DEPTH + 50;
+        let src = format!("a = {}{}", "(".repeat(depth), ")".repeat(depth));
+        let err = parse_body(&src).expect_err("over-depth input must error");
+        match err {
+            BodyParseError::Panicked(p) => {
+                assert!(
+                    p.message.contains("nesting depth"),
+                    "message should explain the depth guard: {}",
+                    p.message
+                );
+            }
+            other => panic!("expected Panicked guard error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn over_depth_bracket_storm_is_refused() {
+        // A payload of `[` repeated many thousands of times is the classic
+        // recursive-descent stack-overflow trigger. Even unbalanced, the
+        // pre-scan trips before hcl-edit recurses. (Real `.tf.json` reaches
+        // serde_json, not this path; this guards the native-HCL parser.)
+        let src = "[".repeat(MAX_NESTING_DEPTH * 200);
+        let err = parse_body(&src).expect_err("bracket storm must error");
+        assert!(matches!(err, BodyParseError::Panicked(_)));
+    }
+
+    #[test]
+    fn legal_deep_nesting_under_bound_still_parses() {
+        // Deeply but legally nested — well under the bound — must parse
+        // exactly as before (no behaviour change for normal inputs).
+        let depth = 100;
+        assert!(depth < MAX_NESTING_DEPTH);
+        let src = format!("a = {}1{}\n", "(".repeat(depth), ")".repeat(depth));
+        let body = parse_body(&src).expect("legal deep nesting parses");
+        assert_eq!(body.iter().count(), 1);
+    }
+
+    #[test]
+    fn depth_scan_handles_balanced_brackets_without_tripping() {
+        // Many shallow, sequential bracket pairs (high total count, low
+        // depth) must NOT trip the guard — the scan tracks depth, not
+        // cumulative count.
+        let src = format!("a = [{}]\n", "[], ".repeat(MAX_NESTING_DEPTH * 4));
+        assert!(
+            excessive_nesting_depth(&src).is_none(),
+            "shallow-but-many brackets must stay under the depth bound"
+        );
     }
 
     #[test]
