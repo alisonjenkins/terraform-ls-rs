@@ -5,10 +5,11 @@ use std::sync::Mutex;
 
 use lsp_types::{TextDocumentContentChangeEvent, TextEdit};
 use ropey::Rope;
-use tfls_core::SymbolTable;
+use tfls_core::{Symbol, SymbolTable};
 use tfls_parser::{
     extract_references, extract_references_fallback, extract_symbols, extract_symbols_fallback,
-    lsp_position_to_byte_offset, parse_source_recovering_for_uri, ParsedFile, Reference,
+    extract_test_symbols, lsp_position_to_byte_offset, parse_source_recovering_for_uri, ParsedFile,
+    Reference,
 };
 use url::Url;
 
@@ -48,6 +49,12 @@ pub struct DocumentState {
     pub parsed: ParsedFile,
     pub symbols: SymbolTable,
     pub references: Vec<Reference>,
+    /// `run "<label>"` blocks from a test file (`.tftest.hcl`). Empty for
+    /// ordinary `.tf` files. Held separately because a test file
+    /// contributes NO module symbols (see `compute_analysis`), yet its run
+    /// blocks still need to drive the outline view and `run.<label>`
+    /// navigation.
+    pub test_runs: Vec<Symbol>,
     /// Last format-source pass result. `Mutex` because the LSP
     /// handlers see a shared `&DocumentState` (DashMap shard
     /// guard) but may need to populate the cache on first
@@ -62,7 +69,7 @@ impl DocumentState {
     pub fn new(uri: Url, text: &str, version: i32) -> Self {
         let rope = Rope::from_str(text);
         let parsed = parse_source_recovering_for_uri(text, uri.as_str());
-        let (symbols, references) = compute_analysis(&parsed, &uri, &rope);
+        let (symbols, references, test_runs) = compute_analysis(&parsed, &uri, &rope);
         Self {
             uri,
             rope,
@@ -70,6 +77,7 @@ impl DocumentState {
             parsed,
             symbols,
             references,
+            test_runs,
             format_cache: Mutex::new(None),
         }
     }
@@ -104,6 +112,9 @@ impl DocumentState {
             parsed,
             symbols,
             references,
+            // No body was parsed (cache hydration) — run blocks come
+            // online when the user opens the file and `new` runs.
+            test_runs: Vec::new(),
             format_cache: Mutex::new(None),
         }
     }
@@ -194,9 +205,11 @@ impl DocumentState {
         // syntax error never drops declarations (which would cascade into
         // spurious "undefined variable" warnings on every reference).
         if self.parsed.body.is_some() {
-            let (symbols, references) = compute_analysis(&self.parsed, &self.uri, &self.rope);
+            let (symbols, references, test_runs) =
+                compute_analysis(&self.parsed, &self.uri, &self.rope);
             self.symbols = symbols;
             self.references = references;
+            self.test_runs = test_runs;
         }
     }
 
@@ -205,7 +218,19 @@ impl DocumentState {
     }
 }
 
-fn compute_analysis(parsed: &ParsedFile, uri: &Url, rope: &Rope) -> (SymbolTable, Vec<Reference>) {
+fn compute_analysis(
+    parsed: &ParsedFile,
+    uri: &Url,
+    rope: &Rope,
+) -> (SymbolTable, Vec<Reference>, Vec<Symbol>) {
+    // Test files (`.tftest.hcl`/`.tftest.json`/`.tofutest.*`) are parsed like
+    // HCL but are NOT module configuration. Their `provider "aws" {}`,
+    // `variable`, etc. blocks must never enter the module symbol index — that
+    // would corrupt the real module's reference resolution. Produce NO module
+    // symbols for them, while still extracting references (needed to resolve
+    // `var.X` / module resources against the module UNDER TEST). Run-block
+    // symbols for outline/goto-def live in a separate per-document field.
+    let is_test = tfls_core::uri::is_tftest_uri(uri.as_str());
     match &parsed.body {
         // Structured extraction only on a CLEAN parse. A partially-recovered
         // body (errors present) has had its broken lines blanked out, so
@@ -213,9 +238,18 @@ fn compute_analysis(parsed: &ParsedFile, uri: &Url, rope: &Rope) -> (SymbolTable
         // lived on a blanked line — exactly the cascade the text fallback
         // exists to prevent. Use the fallback whenever the parse wasn't clean.
         Some(body) if !parsed.has_errors() => {
-            let symbols = extract_symbols(body, uri, rope);
+            let symbols = if is_test {
+                SymbolTable::default()
+            } else {
+                extract_symbols(body, uri, rope)
+            };
             let references = extract_references(body, uri, rope);
-            (symbols, references)
+            let test_runs = if is_test {
+                extract_test_symbols(body, uri, rope)
+            } else {
+                Vec::new()
+            };
+            (symbols, references, test_runs)
         }
         _ => {
             // HCL parser bailed entirely — run the text-based
@@ -229,9 +263,16 @@ fn compute_analysis(parsed: &ParsedFile, uri: &Url, rope: &Rope) -> (SymbolTable
             // refs disappear from the workspace index until the
             // user fixes the parse error.
             let text = rope.to_string();
-            let symbols = extract_symbols_fallback(&text, uri, rope);
+            let symbols = if is_test {
+                SymbolTable::default()
+            } else {
+                extract_symbols_fallback(&text, uri, rope)
+            };
             let references = extract_references_fallback(&text, uri, rope);
-            (symbols, references)
+            // The text fallback can't reliably delimit `run` blocks; outline
+            // for a test file mid-syntax-error is simply empty until it
+            // parses cleanly again.
+            (symbols, references, Vec::new())
         }
     }
 }
@@ -241,6 +282,44 @@ fn compute_analysis(parsed: &ParsedFile, uri: &Url, rope: &Rope) -> (SymbolTable
 mod tests {
     use super::*;
     use lsp_types::{Position, Range};
+
+    #[test]
+    fn test_file_yields_no_module_symbols_but_keeps_references() {
+        // A `.tftest.hcl` must not contribute module symbols to the index
+        // (no pollution), but its `var.X` references are still extracted so
+        // they can resolve against the module under test.
+        let uri = Url::parse("file:///mod/tests/a.tftest.hcl").expect("url");
+        let src = "variable \"leak\" {}\nrun \"x\" {\n  variables { region = var.region }\n}\n";
+        let doc = DocumentState::new(uri, src, 1);
+        assert!(
+            doc.symbols.is_empty(),
+            "test file must export no module symbols; got {:?}",
+            doc.symbols.variables.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            doc.references.iter().any(|r| matches!(
+                &r.kind,
+                tfls_parser::ReferenceKind::Variable { name } if name == "region"
+            )),
+            "var.region reference must still be extracted"
+        );
+        // The `run "x"` block is captured as an outline symbol, separate
+        // from the (empty) module symbol table.
+        assert_eq!(
+            doc.test_runs.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            vec!["x"],
+            "run block must be captured in test_runs"
+        );
+    }
+
+    #[test]
+    fn tf_file_has_no_test_runs() {
+        // A `run` block in an ordinary `.tf` file isn't a test step — it
+        // must not populate `test_runs`.
+        let uri = Url::parse("file:///mod/main.tf").expect("url");
+        let doc = DocumentState::new(uri, "run \"x\" {}\n", 1);
+        assert!(doc.test_runs.is_empty());
+    }
 
     fn test_uri() -> Url {
         Url::parse("file:///test.tf").expect("valid url")
