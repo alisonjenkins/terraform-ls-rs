@@ -284,6 +284,18 @@ Build-level guarantees enforced by the workspace `clippy` lints:
 The only exceptions are tests and benchmark modules, which explicitly
 `#[allow]` those lints.
 
+### Git hooks
+
+A [prek](https://github.com/j178/prek) pre-commit hook runs `cargo fmt
+--check` through the pinned nix toolchain, so misformatted Rust can't be
+committed (and can't drift from CI). It installs automatically the first time
+you enter `nix develop`. Useful commands:
+
+```sh
+prek run --all-files      # run the hooks over the whole tree
+git commit -n             # bypass hooks for one commit (discouraged)
+```
+
 ## Architecture
 
 Nine-crate Cargo workspace, each with its own `thiserror` error enum
