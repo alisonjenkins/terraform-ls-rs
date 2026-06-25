@@ -210,6 +210,15 @@ Values: `off` (suppress), `hint`, `info`, `warning`, `error`. Keyed by the diagn
 
 Adding a code to a new rule = wrap its call site with `tag("terraform_<id>", …)`. Untagged diagnostics pass through unaffected.
 
+### Untagged-resource diagnostics (`terraform_missing_tags`, `terraform_missing_name_tag`)
+
+`crates/tfls-diag/src/missing_tags.rs` emits two default-on WARNING rules for untagged resources:
+
+- `terraform_missing_tags` — schema-driven, provider-agnostic. A `resource` whose schema declares a `tags` (AWS/Azure) or `labels` (GCP/Kubernetes) attribute but sets neither. Requires fetched provider schemas (silent otherwise). Suppressed for any provider that declares `default_tags` — the LSP layer aggregates provider local names across module siblings via `util::module_providers_with_default_tags` (built on `provider_names_with_default_tags`) and passes them in, since `provider "aws" { default_tags {} }` usually lives in `provider.tf`/`versions.tf`.
+- `terraform_missing_name_tag` — AWS-specific, schema-free (works before `.terraform/providers` is fetched). A `resource` of a curated console-visible type (`AWS_NAME_TAG_RESOURCES` table — `aws_instance`, `aws_vpc`, `aws_subnet`, … extend as needed) that lacks a statically-visible literal `Name` tag key. The whole `tags` expression is scanned for an object key `Name` (so `merge(common, { Name = x })` passes; `var.tags` warns). `Name` matters because these types show their `Name` tag in the AWS console.
+
+Both anchor on the type-name label, are off-able / re-severitied via the `rules` config above, and emit no code action (diagnostic only).
+
 ## Code-action scopes
 
 Every multi-target code action (unwrap interpolation, convert lookup, set variable types, refine `type = any`, declare undefined variables, move outputs to `outputs.tf`, move variables to `variables.tf`, convert `null_resource` to `terraform_data`, convert `data "template_file"` to `templatefile()`) is offered at multiple scopes via `crates/tfls-lsp/src/handlers/code_action_scope.rs`. Diagnostic-only deprecation rules (`data "template_dir"`, `data "null_data_source"`) plug into the same framework but emit no fix.
