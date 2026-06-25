@@ -9,13 +9,16 @@ pub mod error;
 pub mod git_ref;
 pub mod lock_file;
 pub mod meta_arguments;
+pub mod named_values;
+pub mod type_constraints;
 pub mod types;
 pub mod uri;
 pub mod variable_type;
 pub mod version_constraint;
 
 pub use completion::{
-    classify_context, resolve_nested_schema, BlockStep, CompletionContext, IndexRootRef, PathStep,
+    classify_context, in_type_expression, resolve_nested_schema, BlockStep, CompletionContext,
+    IndexRootRef, PathStep,
 };
 pub use error::CoreError;
 pub use meta_arguments::{
@@ -23,6 +26,11 @@ pub use meta_arguments::{
     is_meta_attr, is_singleton_meta_block, lifecycle_attr_description, lifecycle_attrs,
     lifecycle_block_description, lifecycle_blocks, meta_attr_description, meta_block_description,
     meta_blocks, BlockKind, CONDITION_ATTRS, META_ATTRS,
+};
+pub use named_values::{is_named_value_head, named_value_description, NAMED_VALUE_HEADS};
+pub use type_constraints::{
+    is_type_constraint_keyword, optional_description, type_constraint_description,
+    TYPE_CONSTRAINT_KEYWORDS,
 };
 pub use types::{
     ModuleId, ProviderAddress, ResourceAddress, Symbol, SymbolKind, SymbolLocation, SymbolTable,
