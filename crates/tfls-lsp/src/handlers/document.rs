@@ -18,8 +18,8 @@ use url::Url;
 use crate::backend::Backend;
 use crate::handlers::util::{
     module_constraint_for_provider, module_locked_provider_version,
-    module_supports_locals_replacement, module_supports_templatefile,
-    module_supports_terraform_data,
+    module_providers_with_default_tags, module_supports_locals_replacement,
+    module_supports_templatefile, module_supports_terraform_data,
 };
 
 pub async fn did_open(backend: &Backend, params: DidOpenTextDocumentParams) {
@@ -644,6 +644,20 @@ pub fn compute_diagnostics_with_lookup(
                 &lookup,
                 Some(&hints),
             ),
+        ));
+        // Untagged-resource warnings. Generic rule is schema-driven and
+        // skips any provider that sets `default_tags` (those tags
+        // auto-apply, aggregated across module siblings). The Name-tag
+        // rule is schema-free (curated AWS table) so it fires even before
+        // schemas are fetched.
+        let dt_suppressed = module_providers_with_default_tags(state, uri);
+        out.extend(tag(
+            "terraform_missing_tags",
+            tfls_diag::missing_tags_diagnostics(body, &doc.rope, &lookup, &dt_suppressed),
+        ));
+        out.extend(tag(
+            "terraform_missing_name_tag",
+            tfls_diag::missing_name_tag_diagnostics(body, &doc.rope),
         ));
         let cache_lookup = OnDiskVersionCache;
         out.extend(tag(
