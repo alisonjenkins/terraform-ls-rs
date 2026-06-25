@@ -157,7 +157,10 @@ pub async fn rename(
 /// advanced the buffer, the stale offsets would rewrite the WRONG text. A
 /// `Some(version)` identifier lets a conforming client reject the stale
 /// edit instead. Mirrors the format / move-outputs code actions.
-fn versioned_workspace_edit(state: &StateStore, edits: HashMap<Url, Vec<TextEdit>>) -> WorkspaceEdit {
+fn versioned_workspace_edit(
+    state: &StateStore,
+    edits: HashMap<Url, Vec<TextEdit>>,
+) -> WorkspaceEdit {
     let doc_edits: Vec<TextDocumentEdit> = edits
         .into_iter()
         .map(|(uri, text_edits)| {

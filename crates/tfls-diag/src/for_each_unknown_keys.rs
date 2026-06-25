@@ -993,7 +993,11 @@ resource "null_resource" "x" {
   for_each = nonsensitive(local.vm_config)
 }
 "#;
-        assert!(!flagged(src), "nonsensitive(local.map) with static keys must be silent; got: {:?}", diags(src));
+        assert!(
+            !flagged(src),
+            "nonsensitive(local.map) with static keys must be silent; got: {:?}",
+            diags(src)
+        );
     }
 
     #[test]
@@ -1010,7 +1014,11 @@ resource "null_resource" "x" {
   for_each = local.vm_config
 }
 "#;
-        assert!(!flagged(src), "bare local.map control must be silent; got: {:?}", diags(src));
+        assert!(
+            !flagged(src),
+            "bare local.map control must be silent; got: {:?}",
+            diags(src)
+        );
     }
 
     #[test]
@@ -1022,7 +1030,10 @@ resource "null_resource" "x" {
   for_each = nonsensitive(toset([for s in aws_subnet.all : s.id]))
 }
 "#;
-        assert!(flagged(src), "nonsensitive() of apply-time keys must still flag");
+        assert!(
+            flagged(src),
+            "nonsensitive() of apply-time keys must still flag"
+        );
     }
 
     #[test]
@@ -1032,7 +1043,10 @@ resource "null_resource" "x" {
   for_each = try(aws_subnet.all, {})
 }
 "#;
-        assert!(flagged(src), "try() whose first arg has apply-time membership must flag");
+        assert!(
+            flagged(src),
+            "try() whose first arg has apply-time membership must flag"
+        );
     }
 
     #[test]
@@ -1042,7 +1056,10 @@ resource "null_resource" "x" {
   for_each = { for s in nonsensitive(aws_subnet.all) : s.id => s }
 }
 "#;
-        assert!(flagged(src), "for-over-nonsensitive keyed on resource id must flag");
+        assert!(
+            flagged(src),
+            "for-over-nonsensitive keyed on resource id must flag"
+        );
     }
 
     #[test]

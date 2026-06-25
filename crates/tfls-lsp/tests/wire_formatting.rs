@@ -22,8 +22,14 @@ fn apply_edits(text: &str, mut edits: Vec<Value>) -> String {
         off // line past EOF → end
     };
     edits.sort_by(|a, b| {
-        let pa = (a["range"]["start"]["line"].as_u64(), a["range"]["start"]["character"].as_u64());
-        let pb = (b["range"]["start"]["line"].as_u64(), b["range"]["start"]["character"].as_u64());
+        let pa = (
+            a["range"]["start"]["line"].as_u64(),
+            a["range"]["start"]["character"].as_u64(),
+        );
+        let pb = (
+            b["range"]["start"]["line"].as_u64(),
+            b["range"]["start"]["character"].as_u64(),
+        );
         pb.cmp(&pa)
     });
     let mut s = text.to_string();
@@ -46,7 +52,8 @@ async fn formatting_preserves_a_freshly_edited_source_line() {
     let uri = "file:///mod/main.tf";
 
     // Open a formatted module block.
-    c.did_open(uri, "module \"m\" {\n  source = \"../old\"\n}\n").await;
+    c.did_open(uri, "module \"m\" {\n  source = \"../old\"\n}\n")
+        .await;
     c.settle(80).await;
 
     // User repoints `source` to a new on-disk path (FULL sync = whole doc).
@@ -75,7 +82,10 @@ async fn formatting_preserves_a_freshly_edited_source_line() {
     for e in &edits {
         let spans_all = e["range"]["start"]["line"].as_u64() == Some(0)
             && e["range"]["end"]["line"].as_u64().unwrap_or(0) >= 3;
-        assert!(!spans_all, "formatting emitted a whole-document replace: {e}");
+        assert!(
+            !spans_all,
+            "formatting emitted a whole-document replace: {e}"
+        );
     }
     c.shutdown().await;
 }

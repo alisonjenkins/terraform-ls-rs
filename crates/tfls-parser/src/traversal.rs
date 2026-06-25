@@ -145,9 +145,16 @@ pub fn extract_test_symbols(body: &Body, uri: &Url, rope: &Rope) -> Vec<Symbol> 
             continue;
         };
         let name = label_str(label).to_string();
-        if let Some(sym) =
-            build_symbol(&name, SymbolKind::Module, block, uri, rope, name_range, None, None)
-        {
+        if let Some(sym) = build_symbol(
+            &name,
+            SymbolKind::Module,
+            block,
+            uri,
+            rope,
+            name_range,
+            None,
+            None,
+        ) {
             runs.push(sym);
         }
     }

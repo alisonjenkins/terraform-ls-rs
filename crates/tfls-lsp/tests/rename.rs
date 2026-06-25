@@ -26,7 +26,10 @@ fn edits_for(edit: &WorkspaceEdit, u: &Url) -> Vec<TextEdit> {
             edit.document_changes
         );
     };
-    assert!(edit.changes.is_none(), "rename must not use the version-less changes map");
+    assert!(
+        edit.changes.is_none(),
+        "rename must not use the version-less changes map"
+    );
     let mut out = Vec::new();
     for tde in tdes {
         if tde.text_document.uri == target {

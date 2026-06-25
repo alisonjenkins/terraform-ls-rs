@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use dashmap::DashMap;
 use lsp_types::{
     request::{GotoDeclarationParams, GotoDeclarationResponse},
     CodeActionParams, CodeActionResponse, CodeLens, CodeLensParams, CompletionParams,
@@ -24,12 +25,11 @@ use lsp_types::{
     WorkspaceEdit, WorkspaceFullDocumentDiagnosticReport, WorkspaceSymbolParams,
     WorkspaceSymbolResponse,
 };
-use dashmap::DashMap;
 use tfls_state::{JobQueue, StateStore};
 use tokio::sync::Mutex;
-use url::Url;
 use tokio::task::JoinHandle;
 use tower_lsp_server::{jsonrpc, Client, LanguageServer};
+use url::Url;
 
 use crate::capabilities::server_capabilities;
 use crate::handlers;

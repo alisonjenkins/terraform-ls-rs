@@ -78,7 +78,12 @@ mod tftest_kind_tests {
         ] {
             assert!(is_tftest_uri(p), "{p} should be a test file");
         }
-        for p in ["file:///m/main.tf", "/m/x.tfvars", "/m/a.tf.json", "/m/a.hcl"] {
+        for p in [
+            "file:///m/main.tf",
+            "/m/x.tfvars",
+            "/m/a.tf.json",
+            "/m/a.hcl",
+        ] {
             assert!(!is_tftest_uri(p), "{p} should NOT be a test file");
         }
     }

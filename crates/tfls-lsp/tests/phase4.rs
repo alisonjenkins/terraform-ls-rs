@@ -1997,13 +1997,15 @@ async fn format_action_file_emits_when_unformatted() {
     let action = find_action(&actions, "Format file");
     // Versioned document_changes, not the version-less `changes` map.
     assert!(
-        action.edit.as_ref().and_then(|e| e.changes.as_ref()).is_none(),
+        action
+            .edit
+            .as_ref()
+            .and_then(|e| e.changes.as_ref())
+            .is_none(),
         "format action must not use the version-less changes map"
     );
     let map = doc_change_text_edits(action);
-    let (version, edits) = map
-        .get(&tfls_core::uri::url_to_uri(&u))
-        .expect("file edit");
+    let (version, edits) = map.get(&tfls_core::uri::url_to_uri(&u)).expect("file edit");
     assert!(version.is_some(), "edit must carry a document version");
     assert_eq!(edits.len(), 1, "single whole-file TextEdit");
     assert!(
@@ -2057,7 +2059,11 @@ async fn format_action_module_covers_dirty_siblings_only() {
     let actions = all_actions_for(&backend, &a).await;
     let action = find_action(&actions, "Format 2 .tf files in this module");
     assert!(
-        action.edit.as_ref().and_then(|e| e.changes.as_ref()).is_none(),
+        action
+            .edit
+            .as_ref()
+            .and_then(|e| e.changes.as_ref())
+            .is_none(),
         "format action must not use the version-less changes map"
     );
     let changes = doc_change_text_edits(action);
@@ -2093,7 +2099,11 @@ async fn format_action_workspace_skips_clean_files() {
     let actions = all_actions_for(&backend, &dirty).await;
     let action = find_action(&actions, "Format 1 .tf file in workspace");
     assert!(
-        action.edit.as_ref().and_then(|e| e.changes.as_ref()).is_none(),
+        action
+            .edit
+            .as_ref()
+            .and_then(|e| e.changes.as_ref())
+            .is_none(),
         "format action must not use the version-less changes map"
     );
     let changes = doc_change_text_edits(action);

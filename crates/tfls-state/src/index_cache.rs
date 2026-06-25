@@ -603,7 +603,11 @@ mod tests {
 
         let store_a = StateStore::new();
         let uri = Url::from_file_path(&var_path).unwrap();
-        store_a.upsert_document(DocumentState::new(uri.clone(), "variable \"region\" {}\n", 1));
+        store_a.upsert_document(DocumentState::new(
+            uri.clone(),
+            "variable \"region\" {}\n",
+            1,
+        ));
         let cache = IndexCache::capture(&store_a, &root);
 
         // Simulate the race: buffer marked open, doc not yet in `documents`.

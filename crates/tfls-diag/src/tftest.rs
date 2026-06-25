@@ -245,7 +245,10 @@ mod tests {
 
     #[test]
     fn flags_unknown_top_level_block() {
-        assert!(has("resource \"x\" \"y\" {}\n", "unknown test-file block `resource`"));
+        assert!(has(
+            "resource \"x\" \"y\" {}\n",
+            "unknown test-file block `resource`"
+        ));
     }
 
     #[test]
@@ -258,9 +261,15 @@ mod tests {
 
     #[test]
     fn flags_bad_command_enum() {
-        assert!(has("run \"x\" {\n  command = \"destroy\"\n}\n", "invalid `command`"));
+        assert!(has(
+            "run \"x\" {\n  command = \"destroy\"\n}\n",
+            "invalid `command`"
+        ));
         // bare keyword form is also checked
-        assert!(has("run \"x\" {\n  command = destroy\n}\n", "invalid `command`"));
+        assert!(has(
+            "run \"x\" {\n  command = destroy\n}\n",
+            "invalid `command`"
+        ));
     }
 
     #[test]

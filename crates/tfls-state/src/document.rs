@@ -306,7 +306,10 @@ mod tests {
         // The `run "x"` block is captured as an outline symbol, separate
         // from the (empty) module symbol table.
         assert_eq!(
-            doc.test_runs.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            doc.test_runs
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["x"],
             "run block must be captured in test_runs"
         );

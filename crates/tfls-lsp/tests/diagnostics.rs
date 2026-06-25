@@ -1992,7 +1992,8 @@ fn undefined_reference_still_fires_on_clean_parse() {
     insert(&b, &u, "output \"o\" { value = local.region_short_na }\n");
     let msgs = messages(&b, &u);
     assert!(
-        msgs.iter().any(|m| m.contains("undefined") && m.contains("region_short_na")),
+        msgs.iter()
+            .any(|m| m.contains("undefined") && m.contains("region_short_na")),
         "undefined ref must fire on a clean parse: {msgs:?}"
     );
 }
@@ -2010,7 +2011,8 @@ fn local_used_only_by_sibling_local_in_same_block_not_unused() {
     );
     let msgs = messages(&b, &u);
     assert!(
-        msgs.iter().all(|m| !(m.contains("region_short_name") && m.contains("declared but not used"))),
+        msgs.iter()
+            .all(|m| !(m.contains("region_short_name") && m.contains("declared but not used"))),
         "a local used by a sibling local must not be flagged unused: {msgs:?}"
     );
 }
@@ -2040,7 +2042,10 @@ resource "null_resource" "y" {
     );
     let msgs = messages(&b, &u);
     let undef: Vec<_> = msgs.iter().filter(|m| m.contains("undefined")).collect();
-    assert!(undef.is_empty(), "special refs must not be flagged undefined: {undef:?}");
+    assert!(
+        undef.is_empty(),
+        "special refs must not be flagged undefined: {undef:?}"
+    );
 }
 
 #[test]
@@ -2076,7 +2081,10 @@ variable "recovery_services_vault_keyvault" {
     );
     let msgs = messages(&b, &main);
     let undef: Vec<_> = msgs.iter().filter(|m| m.contains("undefined")).collect();
-    assert!(undef.is_empty(), "cross-file var with validation/object must resolve: {undef:?}");
+    assert!(
+        undef.is_empty(),
+        "cross-file var with validation/object must resolve: {undef:?}"
+    );
 }
 
 #[test]
@@ -2084,7 +2092,10 @@ fn cross_file_var_used_in_count_conditional_resolves() {
     let b = backend();
     let vars = uri("file:///mod/variables.tf");
     let main = uri("file:///mod/main.tf");
-    insert(&b, &vars, r#"
+    insert(
+        &b,
+        &vars,
+        r#"
 variable "recovery_services_vault" {
   description = "The options for the ASR recovery services vault."
   default = {
@@ -2098,9 +2109,13 @@ variable "recovery_services_vault" {
     immutability_lock_i_am_sure = bool
   })
 }
-"#);
+"#,
+    );
     insert(&b, &main, "resource \"azurerm_key_vault_key\" \"k\" {\n  count = var.recovery_services_vault.encrypt ? 1 : 0\n}\n");
     let msgs = messages(&b, &main);
     let undef: Vec<_> = msgs.iter().filter(|m| m.contains("undefined")).collect();
-    assert!(undef.is_empty(), "cross-file var used in a count conditional must resolve: {undef:?}");
+    assert!(
+        undef.is_empty(),
+        "cross-file var used in a count conditional must resolve: {undef:?}"
+    );
 }

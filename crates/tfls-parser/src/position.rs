@@ -58,7 +58,10 @@ fn line_start_bytes(rope: &Rope) -> Vec<usize> {
 /// the slice includes any trailing `\n` / `\r\n`.
 fn line_byte_range(line_starts: &[usize], line_idx: usize, total_bytes: usize) -> (usize, usize) {
     let start = line_starts[line_idx];
-    let end = line_starts.get(line_idx + 1).copied().unwrap_or(total_bytes);
+    let end = line_starts
+        .get(line_idx + 1)
+        .copied()
+        .unwrap_or(total_bytes);
     (start, end)
 }
 
@@ -134,9 +137,7 @@ pub fn byte_offset_to_lsp_position(rope: &Rope, offset: usize) -> Result<Positio
 
     // Emit a UTF-16 code-unit column (LSP's default `Position.character`
     // encoding), not a byte difference — they diverge on multibyte lines.
-    let character = rope
-        .byte_slice(line_start_byte..offset)
-        .len_utf16_cu();
+    let character = rope.byte_slice(line_start_byte..offset).len_utf16_cu();
 
     Ok(Position {
         line: line_idx as u32,
