@@ -684,6 +684,24 @@ fn variable_type_value_items() -> Vec<CompletionItem> {
             ..Default::default()
         });
     }
+    // `optional` is only meaningful inside an `object({…})` attribute, so it
+    // trails the structural constructors (`02_` prefix). Omitted optional
+    // attributes resolve to `null` unless a default is supplied.
+    items.push(CompletionItem {
+        label: "optional".to_string(),
+        kind: Some(CompletionItemKind::CONSTRUCTOR),
+        detail: Some(
+            "Optional object attribute — omitted ⇒ null unless a default is given".to_string(),
+        ),
+        documentation: Some(Documentation::MarkupContent(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: tfls_core::optional_description().to_string(),
+        })),
+        insert_text: Some("optional(${1:string})".to_string()),
+        insert_text_format: Some(InsertTextFormat::SNIPPET),
+        sort_text: Some("02_optional".to_string()),
+        ..Default::default()
+    });
     items
 }
 
