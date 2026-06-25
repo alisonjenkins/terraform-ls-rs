@@ -558,7 +558,15 @@ pub fn resolve_module_source(
 /// reference in `dir`". Child-module and unrelated-stack
 /// locations return `false`.
 pub(crate) fn location_in_dir(loc: &SymbolLocation, dir: &Path) -> bool {
-    parent_dir(&loc.uri).as_deref() == Some(dir)
+    // Symlink-tolerant compare (NOT a bare `==`): disk-indexed sibling
+    // docs carry a CANONICAL uri — the sync module indexer reads from
+    // `dir.canonicalize()` — while the open file's `dir` is the editor's
+    // (typically non-canonical) path. On macOS (`/var` → `/private/var`)
+    // or any symlinked workspace root the two never compare equal, so
+    // every sibling-declared `var.*` / `local.*` / `module.*` would read
+    // as undefined and never clear. `dir_paths_match` fast-paths literal
+    // equality and only pays the canonicalize syscalls on a miss.
+    parent_dir(&loc.uri).is_some_and(|p| dir_paths_match(&p, dir))
 }
 
 /// Look up a declared symbol (variable or output) inside a child
@@ -833,5 +841,37 @@ mod tests {
         assert!(
             lookup_child_module_symbol(&store, &child, SymbolKind::Variable, "region").is_none()
         );
+    }
+
+    // --- location_in_dir symlink tolerance ---------------------------
+
+    #[test]
+    fn location_in_dir_matches_across_symlinked_parent() {
+        // Repro for the cross-file false-`undefined` bug: disk-indexed
+        // sibling docs get a CANONICAL uri (the sync module indexer reads
+        // from `dir.canonicalize()`), but the open file's `module_dir` is
+        // the editor's NON-canonical path. On macOS (`/var` → `/private/
+        // var`) and any symlinked workspace root the two never compare
+        // equal, so every sibling symbol reads as undefined and never
+        // clears. `location_in_dir` must tolerate the symlink.
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = temp.path().join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        #[cfg(not(unix))]
+        return; // symlink semantics differ; this repro is unix-only.
+
+        // Sibling indexed under the CANONICAL path (what the indexer does).
+        let canonical = real.canonicalize().unwrap();
+        let loc = SymbolLocation::new(uri_in(&canonical, "locals.tf"), lsp_types::Range::default());
+        // The open file's module dir is the NON-canonical symlink path.
+        assert!(
+            location_in_dir(&loc, &link),
+            "symbol under {canonical:?} must resolve in symlink dir {link:?}"
+        );
+        // And the trivially-equal case still holds.
+        assert!(location_in_dir(&loc, &canonical));
     }
 }
