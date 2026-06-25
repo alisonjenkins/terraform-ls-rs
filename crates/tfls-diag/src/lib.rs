@@ -27,6 +27,7 @@ pub mod import_unknown_id;
 pub mod lifecycle_literal;
 pub mod map_duplicate_keys;
 pub mod meta_arguments;
+pub mod missing_tags;
 pub mod module_graph;
 pub mod module_mutable_ref;
 pub mod module_outdated;
@@ -109,6 +110,9 @@ pub use import_unknown_id::{
 pub use lifecycle_literal::lifecycle_literal_diagnostics;
 pub use map_duplicate_keys::map_duplicate_keys_diagnostics;
 pub use meta_arguments::meta_argument_diagnostics;
+pub use missing_tags::{
+    missing_name_tag_diagnostics, missing_tags_diagnostics, provider_names_with_default_tags,
+};
 pub use module_graph::ModuleGraphLookup;
 pub use module_mutable_ref::module_mutable_ref_diagnostics;
 pub use module_outdated::module_outdated_diagnostics;
