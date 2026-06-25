@@ -714,6 +714,19 @@ fn type_expression_context(before: &str) -> Option<CompletionContext> {
     }
 }
 
+/// True if `before` (the document text up to the cursor) ends in a position
+/// where a type-constraint expression is expected: the RHS of `type =`
+/// inside a `variable` block, or any position nested inside a constructor
+/// started from there. Public wrapper over [`type_expression_context`] so the
+/// hover layer can gate type-constraint-keyword hovers without duplicating the
+/// brace/paren walker.
+pub fn in_type_expression(before: &str) -> bool {
+    matches!(
+        type_expression_context(before),
+        Some(CompletionContext::VariableTypeValue)
+    )
+}
+
 /// Find the byte offset of the `{` that opens the enclosing
 /// `variable "…" { … }` block. Walks back through any object-literal
 /// openers, function-call bodies, or nested block openers the cursor
