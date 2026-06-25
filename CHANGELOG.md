@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.14.0](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.13.2...v0.14.0) (2026-06-25)
+
+
+### Features
+
+* **diag:** add missing-tags and missing-name-tag diagnostics ([adc4c0a](https://github.com/alisonjenkins/terraform-ls-rs/commit/adc4c0a9323d87771034ee23f6a4c211f5c64cd4))
+* **lsp:** wire missing-tags diagnostics with default_tags suppression ([dc7fdb8](https://github.com/alisonjenkins/terraform-ls-rs/commit/dc7fdb870fb99ba64f9159f8ac43a316e266eac5))
+
 ## [0.13.2](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.13.1...v0.13.2) (2026-06-20)
 
 
