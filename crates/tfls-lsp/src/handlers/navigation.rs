@@ -19,7 +19,9 @@ use crate::handlers::util::{
     location_in_dir, lookup_child_module_symbol, module_source_in_dir, parent_dir,
     resolve_module_source,
 };
-use crate::handlers::{hover_attribute, hover_function, hover_module_input};
+use crate::handlers::{
+    hover_attribute, hover_function, hover_module_input, hover_named_value, hover_type_constraint,
+};
 
 /// `textDocument/declaration` — for HCL this is identical to
 /// `textDocument/definition`. Clients often call both, so we expose
@@ -964,6 +966,21 @@ pub async fn hover(backend: &Backend, params: HoverParams) -> jsonrpc::Result<Op
     // `required_providers`. Tried BEFORE function-hover so the LOCAL
     // segment isn't accidentally treated as a function name.
     if let Some(hover) = provider_local_hover(&backend.state, &doc, &uri, pos) {
+        return Ok(Some(hover));
+    }
+
+    // Type-constraint keywords inside `type = …` (`optional`, `object`,
+    // `list`, the primitives, …). Tried before function hover so `optional(`
+    // isn't mistaken for a function call, and gated to type-expression
+    // positions so an identifier merely sharing the name isn't shadowed.
+    if let Some(hover) = hover_type_constraint::type_constraint_hover(&doc, pos) {
+        return Ok(Some(hover));
+    }
+
+    // Built-in named values (`path.module`, `terraform.workspace`,
+    // `count.index`, `each.value`, `self`) — not declared anywhere, so the
+    // symbol fallback can't describe them.
+    if let Some(hover) = hover_named_value::named_value_hover(&doc, pos) {
         return Ok(Some(hover));
     }
 
