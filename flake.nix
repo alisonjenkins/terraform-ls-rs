@@ -152,6 +152,10 @@
             cargo-edit
             cargo-audit
             cargo-deny
+            # prek: Rust reimplementation of pre-commit. Runs the git hooks
+            # defined in .pre-commit-config.yaml (rustfmt check). Installed
+            # into .git/hooks by the shellHook below.
+            prek
             # sccache: cache rustc invocations across `cargo build`
             # / `cargo test` runs in this shell. Configured via
             # the `env` block below to point at
@@ -182,6 +186,15 @@
             # required combo.
             CARGO_INCREMENTAL = "0";
           };
+
+          shellHook = ''
+            # Wire up the prek-managed git hooks so commits are rustfmt-checked
+            # with the pinned toolchain (see .pre-commit-config.yaml). Idempotent;
+            # no-op outside a git work-tree or if prek is unavailable.
+            if [ -e .git ] && command -v prek >/dev/null; then
+              prek install >/dev/null 2>&1 || true
+            fi
+          '';
         };
       });
 }

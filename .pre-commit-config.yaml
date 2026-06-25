@@ -1,0 +1,20 @@
+# Git hooks managed by prek (https://github.com/j178/prek) — a Rust
+# reimplementation of pre-commit. Run with `prek`, not `pre-commit`.
+#
+# Hooks install automatically when you enter the nix devshell
+# (`nix develop`); see the `shellHook` in flake.nix. To run manually:
+#   prek run --all-files
+# To bypass once (discouraged): `git commit -n`.
+repos:
+  - repo: local
+    hooks:
+      - id: rustfmt
+        name: rustfmt (pinned 1.96.0 via nix devshell)
+        # `nix develop --command` pins rustfmt to the exact toolchain CI uses
+        # (rust-toolchain.toml), so a developer's ambient cargo/rustfmt can
+        # never disagree with CI's `cargo fmt --check`.
+        entry: nix develop --command cargo fmt --all --
+        args: ["--check"]
+        language: system
+        types: [rust]
+        pass_filenames: false
