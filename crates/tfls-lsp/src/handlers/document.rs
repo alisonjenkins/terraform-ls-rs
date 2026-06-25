@@ -601,7 +601,22 @@ pub fn compute_diagnostics_with_lookup(
         out.extend(tag(
             "terraform_undefined_reference",
             undefined_reference_diagnostics(&doc.references, |kind| {
-                is_defined_in_module(state, module_dir.as_deref(), kind)
+                // Resolve same-file references against THIS document's own
+                // symbol table before the global index. We already hold the
+                // doc read guard, so `doc.symbols` is a consistent snapshot;
+                // the global `definitions_by_name` is not — a concurrent
+                // `apply_and_reparse_document` clears this doc's entries
+                // (`remove_from_indexes` runs under a *shared* `get`, so it
+                // proceeds while this compute holds the read guard) before
+                // `add_to_indexes` restores them. Without the own-symbols
+                // fallback, an overlapping compute observes that empty window
+                // and flags the file's own locals/vars/modules as undefined,
+                // then clears on the next pass — the "locals flash undefined
+                // on rapid edits" race. The current doc is in the module, so
+                // its own declaration always satisfies module scope: this is
+                // strictly sound (never a false negative).
+                defined_in_current_doc(&doc.symbols, kind)
+                    || is_defined_in_module(state, module_dir.as_deref(), kind)
             }),
         ));
     }
@@ -1377,6 +1392,26 @@ fn module_versions_cache_path(
     )
 }
 
+/// True if the referencing document's OWN symbol table defines `kind`.
+///
+/// Consulted before the global module index (`is_defined_in_module`) so a
+/// reference to a same-file `var.*` / `local.*` / `module.*` resolves even
+/// while a concurrent reparse has transiently cleared this doc's entries
+/// from `definitions_by_name`. The caller holds the doc read guard, so
+/// `symbols` is a consistent snapshot; the global index is rebuilt
+/// remove-then-add under `index_lock`, which the diagnostics reader does not
+/// hold. The current doc is always in its own module, so an own-table hit
+/// always satisfies module scope — strictly sound, never a false negative.
+fn defined_in_current_doc(symbols: &tfls_core::SymbolTable, kind: &ReferenceKind) -> bool {
+    match kind {
+        ReferenceKind::Variable { name } => symbols.variables.contains_key(name),
+        ReferenceKind::Local { name } => symbols.locals.contains_key(name),
+        ReferenceKind::Module { name } => symbols.modules.contains_key(name),
+        // resource / data-source refs are skipped upstream by the diag engine.
+        _ => false,
+    }
+}
+
 /// True if a definition for `kind` exists somewhere in the workspace index
 /// with the same parent directory as the referencing document. Falls back to
 /// a lenient `true` for URIs we can't resolve to a filesystem path, so
@@ -2013,6 +2048,60 @@ mod did_open_publish_tests {
                 DidOpenPublish::ClearPushNamespaceThenPull | DidOpenPublish::PublishReal => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod undefined_reference_race_tests {
+    //! Repro for the same-file-locals-flash race.
+    //!
+    //! `compute_diagnostics` resolves references against the global
+    //! `definitions_by_name` index, read WITHOUT holding `index_lock`.
+    //! A concurrent `did_change` handler's `apply_and_reparse_document`
+    //! clears this doc's entries (`remove_from_indexes`, a *shared* `get`
+    //! that runs while another compute already holds the doc read guard)
+    //! before `add_to_indexes` restores them — so an overlapping compute
+    //! sees the empty window and flags the file's OWN locals as undefined.
+    //!
+    //! The fix: resolve same-file references against the document's own
+    //! symbol table (held consistent under the doc read guard) before
+    //! consulting the global index. Here we simulate the transient window
+    //! by clearing `definitions_by_name` while leaving the doc intact.
+
+    use super::compute_diagnostics;
+    use tfls_state::{DocumentState, StateStore};
+    use url::Url;
+
+    #[test]
+    fn same_file_local_not_flagged_while_global_index_cleared() {
+        let store = StateStore::new();
+        let uri = Url::parse("file:///mod/main.tf").unwrap();
+        store.upsert_document(DocumentState::new(
+            uri.clone(),
+            "locals {\n  a = 1\n}\noutput \"o\" {\n  value = local.a\n}\n",
+            1,
+        ));
+
+        // Sanity: with the index populated there's no undefined-ref diag.
+        let clean = compute_diagnostics(&store, &uri);
+        assert!(
+            !clean.iter().any(|d| d.message.contains("undefined local")),
+            "baseline must resolve the same-file local: {clean:?}"
+        );
+
+        // Simulate the cleared-but-not-yet-repopulated window a concurrent
+        // reparse opens. The doc (and its own symbol table) is untouched.
+        store.definitions_by_name.clear();
+
+        let racing = compute_diagnostics(&store, &uri);
+        assert!(
+            !racing
+                .iter()
+                .any(|d| d.message.contains("undefined local `a`")),
+            "same-file local must resolve from the doc's own symbols even \
+             while the global index is transiently empty: {racing:?}"
+        );
     }
 }
 
