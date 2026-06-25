@@ -16,6 +16,8 @@ pub mod highlight;
 pub mod hover_attribute;
 pub mod hover_function;
 pub mod hover_module_input;
+pub mod hover_named_value;
+pub mod hover_type_constraint;
 pub mod inlay_hints;
 pub mod module_snapshot;
 pub mod navigation;
