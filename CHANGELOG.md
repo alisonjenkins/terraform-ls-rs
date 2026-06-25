@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.15.0](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.14.0...v0.15.0) (2026-06-25)
+
+
+### Features
+
+* **core:** add type-constraint and named-value description tables ([505c7fb](https://github.com/alisonjenkins/terraform-ls-rs/commit/505c7fb6741cbe61b811e8a338875da10cd9f980))
+* **lsp:** hover docs for type-constraint keywords and named values ([1835e8e](https://github.com/alisonjenkins/terraform-ls-rs/commit/1835e8e30d030e94a1ed7a591a64788f530d4fbc))
+* **lsp:** offer `optional` in type-constraint completion ([177261c](https://github.com/alisonjenkins/terraform-ls-rs/commit/177261cbd8fa5cc6f9e9b0fa2efb26f3828a4645))
+
+
+### Bug Fixes
+
+* **lsp:** resolve cross-file refs across symlinked module dirs ([53efbe8](https://github.com/alisonjenkins/terraform-ls-rs/commit/53efbe896661f0076931ceb8e27288d379fdc631))
+* **lsp:** resolve same-file refs from doc's own symbols during reparse ([eaaa222](https://github.com/alisonjenkins/terraform-ls-rs/commit/eaaa22282830fdca9f9e09d6574db627c509c98f))
+
 ## [0.14.0](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.13.2...v0.14.0) (2026-06-25)
 
 
