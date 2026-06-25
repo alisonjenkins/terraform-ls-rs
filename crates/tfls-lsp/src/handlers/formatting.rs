@@ -111,11 +111,7 @@ fn minimal_text_edits(old: &str, new: &str) -> Vec<TextEdit> {
                 old_len,
                 new_index,
                 new_len,
-            } => (
-                old_index,
-                old_index + old_len,
-                take_new(new_index, new_len),
-            ),
+            } => (old_index, old_index + old_len, take_new(new_index, new_len)),
         };
         edits.push(TextEdit {
             range: Range {
@@ -416,7 +412,10 @@ mod tests {
         let old = "module \"m\" {\n  source = \"../new-path\"\n  x = 1\n}\n";
         let new = "module \"m\" {\n  source = \"../new-path\"\n  y = 2\n}\n";
         let out = apply_edits(old, minimal_text_edits(old, new));
-        assert!(out.contains("\"../new-path\""), "source value preserved: {out}");
+        assert!(
+            out.contains("\"../new-path\""),
+            "source value preserved: {out}"
+        );
         assert_eq!(out, new);
     }
 }

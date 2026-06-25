@@ -240,7 +240,10 @@ async fn consumer_clears_after_peer_var_typed_through_syntax_error() {
     let vars_uri = "file:///mod/variables.tf";
 
     client
-        .did_open(main_uri, "output \"o\" { value = var.recovery_services_vault_keyvault.x }\n")
+        .did_open(
+            main_uri,
+            "output \"o\" { value = var.recovery_services_vault_keyvault.x }\n",
+        )
         .await;
     client.did_open(vars_uri, "").await;
     client.settle(150).await;
@@ -252,7 +255,11 @@ async fn consumer_clears_after_peer_var_typed_through_syntax_error() {
 
     // Type the variable, passing through an incomplete (syntax-error) state.
     client
-        .did_change_full(vars_uri, 2, "variable \"recovery_services_vault_keyvault\" {\n  type = object({\n")
+        .did_change_full(
+            vars_uri,
+            2,
+            "variable \"recovery_services_vault_keyvault\" {\n  type = object({\n",
+        )
         .await;
     client.settle(120).await;
     // Finish it: valid object-typed variable.
@@ -290,7 +297,11 @@ async fn server_advertises_full_text_sync() {
     let sync = &body["result"]["capabilities"]["textDocumentSync"];
     // Either a bare kind `1` or `{ "change": 1, ... }`.
     let kind = sync.as_i64().or_else(|| sync["change"].as_i64());
-    assert_eq!(kind, Some(1), "textDocumentSync must be FULL (1); got {sync}");
+    assert_eq!(
+        kind,
+        Some(1),
+        "textDocumentSync must be FULL (1); got {sync}"
+    );
     client.shutdown().await;
 }
 
@@ -303,7 +314,9 @@ async fn consumer_clears_when_definition_file_is_opened() {
     let main_uri = "file:///mod/main.tf";
     let vars_uri = "file:///mod/variables.tf";
 
-    client.did_open(main_uri, "output \"o\" { value = var.foo }\n").await;
+    client
+        .did_open(main_uri, "output \"o\" { value = var.foo }\n")
+        .await;
     client.settle(150).await;
     let baseline = client.last_diagnostics(main_uri).await;
     assert!(
@@ -323,27 +336,32 @@ async fn consumer_clears_when_definition_file_is_opened() {
     );
 }
 
-
-
-
-
-
-
-
 #[tokio::test]
 async fn removing_a_definition_via_edit_reflags_consumer() {
     let mut c = TestClient::new();
     c.initialize(None).await;
     let main_uri = "file:///mod/main.tf";
     let vars_uri = "file:///mod/variables.tf";
-    c.did_open(main_uri, "output \"o\" { value = var.foo }\n").await;
+    c.did_open(main_uri, "output \"o\" { value = var.foo }\n")
+        .await;
     c.did_open(vars_uri, "variable \"foo\" {}\n").await;
     c.settle(200).await;
-    assert!(!contains_undefined_var(&c.last_diagnostics(main_uri).await, "foo"));
+    assert!(!contains_undefined_var(
+        &c.last_diagnostics(main_uri).await,
+        "foo"
+    ));
     c.did_change_full(vars_uri, 2, "\n").await;
     c.settle(250).await;
-    let last = c.publishes_for(main_uri).await.last().cloned().unwrap_or_default();
-    assert!(contains_undefined_var(&last, "foo"), "removing the var must re-flag the consumer; got {last:?}");
+    let last = c
+        .publishes_for(main_uri)
+        .await
+        .last()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        contains_undefined_var(&last, "foo"),
+        "removing the var must re-flag the consumer; got {last:?}"
+    );
 }
 
 #[tokio::test]
@@ -352,14 +370,27 @@ async fn renaming_a_definition_reflags_old_name() {
     c.initialize(None).await;
     let main_uri = "file:///mod/main.tf";
     let vars_uri = "file:///mod/variables.tf";
-    c.did_open(main_uri, "output \"o\" { value = var.foo }\n").await;
+    c.did_open(main_uri, "output \"o\" { value = var.foo }\n")
+        .await;
     c.did_open(vars_uri, "variable \"foo\" {}\n").await;
     c.settle(200).await;
-    assert!(!contains_undefined_var(&c.last_diagnostics(main_uri).await, "foo"));
-    c.did_change_full(vars_uri, 2, "variable \"bar\" {}\n").await;
+    assert!(!contains_undefined_var(
+        &c.last_diagnostics(main_uri).await,
+        "foo"
+    ));
+    c.did_change_full(vars_uri, 2, "variable \"bar\" {}\n")
+        .await;
     c.settle(250).await;
-    let last = c.publishes_for(main_uri).await.last().cloned().unwrap_or_default();
-    assert!(contains_undefined_var(&last, "foo"), "rename must re-flag the old name; got {last:?}");
+    let last = c
+        .publishes_for(main_uri)
+        .await
+        .last()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        contains_undefined_var(&last, "foo"),
+        "rename must re-flag the old name; got {last:?}"
+    );
 }
 
 #[tokio::test]
@@ -368,13 +399,25 @@ async fn cross_file_local_resolves_when_defining_file_opened() {
     c.initialize(None).await;
     let main_uri = "file:///mod/main.tf";
     let loc_uri = "file:///mod/locals.tf";
-    c.did_open(main_uri, "output \"o\" { value = local.bar }\n").await;
+    c.did_open(main_uri, "output \"o\" { value = local.bar }\n")
+        .await;
     c.settle(150).await;
-    assert!(any_message_contains(&c.last_diagnostics(main_uri).await, "bar"));
+    assert!(any_message_contains(
+        &c.last_diagnostics(main_uri).await,
+        "bar"
+    ));
     c.did_open(loc_uri, "locals {\n  bar = 1\n}\n").await;
     c.settle(250).await;
-    let last = c.publishes_for(main_uri).await.last().cloned().unwrap_or_default();
-    assert!(!any_message_contains(&last, "bar"), "opening the locals file must clear the consumer; got {last:?}");
+    let last = c
+        .publishes_for(main_uri)
+        .await
+        .last()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !any_message_contains(&last, "bar"),
+        "opening the locals file must clear the consumer; got {last:?}"
+    );
 }
 
 #[tokio::test]
@@ -383,11 +426,21 @@ async fn cross_module_reference_stays_undefined() {
     let mut c = TestClient::new();
     c.initialize(None).await;
     let b_main = "file:///modB/main.tf";
-    c.did_open(b_main, "output \"o\" { value = var.foo }\n").await;
-    c.did_open("file:///modA/variables.tf", "variable \"foo\" {}\n").await;
+    c.did_open(b_main, "output \"o\" { value = var.foo }\n")
+        .await;
+    c.did_open("file:///modA/variables.tf", "variable \"foo\" {}\n")
+        .await;
     c.settle(250).await;
-    let last = c.publishes_for(b_main).await.last().cloned().unwrap_or_default();
-    assert!(contains_undefined_var(&last, "foo"), "cross-module ref must stay undefined; got {last:?}");
+    let last = c
+        .publishes_for(b_main)
+        .await
+        .last()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        contains_undefined_var(&last, "foo"),
+        "cross-module ref must stay undefined; got {last:?}"
+    );
 }
 
 #[tokio::test]
@@ -396,10 +449,23 @@ async fn broken_definition_file_still_resolves_consumer() {
     c.initialize(None).await;
     let main_uri = "file:///mod/main.tf";
     let vars_uri = "file:///mod/variables.tf";
-    c.did_open(main_uri, "output \"o\" { value = var.foo }\n").await;
+    c.did_open(main_uri, "output \"o\" { value = var.foo }\n")
+        .await;
     c.settle(120).await;
-    c.did_open(vars_uri, "variable \"foo\" {}\nresource \"x\" \"y\" {\n  bad = @@@\n}\n").await;
+    c.did_open(
+        vars_uri,
+        "variable \"foo\" {}\nresource \"x\" \"y\" {\n  bad = @@@\n}\n",
+    )
+    .await;
     c.settle(250).await;
-    let last = c.publishes_for(main_uri).await.last().cloned().unwrap_or_default();
-    assert!(!contains_undefined_var(&last, "foo"), "broken def file must still index the var; got {last:?}");
+    let last = c
+        .publishes_for(main_uri)
+        .await
+        .last()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !contains_undefined_var(&last, "foo"),
+        "broken def file must still index the var; got {last:?}"
+    );
 }

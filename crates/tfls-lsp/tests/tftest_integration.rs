@@ -25,15 +25,16 @@ fn backend_with_module() -> Backend {
     let inner = service.inner();
     let upsert = |path: &str, src: &str| {
         let u = Url::parse(path).expect("url");
-        inner
-            .state
-            .upsert_document(DocumentState::new(u, src, 1));
+        inner.state.upsert_document(DocumentState::new(u, src, 1));
     };
     upsert(
         "file:///mod/variables.tf",
         "variable \"region\" {\n  type = string\n}\n",
     );
-    upsert("file:///mod/outputs.tf", "output \"id\" {\n  value = 1\n}\n");
+    upsert(
+        "file:///mod/outputs.tf",
+        "output \"id\" {\n  value = 1\n}\n",
+    );
     Backend::with_shared_state(
         inner.client.clone(),
         inner.state.clone(),
@@ -100,7 +101,9 @@ async fn structural_validator_flags_bad_command() {
     );
     let diags = tfls_lsp::handlers::document::compute_diagnostics(&backend.state, &test_uri);
     assert!(
-        diags.iter().any(|d| d.message.contains("invalid `command`")),
+        diags
+            .iter()
+            .any(|d| d.message.contains("invalid `command`")),
         "bad command enum must be flagged: {:?}",
         diags.iter().map(|d| &d.message).collect::<Vec<_>>()
     );
@@ -155,10 +158,13 @@ async fn test_file_does_not_pollute_module_index() {
 async fn completion_offers_run_in_test_file_not_resource() {
     let backend = backend_with_module();
     let test_uri = upsert_doc(&backend, "file:///mod/tests/main.tftest.hcl", "");
-    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&test_uri, Position::new(0, 0)))
-        .await
-        .expect("ok")
-        .expect("some completions");
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&test_uri, Position::new(0, 0)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&"run".to_string()), "got: {ls:?}");
     assert!(ls.contains(&"mock_provider".to_string()), "got: {ls:?}");
@@ -169,10 +175,13 @@ async fn completion_offers_run_in_test_file_not_resource() {
 async fn completion_offers_resource_in_tf_file_not_run() {
     let backend = backend_with_module();
     let main_uri = upsert_doc(&backend, "file:///mod/main.tf", "");
-    let resp = tfls_lsp::handlers::completion::completion(&backend, make_params(&main_uri, Position::new(0, 0)))
-        .await
-        .expect("ok")
-        .expect("some completions");
+    let resp = tfls_lsp::handlers::completion::completion(
+        &backend,
+        make_params(&main_uri, Position::new(0, 0)),
+    )
+    .await
+    .expect("ok")
+    .expect("some completions");
     let ls = labels(resp);
     assert!(ls.contains(&"resource".to_string()), "got: {ls:?}");
     assert!(!ls.contains(&"run".to_string()), "got: {ls:?}");
@@ -182,7 +191,8 @@ async fn completion_offers_resource_in_tf_file_not_run() {
 async fn completion_offers_module_outputs_after_output_dot() {
     let backend = backend_with_module();
     // Cursor right after `output.` in an assert condition.
-    let src = "run \"x\" {\n  assert {\n    condition     = output.\n    error_message = \"m\"\n  }\n}\n";
+    let src =
+        "run \"x\" {\n  assert {\n    condition     = output.\n    error_message = \"m\"\n  }\n}\n";
     let test_uri = upsert_doc(&backend, "file:///mod/tests/main.tftest.hcl", src);
     // Position on the `output.` line (line 2), just past the dot.
     let line = "    condition     = output.";
@@ -194,5 +204,8 @@ async fn completion_offers_module_outputs_after_output_dot() {
     .expect("ok")
     .expect("some completions");
     let ls = labels(resp);
-    assert!(ls.contains(&"id".to_string()), "module output `id` must be offered: {ls:?}");
+    assert!(
+        ls.contains(&"id".to_string()),
+        "module output `id` must be offered: {ls:?}"
+    );
 }

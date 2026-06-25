@@ -1267,7 +1267,10 @@ mod reliability_tests {
         assert!(!inserted, "must refuse to overwrite an open doc");
         let doc = store.documents.get(&u).expect("doc present");
         assert_eq!(doc.version, 5, "open doc version preserved");
-        assert!(doc.text().contains("variable"), "open doc content preserved");
+        assert!(
+            doc.text().contains("variable"),
+            "open doc content preserved"
+        );
         drop(doc);
 
         // Closed: disk read DOES refresh it.

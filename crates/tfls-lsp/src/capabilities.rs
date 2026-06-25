@@ -22,9 +22,7 @@ pub fn server_capabilities() -> ServerCapabilities {
         // the rope, a skipped version freezing it) that produced a class of
         // "stuck / stale" bugs under tower-lsp's concurrent handlers and
         // lspmux multiplexing.
-        text_document_sync: Some(TextDocumentSyncCapability::Kind(
-            TextDocumentSyncKind::FULL,
-        )),
+        text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         definition_provider: Some(OneOf::Left(true)),
         declaration_provider: Some(DeclarationCapability::Simple(true)),
         references_provider: Some(OneOf::Left(true)),

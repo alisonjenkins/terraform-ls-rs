@@ -156,8 +156,13 @@ pub async fn completion(
     if tfls_core::uri::is_tftest_uri(uri.as_str()) {
         let cur_line_start = doc.rope.line_to_byte(line_idx);
         let line_prefix = doc.rope.byte_slice(cur_line_start..offset).to_string();
-        let items =
-            tftest_completion_items(backend, &uri, doc.parsed.body.as_ref(), &line_prefix, offset);
+        let items = tftest_completion_items(
+            backend,
+            &uri,
+            doc.parsed.body.as_ref(),
+            &line_prefix,
+            offset,
+        );
         return Ok(Some(CompletionResponse::Array(items)));
     }
 
@@ -4259,7 +4264,10 @@ mod tftest_completion_tests {
 
     #[test]
     fn reference_prefix_detects_namespaces() {
-        assert_eq!(tftest_reference_prefix("  region = var."), Some(("var", "")));
+        assert_eq!(
+            tftest_reference_prefix("  region = var."),
+            Some(("var", ""))
+        );
         assert_eq!(
             tftest_reference_prefix("  condition = output.i"),
             Some(("output", "i"))
