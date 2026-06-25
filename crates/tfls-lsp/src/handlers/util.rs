@@ -182,6 +182,35 @@ pub(crate) fn module_unknown_inputs(
     }
 }
 
+/// Local names of providers that declare `default_tags` anywhere in the
+/// active module's directory. Aggregated across siblings because the
+/// `provider "aws" { default_tags { ... } }` block usually lives in
+/// `provider.tf` / `versions.tf`, not the file being edited. Used to
+/// suppress the `terraform_missing_tags` warning — those tags auto-apply,
+/// so the resource isn't really untagged.
+pub(crate) fn module_providers_with_default_tags(
+    state: &StateStore,
+    primary_uri: &Url,
+) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let Some(target_dir) = parent_dir(primary_uri) else {
+        return out;
+    };
+    for entry in state.documents.iter() {
+        let uri = entry.key();
+        let Ok(path) = uri.to_file_path() else {
+            continue;
+        };
+        if path.parent() != Some(&target_dir) {
+            continue;
+        }
+        if let Some(body) = entry.value().parsed.body.as_ref() {
+            out.extend(tfls_diag::provider_names_with_default_tags(body));
+        }
+    }
+    out
+}
+
 /// Per-`compute_diagnostics`-call state for [`ModuleOutputResolver`]: child
 /// module inputs are built once per referenced directory, and `visiting`
 /// breaks module-reference cycles (path-scoped: inserted before analysing a
