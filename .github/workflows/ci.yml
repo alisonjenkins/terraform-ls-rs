@@ -74,7 +74,7 @@ jobs:
       # unchanged crates are sccache hits and only changed code recompiles. A
       # fresh key per commit always saves the latest state; restore-keys fall
       # back to the most recent prior cache.
-      - uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         if: needs.changes.outputs.rust == 'true'
         with:
           path: |
