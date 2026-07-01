@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.0](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.15.0...v0.16.0) (2026-07-01)
+
+
+### Miscellaneous Chores
+
+* release 0.16.0 ([dfc1d08](https://github.com/alisonjenkins/terraform-ls-rs/commit/dfc1d0803e519b85c52087ddf5e18398b15fefa2))
+
 ## [0.15.0](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.14.0...v0.15.0) (2026-06-25)
 
 
