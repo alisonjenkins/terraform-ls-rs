@@ -93,7 +93,7 @@ jobs:
       # download of one of its deps).
       - name: Install cargo-zigbuild
         if: matrix.use_zig
-        uses: taiki-e/install-action@ed67fa35ac944f3a9b33f12c4dd43b6f31a47e20 # v2
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2
         with:
           tool: cargo-zigbuild
 
