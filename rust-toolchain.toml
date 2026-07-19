@@ -2,5 +2,5 @@
 # fenix input can't silently change rustfmt/codegen behaviour. Bump
 # deliberately and re-run `cargo fmt` in the same commit.
 [toolchain]
-channel = "1.96.0"
+channel = "1.97.1"
 components = ["rustfmt", "clippy", "rust-src"]
