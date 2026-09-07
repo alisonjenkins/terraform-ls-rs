@@ -54,7 +54,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         if: needs.changes.outputs.rust == 'true'
 
-      - uses: DeterminateSystems/nix-installer-action@a7ad9c4f0c65208097f4d34f3cfa1913b80cce5c # main
+      - uses: DeterminateSystems/nix-installer-action@b67ad2f0e8376a0bc947db191e4484285b6f5b56 # main
         if: needs.changes.outputs.rust == 'true'
 
       # Persist the nix store (toolchain, devshell deps, fetched derivations)
