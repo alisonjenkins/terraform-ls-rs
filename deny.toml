@@ -11,6 +11,15 @@ ignore = [
   # stack) with no safe upgrade available yet. Not a security vulnerability;
   # revisit when the upstream chain drops it.
   "RUSTSEC-2025-0134",
+  # quick-xml 0.26 DoS advisories (quadratic duplicate-attribute check,
+  # unbounded namespace allocation in NsReader). Reached only through
+  # pprof -> inferno, a Unix dev-dependency used to write flamegraph SVGs
+  # in the fetch_local example; it never parses untrusted XML and is not
+  # in any shipped binary. pprof 0.15 (latest) pins inferno 0.11, which
+  # pins quick-xml 0.26, so there is no upgrade path. Revisit when pprof
+  # moves to inferno 0.12+.
+  "RUSTSEC-2026-0194",
+  "RUSTSEC-2026-0195",
 ]
 
 [licenses]
