@@ -89,18 +89,36 @@ impl TestClient {
     /// `initialize` + `initialized`. Pass `root_uri` for workspaces that
     /// need a root; `None` for single-file sessions.
     pub async fn initialize(&mut self, root_uri: Option<&str>) -> Value {
+        self.initialize_with_capabilities(root_uri, json!({ "textDocument": {}, "workspace": {} }))
+            .await
+    }
+
+    /// `initialize` + `initialized` with explicit client capabilities.
+    pub async fn initialize_with_capabilities(
+        &mut self,
+        root_uri: Option<&str>,
+        capabilities: Value,
+    ) -> Value {
         let resp = self
             .request(
                 "initialize",
                 json!({
                     "processId": null,
                     "rootUri": root_uri,
-                    "capabilities": { "textDocument": {}, "workspace": {} }
+                    "capabilities": capabilities
                 }),
             )
             .await;
         self.notify("initialized", json!({})).await;
         resp
+    }
+
+    /// Number of captured server→client messages with this `method`.
+    pub async fn count_method(&self, method: &str) -> usize {
+        let lock = self.captured.lock().await;
+        lock.iter()
+            .filter(|msg| msg.get("method").and_then(Value::as_str) == Some(method))
+            .count()
     }
 
     pub async fn did_open(&mut self, uri: &str, text: &str) {
