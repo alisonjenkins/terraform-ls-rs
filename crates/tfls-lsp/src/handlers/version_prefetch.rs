@@ -167,6 +167,7 @@ async fn prefetch_and_refresh(
     // — just show the set of targets at begin time.
     let progress = crate::progress::ProgressReporter::begin(
         &client,
+        &state,
         format!("Fetching {} version catalog(s)", targets.len()),
     )
     .await;

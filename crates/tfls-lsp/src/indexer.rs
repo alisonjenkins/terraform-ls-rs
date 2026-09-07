@@ -450,9 +450,12 @@ async fn dispatch_job(
         Job::FetchSchemas { working_dir } => {
             let progress = match client {
                 Some(c) => {
-                    let rep =
-                        crate::progress::ProgressReporter::begin(c, "Fetching provider schemas")
-                            .await;
+                    let rep = crate::progress::ProgressReporter::begin(
+                        c,
+                        &state,
+                        "Fetching provider schemas",
+                    )
+                    .await;
                     // Clue the user in that other startup work is
                     // behind this job in the queue — otherwise the
                     // progress feels like "just one thing happening"
@@ -533,7 +536,12 @@ async fn dispatch_job(
         Job::FetchFunctions { binary } => {
             let progress = match client {
                 Some(c) => {
-                    crate::progress::ProgressReporter::begin(c, "Loading function signatures").await
+                    crate::progress::ProgressReporter::begin(
+                        c,
+                        &state,
+                        "Loading function signatures",
+                    )
+                    .await
                 }
                 None => None,
             };
@@ -595,7 +603,9 @@ async fn bulk_workspace_scan(
     });
 
     let discover_progress = match client {
-        Some(c) => crate::progress::ProgressReporter::begin(c, "Discovering Terraform files").await,
+        Some(c) => {
+            crate::progress::ProgressReporter::begin(c, state, "Discovering Terraform files").await
+        }
         None => None,
     };
     // Workspace-wide `WalkBuilder` traversal. On a cold page
@@ -1119,7 +1129,7 @@ async fn scan_files_parallel(
     // child-module scans complete in single-digit ms each).
     let progress = match (client, with_progress) {
         (Some(c), true) => {
-            crate::progress::ProgressReporter::begin(c, "Indexing Terraform workspace").await
+            crate::progress::ProgressReporter::begin(c, state, "Indexing Terraform workspace").await
         }
         _ => None,
     };
