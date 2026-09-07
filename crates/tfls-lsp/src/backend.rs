@@ -205,6 +205,15 @@ impl LanguageServer for Backend {
         self.state
             .set_client_supports_diagnostic_refresh(client_does_refresh);
 
+        let client_does_progress = params
+            .capabilities
+            .window
+            .as_ref()
+            .and_then(|w| w.work_done_progress)
+            .unwrap_or(false);
+        self.state
+            .set_client_supports_work_done_progress(client_does_progress);
+
         // Apply `initializationOptions` to the live config cell so
         // `formatStyle` (and any other future LSP setting) takes
         // effect immediately, before any did_open / format request

@@ -146,6 +146,12 @@ pub struct StateStore {
     /// requests.
     pub client_supports_diagnostic_refresh: std::sync::atomic::AtomicBool,
 
+    /// True when the client advertised `window.workDoneProgress` at
+    /// `initialize`. Without it the server must not send
+    /// `window/workDoneProgress/create`: a client that never answers
+    /// that request blocks the serial indexer worker forever.
+    pub client_supports_work_done_progress: std::sync::atomic::AtomicBool,
+
     /// URIs currently open in the client (received `didOpen`, no
     /// matching `didClose` yet). Used to distinguish "client will
     /// pull this" (open) from "client will only see this via push"
@@ -242,6 +248,19 @@ impl StateStore {
     /// capability.
     pub fn client_supports_diagnostic_refresh(&self) -> bool {
         self.client_supports_diagnostic_refresh
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Record whether the client advertised `window.workDoneProgress`
+    /// at `initialize`. Call once from the `initialize` handler.
+    pub fn set_client_supports_work_done_progress(&self, v: bool) {
+        self.client_supports_work_done_progress
+            .store(v, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether the server may send `window/workDoneProgress/create`.
+    pub fn client_supports_work_done_progress(&self) -> bool {
+        self.client_supports_work_done_progress
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 

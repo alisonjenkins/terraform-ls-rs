@@ -28,8 +28,8 @@
 //! Usage:
 //!
 //! ```ignore
-//! let Some(p) = ProgressReporter::begin(&client, "Indexing workspace").await else {
-//!     // client didn't accept the token — just proceed silently
+//! let Some(p) = ProgressReporter::begin(&client, &state, "Indexing workspace").await else {
+//!     // client doesn't support progress or didn't accept the token — proceed silently
 //! };
 //! p.report(Some("parsed 50/140".into()), Some(33)).await;
 //! // …
@@ -43,6 +43,7 @@ use lsp_types::{
     ProgressToken, WorkDoneProgress, WorkDoneProgressBegin, WorkDoneProgressCreateParams,
     WorkDoneProgressEnd, WorkDoneProgressReport,
 };
+use tfls_state::StateStore;
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::task::JoinHandle;
 use tower_lsp_server::Client;
@@ -73,11 +74,22 @@ pub struct ProgressReporter {
 
 impl ProgressReporter {
     /// Create a new progress token on the client and send a
-    /// `Begin`. Returns `None` if the client rejects
-    /// `window/workDoneProgress/create` — older clients or clients
-    /// that don't support progress. Callers treat `None` as "just
+    /// `Begin`. Returns `None` when the client did not advertise
+    /// `window.workDoneProgress`, or rejects
+    /// `window/workDoneProgress/create`. Callers treat `None` as "just
     /// don't report progress" rather than an error.
-    pub async fn begin(client: &Client, title: impl Into<String>) -> Option<Self> {
+    ///
+    /// The capability check is load-bearing: a client that does not
+    /// support progress never answers the create request, and the
+    /// await below would block the calling job indefinitely.
+    pub async fn begin(
+        client: &Client,
+        state: &StateStore,
+        title: impl Into<String>,
+    ) -> Option<Self> {
+        if !state.client_supports_work_done_progress() {
+            return None;
+        }
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let token_label = format!("tfls-{n}");
         let token = ProgressToken::String(token_label.clone());
