@@ -95,6 +95,10 @@ enum FailOn {
     Never,
 }
 
+/// Levels the LSP config accepts for a rule; anything else is silently
+/// ignored by `update_from_json`, so reject it here where the user can see.
+const RULE_LEVELS: [&str; 5] = ["off", "hint", "info", "warning", "error"];
+
 #[derive(Debug, Clone)]
 struct RuleOverrideArg {
     code: String,
@@ -110,6 +114,12 @@ impl std::str::FromStr for RuleOverrideArg {
             .ok_or_else(|| format!("expected <CODE>=<LEVEL>, got '{s}'"))?;
         if code.is_empty() || level.is_empty() {
             return Err(format!("expected <CODE>=<LEVEL>, got '{s}'"));
+        }
+        if !RULE_LEVELS.contains(&level) {
+            return Err(format!(
+                "unknown level '{level}' for rule '{code}'; expected one of {}",
+                RULE_LEVELS.join("|")
+            ));
         }
         Ok(RuleOverrideArg {
             code: code.to_string(),
@@ -128,7 +138,7 @@ fn main() -> ExitCode {
         // still gets to build the global pool with this override.
         std::env::set_var("TFLS_RAYON_THREADS", n.to_string());
     }
-    tfls_lsp::configure_rayon_pool();
+    tfls_engine::index::configure_rayon_pool();
 
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -469,5 +479,13 @@ mod tests {
     fn rule_override_arg_rejects_missing_equals() {
         let parsed: Result<RuleOverrideArg, String> = "terraform_fmt".parse();
         assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn rule_override_arg_rejects_unknown_level() {
+        let parsed: Result<RuleOverrideArg, String> = "terraform_fmt=warn".parse();
+        let err = parsed.expect_err("'warn' is not a valid level");
+        assert!(err.contains("unknown level 'warn'"), "{err}");
+        assert!(err.contains("off|hint|info|warning|error"), "{err}");
     }
 }
