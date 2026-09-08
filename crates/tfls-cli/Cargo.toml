@@ -55,6 +55,7 @@ path = "src/bin/mux_format_probe.rs"
 
 [dependencies]
 tfls-lsp.workspace = true
+tfls-engine.workspace = true
 tfls-state.workspace = true
 tfls-walker.workspace = true
 tfls-schema.workspace = true

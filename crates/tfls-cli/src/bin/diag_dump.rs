@@ -12,6 +12,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use lsp_types::DiagnosticSeverity;
+use tfls_engine::index::find_terraform_init_root;
 use tfls_lsp::handlers::document::compute_diagnostics;
 use tfls_state::{DocumentState, StateStore};
 use tfls_walker::discover_terraform_files;
@@ -210,17 +211,6 @@ fn parse_and_upsert(state: &StateStore, files: &[PathBuf]) {
         };
         state.upsert_document(DocumentState::new(url, &text, 0));
     }
-}
-
-fn find_terraform_init_root(start: &Path) -> Option<PathBuf> {
-    let mut current: Option<&Path> = Some(start);
-    while let Some(dir) = current {
-        if dir.join(".terraform").join("providers").is_dir() {
-            return Some(dir.to_path_buf());
-        }
-        current = dir.parent();
-    }
-    None
 }
 
 fn relative_path(uri: &Url, root: &Path) -> String {

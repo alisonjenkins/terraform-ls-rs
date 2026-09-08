@@ -2871,6 +2871,7 @@ dependencies = [
  "sonic-rs",
  "tfls-core",
  "tfls-diag",
+ "tfls-engine",
  "tfls-lsp",
  "tfls-provider-protocol",
  "tfls-schema",
