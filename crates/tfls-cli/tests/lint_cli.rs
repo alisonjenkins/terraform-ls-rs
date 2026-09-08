@@ -244,6 +244,68 @@ fn no_config_flag_skips_discovery() {
     );
 }
 
+// --- cache warming (`--offline`) ------------------------------------
+//
+// `tfls-lint` warms the on-disk version/git-ref caches before linting
+// by default (see `warm_caches_for_root` in `bin/lint.rs`); `--offline`
+// skips that step entirely. `tfls-provider-protocol` has no `TFLS_*`
+// env var that redirects its fetchers to a dead endpoint (checked via
+// `grep -rn "TFLS_" crates/tfls-provider-protocol/src`, no hits), so
+// there's no way to guarantee "no network" for the warming path from
+// this test suite without actually depending on the test runner being
+// offline. Per the task's guard clause, the no-network expectation is
+// therefore restricted to `--offline`, which deterministically skips
+// warming and needs no network assumption at all.
+
+#[test]
+fn offline_flag_matches_default_stdout_and_exit_code() {
+    let output = lint_cmd()
+        .args([FIXTURE, "--schemas", "none", "--offline"])
+        .output()
+        .expect("failed to run tfls-lint");
+
+    assert!(
+        output.status.success(),
+        "expected exit 0, got {:?}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("main.tf:") && stdout.contains("[terraform_undefined_reference]"),
+        "stdout missing undefined-reference line:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("[terraform_unused_declarations]"),
+        "stdout missing unused-declarations line:\n{stdout}"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("3 warning(s)"),
+        "expected the fixture's 3 warnings in the summary line:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("cache warm failed"),
+        "--offline must skip warming entirely — no warm-failure lines expected:\n{stderr}"
+    );
+}
+
+#[test]
+fn offline_flag_prints_nothing_extra_with_verbose() {
+    let output = lint_cmd()
+        .args([FIXTURE, "--schemas", "none", "--offline", "-v"])
+        .output()
+        .expect("failed to run tfls-lint");
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("warmed") && !stderr.contains("cache warm failed"),
+        "--offline must print nothing cache-warming related, even with -v:\n{stderr}"
+    );
+}
+
 #[test]
 fn explicit_config_pointing_at_invalid_json_exits_2() {
     let dir = copy_fixture();

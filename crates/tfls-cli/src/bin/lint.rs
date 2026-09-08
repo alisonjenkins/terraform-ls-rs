@@ -86,6 +86,19 @@ struct Cli {
     /// each workspace root.
     #[arg(long)]
     relative_to: Option<PathBuf>,
+
+    /// Skip warming the on-disk version/git-ref caches before
+    /// linting. Without this flag (the default), every root's
+    /// `required_version` / `required_providers` / module targets
+    /// are fetched-or-confirmed-cached before that root is linted,
+    /// so `terraform_constraint`, `terraform_lock_constraint_drift`,
+    /// `terraform_module_outdated` and
+    /// `terraform_module_ref_tag_mismatch` see a warm cache even on
+    /// a fresh CI runner. A network failure while warming is never
+    /// fatal — see the "Cache-backed rules in CI" section of
+    /// CLAUDE.md.
+    #[arg(long)]
+    offline: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -250,6 +263,10 @@ async fn run(cli: Cli) -> ExitCode {
         let config_json = build_config_json(file_config.as_ref(), &cli.rules, cli.style_rules);
         loaded.state.config.update_from_json(&config_json);
 
+        if !cli.offline {
+            warm_caches_for_root(&loaded.state, path, cli.verbose).await;
+        }
+
         report_schema_outcome(&loaded.schema_outcome, path, cli.verbose);
 
         let relative_to = cli.relative_to.as_deref().unwrap_or(&root);
@@ -390,6 +407,39 @@ fn build_config_json(
     }
 
     merged
+}
+
+/// Warms the on-disk version/git-ref caches `terraform_constraint`,
+/// `terraform_lock_constraint_drift`, `terraform_module_outdated` and
+/// `terraform_module_ref_tag_mismatch` read, before `lint_all` runs
+/// over `state`. A network failure here is always a warning, never a
+/// hard error — CI must still exit 0 (modulo `--fail-on`) on a
+/// disconnected runner; it just silently loses those four rules,
+/// which is the whole reason this exists: surface that loss instead
+/// of leaving it silent. See "Cache-backed rules in CI" in CLAUDE.md.
+async fn warm_caches_for_root(state: &tfls_state::StateStore, root: &Path, verbose: u8) {
+    let targets = tfls_engine::prefetch::collect_warm_targets(state);
+    if targets.is_empty() {
+        return;
+    }
+    let cli_enabled = state.config.snapshot().cli_enabled;
+    let opts = tfls_engine::prefetch::WarmOptions { cli_enabled };
+    let report =
+        tfls_engine::prefetch::warm_caches(&targets, &opts, &tfls_engine::prefetch::NoopProgress)
+            .await;
+
+    if verbose > 0 {
+        eprintln!(
+            "# {}: warmed {} cache entries ({} already cached, {} failed)",
+            root.display(),
+            report.fetched,
+            report.cached,
+            report.failed.len()
+        );
+    }
+    for (target, err) in &report.failed {
+        eprintln!("warning: cache warm failed for {target}: {err}");
+    }
 }
 
 fn report_schema_outcome(outcome: &SchemaOutcome, root: &Path, verbose: u8) {
