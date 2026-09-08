@@ -2937,6 +2937,7 @@ dependencies = [
  "tfls-provider-protocol",
  "tfls-schema",
  "tfls-state",
+ "tfls-walker",
  "tracing",
  "url",
 ]
