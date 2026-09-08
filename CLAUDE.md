@@ -38,7 +38,7 @@ crates/
   tfls-format/             Formatter — thin wrapper around `tf-format`; style runtime-toggleable (see "Formatting style" below)
   tfls-walker/             FS discovery + notify-debouncer-full file watcher
   tfls-provider-protocol/  Terraform plugin gRPC protocol (v5+v6), mTLS, registry docs
-  tfls-engine/             Transport-free diagnostics engine (module aggregation, snapshots) shared by tfls-lsp and the future lint CLI
+  tfls-engine/             Transport-free diagnostics engine (module aggregation, snapshots, the diagnostics pipeline) shared by tfls-lsp and the future lint CLI
   tfls-lsp/                Backend (tower-lsp) + handlers + background indexer
   tfls-cli/                main: tokio, clap, stdio transport
 ```
@@ -194,7 +194,7 @@ Storage lives on `tfls_state::Config::format_style`; LSP handlers (`textDocument
 
 ### Unformatted-file diagnostic (`terraform_fmt`)
 
-`compute_diagnostics_with_lookup` emits an INFORMATION diagnostic when a buffer isn't formatted to the active `formatStyle` (minimal = `terraform fmt`/`tofu fmt` parity, opinionated = full tf-format). Implemented by `handlers::code_action::formatting_diagnostic`, which reuses `scan_format_cached` (the per-doc `format_cache`, keyed by `(version, FormatStyle::marker)`) — so an already-formatted, unedited buffer is a no-op, and any edit clears the cache (`apply_change` sets it to `None`) so a change that breaks formatting is picked up on the next compute. Ranges at the first differing line; pairs with the existing format code action. A file that doesn't parse yields no fmt diagnostic (the formatter errors; the syntax-error diagnostic covers it). Default-on; disable or retune via the per-rule config (`{"rules": {"terraform_fmt": "off"}}`).
+`compute_diagnostics_with_lookup` emits an INFORMATION diagnostic when a buffer isn't formatted to the active `formatStyle` (minimal = `terraform fmt`/`tofu fmt` parity, opinionated = full tf-format). Implemented by `tfls_engine::format_scan::formatting_diagnostic`, which reuses `scan_format_cached` (the per-doc `format_cache`, keyed by `(version, FormatStyle::marker)`) — so an already-formatted, unedited buffer is a no-op, and any edit clears the cache (`apply_change` sets it to `None`) so a change that breaks formatting is picked up on the next compute. `tfls-lsp`'s format code action re-exports `scan_format_cached` from `handlers::code_action` to share the same cache. Ranges at the first differing line; pairs with the existing format code action. A file that doesn't parse yields no fmt diagnostic (the formatter errors; the syntax-error diagnostic covers it). Default-on; disable or retune via the per-rule config (`{"rules": {"terraform_fmt": "off"}}`).
 
 ## Per-rule diagnostic config
 
@@ -207,7 +207,7 @@ Any diagnostic rule can be disabled or have its severity remapped via the `rules
 } } }
 ```
 
-Values: `off` (suppress), `hint`, `info`, `warning`, `error`. Keyed by the diagnostic's stable `code`. Each rule's output is tagged with a `terraform_<rule>` code at its `compute_diagnostics_with_lookup` call site (in `crates/tfls-lsp/src/handlers/document.rs`, via the `tag()` wrapper); a final `apply_rule_overrides` post-pass (before dedup) drops `off` codes and remaps the rest. Storage: `tfls_state::Config::rule_overrides` (`Arc<HashMap<String, RuleSeverity>>`, replaced wholesale per update so dropping a key restores the default). Live-toggle works because `did_change_configuration` already republishes open docs.
+Values: `off` (suppress), `hint`, `info`, `warning`, `error`. Keyed by the diagnostic's stable `code`. Each rule's output is tagged with a `terraform_<rule>` code at its `compute_diagnostics_with_lookup` call site (in `crates/tfls-engine/src/pipeline.rs`, via the `tag()` wrapper); a final `apply_rule_overrides` post-pass (before dedup) drops `off` codes and remaps the rest. Storage: `tfls_state::Config::rule_overrides` (`Arc<HashMap<String, RuleSeverity>>`, replaced wholesale per update so dropping a key restores the default). Live-toggle works because `did_change_configuration` already republishes open docs.
 
 Adding a code to a new rule = wrap its call site with `tag("terraform_<id>", …)`. Untagged diagnostics pass through unaffected.
 
