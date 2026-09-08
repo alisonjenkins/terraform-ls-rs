@@ -16,6 +16,8 @@ use tfls_core::SymbolKind;
 use tfls_state::{StateStore, SymbolKey};
 use url::Url;
 
+use crate::module::parent_dir;
+
 pub struct ModuleSnapshot {
     pub module_dir: Option<PathBuf>,
     pub has_required_version: bool,
@@ -208,10 +210,7 @@ impl ModuleSnapshot {
             // count as "used" too — otherwise renaming a provider local
             // and using it only via this 1.8+ syntax would trip
             // unused-required-providers.
-            crate::handlers::document::collect_provider_function_locals(
-                &doc.rope.to_string(),
-                &mut used_provider_locals,
-            );
+            collect_provider_function_locals(&doc.rope.to_string(), &mut used_provider_locals);
         }
 
         terraform_uri_candidates.sort();
@@ -271,9 +270,9 @@ impl ModuleSnapshot {
             return false;
         };
         match &self.module_dir {
-            Some(dir) => locs.iter().any(|loc| {
-                crate::handlers::util::parent_dir(&loc.uri).as_deref() == Some(dir.as_path())
-            }),
+            Some(dir) => locs
+                .iter()
+                .any(|loc| parent_dir(&loc.uri).as_deref() == Some(dir.as_path())),
             None => !locs.is_empty(),
         }
     }
@@ -281,8 +280,64 @@ impl ModuleSnapshot {
 
 fn in_module(uri: &Url, module_dir: Option<&Path>) -> bool {
     match module_dir {
-        Some(dir) => crate::handlers::util::parent_dir(uri).as_deref() == Some(dir),
+        Some(dir) => parent_dir(uri).as_deref() == Some(dir),
         None => true,
+    }
+}
+
+/// Scan source text for `provider::<local>::<fn>(` Terraform 1.8+
+/// provider-defined function calls, adding each LOCAL to `out`.
+/// Pure text scan — body walking won't cut it because the AST
+/// represents these as opaque traversals/calls inside expression
+/// values, and a fully recursive expression walk is overkill for
+/// what's a simple textual pattern.
+pub fn collect_provider_function_locals(text: &str, out: &mut HashSet<String>) {
+    let bytes = text.as_bytes();
+    let needle = b"provider::";
+    let mut search_from = 0usize;
+    while search_from + needle.len() <= bytes.len() {
+        let Some(rel) = bytes[search_from..]
+            .windows(needle.len())
+            .position(|w| w == needle)
+        else {
+            break;
+        };
+        let kw_start = search_from + rel;
+        if kw_start > 0 {
+            let prev = bytes[kw_start - 1];
+            if prev.is_ascii_alphanumeric() || prev == b'_' {
+                search_from = kw_start + needle.len();
+                continue;
+            }
+        }
+        let mut p = kw_start + needle.len();
+        let local_start = p;
+        while p < bytes.len() && (bytes[p].is_ascii_alphanumeric() || bytes[p] == b'_') {
+            p += 1;
+        }
+        if p == local_start {
+            search_from = p;
+            continue;
+        }
+        // Need a `::<ident>(` shape to confirm this is a call, not
+        // some other `provider::X` construct.
+        if p + 2 < bytes.len() && bytes[p] == b':' && bytes[p + 1] == b':' {
+            let mut q = p + 2;
+            while q < bytes.len() && (bytes[q].is_ascii_alphanumeric() || bytes[q] == b'_') {
+                q += 1;
+            }
+            // Skip optional whitespace then check for `(`.
+            let mut r = q;
+            while r < bytes.len() && (bytes[r] == b' ' || bytes[r] == b'\t') {
+                r += 1;
+            }
+            if r < bytes.len() && bytes[r] == b'(' {
+                if let Some(s) = text.get(local_start..p) {
+                    out.insert(s.to_string());
+                }
+            }
+        }
+        search_from = p;
     }
 }
 
@@ -337,7 +392,7 @@ pub fn referenced_dirs_in_workspace(state: &StateStore) -> HashSet<PathBuf> {
         let Some(body) = doc.parsed.body.as_ref() else {
             continue;
         };
-        let caller_dir = crate::handlers::util::parent_dir(doc.key());
+        let caller_dir = parent_dir(doc.key());
         for structure in body.iter() {
             let Some(block) = structure.as_block() else {
                 continue;
@@ -399,7 +454,7 @@ fn is_root_via_set(module_dir: Option<&Path>, referenced: &HashSet<PathBuf>) -> 
 /// root rather than a module for reuse. Used by the per-call
 /// `ModuleGraphAdapter`; `ModuleSnapshot::build` computes the same flag
 /// inline during its single pass.
-pub(crate) fn module_has_applyable_config(state: &StateStore, module_dir: Option<&Path>) -> bool {
+pub fn module_has_applyable_config(state: &StateStore, module_dir: Option<&Path>) -> bool {
     for doc in state.documents.iter() {
         if !in_module(doc.key(), module_dir) {
             continue;
@@ -437,7 +492,7 @@ fn compute_is_root(state: &StateStore, module_dir: Option<&Path>) -> bool {
         let Some(body) = doc.parsed.body.as_ref() else {
             continue;
         };
-        let doc_dir = crate::handlers::util::parent_dir(doc.key());
+        let doc_dir = parent_dir(doc.key());
         if doc_dir.as_deref() == Some(dir) {
             continue;
         }

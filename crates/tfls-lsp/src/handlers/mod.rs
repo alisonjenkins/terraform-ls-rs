@@ -19,7 +19,10 @@ pub mod hover_module_input;
 pub mod hover_named_value;
 pub mod hover_type_constraint;
 pub mod inlay_hints;
-pub mod module_snapshot;
+pub mod module_snapshot {
+    //! Re-export of the module snapshot logic, moved to `tfls-engine`.
+    pub use tfls_engine::snapshot::*;
+}
 pub mod navigation;
 pub mod rename;
 pub mod search_docs;
