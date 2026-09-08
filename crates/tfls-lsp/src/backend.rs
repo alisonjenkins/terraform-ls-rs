@@ -136,6 +136,53 @@ impl Backend {
         }
     }
 
+    /// Discover and apply a checked-in `.tfls.json` for every workspace
+    /// root the client gave us (`workspace_folders`, falling back to the
+    /// deprecated `root_uri`), deduplicated by resolved path. A missing
+    /// file is silent; a present-but-invalid one is logged at `warn` and
+    /// otherwise ignored — a malformed project config must never fail
+    /// `initialize`.
+    async fn apply_project_config_file(&self, params: &InitializeParams) {
+        let mut roots: Vec<std::path::PathBuf> = params
+            .workspace_folders
+            .iter()
+            .flatten()
+            .filter_map(|f| tfls_core::uri::uri_to_url(&f.uri))
+            .filter_map(|u| u.to_file_path().ok())
+            .collect();
+        #[allow(deprecated)]
+        if let Some(path) = params
+            .root_uri
+            .as_ref()
+            .and_then(tfls_core::uri::uri_to_url)
+            .and_then(|u| u.to_file_path().ok())
+        {
+            roots.push(path);
+        }
+        roots.sort();
+        roots.dedup();
+
+        for root in roots {
+            let Some(path) = tfls_engine::config_file::find_config_file(&root) else {
+                continue;
+            };
+            match tfls_engine::config_file::load_config_file(&path) {
+                Ok(value) => {
+                    self.state.config.update_from_json(&value);
+                    tracing::info!(path = %path.display(), "applied project config file");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        source = ?std::error::Error::source(&e),
+                        "failed to load project config file"
+                    );
+                }
+            }
+        }
+    }
+
     async fn abort_tasks(&self) {
         let mut guard = self.tasks.lock().await;
         for h in guard.drain(..) {
@@ -213,6 +260,13 @@ impl LanguageServer for Backend {
             .unwrap_or(false);
         self.state
             .set_client_supports_work_done_progress(client_does_progress);
+
+        // A checked-in `.tfls.json` project config applies first, so a
+        // user's explicit editor settings (`initializationOptions` below,
+        // and any later `workspace/didChangeConfiguration`) still take
+        // precedence over it. Reload-on-edit is a follow-up — this file
+        // is only read once, at `initialize`.
+        self.apply_project_config_file(&params).await;
 
         // Apply `initializationOptions` to the live config cell so
         // `formatStyle` (and any other future LSP setting) takes
