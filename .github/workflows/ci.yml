@@ -46,6 +46,9 @@ jobs:
     name: Test
     needs: changes
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - name: Skip (no Rust changes)
         if: needs.changes.outputs.rust != 'true'
@@ -102,6 +105,27 @@ jobs:
             cargo deny check
             sccache --show-stats || true
           '
+
+      - name: Lint example workspace with tfls-lint
+        if: needs.changes.outputs.rust == 'true'
+        run: |
+          nix develop --command cargo run --release --bin tfls-lint -- \
+            --schemas none --offline --format github --fail-on error \
+            crates/tfls-engine/tests/fixtures/basic
+
+      - name: Generate tfls-lint SARIF
+        if: needs.changes.outputs.rust == 'true'
+        run: |
+          nix develop --command cargo run --release --bin tfls-lint -- \
+            --format sarif --offline --schemas none \
+            crates/tfls-engine/tests/fixtures/basic > tfls-lint.sarif
+
+      - name: Upload tfls-lint SARIF
+        if: needs.changes.outputs.rust == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: github/codeql-action/upload-sarif@6f5948dfacef28e207b48d0905cf90c03365536d # v3
+        with:
+          sarif_file: tfls-lint.sarif
+          category: tfls-lint
 
   dependency-review:
     name: Dependency Review
