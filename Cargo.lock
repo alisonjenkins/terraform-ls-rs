@@ -2968,6 +2968,7 @@ dependencies = [
  "tempfile",
  "tfls-core",
  "tfls-diag",
+ "tfls-engine",
  "tfls-format",
  "tfls-parser",
  "tfls-provider-protocol",

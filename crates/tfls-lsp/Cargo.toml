@@ -10,6 +10,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+tfls-engine.workspace = true
 tfls-core.workspace = true
 tfls-parser.workspace = true
 tfls-state.workspace = true
