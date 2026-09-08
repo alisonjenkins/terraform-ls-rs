@@ -2,4 +2,5 @@
 //! (future) standalone lint CLI.
 
 pub mod module;
+pub mod provider_fn;
 pub mod snapshot;

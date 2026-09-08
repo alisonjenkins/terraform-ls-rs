@@ -7,7 +7,10 @@ pub mod code_lens;
 pub mod commands;
 pub mod completion;
 pub mod cursor;
-pub mod diagnostic_provider_fn;
+pub mod diagnostic_provider_fn {
+    //! Re-export of the provider-function diagnostics, moved to `tfls-engine`.
+    pub use tfls_engine::provider_fn::*;
+}
 pub mod document;
 pub mod document_link;
 pub mod folding;
