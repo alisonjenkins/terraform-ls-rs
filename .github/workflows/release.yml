@@ -40,6 +40,7 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             bin: tfls
+            lint_bin: tfls-lint
             use_zig: true
           # macOS arm64 is DISABLED until a self-hosted Apple-silicon runner is
           # available again (GitHub-hosted macOS runners are billed at a steep
@@ -54,6 +55,7 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             bin: tfls.exe
+            lint_bin: tfls-lint.exe
             use_zig: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -104,10 +106,10 @@ jobs:
       # lock.
       - name: Build release binary (zig/musl)
         if: matrix.use_zig
-        run: cargo zigbuild --release -p tfls-cli --bin tfls --target ${{ matrix.target }}
+        run: cargo zigbuild --release -p tfls-cli --bin tfls --bin tfls-lint --target ${{ matrix.target }}
       - name: Build release binary
         if: ${{ !matrix.use_zig }}
-        run: cargo build --release -p tfls-cli --bin tfls --target ${{ matrix.target }}
+        run: cargo build --release -p tfls-cli --bin tfls --bin tfls-lint --target ${{ matrix.target }}
 
       - name: Package
         shell: bash
@@ -128,6 +130,18 @@ jobs:
           fi
           echo "ASSET=$staging.tar.gz" >> "$GITHUB_ENV"
 
+          lint_staging="tfls-lint-${VERSION}-${{ matrix.target }}"
+          mkdir "$lint_staging"
+          cp "target/${{ matrix.target }}/release/${{ matrix.lint_bin }}" "$lint_staging/"
+          cp README.md LICENSE* "$lint_staging/" 2>/dev/null || true
+          tar czf "$lint_staging.tar.gz" "$lint_staging"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$lint_staging.tar.gz" > "$lint_staging.tar.gz.sha256"
+          else
+            shasum -a 256 "$lint_staging.tar.gz" > "$lint_staging.tar.gz.sha256"
+          fi
+          echo "LINT_ASSET=$lint_staging.tar.gz" >> "$GITHUB_ENV"
+
       # Upload to the DRAFT release (created by release-please) with the gh CLI:
       # `gh release upload` resolves draft releases by tag, whereas the
       # get-release-by-tag API softprops uses skips drafts. Assets can only be
@@ -138,7 +152,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag || github.ref_name }}
-        run: gh release upload "$TAG" "$ASSET" "$ASSET.sha256" --clobber --repo "$GITHUB_REPOSITORY"
+        run: gh release upload "$TAG" "$ASSET" "$ASSET.sha256" "$LINT_ASSET" "$LINT_ASSET.sha256" --clobber --repo "$GITHUB_REPOSITORY"
 
   # Package the VS Code extension and attach the VSIX to the release so it can
   # be installed and tested. Publishing to the Marketplace / Open VSX is NOT
