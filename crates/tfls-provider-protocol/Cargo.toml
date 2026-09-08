@@ -47,7 +47,7 @@ regex = "1"
 serde = { workspace = true }
 semver = "1"
 # Cross-platform user-cache directory (Linux/macOS/Windows).
-dirs = "6"
+dirs = "7"
 tfls-schema = { path = "../tfls-schema" }
 tfls-core = { path = "../tfls-core" }
 
