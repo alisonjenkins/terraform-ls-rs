@@ -4,6 +4,8 @@
 //! asserting on stdout/stderr text and exit code.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::fs;
+use std::path::Path;
 use std::process::Command;
 
 const FIXTURE: &str = concat!(
@@ -13,6 +15,25 @@ const FIXTURE: &str = concat!(
 
 fn lint_cmd() -> Command {
     Command::new(env!("CARGO_BIN_EXE_tfls-lint"))
+}
+
+/// Copies the shared engine fixture into a fresh tempdir so a test can add
+/// its own `.tfls.json` without mutating the fixture other tests rely on.
+fn copy_fixture() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for entry in fs::read_dir(FIXTURE).expect("read fixture dir") {
+        let entry = entry.expect("dir entry");
+        let src = entry.path();
+        if src.is_file() {
+            let dest = dir.path().join(entry.file_name());
+            fs::copy(&src, &dest).expect("copy fixture file");
+        }
+    }
+    dir
+}
+
+fn write_config(dir: &Path, contents: &str) {
+    fs::write(dir.join(".tfls.json"), contents).expect("write .tfls.json");
 }
 
 #[test]
@@ -141,6 +162,102 @@ fn format_github_lines_all_start_with_workflow_command() {
 fn nonexistent_path_exits_2_with_error_prefix() {
     let output = lint_cmd()
         .args(["/nonexistent/path/does-not-exist", "--schemas", "none"])
+        .output()
+        .expect("failed to run tfls-lint");
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.starts_with("error:"),
+        "stderr should start with 'error:':\n{stderr}"
+    );
+}
+
+#[test]
+fn discovered_config_file_suppresses_unused_declarations() {
+    let dir = copy_fixture();
+    write_config(
+        dir.path(),
+        r#"{"rules": {"terraform_unused_declarations": "off"}}"#,
+    );
+
+    let output = lint_cmd()
+        .args([dir.path().to_str().expect("utf8 path"), "--schemas", "none"])
+        .output()
+        .expect("failed to run tfls-lint");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("terraform_unused_declarations"),
+        "unused-declarations line should be suppressed by discovered config:\n{stdout}"
+    );
+}
+
+#[test]
+fn cli_flag_wins_over_discovered_config_file() {
+    let dir = copy_fixture();
+    write_config(
+        dir.path(),
+        r#"{"rules": {"terraform_unused_declarations": "off"}}"#,
+    );
+
+    let output = lint_cmd()
+        .args([
+            dir.path().to_str().expect("utf8 path"),
+            "--schemas",
+            "none",
+            "--rule",
+            "terraform_unused_declarations=warning",
+        ])
+        .output()
+        .expect("failed to run tfls-lint");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("terraform_unused_declarations"),
+        "flag should re-enable the rule the config file turned off:\n{stdout}"
+    );
+}
+
+#[test]
+fn no_config_flag_skips_discovery() {
+    let dir = copy_fixture();
+    write_config(
+        dir.path(),
+        r#"{"rules": {"terraform_unused_declarations": "off"}}"#,
+    );
+
+    let output = lint_cmd()
+        .args([
+            dir.path().to_str().expect("utf8 path"),
+            "--schemas",
+            "none",
+            "--no-config",
+        ])
+        .output()
+        .expect("failed to run tfls-lint");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("terraform_unused_declarations"),
+        "--no-config should skip the discovered file entirely:\n{stdout}"
+    );
+}
+
+#[test]
+fn explicit_config_pointing_at_invalid_json_exits_2() {
+    let dir = copy_fixture();
+    let config_path = dir.path().join("bad-config.json");
+    fs::write(&config_path, "[]").expect("write bad config");
+
+    let output = lint_cmd()
+        .args([
+            dir.path().to_str().expect("utf8 path"),
+            "--schemas",
+            "none",
+            "--config",
+            config_path.to_str().expect("utf8 path"),
+        ])
         .output()
         .expect("failed to run tfls-lint");
 
