@@ -37,6 +37,7 @@
 //! ```
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use lsp_types::{
     notification::Progress, request::WorkDoneProgressCreate, ProgressParams, ProgressParamsValue,
@@ -46,12 +47,47 @@ use lsp_types::{
 use tfls_state::StateStore;
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::task::JoinHandle;
+use tower_lsp_server::jsonrpc;
 use tower_lsp_server::Client;
 
 /// Monotonic counter that keeps tokens unique across concurrent
 /// reporters. We prefix with `"tfls-"` so the tokens are easy to
 /// spot in LSP traces.
 static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Bound on how long a background job waits for a client to answer a
+/// server-initiated request (`window/workDoneProgress/create`,
+/// `workspace/diagnostic/refresh`, `workspace/inlayHint/refresh`, ...).
+/// The indexer is a single serial worker, so an unanswered request
+/// wedges every later job forever. 5s is long enough for a busy real
+/// editor to respond, short enough that a wedge is visible in tests.
+pub const CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Await a server→client request bounded by [`CLIENT_REQUEST_TIMEOUT`].
+/// `what` names the request for the timeout/error log line. Returns
+/// `None` on timeout or error so a non-responding or misbehaving client
+/// degrades the calling feature (no progress, no refresh) instead of
+/// wedging the single serial background worker.
+pub async fn bounded_request<T, F>(what: &str, fut: F) -> Option<T>
+where
+    F: std::future::Future<Output = jsonrpc::Result<T>>,
+{
+    match tokio::time::timeout(CLIENT_REQUEST_TIMEOUT, fut).await {
+        Ok(Ok(v)) => Some(v),
+        Ok(Err(e)) => {
+            tracing::warn!(error = ?e, request = %what, "client request failed");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(
+                request = %what,
+                timeout_secs = CLIENT_REQUEST_TIMEOUT.as_secs(),
+                "client request timed out — client may be unresponsive"
+            );
+            None
+        }
+    }
+}
 
 /// Messages pushed into a reporter's drain queue.
 enum DrainMsg {
@@ -75,13 +111,16 @@ pub struct ProgressReporter {
 impl ProgressReporter {
     /// Create a new progress token on the client and send a
     /// `Begin`. Returns `None` when the client did not advertise
-    /// `window.workDoneProgress`, or rejects
-    /// `window/workDoneProgress/create`. Callers treat `None` as "just
-    /// don't report progress" rather than an error.
+    /// `window.workDoneProgress`, rejects `window/workDoneProgress/create`,
+    /// or fails to answer it within [`CLIENT_REQUEST_TIMEOUT`]. Callers
+    /// treat `None` as "just don't report progress" rather than an error.
     ///
-    /// The capability check is load-bearing: a client that does not
-    /// support progress never answers the create request, and the
-    /// await below would block the calling job indefinitely.
+    /// The capability check filters out clients that are spec-compliant
+    /// about never answering the create request when they don't support
+    /// progress. The bounded wait below covers the remaining case: a
+    /// client that advertises the capability but is slow or buggy — the
+    /// single serial indexer worker would otherwise wedge on the
+    /// unanswered request forever.
     pub async fn begin(
         client: &Client,
         state: &StateStore,
@@ -94,15 +133,13 @@ impl ProgressReporter {
         let token_label = format!("tfls-{n}");
         let token = ProgressToken::String(token_label.clone());
         let title = title.into();
-        if client
-            .send_request::<WorkDoneProgressCreate>(WorkDoneProgressCreateParams {
+        bounded_request(
+            "window/workDoneProgress/create",
+            client.send_request::<WorkDoneProgressCreate>(WorkDoneProgressCreateParams {
                 token: token.clone(),
-            })
-            .await
-            .is_err()
-        {
-            return None;
-        }
+            }),
+        )
+        .await?;
         tracing::info!(
             token = %token_label,
             title = %title,
