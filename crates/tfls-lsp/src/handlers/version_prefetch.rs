@@ -9,36 +9,25 @@
 //! the main document handler stays responsive. When fetches finish we
 //! ask the client to re-request inlay hints (and we re-publish
 //! diagnostics so the semantic no-match warning lights up too).
+//!
+//! The actual "figure out what to fetch, fetch it" core lives in
+//! `tfls_engine::prefetch` — this module is a thin LSP adapter: it
+//! extracts targets for the single document being prefetched (with
+//! the pre-fetch `is_cached` short-circuit still applied here so a
+//! warm-cache `did_change` stays a true no-op without even calling
+//! into the engine), wires a `WarmProgress` impl over
+//! `ProgressReporter`, calls `tfls_engine::prefetch::warm_caches`,
+//! then does the LSP-only tail (inlay-hint refresh + diagnostic
+//! republish) that `tfls-lint` has no equivalent of.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
-use hcl_edit::expr::Expression;
-use hcl_edit::structure::Body;
+use tfls_engine::prefetch::{warm_caches, NoopProgress, WarmOptions, WarmProgress, WarmTarget};
 use tfls_state::StateStore;
 use url::Url;
 
 use crate::backend::Backend;
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-enum Target {
-    TerraformCli,
-    Provider {
-        namespace: String,
-        name: String,
-    },
-    Module {
-        namespace: String,
-        name: String,
-        provider: String,
-    },
-    /// A git module repo whose tag list powers the mutable-ref / mismatch /
-    /// outdated diagnostics. `url` is the normalized clonable URL (deduped
-    /// across modules sharing a repo, e.g. a monorepo's subdir modules).
-    GitRepo {
-        url: String,
-    },
-}
+use crate::progress::ProgressReporter;
 
 /// Fire-and-forget: parse the document, fetch every uncached version
 /// target in parallel, then trigger client-side inlay-hint refresh +
@@ -71,46 +60,25 @@ pub fn spawn(backend: &Backend, uri: Url, version: Option<i32>) {
 /// falling back to an empty tabstop on cold start.
 ///
 /// All HTTP fetches respect the existing 24h disk cache; subsequent
-/// server starts are network-free. Provider catalogs prefetched in
-/// parallel with bounded concurrency to stay polite to the registry.
+/// server starts are network-free. This delegates to the engine's
+/// `warm_caches` (with `NoopProgress` — a single eager batch at
+/// startup doesn't need a `$/progress` stream) rather than the
+/// per-document collector, since there's no document yet.
 pub fn spawn_eager_tool_versions(client: tower_lsp_server::Client) {
     tokio::spawn(async move {
-        let Ok(gh) = tfls_provider_protocol::tool_versions::build_http_client() else {
-            return;
-        };
-        let Ok(http) = tfls_provider_protocol::registry_versions::build_http_client() else {
-            return;
-        };
-
-        // Issue both the CLI fetch and every common-provider fetch
-        // concurrently. Each `fetch_*` short-circuits internally on
-        // a fresh cache hit so warm-disk runs still cost just stat
-        // syscalls. We DO filter cached providers up front to avoid
-        // spawning useless tasks that the registry would tally
-        // against rate limits even if they no-op.
-        let mut joins = Vec::new();
-        joins.push(tokio::spawn(async move {
-            let _ = tfls_provider_protocol::tool_versions::fetch_tool_versions(&gh).await;
-        }));
+        let mut targets = vec![WarmTarget::TerraformCli];
         for (_, source, _) in tfls_core::builtin_blocks::REQUIRED_PROVIDERS_COMMON_ENTRIES {
             let Some((ns, name)) = source.split_once('/') else {
                 continue;
             };
-            if tfls_provider_protocol::registry_versions::is_provider_cached(ns, name) {
-                continue;
-            }
-            let http = http.clone();
-            let ns = ns.to_string();
-            let name = name.to_string();
-            joins.push(tokio::spawn(async move {
-                let _ =
-                    tfls_provider_protocol::registry_versions::fetch_versions(&http, &ns, &name)
-                        .await;
-            }));
+            targets.push(WarmTarget::Provider {
+                namespace: ns.to_string(),
+                name: name.to_string(),
+            });
         }
-        for j in joins {
-            let _ = j.await;
-        }
+
+        let opts = WarmOptions { cli_enabled: true };
+        let _ = warm_caches(&targets, &opts, &NoopProgress).await;
 
         // Refresh inlay hints so the freshness annotations light
         // up against the now-warm cache. Failure to refresh is
@@ -124,6 +92,28 @@ pub fn spawn_eager_tool_versions(client: tower_lsp_server::Client) {
     });
 }
 
+/// Adapts a `ProgressReporter`'s sync-friendly `ReportSender` to the
+/// engine's `WarmProgress` trait. `WarmProgress::report` is
+/// deliberately sync (the engine has no dependency on tokio-flavoured
+/// async plumbing), so this uses `send_detached` — order relative to
+/// the reporter's eventual `end()` is preserved because every sender
+/// shares the same drain queue.
+struct ProgressReporterAdapter {
+    sender: crate::progress::ReportSender,
+}
+
+impl WarmProgress for ProgressReporterAdapter {
+    fn report(&self, done: usize, total: usize, message: &str) {
+        let percentage = if total == 0 {
+            None
+        } else {
+            Some(((done as f64 / total as f64) * 100.0) as u32)
+        };
+        self.sender
+            .send_detached(Some(message.to_string()), percentage);
+    }
+}
+
 async fn prefetch_and_refresh(
     state: Arc<StateStore>,
     client: tower_lsp_server::Client,
@@ -132,7 +122,7 @@ async fn prefetch_and_refresh(
 ) {
     let targets = match state.documents.get(&uri) {
         Some(doc) => match doc.parsed.body.as_ref() {
-            Some(body) => collect_targets(body),
+            Some(body) => tfls_engine::prefetch::collect_targets_from_body(body),
             None => return,
         },
         None => return,
@@ -148,68 +138,36 @@ async fn prefetch_and_refresh(
     // catalog(s)" progress dialog and an `inlay_hint_refresh` /
     // diagnostic re-publish, even though the actual `fetch_*`
     // calls inside short-circuit on the 24h disk cache. Filter
-    // up front so warm-cache `did_change` is a true no-op.
-    let targets: HashSet<Target> = targets
-        .into_iter()
-        .filter(|t| !target_is_cached(t))
-        .collect();
+    // up front so warm-cache `did_change` is a true no-op —
+    // avoids even calling into `warm_caches` on the hot path.
+    let targets: Vec<WarmTarget> = targets.into_iter().filter(|t| !t.is_cached()).collect();
     if targets.is_empty() {
         return;
     }
 
-    let Ok(http) = tfls_provider_protocol::registry_versions::build_http_client() else {
-        return;
-    };
-    let Ok(gh) = tfls_provider_protocol::tool_versions::build_http_client() else {
-        return;
-    };
     // Git tag-list resolution shells out to `git`; honor the cliEnabled gate.
     let cli_enabled = state.config.snapshot().cli_enabled;
+    let opts = WarmOptions { cli_enabled };
 
     // User-visible progress for the batch. Individual fetches run
     // concurrently so we can't report "provider 3/10" meaningfully
     // — just show the set of targets at begin time.
-    let progress = crate::progress::ProgressReporter::begin(
+    let progress = ProgressReporter::begin(
         &client,
         &state,
         format!("Fetching {} version catalog(s)", targets.len()),
     )
     .await;
 
-    let mut joins = Vec::new();
-    for target in targets {
-        let http = http.clone();
-        let gh = gh.clone();
-        joins.push(tokio::spawn(async move {
-            match target {
-                Target::TerraformCli => {
-                    let _ = tfls_provider_protocol::tool_versions::fetch_tool_versions(&gh).await;
-                }
-                Target::Provider { namespace, name } => {
-                    let _ = tfls_provider_protocol::registry_versions::fetch_versions(
-                        &http, &namespace, &name,
-                    )
-                    .await;
-                }
-                Target::Module {
-                    namespace,
-                    name,
-                    provider,
-                } => {
-                    let _ = tfls_provider_protocol::registry_versions::fetch_module_versions(
-                        &http, &namespace, &name, &provider,
-                    )
-                    .await;
-                }
-                Target::GitRepo { url } => {
-                    let _ =
-                        tfls_provider_protocol::git_refs::list_repo_tags(&url, cli_enabled).await;
-                }
-            }
-        }));
-    }
-    for j in joins {
-        let _ = j.await;
+    let report = match &progress {
+        Some(p) => {
+            let adapter = ProgressReporterAdapter { sender: p.sender() };
+            warm_caches(&targets, &opts, &adapter).await
+        }
+        None => warm_caches(&targets, &opts, &NoopProgress).await,
+    };
+    for (target, err) in &report.failed {
+        tracing::debug!(target = %target, error = %err, "version prefetch fetch failed");
     }
 
     if let Some(p) = progress {
@@ -235,149 +193,4 @@ async fn prefetch_and_refresh(
     // leaving the file apparently clean even when the constraint
     // is actually unsatisfiable.
     crate::indexer::maybe_refresh_diagnostics(&state, Some(&client)).await;
-}
-
-fn target_is_cached(target: &Target) -> bool {
-    match target {
-        Target::TerraformCli => tfls_provider_protocol::tool_versions::is_cached(),
-        Target::Provider { namespace, name } => {
-            tfls_provider_protocol::registry_versions::is_provider_cached(namespace, name)
-        }
-        Target::Module {
-            namespace,
-            name,
-            provider,
-        } => tfls_provider_protocol::registry_versions::is_module_cached(namespace, name, provider),
-        Target::GitRepo { url } => tfls_provider_protocol::git_refs::is_repo_tags_cached(url),
-    }
-}
-
-fn collect_targets(body: &Body) -> HashSet<Target> {
-    let mut out: HashSet<Target> = HashSet::new();
-    for structure in body.iter() {
-        let Some(block) = structure.as_block() else {
-            continue;
-        };
-        match block.ident.as_str() {
-            "terraform" => collect_terraform(&block.body, &mut out),
-            "module" => collect_module(&block.body, &mut out),
-            _ => {}
-        }
-    }
-    out
-}
-
-fn collect_terraform(body: &Body, out: &mut HashSet<Target>) {
-    for structure in body.iter() {
-        if let Some(attr) = structure.as_attribute() {
-            if attr.key.as_str() == "required_version" && literal_string(&attr.value).is_some() {
-                out.insert(Target::TerraformCli);
-            }
-        } else if let Some(nested) = structure.as_block() {
-            if nested.ident.as_str() == "required_providers" {
-                for entry in nested.body.iter() {
-                    let Some(attr) = entry.as_attribute() else {
-                        continue;
-                    };
-                    let Expression::Object(obj) = &attr.value else {
-                        continue;
-                    };
-                    for (key, value) in obj.iter() {
-                        if let Some(k) = object_key_as_str(key) {
-                            if k == "source" {
-                                if let Some(s) = literal_string(value.expr()) {
-                                    if let Some((ns, name)) = parse_provider_source(&s) {
-                                        out.insert(Target::Provider {
-                                            namespace: ns,
-                                            name,
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn collect_module(body: &Body, out: &mut HashSet<Target>) {
-    let mut source_str: Option<String> = None;
-    for structure in body.iter() {
-        let Some(attr) = structure.as_attribute() else {
-            continue;
-        };
-        if attr.key.as_str() == "source" {
-            source_str = literal_string(&attr.value);
-        }
-    }
-    if let Some(s) = source_str.as_deref() {
-        if let Some(reg) = parse_module_source(s) {
-            out.insert(Target::Module {
-                namespace: reg.0,
-                name: reg.1,
-                provider: reg.2,
-            });
-        } else if tfls_diag::is_git_source(s) {
-            // Dedup by normalized repo URL so a monorepo's N subdir modules
-            // trigger a single tag-list fetch.
-            if let Some(url) = tfls_provider_protocol::git_refs::normalize_git_url(s) {
-                out.insert(Target::GitRepo { url });
-            }
-        }
-    }
-}
-
-fn literal_string(expr: &Expression) -> Option<String> {
-    match expr {
-        Expression::String(s) => Some(s.as_str().to_string()),
-        Expression::StringTemplate(t) => {
-            let mut collected = String::new();
-            for element in t.iter() {
-                match element {
-                    hcl_edit::template::Element::Literal(lit) => collected.push_str(lit.as_str()),
-                    _ => return None,
-                }
-            }
-            Some(collected)
-        }
-        _ => None,
-    }
-}
-
-fn object_key_as_str(key: &hcl_edit::expr::ObjectKey) -> Option<String> {
-    match key {
-        hcl_edit::expr::ObjectKey::Ident(d) => Some(d.as_str().to_string()),
-        hcl_edit::expr::ObjectKey::Expression(Expression::String(s)) => {
-            Some(s.as_str().to_string())
-        }
-        _ => None,
-    }
-}
-
-fn parse_provider_source(s: &str) -> Option<(String, String)> {
-    let s = s.trim();
-    let mut parts = s.splitn(3, '/');
-    let a = parts.next()?;
-    let b = parts.next()?;
-    if let Some(c) = parts.next() {
-        Some((b.to_string(), c.to_string()))
-    } else {
-        Some((a.to_string(), b.to_string()))
-    }
-}
-
-fn parse_module_source(s: &str) -> Option<(String, String, String)> {
-    let s = s.trim();
-    if s.starts_with('.') || s.starts_with('/') || s.contains("://") || s.contains("::") {
-        return None;
-    }
-    let parts: Vec<&str> = s.split('/').collect();
-    match parts.as_slice() {
-        [ns, name, provider] if !ns.is_empty() && !name.is_empty() && !provider.is_empty() => {
-            Some((ns.to_string(), name.to_string(), provider.to_string()))
-        }
-        _ => None,
-    }
 }
