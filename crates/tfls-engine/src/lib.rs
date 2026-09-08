@@ -6,6 +6,7 @@ pub mod format_scan;
 pub mod index;
 pub mod module;
 pub mod pipeline;
+pub mod prefetch;
 pub mod provider_fn;
 pub mod snapshot;
 pub mod workspace;

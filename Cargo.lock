@@ -2924,6 +2924,7 @@ dependencies = [
 name = "tfls-engine"
 version = "0.16.0"
 dependencies = [
+ "futures",
  "hcl-edit",
  "ls-types",
  "rayon",
