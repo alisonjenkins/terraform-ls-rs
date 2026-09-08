@@ -3,5 +3,6 @@
 
 pub mod format_scan;
 pub mod module;
+pub mod pipeline;
 pub mod provider_fn;
 pub mod snapshot;

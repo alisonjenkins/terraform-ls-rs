@@ -914,10 +914,10 @@ fn emit_move_variables_actions(
     }));
 }
 
-/// Format scan + `terraform_fmt` diagnostic moved to `tfls-engine`
-/// (shared with the diagnostics pipeline); re-exported here so this
+/// Format scan moved to `tfls-engine` (shared with the diagnostics
+/// pipeline's `terraform_fmt` rule); re-exported here so this
 /// module's own format code action keeps using the cross-call cache.
-pub(crate) use tfls_engine::format_scan::{formatting_diagnostic, scan_format_cached};
+pub(crate) use tfls_engine::format_scan::scan_format_cached;
 
 /// Format-as-code-action across scopes. Reads the live
 /// `format_style` once at invocation; switching mid-action

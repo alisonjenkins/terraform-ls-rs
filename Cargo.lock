@@ -2933,8 +2933,10 @@ dependencies = [
  "tfls-diag",
  "tfls-format",
  "tfls-parser",
+ "tfls-provider-protocol",
  "tfls-schema",
  "tfls-state",
+ "tracing",
  "url",
 ]
 
