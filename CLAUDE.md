@@ -69,6 +69,7 @@ tfls-lint --relative-to <DIR>           # print paths relative to DIR instead of
 tfls-lint --format <text|json|sarif|github>  # default text
 tfls-lint --config <FILE>               # explicit .tfls.json instead of per-root discovery
 tfls-lint --no-config                   # skip .tfls.json discovery entirely
+tfls-lint --offline                     # skip cache warming (see "Cache-backed rules in CI" below)
 ```
 
 Output: one line per diagnostic to stdout, sorted by `(path, line, col, code)`:
@@ -111,6 +112,21 @@ CI examples:
 ```
 
 `--rule` / `--style-rules` build the same `{"rules": {...}, "styleRules": ...}` JSON shape the LSP `initializationOptions`/`didChangeConfiguration` accept (see "Per-rule diagnostic config" below) and apply it to each loaded root's `state.config` before linting.
+
+### Cache-backed rules in CI
+
+Four rules read on-disk caches under `$XDG_CACHE_HOME/terraform-ls-rs/` instead of fetching over the network inline: `terraform_constraint` and `terraform_lock_constraint_drift` (Terraform/OpenTofu CLI + registry provider/module version catalogues), `terraform_module_outdated` and `terraform_module_ref_tag_mismatch` (git module tag lists, `tfls_provider_protocol::git_refs`). In the LSP these caches are warmed in the background (`crates/tfls-lsp/src/handlers/version_prefetch.rs`); a fresh CI runner has no such background job and no warm cache, so without warming these four rules silently never fire — no error, no signal, just missing findings.
+
+`tfls-lint` warms the cache by default: after loading a root and before `lint_all`, it calls `tfls_engine::prefetch::{collect_warm_targets, warm_caches}` — the same walk-the-`StateStore`-and-fetch core the LSP prefetch is built on (`crates/tfls-engine/src/prefetch.rs`) — over every `required_version` / `required_providers` / module `source` target found in the root. A fetch failure (offline runner, rate limit, DNS) is always a warning on stderr (`warning: cache warm failed for <target>: <err>`) and never changes the exit code; `-v` additionally prints a one-line fetched/cached/failed summary. Pass `--offline` to skip warming entirely (e.g. a runner that intentionally has no network and wants to lint against whatever cache already exists, with no warning noise).
+
+Speed up repeat CI runs by caching `~/.cache/terraform-ls-rs` between them:
+
+```yaml
+- uses: actions/cache@v4
+  with:
+    path: ~/.cache/terraform-ls-rs
+    key: tfls-cache-${{ runner.os }}
+```
 
 ## Debug binaries
 
