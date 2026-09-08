@@ -9,11 +9,15 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["watch"]
+watch = ["dep:notify", "dep:notify-debouncer-full", "dep:tokio"]
+
 [dependencies]
 thiserror.workspace = true
-notify.workspace = true
-notify-debouncer-full.workspace = true
-tokio.workspace = true
+notify = { workspace = true, optional = true }
+notify-debouncer-full = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
 tracing.workspace = true
 
 
