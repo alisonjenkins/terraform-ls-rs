@@ -16,6 +16,13 @@ use tfls_walker::{
 };
 use thiserror::Error;
 
+use tfls_engine::index::{
+    catch_file_diag, find_terraform_init_root, parse_and_upsert_files, ParseAndUpsert,
+};
+pub use tfls_engine::index::{
+    install_builtin_provider_schema, rebuild_unknown_module_vars_for_dir,
+};
+
 const WATCH_DEBOUNCE_MS: u64 = 150;
 const SCHEMA_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -271,24 +278,6 @@ pub fn enqueue_schema_fetch(queue: &JobQueue, root: &Path) {
 pub fn enqueue_functions_fetch(queue: &JobQueue) {
     let binary = resolve_cli_binary();
     queue.enqueue(Job::FetchFunctions { binary }, Priority::Normal);
-}
-
-/// Install the bundled built-in `terraform` provider schema
-/// (`terraform_remote_state`, `terraform_data`) into the global schema
-/// store. This provider is compiled into Terraform core and never
-/// arrives via the plugin protocol or `providers schema -json`, so we
-/// inject the compiled-in snapshot once at session start. Infallible —
-/// a decode failure is logged and leaves the store unchanged.
-pub fn install_builtin_provider_schema(state: &StateStore) {
-    match tfls_schema::bundled_builtin_provider() {
-        Ok(schemas) => {
-            state.install_schemas(schemas);
-            tracing::debug!("installed bundled built-in terraform provider schema");
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "bundled built-in provider schema failed to load");
-        }
-    }
 }
 
 fn resolve_cli_binary() -> PathBuf {
@@ -968,22 +957,6 @@ async fn mark_scan_completed_and_publish(
     }
 }
 
-/// Walk upward from `start` looking for a directory whose
-/// `.terraform/providers/` subtree exists. That directory is the
-/// terraform module root where `tofu init` was run and its schemas
-/// live. Returns `None` if nothing was found before hitting the
-/// filesystem root.
-fn find_terraform_init_root(start: &Path) -> Option<PathBuf> {
-    let mut current: Option<&Path> = Some(start);
-    while let Some(dir) = current {
-        if dir.join(".terraform").join("providers").is_dir() {
-            return Some(dir.to_path_buf());
-        }
-        current = dir.parent();
-    }
-    None
-}
-
 /// Walk upward from `file_uri`'s directory looking for the
 /// nearest `.terraform/providers/` root, and enqueue a schema
 /// fetch when the providers directory's mtime differs from the
@@ -1086,103 +1059,14 @@ async fn scan_dir_into_state(
     Ok(())
 }
 
-/// Result of [`parse_and_upsert_files`]: the URIs touched by the
-/// parse pass (freshly parsed, plus any already-open doc that also
-/// appears in the input file list) and how many files were freshly
-/// parsed off disk (as opposed to skipped because an open buffer or
-/// an already-parsed closed doc already covers them).
-struct ParseAndUpsert {
-    uris: Vec<url::Url>,
-    parsed_count: usize,
-}
-
-/// Read + parse (rayon-parallel) + upsert every file in `files` into
-/// `state`. Pure and synchronous (CPU-bound) — no diagnostic compute,
-/// no publish, no LSP client. Callers on an async runtime should run
-/// it off the reactor (see `crate::blocking::run`).
-///
-/// Skips docs that are open (editor-authoritative) or already have a
-/// fully parsed body. Cache hydration (`DocumentState::hydrated_from_cache`)
-/// leaves `parsed.body = None` so per-doc symbols can populate ahead
-/// of parse, but body-dependent passes (the module-call walk in
-/// `rebuild_assigned_variable_types_for_dir`, body-walking
-/// diagnostics, etc.) need the AST — those get re-parsed. The skip
-/// snapshot is taken before the parallel parse, so a buffer opened
-/// mid-parse won't be in it; `upsert_document_unless_open` is the
-/// backstop that closes that TOCTOU at upsert time.
-fn parse_and_upsert_files(state: &StateStore, files: &[PathBuf]) -> ParseAndUpsert {
-    use rayon::prelude::*;
-
-    let skip: std::collections::HashSet<url::Url> = state
-        .documents
-        .iter()
-        .filter(|e| state.is_open(e.key()) || e.value().parsed.body.is_some())
-        .map(|e| e.key().clone())
-        .collect();
-
-    let parsed: Vec<DocumentState> = files
-        .par_iter()
-        .filter_map(|path| {
-            let url = path_to_url(path)?;
-            if skip.contains(&url) {
-                return None;
-            }
-            let text = std::fs::read_to_string(path).ok()?;
-            Some(DocumentState::new(url, &text, 0))
-        })
-        .collect();
-
-    let parsed_count = parsed.len();
-    let mut uris: Vec<url::Url> = parsed.iter().map(|d| d.uri.clone()).collect();
-    for doc in parsed {
-        state.upsert_document_unless_open(doc);
-    }
-    // Also include any already-open docs that sit in the same dirs
-    // we just scanned — they should be in the publish round too so
-    // cross-file aggregates (added-provider, etc.) refresh.
-    for f in files {
-        if let Some(url) = path_to_url(f) {
-            if !uris.contains(&url) && state.documents.contains_key(&url) {
-                uris.push(url);
-            }
-        }
-    }
-
-    ParseAndUpsert { uris, parsed_count }
-}
-
-/// Read + parse + upsert all `files` (via [`parse_and_upsert_files`]),
-/// then build a per-module-dir snapshot, compute diagnostics in
-/// parallel, and fan out publishes concurrently. Shared between
-/// [`scan_dir_into_state`] and [`bulk_workspace_scan`] so both
-/// benefit from the same speedups.
-/// Run one file's diagnostic compute, containing any panic to THIS file.
-///
-/// Without this, a panic in one file's diagnostic pass unwinds the whole
-/// rayon `par_iter` out of `bulk_workspace_scan`, skipping its
-/// `mark_scan_completed` loop and wedging EVERY discovered dir permanently
-/// in `Scheduled` for the session (no `did_open` can re-schedule a dir
-/// that's already `Scheduled`). The parse layer is panic-guarded
-/// ([`tfls_parser::safe`]); the diagnostic layer is not — so contain it
-/// here and drop just the offending file (`None`), letting the scan finish
-/// and mark every dir `Completed`.
-fn catch_file_diag<F: FnOnce() -> Vec<lsp_types::Diagnostic>>(
-    uri: &url::Url,
-    compute: F,
-) -> Option<Vec<lsp_types::Diagnostic>> {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(compute)) {
-        Ok(diagnostics) => Some(diagnostics),
-        Err(_) => {
-            tracing::error!(
-                uri = %uri,
-                "scan_files_parallel: diagnostic pass PANICKED; \
-                 skipping this file so the scan still completes"
-            );
-            None
-        }
-    }
-}
-
+/// Read + parse + upsert all `files` (via
+/// [`tfls_engine::index::parse_and_upsert_files`]), then build a
+/// per-module-dir snapshot, compute diagnostics in parallel, and fan
+/// out publishes concurrently. Shared between [`scan_dir_into_state`]
+/// and [`bulk_workspace_scan`] so both benefit from the same
+/// speedups. Per-file diagnostic panics are contained via
+/// [`tfls_engine::index::catch_file_diag`] so one bad file can't wedge
+/// the whole scan.
 async fn scan_files_parallel(
     state: &StateStore,
     client: Option<&tower_lsp_server::Client>,
@@ -1796,104 +1680,6 @@ pub fn rebuild_assigned_variable_types_for_dir(state: &StateStore, dir: &Path) {
     }
 }
 
-/// Recompute the caller-passed unknown-variable map contributed by module
-/// calls authored in `dir`. For each module-block argument, decide whether
-/// its membership and/or value is apply-time in the CALLER's context; stage
-/// per child dir and replace this caller's contribution wholesale (see
-/// [`StateStore::replace_unknown_module_vars_from_caller`]).
-///
-/// The caller's context unions its OWN cached caller-unknownness, so
-/// multi-hop chains (grandparent → parent → child) converge over the
-/// successive scan rebuilds that already follow directory scans — no
-/// recursion, no cycles.
-pub fn rebuild_unknown_module_vars_for_dir(state: &StateStore, dir: &Path) {
-    use std::collections::HashMap;
-    use tfls_diag::unknown_value::{membership_apply_time, value_apply_time, MetaKind, UnknownCtx};
-    use tfls_state::UnknownVarBits;
-
-    fn is_meta_attr(name: &str) -> bool {
-        matches!(
-            name,
-            "source" | "version" | "providers" | "count" | "for_each" | "depends_on"
-        )
-    }
-
-    let mut caller_inputs = crate::handlers::util::module_unknown_inputs_for_dir(state, dir);
-    crate::handlers::util::fill_unknown_variables(state, dir, &mut caller_inputs);
-    let schema_lookup = crate::handlers::document::StateStoreSchemaLookup { state };
-    let output_cache = crate::handlers::util::ModuleOutputCache::default();
-    let resolver = crate::handlers::util::ModuleOutputResolver {
-        state,
-        caller_dir: dir.to_path_buf(),
-        cache: &output_cache,
-    };
-    let ctx =
-        UnknownCtx::new(&caller_inputs, Some(&schema_lookup)).with_module_outputs(Some(&resolver));
-
-    let mut staged: HashMap<PathBuf, HashMap<String, UnknownVarBits>> = HashMap::new();
-    for entry in state.documents.iter() {
-        let Ok(doc_path) = entry.key().to_file_path() else {
-            continue;
-        };
-        let Some(parent) = doc_path.parent() else {
-            continue;
-        };
-        if !crate::handlers::util::dir_paths_match(parent, dir) {
-            continue;
-        }
-        let Some(body) = entry.value().parsed.body.as_ref() else {
-            continue;
-        };
-        for structure in body.iter() {
-            let Some(block) = structure.as_block() else {
-                continue;
-            };
-            if block.ident.as_str() != "module" {
-                continue;
-            }
-            let Some(label) = block.labels.first().map(|l| match l {
-                hcl_edit::structure::BlockLabel::String(s) => s.value().to_string(),
-                hcl_edit::structure::BlockLabel::Ident(i) => i.as_str().to_string(),
-            }) else {
-                continue;
-            };
-            let Some(source) = entry.value().symbols.module_sources.get(&label).cloned() else {
-                continue;
-            };
-            let Some(child_dir) =
-                crate::handlers::util::resolve_module_source(dir, &label, &source)
-            else {
-                continue;
-            };
-            for body_struct in block.body.iter() {
-                let Some(attr) = body_struct.as_attribute() else {
-                    continue;
-                };
-                let attr_name = attr.key.as_str();
-                if is_meta_attr(attr_name) {
-                    continue;
-                }
-                let membership = membership_apply_time(&attr.value, MetaKind::ForEach, &ctx);
-                let value = value_apply_time(&attr.value, &ctx);
-                if membership || value {
-                    staged.entry(child_dir.clone()).or_default().insert(
-                        attr_name.to_string(),
-                        UnknownVarBits {
-                            membership,
-                            value,
-                            reason: format!(
-                                "caller module \"{label}\" in {} passes an apply-time value",
-                                dir.display()
-                            ),
-                        },
-                    );
-                }
-            }
-        }
-    }
-    state.replace_unknown_module_vars_from_caller(dir.to_path_buf(), staged);
-}
-
 /// After a directory's `.tf` files have been parsed into the store,
 /// walk their `module_sources` and enqueue scans of any referenced
 /// child module directories — whether local (relative paths) or
@@ -2179,8 +1965,8 @@ mod tests {
     //! and `SendRefresh` is the ONLY variant that can trigger
     //! client-side I/O.
     use super::{
-        catch_file_diag, decide_refresh, ensure_module_indexed, handle_disk_removal,
-        index_module_dir_sync, mark_scan_completed_and_publish, RefreshDecision,
+        decide_refresh, ensure_module_indexed, handle_disk_removal, index_module_dir_sync,
+        mark_scan_completed_and_publish, RefreshDecision,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -2238,22 +2024,6 @@ mod tests {
         assert!(
             !state.documents.contains_key(&url),
             "a non-open deleted file must be removed from the store"
-        );
-    }
-
-    #[test]
-    fn catch_file_diag_contains_a_panic() {
-        // HIGH-4: a panicking diagnostic pass for ONE file must yield None
-        // (drop that file) rather than unwind and wedge the whole scan.
-        let url = u("file:///x.tf");
-        assert!(
-            catch_file_diag(&url, || panic!("boom")).is_none(),
-            "a panic must be contained, returning None"
-        );
-        assert_eq!(
-            catch_file_diag(&url, Vec::new).map(|v| v.len()),
-            Some(0),
-            "a clean compute passes its result through"
         );
     }
 

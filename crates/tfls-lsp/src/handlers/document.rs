@@ -504,10 +504,6 @@ async fn publish_current_diagnostics(backend: &Backend, uri: &Url, version: Opti
 /// call site keeps compiling unchanged.
 pub use tfls_engine::pipeline::{compute_diagnostics, compute_diagnostics_with_lookup};
 
-/// Re-export so `indexer.rs`'s `StateStoreSchemaLookup { state }`
-/// construction keeps resolving through this module.
-pub(crate) use tfls_engine::module::StateStoreSchemaLookup;
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod did_open_publish_tests {
