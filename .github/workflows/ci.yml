@@ -46,9 +46,6 @@ jobs:
     name: Test
     needs: changes
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write
     steps:
       - name: Skip (no Rust changes)
         if: needs.changes.outputs.rust != 'true'
@@ -106,26 +103,26 @@ jobs:
             sccache --show-stats || true
           '
 
+      # Dogfood the linter on the engine's example workspace. The debug
+      # build is already warm from the test step; the fixture holds
+      # warnings only, so this exits 0 and shows the annotations on PRs.
+      # SARIF is generated and parsed but not uploaded: the fixture's
+      # findings are deliberate and would sit as permanent code-scanning
+      # alerts otherwise.
       - name: Lint example workspace with tfls-lint
         if: needs.changes.outputs.rust == 'true'
         run: |
-          nix develop --command cargo run --release --bin tfls-lint -- \
+          nix develop --command cargo run --bin tfls-lint -- \
             --schemas none --offline --format github --fail-on error \
             crates/tfls-engine/tests/fixtures/basic
 
-      - name: Generate tfls-lint SARIF
+      - name: Check tfls-lint SARIF output parses
         if: needs.changes.outputs.rust == 'true'
         run: |
-          nix develop --command cargo run --release --bin tfls-lint -- \
+          nix develop --command cargo run --bin tfls-lint -- \
             --format sarif --offline --schemas none \
             crates/tfls-engine/tests/fixtures/basic > tfls-lint.sarif
-
-      - name: Upload tfls-lint SARIF
-        if: needs.changes.outputs.rust == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-        uses: github/codeql-action/upload-sarif@6f5948dfacef28e207b48d0905cf90c03365536d # v3
-        with:
-          sarif_file: tfls-lint.sarif
-          category: tfls-lint
+          python3 -c 'import json; d = json.load(open("tfls-lint.sarif")); assert d["version"] == "2.1.0", d'
 
   dependency-review:
     name: Dependency Review
