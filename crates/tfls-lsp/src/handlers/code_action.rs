@@ -914,104 +914,10 @@ fn emit_move_variables_actions(
     }));
 }
 
-/// Format a single document under the active style. Returns a
-/// whole-file `TextEdit` when the formatted output differs from
-/// the input; `None` when the doc is already formatted, the
-/// rope is empty, or the formatter rejected the source (parse
-/// error, etc).
-///
-/// Pure — no LSP-state access. Caller decides which docs to
-/// scan and which style to use.
-fn scan_format(rope: &Rope, style: tfls_state::FormatStyle) -> Option<TextEdit> {
-    let text = rope.to_string();
-    let formatted = tfls_format::format_source(&text, style).ok()?;
-    if formatted == text {
-        return None;
-    }
-    Some(TextEdit {
-        range: crate::handlers::formatting::whole_document_range(rope),
-        new_text: formatted,
-    })
-}
-
-/// Cross-call wrapper around `scan_format`. Reads / writes the
-/// document's own `format_cache` slot, invalidated on every
-/// `apply_change` / `reparse`. Cache key is
-/// `(DocumentState::version, FormatStyle::marker)` — a doc
-/// edit bumps the version, a runtime style toggle bumps the
-/// marker, both make stale entries miss.
-///
-/// Falls back to a fresh `scan_format` call when the cache
-/// mutex is poisoned (lock failure is rare and recovery is
-/// cheap — just don't bypass the formatter).
-fn scan_format_cached(doc: &DocumentState, style: tfls_state::FormatStyle) -> Option<TextEdit> {
-    let style_marker = style.marker();
-    if let Ok(guard) = doc.format_cache.lock() {
-        if let Some(entry) = guard.as_ref() {
-            if entry.version == doc.version && entry.style_marker == style_marker {
-                return entry.edit.clone();
-            }
-        }
-    }
-    let edit = scan_format(&doc.rope, style);
-    if let Ok(mut guard) = doc.format_cache.lock() {
-        *guard = Some(tfls_state::FormatCacheEntry {
-            version: doc.version,
-            style_marker,
-            edit: edit.clone(),
-        });
-    }
-    edit
-}
-
-/// `terraform_fmt` — INFORMATION diagnostic when the document isn't
-/// formatted to the active style (minimal = `terraform fmt`/`tofu fmt`
-/// parity, opinionated = full tf-format). Reuses the cached format scan
-/// so an already-formatted, unchanged buffer is a no-op. Ranges at the
-/// first line that differs from the formatted output; pairs with the
-/// existing format code action. Default-on; disable / retune via the
-/// per-rule config (`{"rules": {"terraform_fmt": "off"}}`).
-pub(crate) fn formatting_diagnostic(
-    doc: &DocumentState,
-    style: tfls_state::FormatStyle,
-) -> Option<Diagnostic> {
-    let edit = scan_format_cached(doc, style)?; // `None` ⇒ already formatted.
-    let formatted = &edit.new_text;
-    let original = doc.rope.to_string();
-
-    // First line whose content differs — a friendlier anchor than line 0.
-    let line = original
-        .lines()
-        .zip(formatted.lines())
-        .position(|(a, b)| a != b)
-        .unwrap_or_else(|| {
-            original
-                .lines()
-                .count()
-                .min(formatted.lines().count())
-                .saturating_sub(1)
-        });
-    let line_len = original
-        .lines()
-        .nth(line)
-        .map(|l| l.chars().count())
-        .unwrap_or(0);
-
-    let style_name = match style {
-        tfls_state::FormatStyle::Minimal => "terraform fmt",
-        tfls_state::FormatStyle::Opinionated => "opinionated tf-format",
-    };
-    Some(Diagnostic {
-        range: Range {
-            start: Position::new(line as u32, 0),
-            end: Position::new(line as u32, line_len as u32),
-        },
-        severity: Some(DiagnosticSeverity::INFORMATION),
-        source: Some("terraform-ls-rs".to_string()),
-        message: format!("File is not formatted ({style_name} style); run the formatter."),
-        ..Default::default()
-    })
-}
+/// Format scan + `terraform_fmt` diagnostic moved to `tfls-engine`
+/// (shared with the diagnostics pipeline); re-exported here so this
+/// module's own format code action keeps using the cross-call cache.
+pub(crate) use tfls_engine::format_scan::{formatting_diagnostic, scan_format_cached};
 
 /// Format-as-code-action across scopes. Reads the live
 /// `format_style` once at invocation; switching mid-action
