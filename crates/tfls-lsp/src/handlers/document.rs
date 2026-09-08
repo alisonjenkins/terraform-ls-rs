@@ -11,7 +11,6 @@ use lsp_types::{
 use tfls_core::SymbolKind;
 use tfls_diag::{diagnostics_for_parse_errors, undefined_reference_diagnostics};
 use tfls_parser::ReferenceKind;
-use tfls_schema::Schema;
 use tfls_state::{DocumentState, StateStore, SymbolKey};
 use url::Url;
 
@@ -1440,20 +1439,7 @@ fn is_defined_in_module(
         .any(|loc| crate::handlers::util::location_in_dir(loc, module_dir))
 }
 
-/// Adapter so `tfls-diag` can query [`StateStore`]-installed schemas
-/// via its [`tfls_diag::schema_validation::SchemaLookup`] trait.
-pub(crate) struct StateStoreSchemaLookup<'a> {
-    pub(crate) state: &'a StateStore,
-}
-
-impl tfls_diag::schema_validation::SchemaLookup for StateStoreSchemaLookup<'_> {
-    fn resource(&self, type_name: &str) -> Option<Schema> {
-        self.state.resource_schema(type_name)
-    }
-    fn data_source(&self, type_name: &str) -> Option<Schema> {
-        self.state.data_source_schema(type_name)
-    }
-}
+pub(crate) use tfls_engine::module::StateStoreSchemaLookup;
 
 /// Adapter that answers `UpgradeHintLookup` queries by reading the
 /// latest-published-version registry-doc cache laid down by
