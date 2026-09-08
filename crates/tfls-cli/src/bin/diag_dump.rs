@@ -1,6 +1,7 @@
-//! Standalone diagnostic dumper. Loads a directory, fetches schemas,
-//! runs the full `compute_diagnostics` pipeline over every `.tf` /
-//! `.tf.json` file, prints results grouped by file.
+//! Standalone diagnostic dumper. Thin CLI wrapper over
+//! `tfls_engine::workspace::{load, lint_all}` — loads a directory,
+//! fetches schemas, runs the full diagnostics pipeline over every
+//! `.tf` / `.tf.json` file, prints results grouped by file.
 //!
 //! Used as a bug-hunting harness — output mirrors what `did_open`
 //! would produce after indexing completes, but without the LSP
@@ -12,10 +13,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use lsp_types::DiagnosticSeverity;
-use tfls_engine::index::find_terraform_init_root;
-use tfls_lsp::handlers::document::compute_diagnostics;
-use tfls_state::{DocumentState, StateStore};
-use tfls_walker::discover_terraform_files;
+use tfls_engine::workspace::{lint_all, load, LoadOptions, SchemaOutcome, SchemaSource};
 use url::Url;
 
 #[derive(Debug, Parser)]
@@ -72,74 +70,38 @@ fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    let dir = cli.dir.canonicalize()?;
-    eprintln!("# workspace: {}", dir.display());
-
-    let state = StateStore::new();
-
-    // 1. Discover + parse + upsert every .tf / .tf.json.
-    let files = discover_terraform_files(&dir)?;
-    eprintln!("# discovered {} .tf / .tf.json files", files.len());
-    parse_and_upsert(&state, &files);
-    eprintln!("# upserted {} documents", state.documents.len());
-
-    // 2. Install bundled functions synchronously — cheap, catches
-    //    the `unknown function` family without round-tripping the CLI.
-    let functions = tfls_schema::functions_cache::bundled()?;
-    state.install_functions(functions);
-
-    // 3. Schema fetch via plugin protocol. Walk up from `dir` to find
-    //    `.terraform/providers/` — same logic the indexer uses on
-    //    `did_open`. Diagnostics that depend on schemas (unknown
-    //    attribute, deprecated, etc.) only fire once this returns.
-    if !cli.no_schemas {
-        if let Some(init_root) = find_terraform_init_root(&dir) {
-            eprintln!("# fetching schemas from {}", init_root.display());
-            let tf_dir = init_root.join(".terraform");
-            match tfls_provider_protocol::fetch_schemas_from_plugins(&tf_dir, None).await {
-                Ok(schemas) => {
-                    let n = schemas.provider_schemas.len();
-                    state.install_schemas(schemas);
-                    eprintln!("# installed {n} provider schemas");
-                }
-                Err(e) => {
-                    eprintln!("# WARNING: schema fetch failed: {e}");
-                }
-            }
+    let opts = LoadOptions {
+        schemas: if cli.no_schemas {
+            SchemaSource::None
         } else {
+            SchemaSource::Plugins
+        },
+    };
+    let root = cli.dir.canonicalize()?;
+    let loaded = load(&cli.dir, &opts).await?;
+    eprintln!("# workspace: {}", root.display());
+    eprintln!("# discovered {} .tf / .tf.json files", loaded.file_count);
+    eprintln!("# upserted {} documents", loaded.state.documents.len());
+
+    match &loaded.schema_outcome {
+        SchemaOutcome::Fetched { init_root, count } => {
+            eprintln!("# fetching schemas from {}", init_root.display());
+            eprintln!("# installed {count} provider schemas");
+        }
+        SchemaOutcome::FetchFailed { init_root, message } => {
+            eprintln!("# fetching schemas from {}", init_root.display());
+            eprintln!("# WARNING: schema fetch failed: {message}");
+        }
+        SchemaOutcome::NoInitRoot => {
             eprintln!("# no .terraform/providers found — skipping schema fetch");
         }
+        SchemaOutcome::Bundled | SchemaOutcome::Skipped => {}
     }
 
-    // 4. Mirror the indexer's post-scan bookkeeping: mark every loaded dir
-    //    scan-complete (the unknown-value rules are gated on it) and rebuild
-    //    the cross-module maps (assigned variable types, caller-passed
-    //    unknown variables) the same way `scan_dir_into_state` does.
-    let dirs: std::collections::BTreeSet<std::path::PathBuf> = state
-        .documents
-        .iter()
-        .filter_map(|entry| {
-            entry
-                .key()
-                .to_file_path()
-                .ok()
-                .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
-        })
-        .collect();
-    for d in &dirs {
-        state.mark_scan_completed(d.clone());
-    }
-    for d in &dirs {
-        tfls_lsp::indexer::rebuild_assigned_variable_types_for_dir(&state, d);
-        tfls_lsp::indexer::rebuild_unknown_module_vars_for_dir(&state, d);
-    }
-
-    // 5. Run diagnostics per file, grouped and sorted.
+    // Run diagnostics per file, grouped and sorted.
     let mut by_file: BTreeMap<String, Vec<lsp_types::Diagnostic>> = BTreeMap::new();
     let mut total = 0usize;
-    for entry in state.documents.iter() {
-        let uri = entry.key();
-        let mut diags = compute_diagnostics(&state, uri);
+    for (uri, mut diags) in lint_all(&loaded.state) {
         if cli.errors_only {
             diags.retain(|d| {
                 matches!(
@@ -155,7 +117,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
         total += diags.len();
-        let rel = relative_path(uri, &dir);
+        let rel = relative_path(&uri, &root);
         by_file.insert(rel, diags);
     }
 
@@ -199,18 +161,6 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     Ok(())
-}
-
-fn parse_and_upsert(state: &StateStore, files: &[PathBuf]) {
-    for path in files {
-        let Ok(url) = Url::from_file_path(path) else {
-            continue;
-        };
-        let Ok(text) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        state.upsert_document(DocumentState::new(url, &text, 0));
-    }
 }
 
 fn relative_path(uri: &Url, root: &Path) -> String {
