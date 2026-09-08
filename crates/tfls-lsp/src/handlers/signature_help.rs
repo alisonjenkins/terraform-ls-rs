@@ -236,8 +236,7 @@ fn lookup_local_in_workspace(
 ) -> Option<String> {
     if let Some(doc) = state.documents.get(uri) {
         if let Some(body) = doc.parsed.body.as_ref() {
-            if let Some(name) =
-                crate::handlers::completion::required_providers_local_to_name_pub(body, local)
+            if let Some(name) = crate::handlers::util::required_providers_local_to_name(body, local)
             {
                 return Some(name);
             }
@@ -259,9 +258,7 @@ fn lookup_local_in_workspace(
         let Some(body) = doc.parsed.body.as_ref() else {
             continue;
         };
-        if let Some(name) =
-            crate::handlers::completion::required_providers_local_to_name_pub(body, local)
-        {
+        if let Some(name) = crate::handlers::util::required_providers_local_to_name(body, local) {
             return Some(name);
         }
     }
