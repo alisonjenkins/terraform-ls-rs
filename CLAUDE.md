@@ -66,12 +66,47 @@ tfls-lint --jobs <N>                    # rayon worker threads
 tfls-lint -q / --quiet                  # summary line only
 tfls-lint -v / --verbose                # -v/-vv logging; also enables the schema-outcome '#' lines
 tfls-lint --relative-to <DIR>           # print paths relative to DIR instead of each root
+tfls-lint --format <text|json|sarif|github>  # default text
 ```
 
 Output: one line per diagnostic to stdout, sorted by `(path, line, col, code)`:
 `<relative path>:<line+1>:<col+1>: <severity> [<code>] <message>`. A summary line goes to stderr: `N error(s), N warning(s), N info, N hint(s) in F file(s)`. Schema-fetch failures always print a `warning: schema fetch failed for <root>: <msg>` line to stderr; other schema-outcome detail only appears with `-v`.
 
 Exit codes: `0` clean or below `--fail-on` threshold, `1` findings at/above threshold, `2` tool error (bad path, load failure — printed as `error: ...` with the source chain).
+
+### `--format`: machine-readable output
+
+Rendering lives in `crates/tfls-cli/src/lint_output.rs` (exposed by the `tfls_cli` lib crate so it's unit-testable without spawning the binary) as four pure `fn render_<fmt>(entries: &[(String, Diagnostic)], summary: &Summary) -> String` functions. `main` picks one by `--format` and writes it to stdout; the stderr summary line described above is `text`-only — the machine formats leave stderr quiet (aside from real warnings/errors, e.g. schema-fetch failures). Positions are 1-based in every format, matching `text`.
+
+- **`text`** (default) — the format above.
+- **`json`** — stable document, `serde_json`-derived:
+  ```json
+  {
+    "version": 1,
+    "summary": { "errors": 0, "warnings": 3, "info": 0, "hints": 0, "files": 1 },
+    "diagnostics": [
+      { "path": "main.tf", "line": 5, "column": 1, "end_line": 5, "end_column": 9,
+        "severity": "warning", "code": "terraform_unused_declarations",
+        "message": "variable `unused` is declared but not used",
+        "source": "terraform-ls-rs" }
+    ]
+  }
+  ```
+- **`sarif`** — SARIF 2.1.0, one run, `tool.driver.rules` populated with one rule per distinct code (sorted); `level` maps `error`→`error`, `warning`→`warning`, `info`/`hint`→`note`; `artifactLocation.uriBaseId` is `%SRCROOT%`. What GitHub code scanning's `upload-sarif` action consumes.
+- **`github`** — one [GitHub Actions workflow command](https://docs.github.com/en/actions/using-workflows/workflow-commands-for-github-actions) per finding: `::<error|warning|notice> file=<path>,line=<L>,endLine=<L>,col=<C>,endColumn=<C>,title=<code>::<message>` (severity `info`/`hint` → `notice`). Values are escaped per the Actions spec (`%`→`%25`, `\r`→`%0D`, `\n`→`%0A` in the message; additionally `:`→`%3A`, `,`→`%2C` in property values).
+
+CI examples:
+
+```yaml
+- run: tfls-lint --format github --fail-on warning .
+```
+
+```yaml
+- run: tfls-lint --format sarif . > tfls.sarif
+- uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: tfls.sarif
+```
 
 `--rule` / `--style-rules` build the same `{"rules": {...}, "styleRules": ...}` JSON shape the LSP `initializationOptions`/`didChangeConfiguration` accept (see "Per-rule diagnostic config" below) and apply it to each loaded root's `state.config` before linting.
 
