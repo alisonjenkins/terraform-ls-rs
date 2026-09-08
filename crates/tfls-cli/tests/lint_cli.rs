@@ -88,6 +88,56 @@ fn rule_severity_bump_to_error_trips_default_fail_on() {
 }
 
 #[test]
+fn format_json_parses_and_leaves_stderr_empty() {
+    let output = lint_cmd()
+        .args([FIXTURE, "--schemas", "none", "--format", "json"])
+        .output()
+        .expect("failed to run tfls-lint");
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.is_empty(), "stderr should be empty:\n{stderr}");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout should be valid json");
+    assert_eq!(value["summary"]["warnings"], 3);
+}
+
+#[test]
+fn format_sarif_parses_with_expected_tool_name() {
+    let output = lint_cmd()
+        .args([FIXTURE, "--schemas", "none", "--format", "sarif"])
+        .output()
+        .expect("failed to run tfls-lint");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout should be valid json");
+    assert_eq!(value["runs"][0]["tool"]["driver"]["name"], "tfls-lint");
+}
+
+#[test]
+fn format_github_lines_all_start_with_workflow_command() {
+    let output = lint_cmd()
+        .args([FIXTURE, "--schemas", "none", "--format", "github"])
+        .output()
+        .expect("failed to run tfls-lint");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(lines.len(), 3, "expected 3 finding lines:\n{stdout}");
+    for line in lines {
+        assert!(
+            line.starts_with("::warning file=main.tf,"),
+            "unexpected line shape: {line}"
+        );
+    }
+}
+
+#[test]
 fn nonexistent_path_exits_2_with_error_prefix() {
     let output = lint_cmd()
         .args(["/nonexistent/path/does-not-exist", "--schemas", "none"])

@@ -2867,6 +2867,7 @@ dependencies = [
  "reqwest",
  "ropey",
  "rustls",
+ "serde",
  "serde_json",
  "sonic-rs",
  "tfls-core",

@@ -10,7 +10,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
 use lsp_types::{Diagnostic, DiagnosticSeverity};
-use tfls_cli::lint_output::{code_of, render_text, Summary};
+use tfls_cli::lint_output::{
+    code_of, render_github, render_json, render_sarif, render_text, OutputFormat, Summary,
+};
 use tfls_engine::workspace::{lint_all, load, LoadError, LoadOptions, SchemaOutcome, SchemaSource};
 use url::Url;
 
@@ -54,6 +56,13 @@ struct Cli {
     /// summary line.
     #[arg(short, long)]
     quiet: bool,
+
+    /// Output format for the diagnostic listing on stdout. Machine
+    /// formats (`json`, `sarif`, `github`) leave stderr quiet aside
+    /// from real warnings/errors — the human-readable summary line
+    /// is `text`-only.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    format: OutputFormat,
 
     /// Increase logging verbosity (`-v` = debug, `-vv` = trace). Also
     /// enables the schema-outcome `#` line on stderr.
@@ -221,13 +230,21 @@ async fn run(cli: Cli) -> ExitCode {
     };
 
     if !cli.quiet {
-        print!("{}", render_text(&all_entries, &summary));
+        let rendered = match cli.format {
+            OutputFormat::Text => render_text(&all_entries, &summary),
+            OutputFormat::Json => render_json(&all_entries, &summary),
+            OutputFormat::Sarif => render_sarif(&all_entries, &summary),
+            OutputFormat::Github => render_github(&all_entries, &summary),
+        };
+        print!("{rendered}");
     }
 
-    eprintln!(
-        "{} error(s), {} warning(s), {} info, {} hint(s) in {} file(s)",
-        counts.error, counts.warning, counts.info, counts.hint, summary.files,
-    );
+    if cli.format == OutputFormat::Text {
+        eprintln!(
+            "{} error(s), {} warning(s), {} info, {} hint(s) in {} file(s)",
+            counts.error, counts.warning, counts.info, counts.hint, summary.files,
+        );
+    }
 
     let diags_only: Vec<Diagnostic> = all_entries.into_iter().map(|(_, d)| d).collect();
     if exceeds(&diags_only, cli.fail_on) {
