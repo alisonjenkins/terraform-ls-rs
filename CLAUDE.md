@@ -18,6 +18,9 @@ cargo bench
 # Build release binary
 cargo build --release -p tfls-cli
 
+# Lint a workspace in CI
+cargo run --bin tfls-lint -- <workspace_dir>
+
 # Run a specific example
 cargo run --example probe -- /path/to/.terraform aws_instance ami
 ```
@@ -38,7 +41,7 @@ crates/
   tfls-format/             Formatter — thin wrapper around `tf-format`; style runtime-toggleable (see "Formatting style" below)
   tfls-walker/             FS discovery + notify-debouncer-full file watcher
   tfls-provider-protocol/  Terraform plugin gRPC protocol (v5+v6), mTLS, registry docs
-  tfls-engine/             Transport-free diagnostics engine (module aggregation, snapshots, the diagnostics pipeline, workspace loader + parallel lint) shared by tfls-lsp and the future lint CLI
+  tfls-engine/             Transport-free diagnostics engine (module aggregation, snapshots, the diagnostics pipeline, workspace loader + parallel lint) shared by tfls-lsp and tfls-lint
   tfls-lsp/                Backend (tower-lsp) + handlers + background indexer
   tfls-cli/                main: tokio, clap, stdio transport
 ```
@@ -48,6 +51,29 @@ Schema fetch has two paths:
 2. **CLI fallback** — `tofu providers schema -json` when no `.terraform/providers/` exists
 
 Registry docs enrichment fills missing attribute descriptions (e.g. AWS SDKv2 providers) from the Terraform Registry HTTP API, cached to `$XDG_CACHE_HOME/terraform-ls-rs/provider-docs/`.
+
+## `tfls-lint`
+
+CI-facing linter, not a debug tool — the standalone binary users are expected to drop into a pipeline. Thin wrapper over `tfls_engine::workspace::{load, lint_all}`: loads one or more workspace roots independently (no cross-root aggregation), runs the same diagnostics pipeline `did_open` would, prints text to stdout, and exits non-zero when findings meet a configurable severity threshold.
+
+```bash
+tfls-lint [PATHS...]                    # default: ["."], one root per path
+tfls-lint --schemas <plugins|bundled|none>   # default plugins
+tfls-lint --fail-on <error|warning|info|hint|never>  # default error
+tfls-lint --rule <CODE=off|hint|info|warning|error>  # repeatable
+tfls-lint --style-rules                 # opt-in tflint-style rule pack
+tfls-lint --jobs <N>                    # rayon worker threads
+tfls-lint -q / --quiet                  # summary line only
+tfls-lint -v / --verbose                # -v/-vv logging; also enables the schema-outcome '#' lines
+tfls-lint --relative-to <DIR>           # print paths relative to DIR instead of each root
+```
+
+Output: one line per diagnostic to stdout, sorted by `(path, line, col, code)`:
+`<relative path>:<line+1>:<col+1>: <severity> [<code>] <message>`. A summary line goes to stderr: `N error(s), N warning(s), N info, N hint(s) in F file(s)`. Schema-fetch failures always print a `warning: schema fetch failed for <root>: <msg>` line to stderr; other schema-outcome detail only appears with `-v`.
+
+Exit codes: `0` clean or below `--fail-on` threshold, `1` findings at/above threshold, `2` tool error (bad path, load failure — printed as `error: ...` with the source chain).
+
+`--rule` / `--style-rules` build the same `{"rules": {...}, "styleRules": ...}` JSON shape the LSP `initializationOptions`/`didChangeConfiguration` accept (see "Per-rule diagnostic config" below) and apply it to each loaded root's `state.config` before linting.
 
 ## Debug binaries
 
