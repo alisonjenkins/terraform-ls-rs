@@ -67,6 +67,8 @@ tfls-lint -q / --quiet                  # summary line only
 tfls-lint -v / --verbose                # -v/-vv logging; also enables the schema-outcome '#' lines
 tfls-lint --relative-to <DIR>           # print paths relative to DIR instead of each root
 tfls-lint --format <text|json|sarif|github>  # default text
+tfls-lint --config <FILE>               # explicit .tfls.json instead of per-root discovery
+tfls-lint --no-config                   # skip .tfls.json discovery entirely
 ```
 
 Output: one line per diagnostic to stdout, sorted by `(path, line, col, code)`:
@@ -271,6 +273,17 @@ Any diagnostic rule can be disabled or have its severity remapped via the `rules
 Values: `off` (suppress), `hint`, `info`, `warning`, `error`. Keyed by the diagnostic's stable `code`. Each rule's output is tagged with a `terraform_<rule>` code at its `compute_diagnostics_with_lookup` call site (in `crates/tfls-engine/src/pipeline.rs`, via the `tag()` wrapper); a final `apply_rule_overrides` post-pass (before dedup) drops `off` codes and remaps the rest. Storage: `tfls_state::Config::rule_overrides` (`Arc<HashMap<String, RuleSeverity>>`, replaced wholesale per update so dropping a key restores the default). Live-toggle works because `did_change_configuration` already republishes open docs.
 
 Adding a code to a new rule = wrap its call site with `tag("terraform_<id>", …)`. Untagged diagnostics pass through unaffected.
+
+### Project config file (`.tfls.json`)
+
+A repo can check in one `rules`/`styleRules`/`formatStyle` policy that both the editor and CI read, instead of configuring each side separately. `crates/tfls-engine/src/config_file.rs`:
+
+- `find_config_file(start)` looks for `.tfls.json` in `start` and each ancestor directory, stopping at the filesystem root; the nearest ancestor wins. No git-root heuristic.
+- `load_config_file(path)` parses the file as the same settings object `initializationOptions`/`didChangeConfiguration` accept — no wrapper key, so the file's content is exactly `{"rules": {...}, "styleRules": true, "formatStyle": "minimal"}`.
+
+**LSP precedence:** project config file → `initializationOptions` → `workspace/didChangeConfiguration`, each later step winning over the earlier ones. `Backend::initialize` discovers `.tfls.json` for every `workspace_folders`/`root_uri` path (deduplicated) and applies it before `initializationOptions` are applied, so a user's explicit editor settings still take precedence, and a later `didChangeConfiguration` continues to override at runtime as before. A missing file is silent; a present-but-invalid one logs a `warn` with the error chain and never fails `initialize`. **Not implemented**: reloading when `.tfls.json` itself is edited after `initialize` — a follow-up.
+
+**CLI precedence:** project config file → `--rule`/`--style-rules` flags, flags winning. `tfls-lint` defaults to `find_config_file(root)` per root; `--config <FILE>` loads an explicit file instead (applied to every root; exits 2 if unreadable or not a JSON object), and `--no-config` skips discovery entirely. `-v` prints `# config: <path>` to stderr when a file is applied.
 
 ### Untagged-resource diagnostics (`terraform_missing_tags`, `terraform_missing_name_tag`)
 
