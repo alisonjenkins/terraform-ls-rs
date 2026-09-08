@@ -38,7 +38,7 @@ crates/
   tfls-format/             Formatter — thin wrapper around `tf-format`; style runtime-toggleable (see "Formatting style" below)
   tfls-walker/             FS discovery + notify-debouncer-full file watcher
   tfls-provider-protocol/  Terraform plugin gRPC protocol (v5+v6), mTLS, registry docs
-  tfls-engine/             Transport-free diagnostics engine (module aggregation, snapshots, the diagnostics pipeline) shared by tfls-lsp and the future lint CLI
+  tfls-engine/             Transport-free diagnostics engine (module aggregation, snapshots, the diagnostics pipeline, workspace loader + parallel lint) shared by tfls-lsp and the future lint CLI
   tfls-lsp/                Backend (tower-lsp) + handlers + background indexer
   tfls-cli/                main: tokio, clap, stdio transport
 ```
@@ -55,7 +55,7 @@ Three standalone binaries in `crates/tfls-cli/src/bin/` for offline analysis wit
 
 ### `tfls-diag-dump`
 
-Loads a directory, fetches schemas, runs the full `compute_diagnostics` pipeline over every `.tf` / `.tf.json`, prints results grouped by file. Mirror of what `did_open` would publish.
+Loads a directory, fetches schemas, runs the full `compute_diagnostics` pipeline over every `.tf` / `.tf.json`, prints results grouped by file. Mirror of what `did_open` would publish. Thin CLI wrapper over `tfls_engine::workspace::{load, lint_all}`.
 
 ```bash
 cargo run --bin tfls-diag-dump -- <workspace_dir>
