@@ -140,6 +140,11 @@
           name = "tfls";
         };
 
+        apps.tfls-lint = flake-utils.lib.mkApp {
+          drv = tfls;
+          name = "tfls-lint";
+        };
+
         devShells.default = pkgs.mkShell {
           inputsFrom = [ tfls ];
 
