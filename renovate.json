@@ -20,6 +20,12 @@
         "lockFileMaintenance"
       ],
       "automerge": true
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions",
+      "groupSlug": "github-actions",
+      "schedule": ["before 6am on monday"]
     }
   ]
 }
