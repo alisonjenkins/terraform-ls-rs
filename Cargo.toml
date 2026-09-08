@@ -94,6 +94,7 @@ tfls-walker = { path = "crates/tfls-walker" }
 tfls-diag = { path = "crates/tfls-diag" }
 tfls-format = { path = "crates/tfls-format" }
 tfls-provider-protocol = { path = "crates/tfls-provider-protocol" }
+tfls-engine = { path = "crates/tfls-engine" }
 
 [profile.release]
 lto = "thin"

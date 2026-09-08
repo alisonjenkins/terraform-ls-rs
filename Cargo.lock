@@ -2918,6 +2918,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "tfls-engine"
+version = "0.16.0"
+dependencies = [
+ "hcl-edit",
+ "ls-types",
+ "ropey",
+ "rustc-hash",
+ "semver",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tfls-core",
+ "tfls-diag",
+ "tfls-parser",
+ "tfls-schema",
+ "tfls-state",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "tfls-format"
 version = "0.16.0"
 dependencies = [
