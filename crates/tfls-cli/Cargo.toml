@@ -9,6 +9,10 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[lib]
+name = "tfls_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "tfls"
 path = "src/main.rs"
