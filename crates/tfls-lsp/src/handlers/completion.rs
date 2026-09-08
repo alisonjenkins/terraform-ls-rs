@@ -2622,7 +2622,8 @@ fn provider_function_name_items(
 fn local_to_provider_name(backend: &Backend, uri: &Url, local: &str) -> String {
     if let Some(doc) = backend.state.documents.get(uri) {
         if let Some(body) = doc.parsed.body.as_ref() {
-            if let Some(name) = required_providers_local_to_name(body, local) {
+            if let Some(name) = crate::handlers::util::required_providers_local_to_name(body, local)
+            {
                 return name;
             }
         }
@@ -2643,7 +2644,8 @@ fn local_to_provider_name(backend: &Backend, uri: &Url, local: &str) -> String {
             let Some(body) = doc.parsed.body.as_ref() else {
                 continue;
             };
-            if let Some(name) = required_providers_local_to_name(body, local) {
+            if let Some(name) = crate::handlers::util::required_providers_local_to_name(body, local)
+            {
                 return name;
             }
         }
@@ -2687,68 +2689,6 @@ fn name_to_local_map(backend: &Backend, uri: &Url) -> std::collections::HashMap<
         }
     }
     out
-}
-
-/// Pub re-export so handlers in sibling modules (signature_help)
-/// can resolve a local provider name without duplicating the body
-/// walk.
-pub fn required_providers_local_to_name_pub(
-    body: &hcl_edit::structure::Body,
-    local: &str,
-) -> Option<String> {
-    required_providers_local_to_name(body, local)
-}
-
-/// Walk `terraform { required_providers { ... } }` and return the
-/// provider name for `local`. Long form `LOCAL = { source = "ns/name" }`
-/// returns `name`; short form `LOCAL = "version"` returns
-/// `LOCAL` (HashiCorp registry default).
-fn required_providers_local_to_name(
-    body: &hcl_edit::structure::Body,
-    local: &str,
-) -> Option<String> {
-    use hcl_edit::expr::Expression;
-    for structure in body.iter() {
-        let Some(block) = structure.as_block() else {
-            continue;
-        };
-        if block.ident.as_str() != "terraform" {
-            continue;
-        }
-        for inner in block.body.iter() {
-            let Some(rp_block) = inner.as_block() else {
-                continue;
-            };
-            if rp_block.ident.as_str() != "required_providers" {
-                continue;
-            }
-            for entry in rp_block.body.iter() {
-                let Some(attr) = entry.as_attribute() else {
-                    continue;
-                };
-                if attr.key.as_str() != local {
-                    continue;
-                }
-                // Long form: `LOCAL = { source = "...", ... }`.
-                if let Expression::Object(obj) = &attr.value {
-                    for (key, value) in obj.iter() {
-                        if let Some(k) = object_key_as_str(key) {
-                            if k == "source" {
-                                if let Some(s) = expr_literal_string(value.expr()) {
-                                    return parse_source_provider_name(&s)
-                                        .or_else(|| Some(local.to_string()));
-                                }
-                            }
-                        }
-                    }
-                }
-                // Short form (`LOCAL = "~> X"`) or missing source —
-                // the provider name is the local name.
-                return Some(local.to_string());
-            }
-        }
-    }
-    None
 }
 
 /// Walk `terraform { required_providers { ... } }` and return a map
@@ -4058,48 +3998,11 @@ mod compute_index_replace_range_tests {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod required_providers_resolver_tests {
+mod required_providers_name_to_local_tests {
     use super::*;
 
     fn parse_body(src: &str) -> hcl_edit::structure::Body {
         src.parse().expect("parse")
-    }
-
-    #[test]
-    fn resolves_long_form_source() {
-        let src = "terraform {\n  required_providers {\n    aws_v6 = {\n      source = \"hashicorp/aws\"\n    }\n  }\n}\n";
-        let body = parse_body(src);
-        assert_eq!(
-            required_providers_local_to_name(&body, "aws_v6"),
-            Some("aws".to_string())
-        );
-    }
-
-    #[test]
-    fn resolves_long_form_with_full_hostname() {
-        let src = "terraform {\n  required_providers {\n    aws_v6 = {\n      source = \"registry.terraform.io/hashicorp/aws\"\n    }\n  }\n}\n";
-        let body = parse_body(src);
-        assert_eq!(
-            required_providers_local_to_name(&body, "aws_v6"),
-            Some("aws".to_string())
-        );
-    }
-
-    #[test]
-    fn falls_back_to_local_for_short_form() {
-        let src = "terraform {\n  required_providers {\n    aws = \"~> 4.0\"\n  }\n}\n";
-        let body = parse_body(src);
-        assert_eq!(
-            required_providers_local_to_name(&body, "aws"),
-            Some("aws".to_string())
-        );
-    }
-
-    #[test]
-    fn unknown_local_returns_none() {
-        let src = "terraform {\n  required_providers {\n    aws = \"~> 4.0\"\n  }\n}\n";
-        let body = parse_body(src);
-        assert_eq!(required_providers_local_to_name(&body, "kubernetes"), None);
     }
 
     #[test]
