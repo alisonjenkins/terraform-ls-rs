@@ -263,6 +263,39 @@ downloads the matching `tfls` release for your platform (Linux x64, macOS arm64,
 Windows x64), verifies its checksum, and caches it; set
 `terraform-ls-rs.serverPath` to use a local build instead.
 
+## Linting in CI (`tfls-lint`)
+
+`tfls-lint` is a standalone CI-facing binary that runs the same diagnostics
+engine as the LSP server (`tfls-engine`) against one or more workspace roots,
+with no editor required.
+
+Install: download the `tfls-lint-<version>-<target>.tar.gz` asset from a
+[GitHub release](https://github.com/alisonjenkins/terraform-ls-rs/releases)
+(same target triples as the `tfls` asset), or use the `apps.tfls-lint` flake
+app (`nix run github:your-org/terraform-ls-rs#tfls-lint`).
+
+```sh
+tfls-lint .
+tfls-lint --format github --fail-on warning .
+tfls-lint --format sarif . > tfls.sarif   # then upload with github/codeql-action/upload-sarif
+```
+
+A checked-in `.tfls.json` at the workspace root (or any ancestor) sets a
+shared rule policy for both the editor and CI:
+
+```json
+{ "rules": { "terraform_naming_convention": "off" }, "styleRules": true }
+```
+
+Exit codes: `0` clean or below `--fail-on` threshold, `1` findings at/above
+threshold, `2` tool error (bad path, load failure).
+
+Rules that validate against provider schemas need `terraform init` /
+`tofu init` run first (so `.terraform/providers/` exists), or pass
+`--schemas bundled` to use the bundled snapshot instead. A few cache-backed
+rules (version/constraint drift, module tag checks) benefit from caching
+`~/.cache/terraform-ls-rs` between CI runs.
+
 ## Development
 
 ```sh
