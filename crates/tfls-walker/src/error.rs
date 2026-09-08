@@ -9,6 +9,7 @@ pub enum WalkerError {
         source: std::io::Error,
     },
 
+    #[cfg(feature = "watch")]
     #[error("file watcher error")]
     Watcher(#[source] notify::Error),
 }
