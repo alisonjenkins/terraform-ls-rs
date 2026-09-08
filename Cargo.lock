@@ -2939,6 +2939,8 @@ dependencies = [
  "tfls-schema",
  "tfls-state",
  "tfls-walker",
+ "thiserror 2.0.20",
+ "tokio",
  "tracing",
  "url",
 ]
