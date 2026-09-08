@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
-use lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString};
+use lsp_types::{Diagnostic, DiagnosticSeverity};
+use tfls_cli::lint_output::{code_of, render_text, Summary};
 use tfls_engine::workspace::{lint_all, load, LoadError, LoadOptions, SchemaOutcome, SchemaSource};
 use url::Url;
 
@@ -211,26 +212,21 @@ async fn run(cli: Cli) -> ExitCode {
             .then(code_of(a).cmp(&code_of(b)))
     });
 
+    let summary = Summary {
+        errors: counts.error,
+        warnings: counts.warning,
+        info: counts.info,
+        hints: counts.hint,
+        files: files_with_diagnostics.len(),
+    };
+
     if !cli.quiet {
-        for (path, d) in &all_entries {
-            println!(
-                "{path}:{}:{}: {} [{}] {}",
-                d.range.start.line + 1,
-                d.range.start.character + 1,
-                severity_word(d),
-                code_of(d),
-                d.message,
-            );
-        }
+        print!("{}", render_text(&all_entries, &summary));
     }
 
     eprintln!(
         "{} error(s), {} warning(s), {} info, {} hint(s) in {} file(s)",
-        counts.error,
-        counts.warning,
-        counts.info,
-        counts.hint,
-        files_with_diagnostics.len(),
+        counts.error, counts.warning, counts.info, counts.hint, summary.files,
     );
 
     let diags_only: Vec<Diagnostic> = all_entries.into_iter().map(|(_, d)| d).collect();
@@ -260,23 +256,6 @@ fn severity_rank(d: &Diagnostic) -> FailOn {
         Some(DiagnosticSeverity::WARNING) => FailOn::Warning,
         Some(DiagnosticSeverity::ERROR) | None => FailOn::Error,
         Some(_) => FailOn::Error,
-    }
-}
-
-fn severity_word(d: &Diagnostic) -> &'static str {
-    match d.severity {
-        Some(DiagnosticSeverity::HINT) => "hint",
-        Some(DiagnosticSeverity::INFORMATION) => "info",
-        Some(DiagnosticSeverity::WARNING) => "warning",
-        _ => "error",
-    }
-}
-
-fn code_of(d: &Diagnostic) -> String {
-    match &d.code {
-        Some(NumberOrString::String(s)) => s.clone(),
-        Some(NumberOrString::Number(n)) => n.to_string(),
-        None => String::new(),
     }
 }
 
