@@ -53,6 +53,10 @@ path = "src/bin/mux_lock_probe.rs"
 name = "tfls-mux-format-probe"
 path = "src/bin/mux_format_probe.rs"
 
+[[bin]]
+name = "tfls-lint"
+path = "src/bin/lint.rs"
+
 [dependencies]
 tfls-lsp.workspace = true
 tfls-engine.workspace = true
