@@ -1086,11 +1086,76 @@ async fn scan_dir_into_state(
     Ok(())
 }
 
-/// Read + parse + upsert all `files` in parallel (rayon inside
-/// `spawn_blocking`), then build a per-module-dir snapshot, compute
-/// diagnostics in parallel, and fan out publishes concurrently.
-/// Shared between [`scan_dir_into_state`] and
-/// [`bulk_workspace_scan`] so both benefit from the same speedups.
+/// Result of [`parse_and_upsert_files`]: the URIs touched by the
+/// parse pass (freshly parsed, plus any already-open doc that also
+/// appears in the input file list) and how many files were freshly
+/// parsed off disk (as opposed to skipped because an open buffer or
+/// an already-parsed closed doc already covers them).
+struct ParseAndUpsert {
+    uris: Vec<url::Url>,
+    parsed_count: usize,
+}
+
+/// Read + parse (rayon-parallel) + upsert every file in `files` into
+/// `state`. Pure and synchronous (CPU-bound) — no diagnostic compute,
+/// no publish, no LSP client. Callers on an async runtime should run
+/// it off the reactor (see `crate::blocking::run`).
+///
+/// Skips docs that are open (editor-authoritative) or already have a
+/// fully parsed body. Cache hydration (`DocumentState::hydrated_from_cache`)
+/// leaves `parsed.body = None` so per-doc symbols can populate ahead
+/// of parse, but body-dependent passes (the module-call walk in
+/// `rebuild_assigned_variable_types_for_dir`, body-walking
+/// diagnostics, etc.) need the AST — those get re-parsed. The skip
+/// snapshot is taken before the parallel parse, so a buffer opened
+/// mid-parse won't be in it; `upsert_document_unless_open` is the
+/// backstop that closes that TOCTOU at upsert time.
+fn parse_and_upsert_files(state: &StateStore, files: &[PathBuf]) -> ParseAndUpsert {
+    use rayon::prelude::*;
+
+    let skip: std::collections::HashSet<url::Url> = state
+        .documents
+        .iter()
+        .filter(|e| state.is_open(e.key()) || e.value().parsed.body.is_some())
+        .map(|e| e.key().clone())
+        .collect();
+
+    let parsed: Vec<DocumentState> = files
+        .par_iter()
+        .filter_map(|path| {
+            let url = path_to_url(path)?;
+            if skip.contains(&url) {
+                return None;
+            }
+            let text = std::fs::read_to_string(path).ok()?;
+            Some(DocumentState::new(url, &text, 0))
+        })
+        .collect();
+
+    let parsed_count = parsed.len();
+    let mut uris: Vec<url::Url> = parsed.iter().map(|d| d.uri.clone()).collect();
+    for doc in parsed {
+        state.upsert_document_unless_open(doc);
+    }
+    // Also include any already-open docs that sit in the same dirs
+    // we just scanned — they should be in the publish round too so
+    // cross-file aggregates (added-provider, etc.) refresh.
+    for f in files {
+        if let Some(url) = path_to_url(f) {
+            if !uris.contains(&url) && state.documents.contains_key(&url) {
+                uris.push(url);
+            }
+        }
+    }
+
+    ParseAndUpsert { uris, parsed_count }
+}
+
+/// Read + parse + upsert all `files` (via [`parse_and_upsert_files`]),
+/// then build a per-module-dir snapshot, compute diagnostics in
+/// parallel, and fan out publishes concurrently. Shared between
+/// [`scan_dir_into_state`] and [`bulk_workspace_scan`] so both
+/// benefit from the same speedups.
 /// Run one file's diagnostic compute, containing any panic to THIS file.
 ///
 /// Without this, a panic in one file's diagnostic pass unwinds the whole
@@ -1141,44 +1206,9 @@ async fn scan_files_parallel(
     };
 
     let parse_start = std::time::Instant::now();
-    let parsed: Vec<DocumentState> = tokio::task::spawn_blocking({
-        let files = files.clone();
-        // Only skip docs that have a fully parsed body. Cache
-        // hydration (`DocumentState::hydrated_from_cache`) leaves
-        // `parsed.body = None` so per-doc symbols can populate
-        // ahead of parse, but body-dependent passes (the
-        // module-call walk in `rebuild_assigned_variable_types_for_dir`,
-        // body-walking diagnostics, etc.) need the AST. Re-parse
-        // those — the cost is bounded by `cache-hydrated count`
-        // and the cache still covers the symbol-side speedup.
-        // Skip open buffers (editor-authoritative) and already-fully-parsed
-        // closed docs. NOTE: this snapshot can go stale during the slow
-        // parallel parse below — a file `did_open`'d mid-scan won't be here —
-        // so the final upsert loop re-checks `is_open` to close that TOCTOU.
-        let skip: std::collections::HashSet<url::Url> = state
-            .documents
-            .iter()
-            .filter(|e| state.is_open(e.key()) || e.value().parsed.body.is_some())
-            .map(|e| e.key().clone())
-            .collect();
-        move || {
-            files
-                .into_par_iter()
-                .filter_map(|path| {
-                    let url = path_to_url(&path)?;
-                    if skip.contains(&url) {
-                        return None;
-                    }
-                    let text = std::fs::read_to_string(&path).ok()?;
-                    Some(DocumentState::new(url, &text, 0))
-                })
-                .collect()
-        }
-    })
-    .await
-    .unwrap_or_default();
+    let ParseAndUpsert { uris, parsed_count } =
+        crate::blocking::run(|| parse_and_upsert_files(state, &files));
 
-    let parsed_count = parsed.len();
     tracing::info!(
         parsed = parsed_count,
         total = file_count,
@@ -1191,25 +1221,6 @@ async fn scan_files_parallel(
             Some(33),
         )
         .await;
-    }
-
-    let mut uris: Vec<url::Url> = parsed.iter().map(|d| d.uri.clone()).collect();
-    for doc in parsed {
-        // Re-check is_open at upsert time: a buffer opened DURING the
-        // parallel parse above isn't in the pre-parse `skip` snapshot, and
-        // clobbering it from disk (at version 0) would revert the user's
-        // edits and desync. `upsert_document_unless_open` is the backstop.
-        state.upsert_document_unless_open(doc);
-    }
-    // Also include any already-open docs that sit in the same dirs
-    // we just scanned — they should be in the publish round too so
-    // cross-file aggregates (added-provider, etc.) refresh.
-    for f in &files {
-        if let Some(url) = path_to_url(f) {
-            if !uris.contains(&url) && state.documents.contains_key(&url) {
-                uris.push(url);
-            }
-        }
     }
 
     let Some(client) = client else {
