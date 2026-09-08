@@ -38,6 +38,7 @@ crates/
   tfls-format/             Formatter — thin wrapper around `tf-format`; style runtime-toggleable (see "Formatting style" below)
   tfls-walker/             FS discovery + notify-debouncer-full file watcher
   tfls-provider-protocol/  Terraform plugin gRPC protocol (v5+v6), mTLS, registry docs
+  tfls-engine/             Transport-free diagnostics engine (module aggregation, snapshots) shared by tfls-lsp and the future lint CLI
   tfls-lsp/                Backend (tower-lsp) + handlers + background indexer
   tfls-cli/                main: tokio, clap, stdio transport
 ```
