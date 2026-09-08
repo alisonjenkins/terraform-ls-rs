@@ -2923,6 +2923,7 @@ version = "0.16.0"
 dependencies = [
  "hcl-edit",
  "ls-types",
+ "rayon",
  "ropey",
  "rustc-hash",
  "semver",

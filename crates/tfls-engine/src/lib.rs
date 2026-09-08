@@ -2,6 +2,7 @@
 //! (future) standalone lint CLI.
 
 pub mod format_scan;
+pub mod index;
 pub mod module;
 pub mod pipeline;
 pub mod provider_fn;
