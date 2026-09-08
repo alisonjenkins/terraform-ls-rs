@@ -364,7 +364,11 @@ pub fn spawn_watcher(
                     // inlay hints so the new lock state surfaces
                     // immediately, not on the user's next edit.
                     if let Some(client) = &client {
-                        let _ = client.inlay_hint_refresh().await;
+                        let _ = crate::progress::bounded_request(
+                            "workspace/inlayHint/refresh",
+                            client.inlay_hint_refresh(),
+                        )
+                        .await;
                         // Push fresh diagnostics for every open
                         // document in this module dir. The
                         // lock-vs-constraint warning emitted by
@@ -750,9 +754,11 @@ pub(crate) async fn maybe_refresh_diagnostics(
         RefreshDecision::NoClient | RefreshDecision::NoOp => {}
         RefreshDecision::SendRefresh => {
             if let Some(c) = client {
-                if let Err(e) = c.workspace_diagnostic_refresh().await {
-                    tracing::warn!(error = ?e, "workspace/diagnostic/refresh failed");
-                }
+                let _ = crate::progress::bounded_request(
+                    "workspace/diagnostic/refresh",
+                    c.workspace_diagnostic_refresh(),
+                )
+                .await;
             }
         }
     }

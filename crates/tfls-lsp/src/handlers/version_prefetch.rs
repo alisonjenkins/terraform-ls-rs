@@ -116,7 +116,11 @@ pub fn spawn_eager_tool_versions(client: tower_lsp_server::Client) {
         // up against the now-warm cache. Failure to refresh is
         // non-fatal — clients that don't advertise the capability
         // just won't refresh until the next user-driven request.
-        let _ = client.inlay_hint_refresh().await;
+        let _ = crate::progress::bounded_request(
+            "workspace/inlayHint/refresh",
+            client.inlay_hint_refresh(),
+        )
+        .await;
     });
 }
 
@@ -217,7 +221,11 @@ async fn prefetch_and_refresh(
     // on `Client::inlay_hint_refresh`. We ignore failures — an older
     // client that doesn't support the capability just won't refresh
     // until the next user action.
-    let _ = client.inlay_hint_refresh().await;
+    let _ = crate::progress::bounded_request(
+        "workspace/inlayHint/refresh",
+        client.inlay_hint_refresh(),
+    )
+    .await;
 
     // Also refresh diagnostics so the semantic no-match warning
     // (fired by `constraint_diagnostics` when the version constraint
