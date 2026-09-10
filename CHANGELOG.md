@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.17.0](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.16.0...v0.17.0) (2026-09-10)
+
+
+### Features
+
+* **cli:** add json, sarif and github output formats ([0b02c95](https://github.com/alisonjenkins/terraform-ls-rs/commit/0b02c953e86bacac5aeaad7a8f905aacbac48e43))
+* **cli:** add tfls-lint binary ([ef43bfe](https://github.com/alisonjenkins/terraform-ls-rs/commit/ef43bfe1c5693d0ac98ebf56801d68308153a4dc))
+* **cli:** honour .tfls.json in tfls-lint ([e6ec377](https://github.com/alisonjenkins/terraform-ls-rs/commit/e6ec3770ea92512a7ccd0e7950052e752d9bc0e6))
+* **cli:** warm version and git-ref caches in tfls-lint ([671e6a7](https://github.com/alisonjenkins/terraform-ls-rs/commit/671e6a781d56d9cff938c56eb3befb9848860d64))
+* **engine:** add workspace loader and lint_all ([e6f7a86](https://github.com/alisonjenkins/terraform-ls-rs/commit/e6f7a860a6652c169589d99bad899e648959aa8f))
+* **engine:** discover and load .tfls.json project config ([9a67af8](https://github.com/alisonjenkins/terraform-ls-rs/commit/9a67af8aff352eefd00a3f7fb2450455b38ac5d5))
+* **lsp:** apply .tfls.json at initialize ([b9e21db](https://github.com/alisonjenkins/terraform-ls-rs/commit/b9e21db9c48c9a0ae651c4d3e20badf867dd0851))
+
+
+### Bug Fixes
+
+* **cli:** reject unknown --rule levels in tfls-lint ([f2d988f](https://github.com/alisonjenkins/terraform-ls-rs/commit/f2d988f866ae08539dc23c0657e5399ade5a9fe8))
+* **deps:** update rust crate base64 to 0.23 ([a9e7c64](https://github.com/alisonjenkins/terraform-ls-rs/commit/a9e7c6475dc495fc6e9702028b86d68d1a7abe83))
+* **deps:** update rust crate dirs to v7 ([99206e3](https://github.com/alisonjenkins/terraform-ls-rs/commit/99206e3775b69af63427c2fe4e725528ab8162e0))
+* **lsp:** bound remaining client-refresh request waits ([5fa00ab](https://github.com/alisonjenkins/terraform-ls-rs/commit/5fa00abc12359cf9ceb1538d8f9203a29878a523))
+* **lsp:** bound workDoneProgress/create wait ([ffa1a38](https://github.com/alisonjenkins/terraform-ls-rs/commit/ffa1a3866ede134bfbfac554af9855aaf04ca70e))
+* **lsp:** only send workDoneProgress/create to clients that support it ([cd45f39](https://github.com/alisonjenkins/terraform-ls-rs/commit/cd45f396dcc750e14d3b788e3a019ccbd25e5690))
+
 ## [0.16.0](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.15.0...v0.16.0) (2026-07-01)
 
 
