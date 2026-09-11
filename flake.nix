@@ -34,7 +34,7 @@
         # the channel; `nix build` prints the expected hash on mismatch.
         rustToolchain = pkgs.fenix.fromToolchainFile {
           file = ./rust-toolchain.toml;
-          sha256 = "sha256-mvUGEOHYJpn3ikC5hckneuGixaC+yGrkMM/liDIDgoU=";
+          sha256 = "sha256-p8h3Sl/YRByZfZTAKXdsvF6xEenXKrXSVvpphmZENH4=";
         };
 
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
