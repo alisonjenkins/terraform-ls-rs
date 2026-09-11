@@ -1,161 +1,286 @@
 # terraform-ls-rs
 
-A high-performance Rust implementation of the Terraform Language Server,
-built to address the severe latency and memory issues of HashiCorp's
-Go-based `terraform-ls`.
+A fast Rust implementation of the Terraform / OpenTofu language server,
+built to fix the latency and memory problems of HashiCorp's Go-based
+`terraform-ls`.
 
-Why rewrite: `terraform-ls` regularly consumes 2–10 GB of RAM on
-moderately-sized workspaces, pegs a CPU core for minutes during
-indexing, and can leave stale errors on screen long after the
-underlying code has been fixed. The root causes are Go's GC pressure,
-synchronous `terraform` CLI calls, full re-parses on every edit, and
-`go-memdb` overhead.
+`terraform-ls` regularly uses 2-10 GB of RAM on a moderately sized
+workspace, pegs a CPU core for minutes during indexing, and can leave
+stale errors on screen after the underlying code is fixed. The causes:
+Go's GC pressure, synchronous `terraform` CLI calls, full re-parses on
+every edit, and `go-memdb` overhead.
 
 This project replaces those pieces with:
 
-- **[`hcl-edit`](https://docs.rs/hcl-edit)** for HCL parsing with
-  preserved position info
-- **[`ropey`](https://docs.rs/ropey)** for O(log n) incremental edits
-- **[`dashmap`](https://docs.rs/dashmap)** for lock-free concurrent
-  state (replacing `go-memdb`)
-- **[`sonic-rs`](https://docs.rs/sonic-rs)** for SIMD-accelerated JSON
-  parsing of large provider schemas
-- **[`tokio`](https://tokio.rs)** async everywhere — CLI schema
-  fetches never block the server thread
-- **[`tower-lsp`](https://docs.rs/tower-lsp)** for the LSP protocol
+- [`hcl-edit`](https://docs.rs/hcl-edit) for HCL parsing with preserved
+  position info
+- [`ropey`](https://docs.rs/ropey) for O(log n) incremental edits
+- [`dashmap`](https://docs.rs/dashmap) for lock-free concurrent state
+- [`sonic-rs`](https://docs.rs/sonic-rs) for SIMD-accelerated JSON parsing
+  of provider schemas
+- [`tokio`](https://tokio.rs) async everywhere, so CLI schema fetches
+  never block the server thread
+- [`tower-lsp`](https://docs.rs/tower-lsp) for the LSP protocol
+
+The same diagnostics engine ships three ways: an LSP server (`tfls`), a
+CI linter (`tfls-lint`), and a GitHub Action wrapping the linter. All
+three run identical checks, so a warning you silence in your editor
+stays silenced in CI when you check in a `.tfls.json`.
+
+## Install
+
+### Using Nix (recommended)
+
+```sh
+# Run it once without installing
+nix run github:alisonjenkins/terraform-ls-rs
+
+# Install into your profile
+nix profile install github:alisonjenkins/terraform-ls-rs
+
+# Drop into a dev shell with fenix-managed Rust + OpenTofu + rust-analyzer
+nix develop
+```
+
+The flake exposes `packages.default` / `packages.tfls` (the server),
+`apps.default` (runs `tfls`), and `apps.tfls-lint` (runs the CI linter):
+
+```sh
+nix run github:alisonjenkins/terraform-ls-rs#tfls-lint -- .
+```
+
+### Using Cargo
+
+```sh
+cargo install --git https://github.com/alisonjenkins/terraform-ls-rs --bin tfls --bin tfls-lint
+```
+
+`--bin tfls --bin tfls-lint` installs only the server and the linter.
+Without it, Cargo installs every binary in the crate, including a dozen
+debug probes meant for local investigation, not day-to-day use (see
+[CLAUDE.md](CLAUDE.md) if you want those too). The crate isn't published
+to crates.io, so `--git` is required.
+
+### Prebuilt binaries
+
+Each [GitHub release](https://github.com/alisonjenkins/terraform-ls-rs/releases)
+ships `tar.gz` archives for two platforms:
+
+- `tfls-<version>-x86_64-unknown-linux-musl.tar.gz`
+- `tfls-<version>-x86_64-pc-windows-msvc.tar.gz`
+- `tfls-lint-<version>-x86_64-unknown-linux-musl.tar.gz`
+- `tfls-lint-<version>-x86_64-pc-windows-msvc.tar.gz`
+
+Each archive has a matching `.sha256` file. There is no macOS build.
+macOS users build from source through `nix develop` or `cargo install`
+above.
+
+## Editor setup
+
+### Neovim
+
+`nvim-lspconfig` has no built-in preset for `tfls`. Start it directly
+with `vim.lsp.start`, which works on any Neovim 0.10+ without depending
+on lspconfig's internal API:
+
+```lua
+vim.api.nvim_create_autocmd('FileType', {
+  pattern = { 'terraform', 'terraform-vars' },
+  callback = function()
+    vim.lsp.start({
+      name = 'tfls',
+      cmd = { 'tfls' },
+      root_dir = vim.fs.root(0, { '.terraform', '.git' }),
+    })
+  end,
+})
+```
+
+### VS Code
+
+A dedicated extension lives in [`editors/vscode`](editors/vscode). It is
+in **preview** and not yet on the Marketplace. Install the `.vsix`
+attached to a [GitHub release](https://github.com/alisonjenkins/terraform-ls-rs/releases)
+(`code --install-extension tfls-vscode-<version>.vsix`). On first
+activation it downloads the matching `tfls` binary for your platform
+(Linux x64 or Windows x64 — no macOS build), verifies its checksum, and
+caches it; set `terraform-ls-rs.serverPath` to use a local build instead.
 
 ## Features
 
-**31 LSP methods implemented** — covering everything `hashicorp/terraform-ls`
-supports plus the features its users have been asking for (rename,
-documentHighlight, foldingRange, inlayHint, on-type formatting, ...).
+Everything `hashicorp/terraform-ls` supports, plus rename, document
+highlight, folding, inlay hints, on-type formatting, semantic tokens,
+and pull diagnostics. The full method list lives in
+`crates/tfls-lsp/src/backend.rs`; grouped by capability:
 
-| Feature | Method | Notes |
-|---------|--------|-------|
-| Document sync | `textDocument/did{Open,Change,Save,Close}` | Incremental (rope-based) |
-| Diagnostics | `textDocument/publishDiagnostics` | Syntax + undefined-ref + schema + deprecations |
-| Go to definition / declaration | `textDocument/{definition,declaration}` | Cross-file |
-| Find references | `textDocument/references` | Cross-file |
-| Document highlight | `textDocument/documentHighlight` | Write on definition, Read on references |
-| Hover | `textDocument/hover` | Kind + name |
-| Completion | `textDocument/completion` | Block types, schema-derived attrs, `var.*` / `local.*` / `module.*` |
-| Signature help | `textDocument/signatureHelp` | Cached version-correct function signatures |
-| Rename | `textDocument/{prepareRename,rename}` | Cross-file with narrow identifier ranges |
-| Document symbol | `textDocument/documentSymbol` | Outline view |
-| Workspace symbol | `workspace/symbol` | Subsequence fuzzy match, ~200 µs at 10k symbols |
-| Code lens | `textDocument/codeLens` | Reference counts on each definition |
-| Code actions | `textDocument/codeAction` | Multi-scope quick-fixes — see below |
-| Document links | `textDocument/documentLink` | Resource/data blocks → registry docs |
-| Formatting | `textDocument/formatting` | Whole document, runtime-toggleable style (`minimal` / `opinionated`) |
-| Range formatting | `textDocument/rangeFormatting` | Selection only, parse-validated |
-| On-type formatting | `textDocument/onTypeFormatting` | Triggered by `}` |
-| Folding | `textDocument/foldingRange` | Every multi-line block |
-| Selection range | `textDocument/selectionRange` | Smart expand-selection |
-| Inlay hints | `textDocument/inlayHint` | Literal `default` values after `var.*` refs |
+| Capability | LSP methods | Notes |
+|---|---|---|
+| Document sync | `textDocument/did{Open,Change,Save,Close}` | Incremental, rope-based |
+| Diagnostics | `textDocument/publishDiagnostics`, `textDocument/diagnostic`, `workspace/diagnostic` | Push and pull; syntax + undefined-ref + schema + deprecations |
+| Navigation | `textDocument/{definition,declaration,references,documentHighlight,documentSymbol}`, `workspace/symbol` | Cross-file |
+| Hover and signatures | `textDocument/hover`, `textDocument/signatureHelp` | Version-correct function signatures, see below |
+| Completion | `textDocument/completion` | Block types, schema-derived attributes, `var.*` / `local.*` / `module.*` / provider-defined functions |
+| Rename | `textDocument/{prepareRename,rename}` | Cross-file, narrow identifier ranges |
+| Code actions | `textDocument/codeAction`, `workspace/executeCommand` | Multi-scope quick fixes, see below |
+| Formatting | `textDocument/{formatting,rangeFormatting,onTypeFormatting}` | Runtime-toggleable style, see below |
+| Other navigation aids | `textDocument/{documentLink,codeLens,foldingRange,selectionRange,inlayHint}` | Registry doc links, reference counts, stale-provider hints |
 | Semantic tokens | `textDocument/semanticTokens/{full,range}` | Resources, variables, references |
-| Did change configuration | `workspace/didChangeConfiguration` | Live-tunable CLI timeout, debounce, format style |
-| Did change watched files | `workspace/didChangeWatchedFiles` | Client-driven file events |
-| Execute command | `workspace/executeCommand` | `initWorkspace`, `fetchSchemas`, `validate` |
+| Config and files | `workspace/didChangeConfiguration`, `workspace/didChangeWatchedFiles` | Live-tunable CLI timeout, debounce, format style |
+| Custom | `terraform-ls/searchDocs`, `terraform-ls/getDoc`, `terraform-ls/getSnippet` | Registry doc search and retrieval, for clients that want it inline |
 
-### Deprecation diagnostics + auto-fix actions
+`workspace/executeCommand` supports three commands, each prefixed
+`terraform-ls-rs.`: `initWorkspace` (runs `terraform init -backend=false`),
+`fetchSchemas` (re-fetches provider schemas), and `validate` (runs
+`terraform validate`).
 
-Version-aware warnings for the major HashiCorp-provider deprecations,
-each module-gated against the project's `terraform { required_version }`
-constraint (a constraint in `versions.tf` correctly suppresses warnings
-on its sibling files). Each deprecation pairs with a multi-scope code
-action that performs the migration:
+### Diagnostics
 
-| Deprecation family | Gate | Replacement | Auto-fix |
-|--------------------|------|-------------|----------|
-| `resource "null_resource"` | Terraform `>= 1.4.0` | `resource "terraform_data"` | Convert block + rewrite `null_resource.X.triggers` references workspace-wide + emit `moved { }` blocks to `moved.tf` for zero-downtime state migration |
-| `data "template_file"` | Terraform `>= 0.12.0` | `templatefile()` function | Hoist to `local`, rewrite `data.template_file.X.rendered` → `local.X` references, unwrap `template = file("path")` to `templatefile("path", ...)`, skip on local-name collision |
-| `data "template_dir"` | Terraform `>= 0.12.0` | `for_each = fileset(...) + templatefile()` | Diagnostic only (migration project-specific) |
-| `data "null_data_source"` | Terraform `>= 0.10.0` | `locals { }` block | Diagnostic only |
-| AWS alb family (5 resources) | AWS provider `>= 1.7.0` | `aws_alb*` → `aws_lb*` | **Auto-fix:** rewrite labels + refs + emit `moved { }` (safe — true aliases in provider) |
-| AWS `aws_s3_bucket_object` | AWS provider `>= 4.0.0` | `aws_s3_object` | **Auto-fix:** rewrite labels + refs; real `moved {}` emitted when module's `required_version` admits Terraform 1.8+ (cross-type `moved` needs CLI 1.8 + provider `MoveResourceState`). Below 1.8: commented-out scaffolding with a "REQUIRES TERRAFORM 1.8+" header pointing at either a `required_version` bump or `terraform state mv` |
-| Kubernetes `_v1` rename family (20 resources) | Kubernetes provider `>= 2.0.0` | append `_v1` suffix | **Auto-fix:** rewrite labels + refs + emit COMMENTED-OUT `moved {}` scaffolding in `moved.tf` with a verify-before-uncommenting header. Schemas diverge between unversioned and `_v1` variants — user runs `terraform plan` first; if no destructive changes, uncomment the pre-written `moved` block(s); otherwise use `terraform state mv` or `terraform state rm` + `terraform import` (header explains both paths) |
-| Azure VM split family (2 resources) | azurerm `>= 2.40.0` | OS-specific `_linux_` / `_windows_` variants | Diagnostic only (semantic split, schema diverges) |
-| GCP Dataflow split | google `>= 3.45.0` | `google_dataflow_flex_template_job` | Diagnostic only |
-| Vault `vault_generic_secret` | vault `>= 3.0.0` | `vault_kv_secret_v1` / `vault_kv_secret_v2` | Diagnostic only (target depends on KV backend version) |
+Every rule has a stable `terraform_<name>` code you can target in the
+`rules` config (see [Configuration](#configuration)). As of commit
+`40cd6ff`, there are 49 rule codes, wired in
+`crates/tfls-engine/src/pipeline.rs`. Five are gated behind the opt-in
+`styleRules` setting (off by default): `terraform_standard_module_structure`,
+`terraform_documented_variables`, `terraform_documented_outputs`,
+`terraform_naming_convention`, `terraform_comment_syntax`.
 
-**AWS rename family** (one consolidated module, one body walk per code-action call):
+Severities: `error`, `warning`, `information` (labeled `info` in config),
+`hint`. Set any code to `off` to suppress it, or to another severity to
+remap it.
 
-| From | To |
-|------|----|
-| `aws_alb` | `aws_lb` |
-| `aws_alb_listener` | `aws_lb_listener` |
-| `aws_alb_listener_rule` | `aws_lb_listener_rule` |
-| `aws_alb_target_group` | `aws_lb_target_group` |
-| `aws_alb_target_group_attachment` | `aws_lb_target_group_attachment` |
-| `aws_s3_bucket_object` | `aws_s3_object` |
+| Code | Default severity | Checks | styleRules |
+|---|---|---|---|
+| `terraform_aws_renames` | warning | AWS resource type superseded by a renamed type | |
+| `terraform_azurerm_blocks` | warning | Deprecated azurerm resource or block | |
+| `terraform_comment_syntax` | information | Comment uses `//` instead of `#` | yes |
+| `terraform_constraint` | error/warning | Version constraint malformed, or matches nothing in the registry | |
+| `terraform_cyclic_locals` | error | Dependency cycle among `local` values | |
+| `terraform_deprecated_index` | warning | Legacy bracket-free `list.0` index syntax | |
+| `terraform_deprecated_interpolation` | warning | Unneeded `"${var.x}"` string-interpolation wrapping | |
+| `terraform_deprecated_lookup` | warning | Legacy 3-argument `lookup()` call | |
+| `terraform_deprecated_null_data_source` | warning | `data "null_data_source"`, part of the unmaintained `null` provider | |
+| `terraform_deprecated_null_resource` | warning | `null_resource`, superseded by built-in `terraform_data` (Terraform 1.4+) | |
+| `terraform_deprecated_template_dir` | warning | `data "template_dir"`, part of the unmaintained `template` provider | |
+| `terraform_deprecated_template_file` | warning | `data "template_file"`, superseded by built-in `templatefile()` (Terraform 0.12+) | |
+| `terraform_documented_outputs` | information | `output` block missing a `description` | yes |
+| `terraform_documented_variables` | information | `variable` block missing a `description` | yes |
+| `terraform_duplicate_definition` | error | Same-file duplicate block address | |
+| `terraform_empty_list_equality` | warning | Comparing a list to `[]` instead of `length(...) == 0` | |
+| `terraform_fmt` | information | Buffer doesn't match the active `formatStyle` | |
+| `terraform_for_each_unknown_keys` | warning | `for_each` / `count` key set or `if` predicate depends on an apply-time value | |
+| `terraform_google_blocks` | warning | Deprecated google resource or block | |
+| `terraform_import_unknown_id` | warning | `import` block `id` / `for_each` needs a plan-known value | |
+| `terraform_kubernetes_renames` | warning | `kubernetes_*` type superseded by its `_v1` equivalent | |
+| `terraform_lifecycle_literal` | error | Non-literal expression in a `lifecycle` meta-argument | |
+| `terraform_lock_constraint_drift` | warning | Locked provider version no longer satisfies a bumped `version` constraint | |
+| `terraform_map_duplicate_keys` | error | Duplicate key in an object or map literal | |
+| `terraform_meta_argument` | error/warning | `count` + `for_each` conflict, quoted `depends_on`, `for_each` over a list literal | |
+| `terraform_missing_name_tag` | warning | Console-visible AWS resource with no literal `Name` tag | |
+| `terraform_missing_tags` | warning | Resource whose schema has `tags`/`labels` but sets neither | |
+| `terraform_module_mutable_ref` | warning | Module `source` pinned to a mutable ref instead of a tag | |
+| `terraform_module_outdated` | information | Module pinned to a tag that isn't the latest known tag | |
+| `terraform_module_pinned_source` | warning | Module `source` not pinned to a ref or tag | |
+| `terraform_module_ref_tag_mismatch` | warning | Module's pinned tag no longer resolves to the cached commit | |
+| `terraform_module_shallow_clone` | warning | Git module pinned to a ref but not using `depth=1` | |
+| `terraform_module_version_presence` | warning | Registry module call missing a `version` constraint | |
+| `terraform_naming_convention` | information | Block name not snake_case | yes |
+| `terraform_provider_function` | error/warning | Provider-defined function call doesn't resolve or has an argument mismatch | |
+| `terraform_required_providers_version` | warning | `required_providers` entry missing or misconfigured a version constraint | |
+| `terraform_required_version_presence` | warning | Module missing a `terraform { required_version }` constraint | |
+| `terraform_schema_validation` | error/warning | Unknown resource/data/attribute, or a deprecated one, against the provider schema | |
+| `terraform_sensitive_output` | error | Sensitive value flows into an `output` not itself marked `sensitive` | |
+| `terraform_standard_module_structure` | warning | Variable or output declared outside `variables.tf`/`outputs.tf` | yes |
+| `terraform_syntax` | error | Parse error at its real position | |
+| `terraform_tftest` | error | Structural error in a `.tftest.hcl` / `.tftest.json` file | |
+| `terraform_typed_variables` | warning | `variable` block missing `type =` | |
+| `terraform_undefined_reference` | warning | `var.*` / `local.*` / `module.*` reference that doesn't resolve | |
+| `terraform_unused_declarations` | warning | Declared `variable` / `local` / `output` never referenced | |
+| `terraform_unused_required_providers` | warning | `required_providers` entry for a provider never used in the module | |
+| `terraform_variable_default_type` | error | Variable `default` shape disagrees with its declared `type` | |
+| `terraform_vault_blocks` | warning | Deprecated vault resource or block | |
+| `terraform_workspace_remote` | warning | `terraform.workspace` referenced while the backend is remote (HCP Terraform), where "workspace" means something else | |
 
-**Kubernetes `_v1` rename family** — `kubernetes_pod`, `kubernetes_deployment`, `kubernetes_service`, `kubernetes_namespace`, `kubernetes_config_map`, `kubernetes_secret`, `kubernetes_role`, `kubernetes_role_binding`, `kubernetes_cluster_role`, `kubernetes_cluster_role_binding`, `kubernetes_persistent_volume`, `kubernetes_persistent_volume_claim`, `kubernetes_service_account`, `kubernetes_stateful_set`, `kubernetes_daemonset`, `kubernetes_job`, `kubernetes_cron_job`, `kubernetes_network_policy`, `kubernetes_ingress`, `kubernetes_horizontal_pod_autoscaler` — all migrate by appending `_v1`.
+### Deprecation code actions
 
-**Azure split family** — `azurerm_virtual_machine` and `azurerm_virtual_machine_scale_set` each split into `_linux_` + `_windows_` variants (azurerm 2.40+).
+Beyond diagnostics, several deprecations pair with a multi-scope code
+action that performs the migration. The table below covers the
+hand-written (tier-1) rules; every provider-flagged deprecation not in
+this table still surfaces as a warning automatically (tier 2, see
+below), just without an auto-fix.
 
-**GCP block deprecations** — `google_dataflow_job` → `google_dataflow_flex_template_job` (google 3.45+).
+| Family | Gate | Replacement | Fix |
+|---|---|---|---|
+| `resource "null_resource"` | Terraform >= 1.4.0 | `resource "terraform_data"` | Convert block, rewrite `null_resource.X.triggers` references workspace-wide, emit `moved {}` blocks |
+| `data "template_file"` | Terraform >= 0.12.0 | `templatefile()` | Hoist to `local`, rewrite `data.template_file.X.rendered` references to `local.X`, unwrap `template = file(...)` |
+| `data "template_dir"` | Terraform >= 0.12.0 | `for_each = fileset(...)` + `templatefile()` | Diagnostic only, migration is project-specific |
+| `data "null_data_source"` | Terraform >= 0.10.0 | `locals {}` | Diagnostic only |
+| AWS ALB family (5 types) | AWS provider >= 1.7.0 | `aws_alb*` -> `aws_lb*` | Auto-fix: rewrite labels and references, emit real `moved {}` (the types are true provider aliases, so this is always safe) |
+| `aws_s3_bucket_object` (resource, data) | AWS provider >= 4.0.0 | `aws_s3_object` / `aws_s3_objects` | Auto-fix: rewrite labels and references; real `moved {}` only when `required_version` admits Terraform 1.8+, otherwise commented-out scaffolding with a header explaining why |
+| `aws_kinesis_analytics_application` | AWS provider >= 4.0.0 | `aws_kinesisanalyticsv2_application` | Auto-fix, same rewrite mechanics |
+| Kubernetes `_v1` family (20 types) | kubernetes provider >= 2.0.0 | append `_v1` (irregular: `kubernetes_daemonset` -> `kubernetes_daemon_set_v1`) | Auto-fix: rewrite labels and references, emit commented-out `moved {}` scaffolding with a verify-before-uncommenting header, since schemas can diverge between the unversioned and `_v1` variants |
+| Azure VM split (2 types) | azurerm >= 2.40.0 | OS-specific `_linux_` / `_windows_` variants | Diagnostic only, schemas diverge |
+| GCP Dataflow split | google >= 3.45.0 | `google_dataflow_flex_template_job` | Diagnostic only |
+| Vault `vault_generic_secret` | vault >= 3.0.0 | `vault_kv_secret_v1` or `vault_kv_secret_v2` | Diagnostic only, target depends on the KV backend version |
 
-Gates come in two flavours: `terraform { required_version }`
-(Terraform-core deprecations) and
-`terraform { required_providers { <name> = ... } }`
-(provider-specific). Both forms — short `"~> 4.0"` and long
-`{ source = "...", version = "~> 4.0" }` — are recognised.
+Gates come in two flavours: `terraform { required_version }` for
+Terraform-core deprecations, and `terraform { required_providers { <name> = ... } }`
+for provider-specific ones. Both the short form (`aws = "~> 4.0"`) and
+the long form (`aws = { source = "...", version = "~> 4.0" }`) are
+recognised, aggregated across every file in the module.
 
-**Schema-driven deprecation detection (long tail).** Beyond
-the hardcoded rules above, every resource / data source / attribute
-that the provider's own schema marks `deprecated: true` surfaces
-as a WARNING — automatically, no maintenance. Catches the long
-tail of provider deprecations (e.g. `aws_s3_bucket_object`,
-`aws_alb_target_group`, `aws_db_security_group`,
-`kubernetes_pod` v1, dozens of attribute renames per provider
-release) without needing a hand-written rule. Suppressed on
-labels covered by a hardcoded rule so users don't get
-double-warned. Provider-version-correct because it reads the
-*installed* provider's schema — older provider versions don't
-have the deprecation flag set, newer ones do.
+**Tier 2, the long tail.** Beyond the table above, every resource, data
+source, or attribute that a provider's own schema marks `deprecated: true`
+surfaces as a warning automatically, no maintenance needed. It reads the
+schema of the provider version you actually have installed, so it's
+correct as that provider evolves. Suppressed for anything already
+covered by the table above, so you never get warned twice for the same
+thing.
 
-Multi-scope means one click can convert a single block (cursor
-variant), every block in the active file, every block across the
-module, or every block in the entire workspace — gated per-module so
-a module pinned to an older Terraform version isn't nagged about a
-feature its toolchain doesn't have.
+Both tables are enforced by tests (`rule_table_invariants`,
+`every_*_is_hardcoded_listed` in `crates/tfls-diag/src`), so a change
+here can't silently drift from the code.
 
 ### Code actions across scopes
 
-Every multi-target code action is offered at five scopes:
+Every multi-target code action is offered at up to five scopes:
 
 | Scope | Behaviour |
-|-------|-----------|
-| **Instance** | Single occurrence under the cursor or attached to a specific diagnostic |
-| **Selection** | Every occurrence inside the user's visual range |
-| **File** | Every occurrence in the active document |
-| **Module** | Every occurrence in the active module's directory |
-| **Workspace** | Every occurrence indexed across the workspace |
+|---|---|
+| Instance | Single occurrence under the cursor, or attached to a specific diagnostic |
+| Selection | Every occurrence inside your visual range |
+| File | Every occurrence in the active document |
+| Module | Every occurrence in the active module's directory |
+| Workspace | Every occurrence indexed across the workspace |
 
-LSP `CodeActionKind` strings are stable per action — clients can filter
-via `params.context.only`. Examples: `source.fixAll.terraform-ls-rs.unwrap-interpolation`,
-`source.fixAll.terraform-ls-rs.null-resource-to-terraform-data.workspace`.
+`CodeActionKind` strings are stable per action, so clients can filter via
+`params.context.only`, or match by prefix to target every action this
+server offers: `source.fixAll.terraform-ls-rs` alone matches all of
+them; add `.<id>` for one action, `.<id>.module` or `.<id>.workspace`
+for one action at one scope.
 
-Live actions: unwrap deprecated interpolation, convert deprecated
-`lookup()` to index notation, set inferred variable types, refine
-`type = any`, declare undefined variables, move outputs to `outputs.tf`,
-move variables to `variables.tf`, plus the four deprecation migrations
-above.
+Live actions, by `<id>`: `unwrap-interpolation`, `convert-lookup-to-index`,
+`set-variable-types`, `module-shallow-clone-depth`, `refine-any-types`,
+`null-resource-to-terraform-data`, `template-file-to-templatefile`,
+`rename-deprecated-provider-types` (drives the whole deprecation table
+above), `declare-undefined-variables`, `move-outputs-to-outputs-tf`,
+`move-variables-to-variables-tf`, and `format`. Module scope only
+applies to the three that target a specific file (`declare-undefined-variables`,
+`move-outputs-to-outputs-tf`, `move-variables-to-variables-tf`) — there's
+no File/Selection variant for "move this block to another file."
+
+A handful of git-module-ref fixes (pin a mutable ref to a SHA, fix a
+stale tag comment, switch to a newer tag) attach to their diagnostic
+directly as single Instance quick fixes; they don't have a scoped
+variant since each fix targets a different source string.
 
 ### Signature help is version-correct
 
-The function signatures shown in signature help come from
-`<binary> metadata functions -json`, fetched once per session and
-cached on disk at `$XDG_CACHE_HOME/terraform-ls-rs/functions/`, keyed
-by the binary's canonical path + mtime. A CLI upgrade invalidates the
-cache automatically. If no CLI is available, a gzipped snapshot of
-OpenTofu's latest built-ins is compiled into the binary as a fallback.
-
-Regenerate the bundled snapshot with:
-
-```sh
-scripts/refresh-bundled-functions.sh
-```
+Function signatures come from `<binary> metadata functions -json`,
+fetched once per session and cached on disk at
+`$XDG_CACHE_HOME/terraform-ls-rs/functions/`, keyed by the binary's
+canonical path and mtime. A CLI upgrade invalidates the cache
+automatically. Without a CLI available, a gzipped snapshot of
+OpenTofu's latest built-ins ships in the binary as a fallback.
+Regenerate it with `scripts/refresh-bundled-functions.sh`.
 
 ### Formatting, two styles
 
@@ -163,116 +288,52 @@ The formatter wraps [`tf-format`](https://github.com/alisonjenkins/tf-format)
 and exposes two runtime-toggleable styles:
 
 - **`minimal`** (default) — `terraform fmt` / `tofu fmt` parity.
-  Alignment + spacing only; source order preserved. Safe to apply
-  to any repo.
-- **`opinionated`** — full `tf-format`: alphabetises top-level
-  blocks, hoists meta-arguments, sorts attributes/object keys,
-  expands wide single-line objects, adds trailing commas.
+  Alignment and spacing only, source order preserved. Safe on any repo.
+- **`opinionated`** — full `tf-format`: alphabetises top-level blocks,
+  hoists meta-arguments, sorts attributes and object keys, expands wide
+  single-line objects, adds trailing commas.
 
-Toggle live via `workspace/didChangeConfiguration` with
-`{"settings":{"terraform-ls-rs":{"formatStyle":"opinionated"}}}`
-or set initially via `initializationOptions.formatStyle`.
+Set it in `initializationOptions.formatStyle`, live-toggle it with
+`workspace/didChangeConfiguration` (`{"settings":{"terraform-ls-rs":{"formatStyle":"opinionated"}}}`),
+or check in a `.tfls.json` — see [Configuration](#configuration).
 
-## Performance
+## Configuration
 
-Real numbers (criterion on an AMD workstation, release profile):
+Every key below can be set three ways, applied in this order, each
+later step winning on the keys it sets:
 
-| Benchmark | Time |
-|-----------|------|
-| Parse 100 resource blocks | ~417 µs |
-| Extract symbols (100 blocks) | ~90 µs |
-| Extract references (100 blocks) | ~76 µs |
-| Deserialise 200×40 schema (sonic-rs) | ~1.6 ms |
-| `workspace/symbol` at 10k symbols (exact) | ~206 µs |
-| `workspace/symbol` at 10k symbols (fuzzy) | ~642 µs |
-| `documentSymbol` at 500 symbols | ~34 µs |
-| `signatureHelp` call-context detection (200 lines) | ~5.8 µs |
-| `code_action` against 500-block deprecation fixture | ~11 ms (was 70 ms before caching pass) |
-| Deprecation diagnostic walk (1000 blocks) | ~350 µs |
+1. A checked-in `.tfls.json` at the workspace root or any ancestor
+   directory (nearest one wins). Same shape as the LSP settings object,
+   with no wrapper key: `{"rules": {...}, "styleRules": true}`.
+2. `initializationOptions` on the LSP `initialize` request.
+3. `workspace/didChangeConfiguration`, applied live, no restart needed.
 
-The `code_action` handler runs many independent body scans + a full
-formatter pass per request. Several layers of caching keep latency
-flat as workspaces grow:
+Wrap keys under `"terraform-ls-rs"` for `initializationOptions` and
+`didChangeConfiguration` (`{"terraform-ls-rs": {"formatStyle": "minimal"}}`);
+`.tfls.json` skips the wrapper.
 
-- **Cross-call format cache** — `DocumentState` carries the last
-  format-output keyed by `(version, FormatStyle)`. Repeated
-  code-action menu opens on an unchanged doc skip the formatter
-  entirely; invalidated automatically by `apply_change`.
-- **Per-call scan caches** — every emit fn that walks the body
-  caches its scan output across the multi-scope loop, so adding a
-  fifth scope iteration doesn't cost a fifth body walk.
-- **Combined deprecation walker** — every deprecation
-  reference rewriter shares one body iteration via a
-  `HashMap<Url, CombinedDeprecationRefs>` populated lazily by the
-  first emit fn that needs it.
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `formatStyle` | `"minimal"` \| `"opinionated"` | `"minimal"` | Active formatter style |
+| `cliEnabled` | boolean | `true` | Whether the server may shell out to the Terraform/OpenTofu CLI at all |
+| `cliBinary` | string | `"tofu"` | CLI binary name (on `PATH`) or path |
+| `cliTimeoutSecs` | number | `60` | Timeout, in seconds, for CLI invocations |
+| `watchDebounceMs` | number | `150` | Debounce for file-watch events, in milliseconds |
+| `staleVersionDays` | number | `180` | Days after which a pinned provider version is flagged stale; `0` disables the check |
+| `styleRules` | boolean | `false` | Enables the five style-pack rules listed above |
+| `rules` | object | `{}` | Per-rule severity overrides, keyed by code: `{"terraform_naming_convention": "off"}` |
+| `planKnownComputedCollections` | object | `{}` | Extends the built-in allowlist of plan-known computed collection fields, for the unknown-value diagnostics: `{"<type>.<attribute>": ["<field>", ...]}` |
 
-Net effect on the synthetic 500-block worst-case fixture: **70 ms →
-~11 ms (-84%)** since the first commit on this branch.
+`rules` and `planKnownComputedCollections` **replace the whole map** on
+every update, they don't merge. A `didChangeConfiguration` payload that
+sets any `rules` key discards every rule a `.tfls.json` set, not just
+the overlapping ones — omit `rules` from your editor settings if you
+want the project file's policy to stand untouched.
 
-## Install
+## `tfls-lint`
 
-### Using Nix (recommended)
-
-The flake provides a package, a dev-shell with all build and test
-dependencies, and pre-commit-style checks.
-
-```sh
-# Run it once without installing
-nix run github:your-org/terraform-ls-rs
-
-# Install into your profile
-nix profile install github:your-org/terraform-ls-rs
-
-# Drop into a dev shell with fenix-managed Rust + opentofu + rust-analyzer
-nix develop
-```
-
-### Using Cargo
-
-```sh
-cargo install --path crates/tfls-cli
-```
-
-The binary is called `tfls`.
-
-## Editor setup
-
-### Neovim (with `nvim-lspconfig`)
-
-```lua
-local configs = require('lspconfig.configs')
-if not configs.tfls then
-  configs.tfls = {
-    default_config = {
-      cmd = { 'tfls' },
-      filetypes = { 'terraform', 'terraform-vars' },
-      root_dir = require('lspconfig.util').root_pattern('*.tf', '.git'),
-    },
-  }
-end
-require('lspconfig').tfls.setup {}
-```
-
-### VS Code
-
-A dedicated extension lives in [`editors/vscode`](editors/vscode). It is in
-**preview** and not yet on the Marketplace — install the `.vsix` attached to a
-[GitHub release](https://github.com/alisonjenkins/terraform-ls-rs/releases)
-(`code --install-extension tfls-vscode-<version>.vsix`). On first activation it
-downloads the matching `tfls` release for your platform (Linux x64, macOS arm64,
-Windows x64), verifies its checksum, and caches it; set
-`terraform-ls-rs.serverPath` to use a local build instead.
-
-## Linting in CI (`tfls-lint`)
-
-`tfls-lint` is a standalone CI-facing binary that runs the same diagnostics
-engine as the LSP server (`tfls-engine`) against one or more workspace roots,
-with no editor required.
-
-Install: download the `tfls-lint-<version>-<target>.tar.gz` asset from a
-[GitHub release](https://github.com/alisonjenkins/terraform-ls-rs/releases)
-(same target triples as the `tfls` asset), or use the `apps.tfls-lint` flake
-app (`nix run github:your-org/terraform-ls-rs#tfls-lint`).
+`tfls-lint` runs the same diagnostics engine as the editor, from the
+command line, no LSP client required:
 
 ```sh
 tfls-lint .
@@ -280,27 +341,56 @@ tfls-lint --format github --fail-on warning .
 tfls-lint --format sarif . > tfls.sarif   # then upload with github/codeql-action/upload-sarif
 ```
 
-A checked-in `.tfls.json` at the workspace root (or any ancestor) sets a
-shared rule policy for both the editor and CI:
-
-```json
-{ "rules": { "terraform_naming_convention": "off" }, "styleRules": true }
+```
+tfls-lint [PATHS...]                          # default: ["."], one root per path
+tfls-lint --schemas <plugins|bundled|none>    # default plugins
+tfls-lint --fail-on <error|warning|info|hint|never>  # default error
+tfls-lint --rule <CODE=off|hint|info|warning|error>  # repeatable
+tfls-lint --style-rules                       # opt-in style pack
+tfls-lint --jobs <N>                          # worker threads
+tfls-lint -q / --quiet                        # summary line only
+tfls-lint -v / --verbose                      # detailed logging + schema-outcome lines
+tfls-lint --relative-to <DIR>                 # print paths relative to DIR
+tfls-lint --format <text|json|sarif|github>   # default text
+tfls-lint --config <FILE>                     # explicit .tfls.json, skips discovery
+tfls-lint --no-config                         # skip .tfls.json discovery entirely
+tfls-lint --offline                           # skip cache warming, see below
 ```
 
-Exit codes: `0` clean or below `--fail-on` threshold, `1` findings at/above
-threshold, `2` tool error (bad path, load failure).
+Output: one line per diagnostic to stdout, sorted by path/line/column/code:
+`<relative path>:<line+1>:<col+1>: <severity> [<code>] <message>`. A
+summary line goes to stderr. Exit codes: `0` clean or below
+`--fail-on`, `1` findings at or above it, `2` a tool error (bad path,
+load failure).
+
+`--rule` and `--style-rules` build the same `{"rules": {...}, "styleRules": ...}`
+shape `.tfls.json` and the LSP settings accept, and apply it after any
+discovered `.tfls.json`, so flags win over the file.
 
 Rules that validate against provider schemas need `terraform init` /
-`tofu init` run first (so `.terraform/providers/` exists), or pass
-`--schemas bundled` to use the bundled snapshot instead. A few cache-backed
-rules (version/constraint drift, module tag checks) benefit from caching
-`~/.cache/terraform-ls-rs` between CI runs.
+`tofu init` run first, or pass `--schemas bundled` to use the bundled
+snapshot instead. Four rules (`terraform_constraint`,
+`terraform_lock_constraint_drift`, `terraform_module_outdated`,
+`terraform_module_ref_tag_mismatch`) read on-disk caches under
+`$XDG_CACHE_HOME/terraform-ls-rs/` instead of fetching inline; `tfls-lint`
+warms them before linting unless you pass `--offline`. Cache repeated CI
+runs with:
+
+```yaml
+- uses: actions/cache@v4
+  with:
+    path: ~/.cache/terraform-ls-rs
+    key: tfls-cache-${{ runner.os }}
+```
+
+Full internals (output-format details, cache-warming mechanics) are in
+[CLAUDE.md](CLAUDE.md).
 
 ### GitHub Action
 
-A reusable composite action (`action.yml` at the repo root) downloads the
-matching `tfls-lint` release asset for the runner OS, verifies its checksum,
-and runs it — no manual install step needed.
+A reusable composite action (`action.yml` at the repo root) downloads
+the matching `tfls-lint` release asset for the runner OS, verifies its
+checksum, and runs it:
 
 ```yaml
 - uses: alisonjenkins/terraform-ls-rs@v0.17.0
@@ -321,178 +411,85 @@ SARIF upload for GitHub code scanning:
     sarif_file: out/tfls.sarif
 ```
 
-| Input               | Default          | Description                                                        |
-|----------------------|------------------|----------------------------------------------------------------------|
-| `version`            | `latest`         | Release tag to install (e.g. `v0.17.0`), or `latest`.               |
-| `paths`               | `.`              | Whitespace-separated workspace root(s).                            |
-| `format`              | `github`         | Output format (`text\|json\|sarif\|github`).                       |
-| `fail-on`             | `error`          | Minimum severity that trips a non-zero exit.                       |
-| `schemas`             | `plugins`        | Provider schema source (`plugins\|bundled\|none`).                 |
-| `rules`               | (empty)          | Whitespace-separated `CODE=LEVEL` rule overrides.                  |
-| `style-rules`         | `false`          | Enable the opt-in tflint-style rule pack.                          |
-| `config`              | (empty)          | Explicit path to a `.tfls.json` file.                               |
-| `no-config`           | `false`          | Skip `.tfls.json` discovery.                                        |
-| `offline`             | `false`          | Skip warming the on-disk version/git-ref caches.                    |
-| `sarif-file`          | (empty)          | When set, also writes a SARIF report (`--fail-on never`) here.      |
-| `working-directory`   | `.`              | Directory to run `tfls-lint` from.                                 |
-| `token`               | `${{ github.token }}` | Token used only for the release-lookup API call.               |
+| Input | Default | Description |
+|---|---|---|
+| `version` | `latest` | Release tag to install (`v0.17.0`), or `latest` |
+| `paths` | `.` | Whitespace-separated workspace roots |
+| `format` | `github` | Output format: `text`, `json`, `sarif`, `github` |
+| `fail-on` | `error` | Minimum severity that trips a non-zero exit |
+| `schemas` | `plugins` | Provider schema source: `plugins`, `bundled`, `none` |
+| `rules` | (empty) | Whitespace-separated `CODE=LEVEL` overrides |
+| `style-rules` | `false` | Enable the opt-in style rule pack |
+| `config` | (empty) | Explicit path to a `.tfls.json` |
+| `no-config` | `false` | Skip `.tfls.json` discovery |
+| `offline` | `false` | Skip warming the on-disk version/git-ref caches |
+| `sarif-file` | (empty) | Also write a SARIF report here (always `--fail-on never`, so it never masks the main run's exit code) |
+| `working-directory` | `.` | Directory to run `tfls-lint` from |
+| `token` | `${{ github.token }}` | Token for the release-lookup API call only |
 
-Outputs: `exit-code` (the main run's exit code), `sarif-file` (echo of the
-input when set).
+Outputs: `exit-code` (the main run's exit code), `sarif-file` (echoes
+the input when set). No macOS runner support, no macOS build is
+published.
 
-macOS runners are not supported yet — no macOS build is published.
+## Performance
+
+Seven `criterion` benchmark suites cover the hot paths: parsing and
+position mapping, symbol/reference extraction, schema deserialisation,
+workspace/document symbol search, signature-help context detection, and
+the code-action handler's scan-and-cache pipeline. Run them yourself:
+
+```sh
+cargo bench --workspace
+```
+
+Individual suites: `crates/tfls-core/benches`, `crates/tfls-diag/benches`,
+`crates/tfls-lsp/benches`, `crates/tfls-parser/benches`,
+`crates/tfls-schema/benches`, `crates/tfls-state/benches`,
+`crates/tfls-walker/benches`. No numbers are published here since they
+depend on your hardware; commit messages on perf-focused changes cite a
+before/after from the relevant suite with the commit and machine noted.
+
+The `code_action` handler runs many independent body scans plus a full
+formatter pass per request. Caching keeps that flat as workspaces grow:
+
+- **Cross-call format cache** — each document keeps its last format
+  output keyed by `(version, formatStyle)`. Repeated code-action menu
+  opens on an unchanged document skip the formatter entirely.
+- **Per-call scan caches** — each body-walking function caches its scan
+  output across the multi-scope loop, so a fifth scope doesn't cost a
+  fifth body walk.
+- **Combined deprecation walker** — every deprecation reference
+  rewriter shares one body iteration instead of walking once per rule.
 
 ## Development
 
 ```sh
-nix develop               # fenix Rust toolchain + opentofu + cargo tools
+nix develop               # fenix Rust toolchain + OpenTofu + cargo tools
 
 cargo build --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo bench               # criterion benchmarks
+cargo bench --workspace
 ```
 
-Build-level guarantees enforced by the workspace `clippy` lints:
-
-- `unwrap_used = "deny"`
-- `expect_used = "deny"`
-- `panic = "deny"`
-- `dbg_macro = "deny"`
-
-The only exceptions are tests and benchmark modules, which explicitly
-`#[allow]` those lints.
-
-### Git hooks
+Workspace `clippy` lints deny `unwrap_used`, `expect_used`, `panic`, and
+`dbg_macro`. Only tests and benchmark modules `#[allow]` them.
 
 A [prek](https://github.com/j178/prek) pre-commit hook runs `cargo fmt
---check` through the pinned nix toolchain, so misformatted Rust can't be
-committed (and can't drift from CI). It installs automatically the first time
-you enter `nix develop`. Useful commands:
+--check` through the pinned Nix toolchain, so misformatted Rust can't be
+committed or drift from CI. It installs automatically the first time
+you enter `nix develop`.
 
 ```sh
 prek run --all-files      # run the hooks over the whole tree
-git commit -n             # bypass hooks for one commit (discouraged)
+git commit -n              # bypass hooks for one commit, discouraged
 ```
 
-## Architecture
-
-Nine-crate Cargo workspace, each with its own `thiserror` error enum
-and `#[source]` chain preservation:
-
-```
-crates/
-  tfls-core/               domain types (Symbol, ProviderAddress, ...)
-  tfls-parser/             hcl-edit wrapper, position mapping, symbol + ref extraction
-  tfls-schema/             provider schema types + async CLI fetcher
-  tfls-state/              StateStore (DashMap), DocumentState (rope + AST), JobQueue
-  tfls-diag/               syntax, undefined-ref, schema-validation diagnostics
-  tfls-format/             formatter
-  tfls-walker/             fs discovery + notify-debouncer-full file watcher
-  tfls-provider-protocol/  terraform plugin gRPC protocol (v5+v6), mTLS, registry docs
-  tfls-lsp/                Backend (tower-lsp) + handlers + background indexer
-  tfls-cli/                main: tokio, clap, stdio transport
-```
-
-On `initialize`, the Backend spawns:
-
-1. a **worker task** draining the priority job queue,
-2. a **file watcher** per workspace folder forwarding FS events as
-   Normal-priority jobs, and
-3. a one-shot **schema fetch** — prefers the plugin gRPC protocol
-   (speaking directly to provider binaries in `.terraform/providers/`,
-   no credentials required), falling back to `tofu providers schema -json`
-   if no cached providers exist.
-
-The queue deduplicates identical jobs and delivers by priority
-(`Immediate > High > Normal > Low`), so a flood of save events for the
-same file collapses into a single re-parse.
-
-When a file parse fails mid-keystroke, the document's last-good
-symbol table is retained so completion and navigation keep working.
-
-## Status
-
-Every documented feature has integration tests. The binary runs, the
-Nix flake builds, and the server talks real JSON-RPC LSP to test
-clients.
-
-Highlights:
-
-- **34 deprecation diagnostics live** across 4 Terraform-core
-  rules + AWS / Kubernetes / Azure / GCP / Vault provider
-  families. Each is module-aware (sibling `versions.tf` /
-  `required_providers` constraints suppress correctly) and
-  scales atop a generic `DeprecationRule` framework. Adding
-  another rename to a provider family is one table entry;
-  adding a different-shape deprecation is ~25 lines of new
-  module. Both Terraform-core and provider-version gates are
-  supported.
-- **Auto-fix for 30+ deprecation rules** — multi-scope
-  (Selection / File / Module / Workspace), cursor-driven
-  Instance variant, and diagnostic-attached lightbulb
-  quickfix all surfaced through the same `BlockRenameSpec`
-  framework. Per-spec migration safety classification
-  (`Aliased` / `RequiresTerraform18` / `Manual`) governs
-  whether `moved {}` blocks emit as real Terraform syntax
-  or as commented-out scaffolding with verify-before-uncommenting
-  headers — no resource rename ever ships a silently-dangerous
-  state-migration emit.
-- **Tier-2 schema-driven catch-all** — every resource / data
-  source / attribute the provider's schema marks
-  `deprecated: true` surfaces as a WARNING automatically.
-  Suppressed on labels covered by tier-1 (richer message +
-  auto-fix). Provider-version-correct by construction (reads
-  the *installed* provider's schema).
-- **Curation tool** — `tfls-deprecation-scrape` walks an
-  initialised workspace's `.terraform/providers/` and surfaces
-  uncovered deprecation candidates worth promoting to tier-1.
-  Rust scaffolding output mode emits a draft `DeprecationRule`
-  module for any chosen type.
-- **Multi-scope code actions** — Instance / Selection / File /
-  Module / Workspace, with stable `CodeActionKind` strings clients
-  can filter on.
-- **Plugin protocol schema fetch** — speaks the Terraform plugin gRPC
-  protocol directly to provider binaries in `.terraform/providers/`,
-  bypassing `tofu providers schema -json` and its credential
-  requirements.
-- **Registry docs enrichment** — fills missing attribute descriptions
-  (e.g. AWS SDKv2 providers) from the Terraform Registry HTTP API,
-  cached to disk for subsequent runs.
-- **Module-aware indexing** — walks up from opened files to find the
-  nearest `.terraform/providers/` directory.
-
-Completion shape coverage:
-
-- Reference prefixes — `var.`, `local.`, `module.`, `data.`,
-  `<resource_type>.`, plus the built-in namespaces `each.`,
-  `count.`, `path.`, `terraform.`, and `self.` (inside
-  `provisioner` / `connection` blocks under a resource — the
-  enclosing-resource schema drives attribute candidates). All
-  work in bare expression position AND inside `${ ... }`
-  string-template interpolations (`%{ if var.X }` template
-  directives also classify cleanly). Heredoc bodies (`<<EOT`,
-  `<<-EOT`) work the same as quoted strings — `${self.|}`
-  inside a `user_data = <<EOT` resolves correctly.
-- Function-name completion — bare expression position +
-  inside interpolations, including nested calls
-  (`upper(lower(var.X))`).
-- Provider-defined function completion (Terraform 1.8+) —
-  `provider::|` lights up the set of providers that have
-  installed function libraries; `provider::aws::|` filters
-  to that provider's functions. Hover + signatureHelp also
-  resolve `provider::aws::trim_prefix(...)` calls to the
-  fully-qualified key the indexer stored
-  (`provider::hashicorp::aws::trim_prefix`).
-- Schema-driven attributes / values — provider schemas drive
-  attribute completion at every drill-down level.
-
-Not yet implemented (future work):
-
-- More provider-version-gated deprecations. Framework supports
-  the gate kind; the `tfls-deprecation-scrape --uncovered-only`
-  binary surfaces candidates from real workspaces.
+Contributor and agent-facing documentation (architecture, debug
+binaries, the deprecation and code-action frameworks, internal caches)
+lives in [CLAUDE.md](CLAUDE.md). Investigation notes from past debugging
+and design passes are indexed in [docs/README.md](docs/README.md).
 
 ## License
 
-MPL-2.0, matching the upstream `terraform-ls`.
+MPL-2.0, matching upstream `terraform-ls`.
