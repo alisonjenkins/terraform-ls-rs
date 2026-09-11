@@ -1,7 +1,7 @@
 # Bug Audit Backlog
 
 Source: multi-agent repo audit (per-crate finders → adversarial verify → synthesize), 2026-06-02.
-16 confirmed bugs (deduped) — **3 high, 8 medium, 5 low**. All adversarially verified; several empirically reproduced.
+17 confirmed bugs (deduped) — **3 high, 8 medium, 6 low**. All adversarially verified; several empirically reproduced.
 
 Workflow: `audit-repo-bugs`. Each finding read by a skeptic prompted to refute; only survivors listed.
 
