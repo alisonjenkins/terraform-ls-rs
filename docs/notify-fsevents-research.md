@@ -1,5 +1,9 @@
 # notify-rs on macOS under tokio + tower-lsp + piped stdin: research notes
 
+> Analysed against notify 7.0. The workspace now pins notify 8.2.0 and
+> notify-debouncer-full 0.7.0; re-check any FSEvents-specific claim below
+> against the current version before acting on it.
+
 ## Summary (ranked by likelihood of being the root cause)
 
 1. **`tokio::io::stdin` blocking-thread reader does NOT explain it on its own**, but in combination with **path canonicalization at `watch()` time vs. event-time path resolution** in `notify`'s FSEvents backend it produces this exact failure mode. The smoking gun is that the diagnostic watcher placed in `main()` BEFORE `rt.block_on(...)` fires once for an initial Create event but then goes silent — that pattern matches "stream is alive, runloop thread is alive, but path-match filter is dropping every subsequent event because the canonicalized watch root doesn't match the event paths the kernel is delivering". See hypothesis (B) below — `kFSEventStreamCreateFlagWatchRoot` + nix-shell `/private/tmp` + later directory creation under the watch root is the canonical trigger.

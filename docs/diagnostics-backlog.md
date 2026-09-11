@@ -3,9 +3,9 @@
 Source: multi-agent diagnostics deep-dive (8 survey lenses → per-finding assess/verify → synthesize), 2026-06-02.
 Workflow: `diagnostics-deep-dive`. 64 agents, ~3.1M tokens. Bugs adversarially refuted; features/improvements scored for value, effort, and non-duplication.
 
-**Counts (after dedup): 13 bugs, 11 missing features, 14 improvements.** Effort = rough size (S/M/L); confidence from the assessing agent.
+**Counts (after dedup): 15 bugs, 11 missing features, 14 improvements.** Effort = rough size (S/M/L); confidence from the assessing agent.
 
-**Status:** all 13 bugs fixed; the high-value features and improvements are done. The remaining 5 items are marked **won't fix** (`- [~]`) — each is low-value, has a workaround, or is FP-prone for the payoff; see the per-item rationale. Legend: `[x]` done, `[~]` won't fix, `[ ]` open (none).
+**Status:** all 15 bugs fixed; the high-value features and improvements are done. The remaining 5 items are marked **won't fix** (`- [~]`) — each is low-value, has a workaround, or is FP-prone for the payoff; see the per-item rationale. Legend: `[x]` done, `[~]` won't fix, `[ ]` open (none).
 
 ---
 
