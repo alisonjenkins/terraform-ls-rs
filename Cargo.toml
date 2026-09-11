@@ -7,7 +7,7 @@ version = "0.18.0" # x-release-please-version
 edition = "2021"
 rust-version = "1.75"
 license = "MPL-2.0"
-repository = "https://github.com/ali/terraform-ls-rs"
+repository = "https://github.com/alisonjenkins/terraform-ls-rs"
 
 [workspace.metadata.crane]
 name = "terraform-ls-rs"
