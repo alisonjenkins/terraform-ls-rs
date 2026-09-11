@@ -341,7 +341,7 @@ tfls-lint --format github --fail-on warning .
 tfls-lint --format sarif . > tfls.sarif   # then upload with github/codeql-action/upload-sarif
 ```
 
-```
+```text
 tfls-lint [PATHS...]                          # default: ["."], one root per path
 tfls-lint --schemas <plugins|bundled|none>    # default plugins
 tfls-lint --fail-on <error|warning|info|hint|never>  # default error
