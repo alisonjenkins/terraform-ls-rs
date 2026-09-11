@@ -176,6 +176,12 @@ jobs:
           cache: npm
           cache-dependency-path: editors/vscode/package-lock.json
 
+      # release-please bumps package.json; make sure the lockfile carries
+      # the same version, otherwise `npm ci` rejects the lock and
+      # re-resolves (which currently fails on peer ranges).
+      - name: Sync lockfile version with package.json
+        run: npm version --no-git-tag-version --allow-same-version "$(node -p 'require("./package.json").version')"
+
       - run: npm ci
 
       - name: Type-check & lint
