@@ -296,6 +296,52 @@ Rules that validate against provider schemas need `terraform init` /
 rules (version/constraint drift, module tag checks) benefit from caching
 `~/.cache/terraform-ls-rs` between CI runs.
 
+### GitHub Action
+
+A reusable composite action (`action.yml` at the repo root) downloads the
+matching `tfls-lint` release asset for the runner OS, verifies its checksum,
+and runs it — no manual install step needed.
+
+```yaml
+- uses: alisonjenkins/terraform-ls-rs@v0.17.0
+  with:
+    fail-on: warning
+```
+
+SARIF upload for GitHub code scanning:
+
+```yaml
+- uses: alisonjenkins/terraform-ls-rs@v0.17.0
+  id: tfls-lint
+  with:
+    fail-on: warning
+    sarif-file: out/tfls.sarif
+- uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: out/tfls.sarif
+```
+
+| Input               | Default          | Description                                                        |
+|----------------------|------------------|----------------------------------------------------------------------|
+| `version`            | `latest`         | Release tag to install (e.g. `v0.17.0`), or `latest`.               |
+| `paths`               | `.`              | Whitespace-separated workspace root(s).                            |
+| `format`              | `github`         | Output format (`text\|json\|sarif\|github`).                       |
+| `fail-on`             | `error`          | Minimum severity that trips a non-zero exit.                       |
+| `schemas`             | `plugins`        | Provider schema source (`plugins\|bundled\|none`).                 |
+| `rules`               | (empty)          | Whitespace-separated `CODE=LEVEL` rule overrides.                  |
+| `style-rules`         | `false`          | Enable the opt-in tflint-style rule pack.                          |
+| `config`              | (empty)          | Explicit path to a `.tfls.json` file.                               |
+| `no-config`           | `false`          | Skip `.tfls.json` discovery.                                        |
+| `offline`             | `false`          | Skip warming the on-disk version/git-ref caches.                    |
+| `sarif-file`          | (empty)          | When set, also writes a SARIF report (`--fail-on never`) here.      |
+| `working-directory`   | `.`              | Directory to run `tfls-lint` from.                                 |
+| `token`               | `${{ github.token }}` | Token used only for the release-lookup API call.               |
+
+Outputs: `exit-code` (the main run's exit code), `sarif-file` (echo of the
+input when set).
+
+macOS runners are not supported yet — no macOS build is published.
+
 ## Development
 
 ```sh
