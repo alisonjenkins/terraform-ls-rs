@@ -7,10 +7,11 @@ language server.
 ## Features
 
 Completion, hover, go-to-definition / references, document and workspace
-symbols, diagnostics (both push and pull — `textDocument/diagnostic` and
+symbols, diagnostics (both push and pull, `textDocument/diagnostic` and
 `workspace/diagnostic`), code actions (quick fixes), semantic highlighting,
-folding, rename, signature help, inlay hints, code lens, and formatting —
-`minimal` (`terraform fmt` parity) or `opinionated`.
+folding, rename, signature help, inlay hints, code lens, and formatting.
+Formatting supports two styles: `minimal` (`terraform fmt` parity) or
+`opinionated`.
 
 ## Server binary
 
@@ -20,7 +21,7 @@ your platform from
 verifies its checksum, and caches it. Published platforms today:
 **Linux x64** and **Windows x64**. There is no macOS build. On macOS, build
 `tfls` yourself (see the root
-[README's install section](https://github.com/alisonjenkins/terraform-ls-rs#install) —
+[README's install section](https://github.com/alisonjenkins/terraform-ls-rs#install),
 Nix or `cargo install`) and point the extension at it:
 
 ```jsonc
@@ -42,7 +43,7 @@ Precedence: `.tfls.json` applies first, then your VS Code settings
 `workspace/didChangeConfiguration`. Each later step wins on the keys it
 sets. `rules` replaces the whole map at each step, so a VS Code setting
 that sets any `rules` key discards every rule `.tfls.json` set, not just
-the overlapping ones — leave `terraform-ls-rs.rules` empty in your user
+the overlapping ones. Leave `terraform-ls-rs.rules` empty in your user
 settings if you want the project file's policy to stand.
 
 ## Code actions
@@ -50,10 +51,10 @@ settings if you want the project file's policy to stand.
 Two ways to invoke them (VS Code splits them by kind):
 
 - **Quick fixes** (convert `null_resource` → `terraform_data`, set a
-  variable type, add `depth=1`, unwrap interpolation, …) — put the cursor
+  variable type, add `depth=1`, unwrap interpolation, …). Put the cursor
   on the line and press **`Ctrl+.`** (macOS **`Cmd+.`**), or click the
   lightbulb.
-- **Scoped "source" actions** — the same fixes applied across a wider
+- **Scoped "source" actions**: the same fixes applied across a wider
   scope (**File / Module / Workspace**) are `source.*` actions, which
   `Ctrl+.` hides. Run them via **Command Palette → "Source Action…"**.
 
@@ -61,7 +62,7 @@ Every scoped action's `CodeActionKind` is `source.fixAll.terraform-ls-rs.<id>`,
 with `.module` / `.workspace` suffixes for those scopes (no suffix means
 File scope). VS Code and most clients match action kinds **by prefix**, so
 `"source.fixAll.terraform-ls-rs"` alone (no `<id>`) matches every action
-this server offers — useful for a blanket "fix everything on save," or add
+this server offers, useful for a blanket "fix everything on save," or add
 the full `.terraform-ls-rs.<id>` path to target one action. `<id>` examples:
 `set-variable-types`, `convert-lookup-to-index`, `module-shallow-clone-depth`,
 `unwrap-interpolation`, `rename-deprecated-provider-types`.
@@ -69,7 +70,7 @@ the full `.terraform-ls-rs.<id>` path to target one action. `<id>` examples:
 Bind a key to a scope, or run on save:
 
 ```jsonc
-// keybindings.json — apply a workspace-wide fix on demand
+// keybindings.json: apply a workspace-wide fix on demand
 {
   "key": "ctrl+alt+w",
   "command": "editor.action.codeAction",
@@ -77,7 +78,7 @@ Bind a key to a scope, or run on save:
 }
 ```
 ```jsonc
-// settings.json — fix on save (kind is a prefix; narrow as needed)
+// settings.json: fix on save (kind is a prefix; narrow as needed)
 "editor.codeActionsOnSave": {
   "source.fixAll.terraform-ls-rs.module-shallow-clone-depth": "explicit"
 }
@@ -85,7 +86,7 @@ Bind a key to a scope, or run on save:
 
 ## Commands
 
-- **Terraform: Toggle Format Style** — flip `minimal` ↔ `opinionated` live.
+- **Terraform: Toggle Format Style**: flip `minimal` ↔ `opinionated` live.
 - **Terraform: Restart Language Server**
 - **Terraform: Show Language Server Output**
 
@@ -111,7 +112,7 @@ See the Settings UI for the same list with live validation.
 ## Linting outside the editor
 
 The same diagnostics engine is available as a standalone binary,
-`tfls-lint`, for CI or a pre-commit hook — no editor required. See the
+`tfls-lint`, for CI or a pre-commit hook, no editor required. See the
 root README's [`tfls-lint`](https://github.com/alisonjenkins/terraform-ls-rs#tfls-lint) section.
 
 ## Coexistence

@@ -1,6 +1,6 @@
 # Changelog
 
-> Preview — not yet published to the Marketplace / Open VSX. Install the
+> Preview. Not yet published to the Marketplace / Open VSX. Install the
 > `.vsix` from a GitHub release to test.
 
 The extension version tracks the `tfls` server release it bundles. See the
