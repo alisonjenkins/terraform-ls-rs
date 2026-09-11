@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.18.0](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.17.0...v0.18.0) (2026-09-11)
+
+
+### Features
+
+* **action:** add composite GitHub Action for tfls-lint ([61f816a](https://github.com/alisonjenkins/terraform-ls-rs/commit/61f816a7f81f76736fc63e1613e9fea8fed777ce))
+
+
+### Bug Fixes
+
+* **vscode:** pin typescript to ^6 until typescript-eslint supports 7 ([39ed176](https://github.com/alisonjenkins/terraform-ls-rs/commit/39ed17604454fc366f1ee2376accdeab61ef637c))
+* **vscode:** sync package-lock version with 0.17.0 release ([4a047af](https://github.com/alisonjenkins/terraform-ls-rs/commit/4a047afa7ecb3d7f99f07f3e2bdaa5ea2552d661))
+
 ## [0.17.0](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.16.0...v0.17.0) (2026-09-10)
 
 
