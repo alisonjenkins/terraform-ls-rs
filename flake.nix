@@ -53,6 +53,10 @@
             # include_str!; without these the sandboxed test/clippy builds
             # (cargoTest / cargoClippy --all-targets) fail to compile.
             ./crates/tfls-provider-protocol/tests/fixtures
+            # Example Terraform workspace read by tfls-engine's workspace
+            # tests and tfls-cli's lint_cli tests at runtime; the crane
+            # source filter drops non-Rust files unless listed here.
+            ./crates/tfls-engine/tests/fixtures
           ];
         };
 
