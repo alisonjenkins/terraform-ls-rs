@@ -9,7 +9,7 @@ repos:
   - repo: local
     hooks:
       - id: rustfmt
-        name: rustfmt (pinned 1.96.0 via nix devshell)
+        name: rustfmt (pinned 1.98.1 via nix devshell)
         # `nix develop --command` pins rustfmt to the exact toolchain CI uses
         # (rust-toolchain.toml), so a developer's ambient cargo/rustfmt can
         # never disagree with CI's `cargo fmt --check`.
