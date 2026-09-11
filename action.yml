@@ -1,0 +1,243 @@
+name: tfls-lint
+description: Lint Terraform workspaces in CI with the terraform-ls-rs diagnostics engine (tfls-lint).
+author: alisonjenkins
+
+branding:
+  icon: check-circle
+  color: purple
+
+inputs:
+  version:
+    description: >
+      Release tag to install (e.g. v0.17.0), or "latest" to resolve the
+      newest release.
+    required: false
+    default: latest
+  paths:
+    description: Whitespace-separated workspace root(s) to lint.
+    required: false
+    default: "."
+  format:
+    description: Output format (text|json|sarif|github).
+    required: false
+    default: github
+  fail-on:
+    description: Minimum severity that trips a non-zero exit (error|warning|info|hint|never).
+    required: false
+    default: error
+  schemas:
+    description: Where to get provider schemas from (plugins|bundled|none).
+    required: false
+    default: plugins
+  rules:
+    description: Whitespace-separated rule overrides, each "CODE=LEVEL".
+    required: false
+    default: ""
+  style-rules:
+    description: Enable the opt-in tflint-style rule pack.
+    required: false
+    default: "false"
+  config:
+    description: Explicit path to a .tfls.json config file.
+    required: false
+    default: ""
+  no-config:
+    description: Skip .tfls.json discovery entirely.
+    required: false
+    default: "false"
+  offline:
+    description: Skip warming the on-disk version/git-ref caches before linting.
+    required: false
+    default: "false"
+  sarif-file:
+    description: >
+      When set, also run a second pass with --format sarif writing to this
+      path, so it can be fed to github/codeql-action/upload-sarif. This
+      second pass always runs with --fail-on never, so it can never mask the
+      main run's exit code.
+    required: false
+    default: ""
+  working-directory:
+    description: Directory to run tfls-lint from.
+    required: false
+    default: "."
+  token:
+    description: GitHub token used only to look up the latest release (avoids API rate limits).
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  exit-code:
+    description: Exit code of the main tfls-lint run.
+    value: ${{ steps.run.outputs.exit-code }}
+  sarif-file:
+    description: Echo of the sarif-file input, when set.
+    value: ${{ inputs.sarif-file }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve tfls-lint version
+      id: resolve-version
+      shell: bash
+      env:
+        VERSION_INPUT: ${{ inputs.version }}
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        set -euo pipefail
+
+        if [ "$VERSION_INPUT" = "latest" ]; then
+          response="$(curl -fsSL --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/alisonjenkins/terraform-ls-rs/releases/latest")" || {
+            echo "::error::failed to query the latest terraform-ls-rs release" >&2
+            exit 1
+          }
+          tag="$(printf '%s' "$response" | jq -r '.tag_name')"
+          if [ -z "$tag" ] || [ "$tag" = "null" ]; then
+            echo "::error::could not determine the latest release tag from the GitHub API response" >&2
+            exit 1
+          fi
+        else
+          tag="$VERSION_INPUT"
+        fi
+
+        echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+    - name: Download tfls-lint
+      shell: bash
+      env:
+        TAG: ${{ steps.resolve-version.outputs.tag }}
+        RUNNER_OS: ${{ runner.os }}
+      run: |
+        set -euo pipefail
+
+        case "$RUNNER_OS" in
+          Linux)
+            target="x86_64-unknown-linux-musl"
+            ;;
+          Windows)
+            target="x86_64-pc-windows-msvc"
+            ;;
+          *)
+            echo "::error::no macOS build is published yet for tfls-lint" >&2
+            exit 1
+            ;;
+        esac
+
+        asset="tfls-lint-${TAG}-${target}.tar.gz"
+        base_url="https://github.com/alisonjenkins/terraform-ls-rs/releases/download/${TAG}"
+
+        install_dir="${RUNNER_TEMP}/tfls-lint-${TAG}-${target}"
+        mkdir -p "$install_dir"
+        cd "$install_dir"
+
+        curl -fsSL --retry 3 -o "$asset" "${base_url}/${asset}"
+        curl -fsSL --retry 3 -o "${asset}.sha256" "${base_url}/${asset}.sha256"
+
+        sha256sum -c "${asset}.sha256"
+
+        tar xzf "$asset"
+
+        bin_dir="${install_dir}/tfls-lint-${TAG}-${target}"
+        if [ "$RUNNER_OS" = "Windows" ]; then
+          bin_path="${bin_dir}/tfls-lint.exe"
+        else
+          bin_path="${bin_dir}/tfls-lint"
+        fi
+
+        if [ ! -f "$bin_path" ]; then
+          echo "::error::expected binary not found at ${bin_path} after extracting ${asset}" >&2
+          exit 1
+        fi
+
+        chmod +x "$bin_path"
+        echo "$bin_dir" >> "$GITHUB_PATH"
+
+    - name: Run tfls-lint (SARIF)
+      if: ${{ inputs.sarif-file != '' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        SARIF_FILE: ${{ inputs.sarif-file }}
+        IN_PATHS: ${{ inputs.paths }}
+        IN_SCHEMAS: ${{ inputs.schemas }}
+        IN_RULES: ${{ inputs.rules }}
+        IN_STYLE_RULES: ${{ inputs.style-rules }}
+        IN_CONFIG: ${{ inputs.config }}
+        IN_NO_CONFIG: ${{ inputs.no-config }}
+        IN_OFFLINE: ${{ inputs.offline }}
+      run: |
+        set -euo pipefail
+
+        mkdir -p "$(dirname "$SARIF_FILE")"
+
+        args=(--format sarif --fail-on never --schemas "$IN_SCHEMAS")
+
+        for rule in $IN_RULES; do
+          args+=(--rule "$rule")
+        done
+        if [ "$IN_STYLE_RULES" = "true" ]; then
+          args+=(--style-rules)
+        fi
+        if [ -n "$IN_CONFIG" ]; then
+          args+=(--config "$IN_CONFIG")
+        fi
+        if [ "$IN_NO_CONFIG" = "true" ]; then
+          args+=(--no-config)
+        fi
+        if [ "$IN_OFFLINE" = "true" ]; then
+          args+=(--offline)
+        fi
+
+        # shellcheck disable=SC2206
+        paths=($IN_PATHS)
+
+        tfls-lint "${args[@]}" "${paths[@]}" > "$SARIF_FILE"
+
+    - name: Run tfls-lint
+      id: run
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        IN_PATHS: ${{ inputs.paths }}
+        IN_FORMAT: ${{ inputs.format }}
+        IN_FAIL_ON: ${{ inputs.fail-on }}
+        IN_SCHEMAS: ${{ inputs.schemas }}
+        IN_RULES: ${{ inputs.rules }}
+        IN_STYLE_RULES: ${{ inputs.style-rules }}
+        IN_CONFIG: ${{ inputs.config }}
+        IN_NO_CONFIG: ${{ inputs.no-config }}
+        IN_OFFLINE: ${{ inputs.offline }}
+      run: |
+        set -euo pipefail
+
+        args=(--format "$IN_FORMAT" --fail-on "$IN_FAIL_ON" --schemas "$IN_SCHEMAS")
+
+        for rule in $IN_RULES; do
+          args+=(--rule "$rule")
+        done
+        if [ "$IN_STYLE_RULES" = "true" ]; then
+          args+=(--style-rules)
+        fi
+        if [ -n "$IN_CONFIG" ]; then
+          args+=(--config "$IN_CONFIG")
+        fi
+        if [ "$IN_NO_CONFIG" = "true" ]; then
+          args+=(--no-config)
+        fi
+        if [ "$IN_OFFLINE" = "true" ]; then
+          args+=(--offline)
+        fi
+
+        # shellcheck disable=SC2206
+        paths=($IN_PATHS)
+
+        set +e
+        tfls-lint "${args[@]}" "${paths[@]}"
+        exit_code=$?
+        set -e
+
+        echo "exit-code=${exit_code}" >> "$GITHUB_OUTPUT"
+        exit "$exit_code"
