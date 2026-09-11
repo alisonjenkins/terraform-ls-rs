@@ -20,7 +20,7 @@ This project replaces those pieces with:
   of provider schemas
 - [`tokio`](https://tokio.rs) async everywhere, so CLI schema fetches
   never block the server thread
-- [`tower-lsp`](https://docs.rs/tower-lsp) for the LSP protocol
+- [`tower-lsp-server`](https://docs.rs/tower-lsp-server) for the LSP protocol
 
 The same diagnostics engine ships three ways: an LSP server (`tfls`), a
 CI linter (`tfls-lint`), and a GitHub Action wrapping the linter. All
@@ -103,14 +103,12 @@ in **preview** and not yet on the Marketplace. Install the `.vsix`
 attached to a [GitHub release](https://github.com/alisonjenkins/terraform-ls-rs/releases)
 (`code --install-extension tfls-vscode-<version>.vsix`). On first
 activation it downloads the matching `tfls` binary for your platform
-(Linux x64 or Windows x64 — no macOS build), verifies its checksum, and
+(Linux x64 or Windows x64, no macOS build), verifies its checksum, and
 caches it; set `terraform-ls-rs.serverPath` to use a local build instead.
 
 ## Features
 
-Everything `hashicorp/terraform-ls` supports, plus rename, document
-highlight, folding, inlay hints, on-type formatting, semantic tokens,
-and pull diagnostics. The full method list lives in
+The table below lists what's implemented. The full method list lives in
 `crates/tfls-lsp/src/backend.rs`; grouped by capability:
 
 | Capability | LSP methods | Notes |
@@ -261,11 +259,11 @@ Live actions, by `<id>`: `unwrap-interpolation`, `convert-lookup-to-index`,
 `set-variable-types`, `module-shallow-clone-depth`, `refine-any-types`,
 `null-resource-to-terraform-data`, `template-file-to-templatefile`,
 `rename-deprecated-provider-types` (drives the whole deprecation table
-above), `declare-undefined-variables`, `move-outputs-to-outputs-tf`,
-`move-variables-to-variables-tf`, and `format`. Module scope only
-applies to the three that target a specific file (`declare-undefined-variables`,
-`move-outputs-to-outputs-tf`, `move-variables-to-variables-tf`) — there's
-no File/Selection variant for "move this block to another file."
+above), and `format` are offered at every scope. `declare-undefined-variables`,
+`move-outputs-to-outputs-tf`, and `move-variables-to-variables-tf` are
+Module scope only: each one moves or adds a block in a different file
+(`variables.tf`, `outputs.tf`), so a File or Selection scope doesn't
+make sense for it.
 
 A handful of git-module-ref fixes (pin a mutable ref to a SHA, fix a
 stale tag comment, switch to a newer tag) attach to their diagnostic
@@ -287,15 +285,15 @@ Regenerate it with `scripts/refresh-bundled-functions.sh`.
 The formatter wraps [`tf-format`](https://github.com/alisonjenkins/tf-format)
 and exposes two runtime-toggleable styles:
 
-- **`minimal`** (default) — `terraform fmt` / `tofu fmt` parity.
+- **`minimal`** (default): `terraform fmt` / `tofu fmt` parity.
   Alignment and spacing only, source order preserved. Safe on any repo.
-- **`opinionated`** — full `tf-format`: alphabetises top-level blocks,
+- **`opinionated`**: full `tf-format`, alphabetises top-level blocks,
   hoists meta-arguments, sorts attributes and object keys, expands wide
   single-line objects, adds trailing commas.
 
 Set it in `initializationOptions.formatStyle`, live-toggle it with
 `workspace/didChangeConfiguration` (`{"settings":{"terraform-ls-rs":{"formatStyle":"opinionated"}}}`),
-or check in a `.tfls.json` — see [Configuration](#configuration).
+or check in a `.tfls.json`. See [Configuration](#configuration).
 
 ## Configuration
 
@@ -327,7 +325,7 @@ Wrap keys under `"terraform-ls-rs"` for `initializationOptions` and
 `rules` and `planKnownComputedCollections` **replace the whole map** on
 every update, they don't merge. A `didChangeConfiguration` payload that
 sets any `rules` key discards every rule a `.tfls.json` set, not just
-the overlapping ones — omit `rules` from your editor settings if you
+the overlapping ones. Omit `rules` from your editor settings if you
 want the project file's policy to stand untouched.
 
 ## `tfls-lint`
@@ -393,7 +391,7 @@ the matching `tfls-lint` release asset for the runner OS, verifies its
 checksum, and runs it:
 
 ```yaml
-- uses: alisonjenkins/terraform-ls-rs@v0.17.0
+- uses: alisonjenkins/terraform-ls-rs@v0.18.0
   with:
     fail-on: warning
 ```
@@ -401,7 +399,7 @@ checksum, and runs it:
 SARIF upload for GitHub code scanning:
 
 ```yaml
-- uses: alisonjenkins/terraform-ls-rs@v0.17.0
+- uses: alisonjenkins/terraform-ls-rs@v0.18.0
   id: tfls-lint
   with:
     fail-on: warning
@@ -413,7 +411,7 @@ SARIF upload for GitHub code scanning:
 
 | Input | Default | Description |
 |---|---|---|
-| `version` | `latest` | Release tag to install (`v0.17.0`), or `latest` |
+| `version` | `latest` | Release tag to install (`v0.18.0`), or `latest` |
 | `paths` | `.` | Whitespace-separated workspace roots |
 | `format` | `github` | Output format: `text`, `json`, `sarif`, `github` |
 | `fail-on` | `error` | Minimum severity that trips a non-zero exit |
@@ -452,13 +450,13 @@ before/after from the relevant suite with the commit and machine noted.
 The `code_action` handler runs many independent body scans plus a full
 formatter pass per request. Caching keeps that flat as workspaces grow:
 
-- **Cross-call format cache** — each document keeps its last format
+- **Cross-call format cache**: each document keeps its last format
   output keyed by `(version, formatStyle)`. Repeated code-action menu
   opens on an unchanged document skip the formatter entirely.
-- **Per-call scan caches** — each body-walking function caches its scan
+- **Per-call scan caches**: each body-walking function caches its scan
   output across the multi-scope loop, so a fifth scope doesn't cost a
   fifth body walk.
-- **Combined deprecation walker** — every deprecation reference
+- **Combined deprecation walker**: every deprecation reference
   rewriter shares one body iteration instead of walking once per rule.
 
 ## Development
