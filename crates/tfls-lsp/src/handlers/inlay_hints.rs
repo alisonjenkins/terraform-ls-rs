@@ -726,12 +726,10 @@ fn semver_tuple(v: &str) -> (i64, i64, i64, i32, String) {
 fn cache_path(segments: &[&str]) -> Option<std::path::PathBuf> {
     let mut root = if let Some(dir) = std::env::var_os("XDG_CACHE_HOME") {
         std::path::PathBuf::from(dir).join("terraform-ls-rs")
-    } else if let Some(home) = std::env::var_os("HOME") {
-        std::path::PathBuf::from(home)
+    } else {
+        std::path::PathBuf::from(std::env::var_os("HOME")?)
             .join(".cache")
             .join("terraform-ls-rs")
-    } else {
-        return None;
     };
     for seg in segments {
         root = root.join(seg);

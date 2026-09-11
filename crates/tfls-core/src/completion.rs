@@ -1404,10 +1404,7 @@ fn block_opener_context(before: &str) -> Option<CompletionContext> {
 /// label. Returns `None` if the cursor is between or after labels.
 fn label_index_at_cursor(line: &str) -> Option<usize> {
     // Skip past the block keyword (e.g. `resource`) to where labels live.
-    let after_keyword = match line.find(' ') {
-        Some(i) => &line[i..],
-        None => return None,
-    };
+    let after_keyword = &line[line.find(' ')?..];
     let mut in_label = false;
     let mut label_idx = 0usize;
     for c in after_keyword.chars() {
