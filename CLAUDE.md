@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-terraform-ls-rs is a high-performance Rust implementation of the Terraform Language Server. Nine-crate Cargo workspace using tower-lsp, hcl-edit, dashmap, sonic-rs, and tokio.
+terraform-ls-rs is a high-performance Rust implementation of the Terraform Language Server. Eleven-crate Cargo workspace using tower-lsp, hcl-edit, dashmap, sonic-rs, and tokio. User-facing documentation (install, editor setup, diagnostics, configuration, `tfls-lint`) lives in [README.md](README.md); this file covers architecture, internals, and the debug tooling.
 
 ## Common Commands
 
@@ -21,9 +21,11 @@ cargo build --release -p tfls-cli
 # Lint a workspace in CI
 cargo run --bin tfls-lint -- <workspace_dir>
 
-# Run a specific example
-cargo run --example probe -- /path/to/.terraform aws_instance ami
+# Run a specific example (package is required — probe.rs lives in tfls-provider-protocol)
+cargo run -p tfls-provider-protocol --example probe -- /path/to/workspace aws_instance ami
 ```
+
+Past investigation and design notes are indexed in [docs/README.md](docs/README.md) — historical record, not living reference.
 
 ## Workspace Lints
 
@@ -41,7 +43,7 @@ crates/
   tfls-format/             Formatter — thin wrapper around `tf-format`; style runtime-toggleable (see "Formatting style" below)
   tfls-walker/             FS discovery + notify-debouncer-full file watcher
   tfls-provider-protocol/  Terraform plugin gRPC protocol (v5+v6), mTLS, registry docs
-  tfls-engine/             Transport-free diagnostics engine (module aggregation, snapshots, the diagnostics pipeline, workspace loader + parallel lint) shared by tfls-lsp and tfls-lint
+  tfls-engine/             Transport-free diagnostics engine shared by tfls-lsp and tfls-lint. Modules: config_file, format_scan, index, module, pipeline, prefetch, provider_fn, snapshot, workspace
   tfls-lsp/                Backend (tower-lsp) + handlers + background indexer
   tfls-cli/                main: tokio, clap, stdio transport
 ```
@@ -130,7 +132,13 @@ Speed up repeat CI runs by caching `~/.cache/terraform-ls-rs` between them:
 
 ## Debug binaries
 
-Three standalone binaries in `crates/tfls-cli/src/bin/` for offline analysis without an LSP client. All use the same `tfls_state::StateStore` + `tfls_lsp::indexer` plumbing as the main `tfls` server, so behaviour matches what a live `did_open` would produce.
+`crates/tfls-cli/Cargo.toml` declares 12 `[[bin]]` targets: the main
+`tfls` server, `tfls-lint` (documented above), and 10 standalone probes
+in `crates/tfls-cli/src/bin/` for offline analysis without an LSP
+client. Most share the same `tfls_state::StateStore` + `tfls_lsp::indexer`
+plumbing as the main `tfls` server, so behaviour matches what a live
+`did_open` would produce; `tfls-lint` is the exception — it goes through
+`tfls_engine::index` instead, since it has no LSP session to indexer.
 
 ### `tfls-diag-dump`
 
@@ -251,25 +259,42 @@ Use this when:
 - After changes to `parse_value_shape_with_schema` / `merge_observations` / `traversal_attr_type` — the percentage figures in commit messages come from this binary.
 - Spot-checking a specific module — `--dump-dir` prints the raw `assigned_variable_types` map for one dir.
 
+### `tfls-lock-probe`
+
+End-to-end `.terraform.lock.hcl` invalidation probe. Boots the same plumbing the real LSP server uses (`StateStore`, `JobQueue`, `tfls_lsp::indexer::spawn_watcher`) against a temp workspace, rewrites the lock file to simulate a `terraform init`, and reports what `state.lock_file_for(...)` / `compute_diagnostics(...)` see after each step. Catches cache-key / watcher-path / debounce mismatches that unit tests miss but the real `notify-debouncer-full` crate triggers.
+
+```bash
+cargo run --bin tfls-lock-probe -- <workspace_dir>
+cargo run --bin tfls-lock-probe -- <workspace_dir> --wait-ms 600   # ms between mutating the lock file and querying state; keep above the watcher's debounce window
+cargo run --bin tfls-lock-probe -- <workspace_dir> --verbose       # dump every parsed lock entry at each step
+```
+
+### `tfls-mux-lock-probe`
+
+Lock-file-change-through-lspmux probe. Boots an isolated `lspmux` daemon plus one `lspmux client` subprocess against a fresh `tfls`, drives `initialize`/`didOpen`, mutates `.terraform.lock.hcl` mid-session, and reports which `textDocument/publishDiagnostics` notifications actually arrive. Pins whether the lock-to-diagnostic refresh chain breaks in `tfls`'s in-process flow or in lspmux's fanout routing.
+
+```bash
+cargo run --bin tfls-mux-lock-probe -- \
+  --tfls-path target/debug/tfls --lspmux-path "$(which lspmux)" \
+  --workspace <workspace_dir> --drain-ms 1500
+cargo run --bin tfls-mux-lock-probe -- --direct --workspace <workspace_dir>   # skip lspmux, JSON-RPC straight to tfls's stdio
+```
+
+### `tfls-mux-format-probe`
+
+Reproduces a reported bug where diagnostics render on the wrong line after an opinionated reformat reorders blocks: opens a synthetic file ordered so the opinionated formatter reshuffles blocks, drains initial diagnostics, sets `formatStyle=opinionated` via `didChangeConfiguration`, formats, applies the edits, sends `didChange`, then checks post-format diagnostics still point at the right line. The in-process counterpart is `tfls-lsp/tests/phase4.rs::opinionated_format_then_diagnostics_align_to_new_buffer`; this probe drives the real LSP transport (optionally through lspmux) to catch transport-layer routing bugs the in-process test can't see.
+
+```bash
+cargo run --bin tfls-mux-format-probe -- \
+  --tfls-path target/debug/tfls --lspmux-path "$(which lspmux)" --drain-ms 2500
+cargo run --bin tfls-mux-format-probe -- --direct   # skip lspmux, spawn tfls directly
+```
+
 ## Formatting style
 
-The formatter (`crates/tfls-format`) wraps the [`tf-format`](https://github.com/alisonjenkins/tf-format) crate. Two styles, switchable at runtime:
+User-facing description (what `minimal`/`opinionated` do, how to set them) is in [README.md](README.md#formatting-two-styles).
 
-- `minimal` (default) — `terraform fmt` / `tofu fmt` parity. Alignment + spacing only; source order preserved. Safe to apply to any repo.
-- `opinionated` — full tf-format behaviour: alphabetises top-level blocks, hoists meta-arguments, sorts attributes/object keys, expands wide single-line objects, adds trailing commas.
-
-Set via either:
-
-1. `initializationOptions.formatStyle` on the LSP `initialize` request:
-   ```json
-   { "initializationOptions": { "formatStyle": "opinionated" } }
-   ```
-2. `workspace/didChangeConfiguration` notification (live toggle, no restart):
-   ```json
-   { "settings": { "terraform-ls-rs": { "formatStyle": "minimal" } } }
-   ```
-
-Storage lives on `tfls_state::Config::format_style`; LSP handlers (`textDocument/formatting`, `rangeFormatting`, `onTypeFormatting`) read the live snapshot per-request via `state.config.snapshot()`. Unknown values keep the previous setting.
+The formatter (`crates/tfls-format`) wraps the [`tf-format`](https://github.com/alisonjenkins/tf-format) crate. Storage lives on `tfls_state::Config::format_style`; LSP handlers (`textDocument/formatting`, `rangeFormatting`, `onTypeFormatting`) read the live snapshot per-request via `state.config.snapshot()`. Unknown values keep the previous setting.
 
 ### Unformatted-file diagnostic (`terraform_fmt`)
 
@@ -277,16 +302,7 @@ Storage lives on `tfls_state::Config::format_style`; LSP handlers (`textDocument
 
 ## Per-rule diagnostic config
 
-Any diagnostic rule can be disabled or have its severity remapped via the `rules` config object (initializationOptions or `workspace/didChangeConfiguration`):
-
-```json
-{ "terraform-ls-rs": { "rules": {
-    "terraform_naming_convention": "off",
-    "terraform_duplicate_definition": "hint"
-} } }
-```
-
-Values: `off` (suppress), `hint`, `info`, `warning`, `error`. Keyed by the diagnostic's stable `code`. Each rule's output is tagged with a `terraform_<rule>` code at its `compute_diagnostics_with_lookup` call site (in `crates/tfls-engine/src/pipeline.rs`, via the `tag()` wrapper); a final `apply_rule_overrides` post-pass (before dedup) drops `off` codes and remaps the rest. Storage: `tfls_state::Config::rule_overrides` (`Arc<HashMap<String, RuleSeverity>>`, replaced wholesale per update so dropping a key restores the default). Live-toggle works because `did_change_configuration` already republishes open docs.
+The full rule-code table and JSON syntax are in [README.md](README.md#diagnostics). Mechanism: each rule's output is tagged with a `terraform_<rule>` code at its `compute_diagnostics_with_lookup` call site (in `crates/tfls-engine/src/pipeline.rs`, via the `tag()` wrapper); a final `apply_rule_overrides` post-pass (before dedup) drops `off` codes and remaps the rest. Storage: `tfls_state::Config::rule_overrides` (`Arc<HashMap<String, RuleSeverity>>`, replaced wholesale per update so dropping a key restores the default). Live-toggle works because `did_change_configuration` already republishes open docs.
 
 Adding a code to a new rule = wrap its call site with `tag("terraform_<id>", …)`. Untagged diagnostics pass through unaffected.
 
@@ -305,14 +321,14 @@ A repo can check in one `rules`/`styleRules`/`formatStyle` policy that both the 
 
 `crates/tfls-diag/src/missing_tags.rs` emits two default-on WARNING rules for untagged resources:
 
-- `terraform_missing_tags` — schema-driven, provider-agnostic. A `resource` whose schema declares a `tags` (AWS/Azure) or `labels` (GCP/Kubernetes) attribute but sets neither. Requires fetched provider schemas (silent otherwise). Suppressed for any provider that declares `default_tags` — the LSP layer aggregates provider local names across module siblings via `util::module_providers_with_default_tags` (built on `provider_names_with_default_tags`) and passes them in, since `provider "aws" { default_tags {} }` usually lives in `provider.tf`/`versions.tf`.
+- `terraform_missing_tags` — schema-driven, provider-agnostic. A `resource` whose schema declares a `tags` (AWS/Azure) or `labels` (GCP/Kubernetes) attribute but sets neither. Requires fetched provider schemas (silent otherwise). Suppressed for any provider that declares `default_tags` — `crates/tfls-engine/src/pipeline.rs` aggregates provider local names across module siblings via `module::module_providers_with_default_tags` (`crates/tfls-engine/src/module.rs:184`, built on `tfls_diag::provider_names_with_default_tags`) and passes them in, since `provider "aws" { default_tags {} }` usually lives in `provider.tf`/`versions.tf`.
 - `terraform_missing_name_tag` — AWS-specific, schema-free (works before `.terraform/providers` is fetched). A `resource` of a curated console-visible type (`AWS_NAME_TAG_RESOURCES` table — `aws_instance`, `aws_vpc`, `aws_subnet`, … extend as needed) that lacks a statically-visible literal `Name` tag key. The whole `tags` expression is scanned for an object key `Name` (so `merge(common, { Name = x })` passes; `var.tags` warns). `Name` matters because these types show their `Name` tag in the AWS console.
 
 Both anchor on the type-name label, are off-able / re-severitied via the `rules` config above, and emit no code action (diagnostic only).
 
 ## Code-action scopes
 
-Every multi-target code action (unwrap interpolation, convert lookup, set variable types, refine `type = any`, declare undefined variables, move outputs to `outputs.tf`, move variables to `variables.tf`, convert `null_resource` to `terraform_data`, convert `data "template_file"` to `templatefile()`) is offered at multiple scopes via `crates/tfls-lsp/src/handlers/code_action_scope.rs`. Diagnostic-only deprecation rules (`data "template_dir"`, `data "null_data_source"`) plug into the same framework but emit no fix.
+Every multi-target code action (unwrap interpolation, convert lookup, set variable types, refine `type = any`, module-shallow-clone-depth, declare undefined variables, move outputs to `outputs.tf`, move variables to `variables.tf`, convert `null_resource` to `terraform_data`, convert `data "template_file"` to `templatefile()`, rename-deprecated-provider-types) is offered at multiple scopes via `crates/tfls-lsp/src/handlers/code_action_scope.rs`. Diagnostic-only deprecation rules (`data "template_dir"`, `data "null_data_source"`, azurerm VM split, GCP Dataflow split, vault) plug into the same framework but emit no fix. See README's [code actions across scopes](README.md#code-actions-across-scopes) for the full `<id>` list and user-facing scope behaviour.
 
 | Scope       | Iteration set                                     | LSP `CodeActionKind`                                            |
 |-------------|---------------------------------------------------|-----------------------------------------------------------------|
@@ -351,7 +367,7 @@ Live rules:
 | `template_file`                                  | `data`      | Terraform `>= 0.12.0`                           | Convert to `local` calling `templatefile()`     |
 | `template_dir`                                   | `data`      | Terraform `>= 0.12.0`                           | Diagnostic only                                 |
 | `null_data_source`                               | `data`      | Terraform `>= 0.10.0`                           | Diagnostic only                                 |
-| AWS rename family (6 resources)                  | `resource`  | AWS provider `>= 1.7.0` / `>= 4.0.0` (s3 object)| **Auto-fix** via generic block-rename action    |
+| AWS rename family (9 resources/data sources)     | `resource`, `data` | AWS provider `>= 1.7.0` / `>= 4.0.0` (s3 object, s3 objects, kinesis analytics) | **Auto-fix** via generic block-rename action    |
 | Kubernetes `_v1` rename family (20 resources)    | `resource`  | kubernetes provider `>= 2.0.0`                  | **Auto-fix** via generic block-rename action    |
 | Azure VM split family (2 resources)              | `resource`  | azurerm `>= 2.40.0`                             | Diagnostic only (table)                         |
 | GCP Dataflow split                               | `resource`  | google `>= 3.45.0`                              | Diagnostic only (table)                         |
@@ -362,9 +378,9 @@ Each provider family lives in its own table module
 new rule to a family = one table entry + one
 `HARDCODED_DEPRECATION_LABELS` entry, no new module.
 
-The multi-rule body walker (`deprecation_rule::diagnostics_from_table`) visits each block ONCE regardless of rule count — `(block_kind, label)` HashMap lookup per block, single body iteration. So a table with N entries pays O(blocks) total, not O(blocks × rules). Per-rule gate evaluation runs through the caller's `rule_supported` closure, which the LSP layer wires via `provider_rule_filter(constraint)` (one provider-version constraint extracted per module per code-action call, regardless of how many rules in the table use that provider).
+The multi-rule body walker (`deprecation_rule::diagnostics_from_table`) visits each block ONCE regardless of rule count — `(block_kind, label)` HashMap lookup per block, single body iteration. So a table with N entries pays O(blocks) total, not O(blocks × rules). Per-rule gate evaluation runs through the caller's `rule_supported` closure, which `crates/tfls-engine/src/pipeline.rs` wires via `provider_rule_filter(&constraint, locked_version.as_ref())` (one provider-version constraint extracted per module per code-action call, regardless of how many rules in the table use that provider; the second argument is the locked version from `.terraform.lock.hcl` when available).
 
-`deprecation_rule::body_supports_rule(rule, body)` is the body-only fallback; `module_constraint_for_provider(state, primary_uri, name)` is the LSP-layer module-aware path. Each provider module provides `<provider>_diagnostics` (body-only convenience) + `<provider>_diagnostics_for_module` (closure-driven, used by `compute_diagnostics_with_lookup`).
+`deprecation_rule::body_supports_rule(rule, body)` is the body-only fallback; `module_constraint_for_provider(state, primary_uri, name)` (`crates/tfls-engine/src/module.rs:382`) is the engine's module-aware path, shared by `tfls-lsp` and `tfls-lint`. Each provider module provides `<provider>_diagnostics` (body-only convenience) + `<provider>_diagnostics_for_module` (closure-driven, used by `compute_diagnostics_with_lookup`).
 
 ### Generic block-rename code action
 
@@ -383,7 +399,7 @@ The multi-rule body walker (`deprecation_rule::diagnostics_from_table`) visits e
    - Real `moved {}` blocks: HCL-parse existing `moved` blocks across the module, skip names already covered.
    - Commented `moved {}` blocks: text-search existing `moved.tf` for `from = <type>.<name>` substring, skip duplicates.
 
-Multi-scope (Selection / File / Module / Workspace), `CodeActionKind` family `source.fixAll.terraform-ls-rs.rename-deprecated-provider-types[.<scope>]`. Per-call cache keyed by `(module_dir, provider_name)` so a 26-spec table touching 2 providers does at most 2 sibling walks per module per code-action call.
+Multi-scope (Selection / File / Module / Workspace), `CodeActionKind` family `source.fixAll.terraform-ls-rs.rename-deprecated-provider-types[.<scope>]`. Per-call cache keyed by `(module_dir, provider_name)` so the `ALL_BLOCK_RENAMES` table (29 entries: 9 aws, 20 kubernetes) touching 2 providers does at most 2 sibling walks per module per code-action call.
 
 `null_resource → terraform_data` keeps its bespoke action (it has additional attribute-key renames `triggers → triggers_replace` that the generic rename doesn't model). Future consolidation possible if more attribute-rename cases arrive.
 
@@ -406,9 +422,9 @@ Two gate flavours, set on the rule's `gate: Gate` field:
 - **`Gate::TerraformVersion { threshold }`** — checked against `terraform { required_version = "..." }` aggregated across every sibling in the module dir.
 - **`Gate::ProviderVersion { provider, threshold }`** — checked against `terraform { required_providers { <provider> = ... } }`. Both short form (`aws = "~> 4.0"`) and long form (`aws = { source = "...", version = "~> 4.0" }`) are recognised.
 
-Module-aware gates live in `crates/tfls-lsp/src/handlers/util.rs`:
+Module-aware gates live in `crates/tfls-engine/src/module.rs`:
 - `module_supports_terraform_data`, `module_supports_templatefile`, `module_supports_locals_replacement` — terraform-version gates (`module_constraint_admits_at_least` helper).
-- `module_supports_aws_lb` — provider-version gate (`module_provider_constraint_admits_at_least` helper).
+- Provider-version gates (AWS, Kubernetes, azurerm, google, vault) go through the generic `module_constraint_for_provider` + `provider_rule_filter` path described above, not a per-provider function — there is no `module_supports_aws_lb` any more; the AWS ALB family is just another row in `ALL_BLOCK_RENAMES` gated by the same mechanism as every other provider family.
 
 Each aggregates the relevant constraint string across every sibling `.tf` in the module dir before deciding. A `terraform { required_version = "..." }` block typically lives in `versions.tf`, not the file the user is editing; per-file gates would miss this.
 
@@ -438,10 +454,14 @@ Code-action handler runs many independent body scans / formats per invocation. S
 | Combined deprecation ref cache            | Single `code_action()` | Drops on return                                  |
 | Module-supports gate cache                | Single emit fn         | Drops on return                                  |
 
-Bench delta from baseline (`tfls-lsp/benches/handlers.rs::code_action_deprecation` at the 500-block synthetic worst-case): **70 ms → ~10.5 ms (-85%)**. Subsequent micro-optimisations: (a) `scan_null_resource_block_edits` + `null_resource_names_in_body` consolidated into one body walk; (b) `scan_blocks_of_kind` swapped its per-byte `rope.byte_slice(end..end+1).to_string()` trailing-whitespace probe for a `rope.to_string()` byte-array indexed scan, halving cost on the move-outputs path. Steady-state breakdown (10ms): `null_resource` 3.5ms, `template_file` 3.2ms, `move_outputs` 2.0ms, everything else <0.5ms total. Real-world workspaces benefit further from the cross-call format cache — repeated code-action menu opens on an unchanged doc skip the formatter entirely.
+Run `cargo bench -p tfls-lsp --bench handlers -- code_action_deprecation` for current numbers on your hardware; no historical figure is republished here since the last one shipped undated and had already drifted from README's copy of the same claim (see the docs audit that prompted this rewrite). Two micro-optimisations worth knowing about when reading a profile: (a) `scan_null_resource_block_edits` + `null_resource_names_in_body` are consolidated into one body walk; (b) `scan_blocks_of_kind` uses a `rope.to_string()` byte-array indexed scan for its trailing-whitespace probe instead of a per-byte `rope.byte_slice` call, which mattered most on the move-outputs path. Real-world workspaces benefit further from the cross-call format cache — repeated code-action menu opens on an unchanged doc skip the formatter entirely.
 
-Bench coverage for the freshly-added block-rename path: `code_action_block_rename` (multi-scope) + `code_action_block_rename_cursor` exercise AWS alb (Aliased) + Kubernetes pod (Manual) at 10 / 100 / 250-500 block scales. All sub-5ms baseline.
+Bench coverage for the block-rename path: `code_action_block_rename` (multi-scope) + `code_action_block_rename_cursor` exercise AWS alb (Aliased) + Kubernetes pod (Manual) at 10 / 100 / 250-500 block scales.
 
 ### Hashing
 
-All internal per-call caches use `rustc_hash::{FxHashMap, FxHashSet}` — server-internal cache keys (Url / `&'static str` / PathBuf / String) are never untrusted user input, so the std-collection default SipHash 1-3 brings DOS resistance we don't need at the cost of ~2-3× slower lookups on short keys. The `WorkspaceEdit::changes` LSP-types-fixed field stays std `HashMap` — internal accumulators that flow into it convert at the LSP boundary via `into_iter().collect()`. `tfls-state::StateStore`'s eight DashMap/DashSet fields (`documents`, `definitions_by_name`, `references_by_name`, `schemas`, `functions`, `dir_scans`, `fetched_schema_dirs`, `open_docs`, `assigned_variable_types`) all use `FxBuildHasher` via the `FxDashMap` / `FxDashSet` aliases in `tfls-state::store`. `document_link::find_provider_address` is generic over the hasher so the test path (default-hashed map) still typechecks. Bench delta on `code_action_deprecation/large/500_blocks_5_refs`: -2.2% (within noise on smaller variants — code-action latency at this scale is dominated by per-block format scanning, not DashMap lookups, so the Fx win surfaces only on the largest workload).
+All internal per-call caches use `rustc_hash::{FxHashMap, FxHashSet}` — server-internal cache keys (Url / `&'static str` / PathBuf / String) are never untrusted user input, so the std-collection default SipHash 1-3 brings DOS resistance we don't need at the cost of ~2-3× slower lookups on short keys. The `WorkspaceEdit::changes` LSP-types-fixed field stays std `HashMap` — internal accumulators that flow into it convert at the LSP boundary via `into_iter().collect()`. `tfls-state::StateStore` has 13 Fx-hashed collection fields (12 `FxDashMap`, 1 `FxDashSet`) via the `FxDashMap` / `FxDashSet` aliases in `tfls-state::store`:
+
+`documents`, `definitions_by_name`, `references_by_name`, `schemas`, `functions`, `dir_scans`, `fetched_schema_dirs`, `installed_provider_versions`, `open_docs` (the `FxDashSet`), `assigned_variable_types`, `unknown_module_vars`, `locks`, `locks_mtime`.
+
+`document_link::find_provider_address` is generic over the hasher so the test path (default-hashed map) still typechecks. Non-collection fields on `StateStore` (`config`, the pull-diagnostics-capability `AtomicBool`s) don't count toward this figure.
