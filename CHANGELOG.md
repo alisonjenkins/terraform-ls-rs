@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.1](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.18.0...v0.18.1) (2026-09-12)
+
+
+### Bug Fixes
+
+* **nix:** include engine test fixtures in the flake source ([755c9a1](https://github.com/alisonjenkins/terraform-ls-rs/commit/755c9a150c4864c2c57ccf2d9f56fa6f3e3cd000))
+
 ## [0.18.0](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.17.0...v0.18.0) (2026-09-11)
 
 
