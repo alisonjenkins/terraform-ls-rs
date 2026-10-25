@@ -183,7 +183,7 @@
   },
   "dependencies": {
     "tar": "^7.4.3",
-    "vscode-languageclient": "^10.0.0"
+    "vscode-languageclient": "^11.0.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.0",
