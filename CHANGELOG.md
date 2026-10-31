@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.2](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.18.1...v0.18.2) (2026-10-31)
+
+
+### Bug Fixes
+
+* **deps:** update dependency vscode-languageclient to v11 ([5788091](https://github.com/alisonjenkins/terraform-ls-rs/commit/5788091666a6e2524b3549633962fb83fec892c1))
+
 ## [0.18.1](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.18.0...v0.18.1) (2026-09-17)
 
 
