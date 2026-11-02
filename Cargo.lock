@@ -715,7 +715,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1019,10 +1019,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "hcl-primitives"
-version = "0.1.12"
+name = "hcl-edit"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd662a8afeca01b5b5318f35baed70017b9f854bfa38bdcdadb87de946a49071"
+checksum = "3b1b3e90b173143b26dbb7495ac79e25c0206389d012881cea7cda9f0f1fce8a"
+dependencies = [
+ "fnv",
+ "hcl-primitives",
+ "pratt",
+ "vecmap-rs",
+ "winnow",
+]
+
+[[package]]
+name = "hcl-primitives"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c35ea757c1bdfa0bdfe8f65771be944d199a7f379b739c8f6fe2ad2f92d18ecb"
 dependencies = [
  "itoa",
  "ryu",
@@ -1338,7 +1351,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2110,7 +2123,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2424,7 +2437,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2481,7 +2494,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2841,7 +2854,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2851,7 +2864,7 @@ source = "git+https://github.com/alisonjenkins/tf-format?tag=v0.5.3#07cd0f1f5bdd
 dependencies = [
  "clap",
  "glob",
- "hcl-edit",
+ "hcl-edit 0.9.7",
  "similar",
  "tempfile",
  "thiserror 2.0.21",
@@ -2863,7 +2876,7 @@ version = "0.18.1"
 dependencies = [
  "clap",
  "futures",
- "hcl-edit",
+ "hcl-edit 0.10.0",
  "ls-types",
  "reqwest",
  "ropey",
@@ -2892,7 +2905,7 @@ name = "tfls-core"
 version = "0.18.1"
 dependencies = [
  "criterion",
- "hcl-edit",
+ "hcl-edit 0.10.0",
  "ls-types",
  "rustc-hash",
  "semver",
@@ -2909,7 +2922,7 @@ name = "tfls-diag"
 version = "0.18.1"
 dependencies = [
  "criterion",
- "hcl-edit",
+ "hcl-edit 0.10.0",
  "ls-types",
  "ropey",
  "semver",
@@ -2926,7 +2939,7 @@ name = "tfls-engine"
 version = "0.18.1"
 dependencies = [
  "futures",
- "hcl-edit",
+ "hcl-edit 0.10.0",
  "ls-types",
  "rayon",
  "ropey",
@@ -2966,7 +2979,7 @@ dependencies = [
  "criterion",
  "dashmap",
  "futures",
- "hcl-edit",
+ "hcl-edit 0.10.0",
  "ls-types",
  "rayon",
  "reqwest",
@@ -3000,7 +3013,7 @@ name = "tfls-parser"
 version = "0.18.1"
 dependencies = [
  "criterion",
- "hcl-edit",
+ "hcl-edit 0.10.0",
  "ls-types",
  "ropey",
  "serde",
@@ -3709,7 +3722,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
