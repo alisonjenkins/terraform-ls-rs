@@ -31,11 +31,26 @@
 
         # Pinned to the exact version in rust-toolchain.toml (reproducible
         # across `nix flake update`s of fenix). Update the sha256 when bumping
-        # the channel; `nix build` prints the expected hash on mismatch.
-        rustToolchain = pkgs.fenix.fromToolchainFile {
-          file = ./rust-toolchain.toml;
+        # the channel; `nix eval` prints the expected hash on mismatch.
+        #
+        # The channel manifest is fetched with builtins.fetchurl, not
+        # fenix.fromToolchainFile's pkgs.fetchurl. Reading the manifest is
+        # import-from-derivation, and a pkgs.fetchurl derivation can only be
+        # built on its own system, so evaluating this flake for aarch64-linux
+        # on an x86_64-linux machine with no builder for it failed unless the
+        # file happened to be in the store already. builtins.fetchurl is
+        # fetched by the evaluator itself, on any system.
+        toolchainFile = (builtins.fromTOML (builtins.readFile ./rust-toolchain.toml)).toolchain;
+        channel = pkgs.fenix.fromManifestFile (builtins.fetchurl {
+          url = "https://static.rust-lang.org/dist/channel-rust-${toolchainFile.channel}.toml";
           sha256 = "sha256-p8h3Sl/YRByZfZTAKXdsvF6xEenXKrXSVvpphmZENH4=";
-        };
+        });
+        # Same component set fromToolchainFile picks: the profile's
+        # components plus the ones rust-toolchain.toml lists.
+        rustToolchain = pkgs.fenix.combine (map (component: channel.${component})
+          (builtins.filter (component: channel ? ${component})
+            (pkgs.lib.unique (channel.manifest.profiles.${toolchainFile.profile or "default"}
+              ++ toolchainFile.components or [ ]))));
 
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
