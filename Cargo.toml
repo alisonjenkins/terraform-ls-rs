@@ -41,7 +41,7 @@ lsp-types = { package = "ls-types", version = "0.0" }
 url = { version = "2", features = ["serde"] }
 
 # HCL parsing
-hcl-edit = "0.9"
+hcl-edit = "0.10"
 
 # HCL formatting backend.
 tf-format = { git = "https://github.com/alisonjenkins/tf-format", tag = "v0.5.3" }
