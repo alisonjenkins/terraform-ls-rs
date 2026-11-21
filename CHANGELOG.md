@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.18.2](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.18.1...v0.18.2) (2026-11-21)
+
+
+### Bug Fixes
+
+* **deps:** bump pulldown-cmark to the fixed 0.13 release ([4d0e248](https://github.com/alisonjenkins/terraform-ls-rs/commit/4d0e2481d28991131e8e320539b492d883d6770d))
+* **deps:** bump rustls-webpki to 0.103.17 ([197693d](https://github.com/alisonjenkins/terraform-ls-rs/commit/197693d0a8b3d58b6e922de245acba827ef8d47c))
+* **deps:** bump webpki-roots and webpki-root-certs to 1.0.12 ([cc129fc](https://github.com/alisonjenkins/terraform-ls-rs/commit/cc129fc42ccc97be3e5d386fd905ad640d882cc9))
+* **deps:** update dependency vscode-languageclient to v11 ([5788091](https://github.com/alisonjenkins/terraform-ls-rs/commit/5788091666a6e2524b3549633962fb83fec892c1))
+* **nix:** fetch the toolchain manifest at eval time ([f3513fe](https://github.com/alisonjenkins/terraform-ls-rs/commit/f3513fee8a2638a94e5ad730f20ffe7cbf8cbde3))
+
 ## [0.18.1](https://github.com/alisonjenkins/terraform-ls-rs/compare/v0.18.0...v0.18.1) (2026-09-17)
 
 
