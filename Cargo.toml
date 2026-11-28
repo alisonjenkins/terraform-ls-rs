@@ -63,7 +63,7 @@ rustc-hash = "2"
 
 # File watching
 notify = "8"
-notify-debouncer-full = "0.7"
+notify-debouncer-full = "0.8"
 
 # JSON (SIMD-accelerated)
 sonic-rs = "0.5"
